@@ -159,31 +159,10 @@ export const parseQuotaReset = (message: string | undefined, now: number): numbe
   if (!message) return undefined
   const text = message.toLowerCase()
   if (!/(?:quota|limit|rate limit)/.test(text)) return undefined
-  // The zone designator stays in the capture so Date.parse honours it instead of reading the
-  // timestamp as local time (see ModelRouteLimits.resetAtFromMessage).
-  const absolute =
-    /(?:reset|resume|back|available|return)[a-z ]{0,20}(?:at|on)?\s*(\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?)/.exec(
-      text,
-    )?.[1]
-  if (absolute) {
-    const date = Date.parse(absolute)
-    if (!Number.isNaN(date)) return date
-  }
-  // The relative form mirrors ModelRouteLimits: decimal amounts ("in 1.5 hours") and compound
-  // sequences ("in 1 hour 30 minutes", summed) both read as the total wait.
-  const part = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|s)s?(?![a-z])`
-  const sequence = new RegExp(String.raw`in\s+(${part}(?:[\s,]+(?:and\s+)?${part})*)`).exec(text)?.[1]
-  if (sequence) {
-    const unit = { second: 1_000, sec: 1_000, s: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 } as Record<
-      string,
-      number
-    >
-    let total = 0
-    for (const [, amount, name] of sequence.matchAll(/(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|s)s?(?![a-z])/g))
-      total += Number(amount) * (unit[name] ?? 1_000)
-    return now + total
-  }
-  return undefined
+  // Past the quota gate the parsing itself is ModelRouteLimits', so the two readers can never
+  // drift apart again: one keyword set for absolute forms ("expires at", "available at", …) and
+  // one relative reader (decimal and compound amounts included).
+  return ModelRouteLimits.resetAtFromMessage(text, now)
 }
 
 export interface Settings {

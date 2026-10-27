@@ -113,6 +113,22 @@ describe("ModelRouteLimits.retryHintFromMessage", () => {
     expect(ModelRouteLimits.retryHintFromMessage("try again in 2.5 minutes", at)).toBe(150_000)
   })
 
+  test("reads the full absolute-keyword set, paired with ModelRouteTuning.parseQuotaReset", () => {
+    // Every keyword either parser ever accepted must parse here, to the same instant.
+    const instant = Date.parse("2026-01-02T00:00:00Z")
+    for (const message of [
+      "quota expires at 2026-01-02T00:00:00Z",
+      "quota retry at 2026-01-02T00:00:00Z",
+      "quota wait until 2026-01-02T00:00:00Z",
+      "quota try again at 2026-01-02T00:00:00Z",
+      "quota available at 2026-01-02T00:00:00Z",
+      "quota resets at 2026-01-02T00:00:00Z",
+      "quota returns at 2026-01-02T00:00:00Z",
+      "quota back at 2026-01-02T00:00:00Z",
+    ])
+      expect(ModelRouteLimits.resetAtFromMessage(message, at)).toBe(instant)
+  })
+
   test("does not guess at anything else", () => {
     expect(ModelRouteLimits.retryHintFromMessage("server exploded", at)).toBeUndefined()
     expect(ModelRouteLimits.retryHintFromMessage(undefined, at)).toBeUndefined()

@@ -154,6 +154,24 @@ describe("ModelRouteTuning.parseQuotaReset", () => {
     expect(ModelRouteTuning.parseQuotaReset("try in 5 minutes", at)).toBeUndefined()
     expect(ModelRouteTuning.parseQuotaReset(undefined, at)).toBeUndefined()
   })
+
+  test("reads the full absolute-keyword set, paired with ModelRouteLimits.resetAtFromMessage", () => {
+    // The keyword set is unified with ModelRouteLimits: every form parses here too, to the
+    // same instant, and the quota gate still rejects messages that never mention a quota.
+    const instant = Date.parse("2026-01-02T00:00:00Z")
+    for (const message of [
+      "quota expires at 2026-01-02T00:00:00Z",
+      "quota retry at 2026-01-02T00:00:00Z",
+      "quota wait until 2026-01-02T00:00:00Z",
+      "quota try again at 2026-01-02T00:00:00Z",
+      "quota available at 2026-01-02T00:00:00Z",
+      "quota resets at 2026-01-02T00:00:00Z",
+      "quota returns at 2026-01-02T00:00:00Z",
+      "quota back at 2026-01-02T00:00:00Z",
+    ])
+      expect(ModelRouteTuning.parseQuotaReset(message, at)).toBe(instant)
+    expect(ModelRouteTuning.parseQuotaReset("available at 2026-01-02T00:00:00Z", at)).toBeUndefined()
+  })
 })
 
 describe("ModelRouteTuning notes", () => {
