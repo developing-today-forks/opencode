@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { collect, parseAllowlist, scanSource, staleEntries, unlistedHits, type Hit } from "./check-proto-reads"
+import { collect, parseAllowlist, SCAN_ROOTS, scanSource, staleEntries, unlistedHits, type Hit } from "./check-proto-reads"
 
 describe("scanSource", () => {
   test("flags the P-A uppercase-table shape and the P-C ?? shape", () => {
@@ -29,6 +29,12 @@ describe("scanSource", () => {
   test("a guarded hasOwn line still matches, so it needs a disposition", () => {
     const hits = scanSource("f.ts", "const arity = Object.hasOwn(ARITY, key) ? ARITY[key] : undefined")
     expect(hits).toHaveLength(1)
+  })
+})
+
+describe("scan roots", () => {
+  test("scans packages/ai in addition to packages/core (#912)", () => {
+    expect(SCAN_ROOTS).toEqual(["packages/core/src", "packages/ai/src"])
   })
 })
 
