@@ -147,6 +147,22 @@ export function createSessionRequestModel() {
     ),
   )
 
+  // The running menu walks the owner's whole tree, so the owner's family loads whenever a subagent
+  // view makes a different session the owner. Landing directly on a descendant otherwise syncs only
+  // that session's own descendants plus the ancestors the titlebar walk fetches, and the root's other
+  // subagents never arrive. This is separate from the message load above: that load's already-loaded
+  // guard must not skip the family, and the family sync's own key dedupes repeat runs.
+  createEffect(
+    on(
+      () => [owner(), params.id, serverSDK.connection.status()] as const,
+      ([rootID, id, status]) => {
+        if (!rootID || rootID === id || status !== "connected") return
+        void data.session.sync(rootID, { children: true }).catch(() => undefined)
+      },
+      { defer: true },
+    ),
+  )
+
   const running = createSessionBackground({
     sessionID: owner,
     messages: data.session.message.list,
