@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { AIError, ProviderInternalError, QuotaExceededError, RateLimitError, TransportError } from "@opencode/ai"
+import {
+  AIError,
+  AuthenticationError,
+  ProviderInternalError,
+  QuotaExceededError,
+  RateLimitError,
+  TransportError,
+} from "@opencode/ai"
 import { ModelRoute } from "@opencode/core/model-route"
 import { SessionStep } from "@opencode/core/session/runner/step"
 
@@ -10,6 +17,7 @@ describe("SessionStep.failureHint", () => {
     expect(SessionStep.failureHint(error(new RateLimitError({ message: "slow down", retryAfterMs: 7_000 })))).toEqual({
       retryAfterMs: 7_000,
       quota: false,
+      auth: false,
       network: false,
     })
     expect(
@@ -17,10 +25,33 @@ describe("SessionStep.failureHint", () => {
     ).toMatchObject({ retryAfterMs: 9_000, quota: false, network: false })
   })
 
+  test("flags authentication refusals for the long first bench", () => {
+    expect(SessionStep.failureHint(error(new AuthenticationError({ message: "bad key" })))).toMatchObject({
+      auth: true,
+      quota: false,
+    })
+    const http = (status: number) => ({ url: "https://api.example.com/v1", status, headers: {} })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "forbidden", http: http(403) }))),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "unauthorized", http: http(401) }))),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(
+        error(new ProviderInternalError({ message: "Your organization has disabled Claude subscription access" })),
+      ),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", http: http(500) }))),
+    ).toMatchObject({ auth: false })
+  })
+
   test("flags an exhausted quota, which carries no retry-after", () => {
     expect(SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))).toEqual({
       retryAfterMs: undefined,
       quota: true,
+      auth: false,
       network: false,
     })
   })
@@ -28,10 +59,10 @@ describe("SessionStep.failureHint", () => {
   test("an ordinary provider failure may carry a retry-after and is never a quota", () => {
     expect(
       SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", retryAfterMs: 3_000 }))),
-    ).toEqual({ retryAfterMs: 3_000, quota: false, network: false })
+    ).toEqual({ retryAfterMs: 3_000, quota: false, auth: false, network: false })
     expect(
       SessionStep.failureHint(error(new TransportError({ message: "reset", transport: "http", operation: "read" }))),
-    ).toEqual({ retryAfterMs: undefined, quota: false, network: true })
+    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: true })
     expect(
       SessionStep.failureHint(
         error(
@@ -43,7 +74,7 @@ describe("SessionStep.failureHint", () => {
           }),
         ),
       ),
-    ).toEqual({ retryAfterMs: undefined, quota: false, network: false })
+    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: false })
   })
 })
 

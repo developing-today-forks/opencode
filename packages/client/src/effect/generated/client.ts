@@ -737,9 +737,7 @@ const EndpointSessionInterrupt = (raw: RawClient["server.session"]) => (input: S
     raw["session.interrupt"]({
       params: { sessionID: input["sessionID"] },
       query: { resume: input["resume"], force: input["force"] },
-    }).pipe(
-      Effect.mapError(mapClientError),
-    ),
+    }).pipe(Effect.mapError(mapClientError)),
   )
 
 const EndpointSessionBackground = (raw: RawClient["server.session"]) => (input: SessionBackgroundInput) =>

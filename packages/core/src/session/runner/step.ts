@@ -123,13 +123,15 @@ export const captureRateLimit = (target: ModelRoute.Target) => {
   return { capture, options: seen.options }
 }
 
-/** Cooldown input from a provider error: a stated retry-after, or an exhausted quota. */
+/** Cooldown input from a provider error: a stated retry-after, an exhausted quota, or an
+ * authentication refusal (the `Authentication` tag, an HTTP 401/403, or the org-disabled
+ * refusal shape), which cannot heal by itself and so takes the long first bench. */
 export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
     retryAfterMs?: number
     rateLimit?: { retryAfterMs?: number }
-    http?: unknown
+    http?: { status?: number }
     code?: string
     message?: string
     body?: string
@@ -140,6 +142,11 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
       reason.rateLimit?.retryAfterMs ??
       ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now()),
     quota: reason._tag === "QuotaExceeded",
+    auth:
+      reason._tag === "Authentication" ||
+      reason.http?.status === 401 ||
+      reason.http?.status === 403 ||
+      /organization has disabled/i.test(`${reason.message ?? ""} ${reason.body ?? ""}`),
     network:
       reason._tag === "Transport" &&
       reason.http === undefined &&

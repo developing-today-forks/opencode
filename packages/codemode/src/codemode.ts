@@ -40,6 +40,16 @@ export type ResolvedExecutionLimits = {
   readonly maxOutputBytes: number | undefined
 }
 
+/** A named, versioned program-source library evaluated inside the interpreter. */
+export type Library = {
+  /** Global the library is bound to; must be a valid identifier and not shadow a built-in. */
+  readonly name: string
+  /** Library version, printed in instructions; additive-only within a major version. */
+  readonly version: string
+  /** JavaScript in the interpreter's supported subset; its result is the library namespace. */
+  readonly source: string
+}
+
 /** Configuration shared by `CodeMode.make` and `CodeMode.execute`. */
 export type Options<Provided extends Record<string, unknown> = {}> = {
   /** Explicit tools exposed to the program as `tools`. */
@@ -48,6 +58,8 @@ export type Options<Provided extends Record<string, unknown> = {}> = {
   hooks?: ToolRuntime.Hooks<Services<Provided>>
   /** Host functions exposed as globals; see `Extension.make`. */
   extensions?: ReadonlyArray<Extension>
+  /** Program-source libraries evaluated before the program and bound to frozen globals. */
+  libraries?: ReadonlyArray<Library>
   /** Resource limits enforced on each execution. */
   limits?: ExecutionLimits
 }
@@ -141,6 +153,33 @@ export const execute = <const Provided extends Record<string, unknown>>(
   options: ExecuteOptions<Provided>,
 ): Effect.Effect<Result, never, Services<Provided>> => make(options).execute(options.code)
 
+const libraryNamePattern = /^[A-Za-z_$][A-Za-z0-9_$]*$/
+
+// Words a program cannot bind or reference as an identifier, including
+// "this" (whose global binding a library would silently overwrite).
+const reservedLibraryNames: ReadonlySet<string> = new Set([
+  "await", "break", "case", "catch", "class", "const", "continue", "debugger",
+  "default", "delete", "do", "else", "enum", "export", "extends", "false",
+  "finally", "for", "function", "if", "import", "in", "instanceof", "new",
+  "null", "return", "super", "switch", "this", "throw", "true", "try",
+  "typeof", "var", "void", "while", "with", "yield", "let", "static",
+  "implements", "interface", "package", "private", "protected", "public",
+  "arguments", "eval",
+])
+
+const requireLibraries = (libraries: ReadonlyArray<Library>): ReadonlyArray<Library> => {
+  const seen = new Set<string>()
+  for (const library of libraries) {
+    if (!libraryNamePattern.test(library.name) || reservedLibraryNames.has(library.name))
+      throw new TypeError(`Library name "${library.name}" must be a valid JavaScript identifier.`)
+    if (library.version.length === 0) throw new TypeError(`Library "${library.name}" version must not be empty.`)
+    if (library.source.trim().length === 0) throw new TypeError(`Library "${library.name}" source must not be empty.`)
+    if (seen.has(library.name)) throw new TypeError(`Library "${library.name}" is already defined.`)
+    seen.add(library.name)
+  }
+  return libraries
+}
+
 /** Creates an Effect-native runtime over explicit, schema-described tools. */
 export const make = <const Provided extends Record<string, unknown> = {}>(
   options: Options<Provided> = {},
@@ -148,6 +187,7 @@ export const make = <const Provided extends Record<string, unknown> = {}>(
   const prepared = ToolRuntime.prepare((options.tools ?? {}) as Tools<Services<Provided>>)
   const limits = resolveExecutionLimits(options.limits)
   const extensions = options.extensions ?? []
+  const libraries = requireLibraries(options.libraries ?? [])
   const bound = new Set(globalNames)
   for (const extension of extensions) {
     for (const name of Object.keys(extension.globals)) {
@@ -155,11 +195,15 @@ export const make = <const Provided extends Record<string, unknown> = {}>(
       bound.add(name)
     }
   }
+  for (const library of libraries) {
+    if (bound.has(library.name)) throw new TypeError(`Library "${library.name}" global is already defined.`)
+    bound.add(library.name)
+  }
   return {
     get catalog() {
       return prepared.catalog
     },
     execute: (code) =>
-      executeProgram(code, prepared, limits, options.hooks ?? {}, (ctx) => extensionGlobals(ctx, extensions)),
+      executeProgram(code, prepared, limits, options.hooks ?? {}, (ctx) => extensionGlobals(ctx, extensions), libraries),
   }
 }

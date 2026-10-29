@@ -1,10 +1,23 @@
 export * as CodeModeInstructions from "./instructions.js"
 
-import { searchSignature, toolExpression } from "@opencode/codemode"
+import { Std, searchSignature, toolExpression } from "@opencode/codemode"
 import { Effect, Schema } from "effect"
 import { Instructions } from "../instructions/index.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeRules } from "./rules.js"
+
+const stdListing = `## Standard library \`std@${Std.version}\`
+
+Pure helpers on the frozen \`std\` global; no imports needed.
+
+- std (7 members) // versioned pure helpers
+  - std.bind(target, defaults) // wrap a tool callable or namespace; defaults merge under explicit args, explicit wins; calls record as the original tool
+  - std.chunk(array, size) // split an array into chunks of size
+  - std.uniqBy(array, iteratee) // first row per key; iteratee is a function or property name
+  - std.keyBy(array, iteratee) // last row per key; iteratee is a function or property name
+  - std.pick(obj, keys) // copy only the listed keys
+  - std.omit(obj, keys) // copy without the listed keys
+  - std.version // "${Std.version}" library version`
 
 // prettier-ignore
 const prompt = (hasMoreTools: boolean) => `# Code Mode
@@ -29,7 +42,9 @@ export function render(catalog: CodeModeCatalog.Summary) {
 
   return `${prompt(catalog.shown < catalog.total)}
 
-${tools.join("\n")}`
+${tools.join("\n")}
+
+${stdListing}`
 }
 
 export function update(previous: CodeModeCatalog.Summary, current: CodeModeCatalog.Summary) {

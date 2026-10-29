@@ -1,6 +1,6 @@
 export * as CodeModeTool from "./tool.js"
 
-import { CodeMode, Namespace, Tool, toolError } from "@opencode/codemode"
+import { CodeMode, Namespace, Std, Tool, toolError } from "@opencode/codemode"
 import type {
   Content,
   Context,
@@ -236,7 +236,7 @@ function runtime(
     })
   }
   const tools = renderTools(root)
-  return CodeMode.make<typeof tools>({ tools, extensions: [CodeModeWeb.extension], hooks })
+  return CodeMode.make<typeof tools>({ tools, extensions: [CodeModeWeb.extension], libraries: [Std.library], hooks })
 }
 
 function getNode<T>(root: Node<T>, path: string) {

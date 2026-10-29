@@ -178,6 +178,18 @@ describe("CodeModeInstructions.render", () => {
       "No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.",
     )
   })
+
+  test("lists the std library with its version", () => {
+    const instructions = render([lookup])
+    expect(instructions).toContain("std@1.0.0")
+    expect(instructions).toContain("std.bind(target, defaults)")
+    expect(instructions).toContain("std.chunk(array, size)")
+    expect(instructions).toContain("std.uniqBy(array, iteratee)")
+    expect(instructions).toContain("std.keyBy(array, iteratee)")
+    expect(instructions).toContain("std.pick(obj, keys)")
+    expect(instructions).toContain("std.omit(obj, keys)")
+    expect(instructions).toContain("std.version")
+  })
 })
 
 describe("CodeModeInstructions.update", () => {

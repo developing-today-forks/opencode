@@ -276,6 +276,52 @@ describe("ModelRoute failure hints", () => {
     ModelRoute.failed(t, policy, 1_000)
     expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 60_000)
   })
+
+  test("repeated failures double the bench, and the count survives the bench expiring", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 60_000)
+    ModelRoute.failed(t, policy, 61_000)
+    expect(ModelRoute.cooldownUntil(t, 61_000)).toBe(61_000 + 120_000)
+    ModelRoute.failed(t, policy, 181_000)
+    expect(ModelRoute.cooldownUntil(t, 181_000)).toBe(181_000 + 240_000)
+    // Expiry (recover) does not forgive the history: the next failure keeps escalating.
+    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(0)
+    ModelRoute.failed(t, policy, 421_000)
+    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(421_000 + 480_000)
+  })
+
+  test("a success resets the escalation back to the base bench", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    ModelRoute.failed(t, policy, 61_000)
+    expect(ModelRoute.cooldownUntil(t, 61_000)).toBe(61_000 + 120_000)
+    ModelRoute.completed(t, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, 181_000)
+    ModelRoute.failed(t, policy, 182_000)
+    expect(ModelRoute.cooldownUntil(t, 182_000)).toBe(182_000 + 60_000)
+  })
+
+  test("an auth failure takes the long bench first, then escalates from it", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000, { auth: true })
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 900_000)
+    ModelRoute.failed(t, policy, 901_000, { auth: true })
+    expect(ModelRoute.cooldownUntil(t, 901_000)).toBe(901_000 + 1_800_000)
+  })
+
+  test("a stated retry-after is never multiplied, even after repeated failures", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    ModelRoute.failed(t, policy, 61_000)
+    ModelRoute.failed(t, policy, 181_000, { retryAfterMs: 5_000 })
+    expect(ModelRoute.cooldownUntil(t, 181_000)).toBe(181_000 + 5_000)
+  })
+
+  test("the escalated bench is capped at a day", () => {
+    ModelRoute.resetHealth()
+    for (let index = 0; index < 30; index++) ModelRoute.failed(t, policy, 1_000)
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 86_400_000)
+  })
 })
 
 describe("ModelRoute budgets", () => {

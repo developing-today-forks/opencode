@@ -22,7 +22,7 @@ permissions:
 jobs:
   check:
     timeout-minutes: 15
-    name: typecheck
+    name: basic typecheck
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04
     steps:

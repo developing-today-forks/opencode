@@ -185,7 +185,10 @@ export const ref = (target: { providerID: string; model: string; variant?: strin
     ...(target.variant ? { variant: Model.VariantID.make(target.variant) } : {}),
   })
 
-const health = new Map<string, { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number }>()
+const health = new Map<
+  string,
+  { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number }
+>()
 const HEALTH_LIMIT = 2_000
 // Recent finished requests per target (true = answered). A target with at most one give-up in this
 // window is steady: a single failure there is treated as transient before the route moves on.
@@ -197,7 +200,7 @@ const pushOutcome = (outcomes: boolean[], answered: boolean) => [...outcomes, an
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
-  const current = health.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0 }
+  const current = health.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0, consecutiveFailures: 0 }
   health.delete(id)
   health.set(id, current)
   while (health.size > HEALTH_LIMIT) health.delete(health.keys().next().value!)
@@ -266,6 +269,9 @@ export interface FailureHint {
   readonly quota?: boolean
   /** A local transport failure with no provider HTTP response. */
   readonly network?: boolean
+  /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
+   * so its first bench is the long quota-length one. */
+  readonly auth?: boolean
 }
 
 export const failed = (target: Model.Ref, policy: Policy, now = Date.now(), hint?: FailureHint) => {
@@ -290,17 +296,21 @@ export const failed = (target: Model.Ref, policy: Policy, now = Date.now(), hint
   const state = entry(target)
   state.samples = []
   state.outcomes = pushOutcome(state.outcomes, false)
+  state.consecutiveFailures += 1
+  // A stated retry-after is believed as-is and never multiplied; every other class doubles its
+  // bench per consecutive failure (auth and quota start from the long bench), capped at a day.
+  // The count survives recover() and resets only on a success, so a permanently failing target
+  // backs off instead of being retried at full rate forever.
+  const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, 1_000), MAX_COOLDOWN_MS)
-      : hint?.quota
-        ? policy.quotaCooldownMs
-        : policy.cooldownMs
+      : Math.min(base * 2 ** Math.min(state.consecutiveFailures - 1, 30), MAX_COOLDOWN_MS)
   state.cooldownUntil = now + cooldown
   logHealth(
     target,
     "cooldown-start",
-    hint?.retryAfterMs ? "retry-after" : hint?.quota ? "quota" : "failure",
+    hint?.retryAfterMs ? "retry-after" : hint?.quota ? "quota" : hint?.auth ? "auth" : "failure",
     state.cooldownUntil,
   )
 }
@@ -390,6 +400,7 @@ export const completed = (
 ) => {
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
+  state.consecutiveFailures = 0
   recover(target, state, now)
   if (state.cooldownUntil > now) return
   const slow =
