@@ -1077,3 +1077,73 @@ describe("Messaging offset normalisation", () => {
     }),
   )
 })
+
+describe("Messaging log chars and context normalisation", () => {
+  it.live("clamps invalid grep context to a non-negative integer instead of throwing", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const bus = yield* Bus.Service
+      const messaging = yield* Messaging.Service
+      for (const text of ["alpha step", "beta step", "gamma failure", "delta step"])
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text })
+      const grep = (context: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "grep", query: "step", context })
+          .pipe(Effect.map((result) => result.entries.map((entry) => entry.text)))
+      // Valid context behaves as today.
+      expect(yield* grep(0)).toEqual(["alpha step", "beta step", "delta step"])
+      expect(yield* grep(1)).toEqual(["alpha step", "beta step", "gamma failure", "delta step"])
+      // Fractional context floors instead of indexing the entry list with fractional keys
+      // (which used to materialise undefined entries and throw in the output stage).
+      expect(yield* grep(1.5)).toEqual(yield* grep(1))
+      // Negative and NaN context clamp to 0.
+      expect(yield* grep(-1)).toEqual(yield* grep(0))
+      expect(yield* grep(NaN)).toEqual(yield* grep(0))
+
+      const fail = (context: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "grep", query: "fail", context })
+          .pipe(Effect.map((result) => result.entries.map((entry) => [entry.text, entry.match] as const)))
+      expect(yield* fail(1.5)).toEqual([
+        ["beta step", false],
+        ["gamma failure", true],
+        ["delta step", false],
+      ])
+    }),
+  )
+
+  it.live("clamps invalid chars to a positive integer within the ceiling instead of corrupting entries", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const bus = yield* Bus.Service
+      const messaging = yield* Messaging.Service
+      const long = "a".repeat(9000)
+      yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text: long })
+      const read = (chars: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "head", chars })
+          .pipe(Effect.map((result) => result.entries[0].text))
+      // Valid budgets behave as today: a small budget clips, the default returns the same clip.
+      expect((yield* read(500)).length).toBeLessThanOrEqual(500)
+      expect(yield* read(NaN)).toEqual(yield* read(500))
+      // Negative, zero and sub-1 budgets clamp to 1 instead of returning the wrong end of the
+      // entry; fractional budgets floor. None of them produce the garbage NaN marker.
+      expect(yield* read(-5)).toEqual("a")
+      expect(yield* read(0)).toEqual("a")
+      expect(yield* read(1.5)).toEqual("a")
+      expect(yield* read(-5)).not.toContain("NaN")
+      // Oversized budgets clamp to the documented ceiling instead of returning entries unclipped.
+      expect((yield* read(1e9)).length).toBeLessThanOrEqual(8000)
+      expect(yield* read(1e9)).toEqual(yield* read(8000))
+      expect(yield* read(Infinity)).toEqual(yield* read(8000))
+
+      const pull = (chars?: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "pull", ...(chars === undefined ? {} : { chars }) })
+          .pipe(Effect.map((result) => result.entries[0].text))
+      // NaN is treated as absent, so pull falls back to its 4000 default.
+      expect(yield* pull(NaN)).toEqual(yield* pull())
+      expect((yield* pull(NaN)).length).toBeLessThanOrEqual(4000)
+    }),
+  )
+})

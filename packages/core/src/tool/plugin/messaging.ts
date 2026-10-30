@@ -21,6 +21,7 @@ const SESSIONS =
 const Strings = Schema.Union([Schema.String, Schema.Array(Schema.String)])
 const Count = Schema.Int.check(Schema.isGreaterThan(0))
 const Offset = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+const NonNegativeCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 const Seqs = Schema.Union([Count, Schema.Array(Count)])
 const Order = Schema.Literals(["asc", "desc"])
 const Match = Schema.Literals(["exact", "regex", "fuzzy", "semantic", "hybrid", "advanced"])
@@ -179,7 +180,7 @@ export const SessionsInput = Schema.Struct({
   ).annotate({ description: "log parts (default user, output, tools, synthetic)" }),
   query: Schema.optionalKey(Schema.String),
   match: Schema.optionalKey(Match),
-  context: Schema.optionalKey(Schema.Int).annotate({ description: "grep: entries of context around each match" }),
+  context: Schema.optionalKey(NonNegativeCount).annotate({ description: "grep: entries of context around each match" }),
   scope: Schema.optionalKey(Schema.Literals(["all", "context"])).annotate({
     description: "log: all (full transcript, default) or context (what the model currently sees)",
   }),
