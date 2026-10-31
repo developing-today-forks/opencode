@@ -1160,10 +1160,22 @@ describe("per-credential usage (#1106)", () => {
       serve("cred-a", 900)
       serve("cred-b", 100)
       serve(undefined, 500)
+      // One session served by two credentials of the same target (credential fallback).
+      ModelRouteLog.observer({
+        routeID: "quota-pool",
+        providerID: "multi",
+        modelID: "m",
+        sessionID: "ses_cred-a",
+        startedAt: now,
+        credentialID: "cred-b",
+      }).done("success", {
+        outputStarted: true,
+        tokens: { input: 50, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
       yield* Effect.sleep("100 millis")
 
       const rows = yield* db.select().from(RouteAttemptTable).all()
-      expect(rows.map((row) => row.credential_id).toSorted()).toEqual(["cred-a", "cred-b", null])
+      expect(rows.map((row) => row.credential_id).toSorted()).toEqual(["cred-a", "cred-b", "cred-b", null])
 
       const usage = yield* ModelRouteLog.targetUsage(db, 0)
       // The quota gate's per-credential sum: each credential sees only its own usage, and the
@@ -1171,10 +1183,13 @@ describe("per-credential usage (#1106)", () => {
       const forCredential = (credentialID: string) =>
         ModelUsage.sum(usage.filter((row) => row.providerID === "multi" && row.credentialID === credentialID))
       expect(forCredential("cred-a").input).toBe(900)
-      expect(forCredential("cred-b").input).toBe(100)
+      expect(forCredential("cred-b").input).toBe(150)
       expect(usage.find((row) => row.providerID === "multi" && row.credentialID === null)?.input).toBe(500)
       // The provider scope still sums every row, as it did before the credential dimension.
-      expect(ModelUsage.sum(usage.filter((row) => row.providerID === "multi")).input).toBe(1_500)
+      expect(ModelUsage.sum(usage.filter((row) => row.providerID === "multi")).input).toBe(1_550)
+      // Distinct sessions per target stays exact despite the credential split: ses_cred-a was
+      // served by both credentials but is one session.
+      expect(yield* ModelRouteLog.targetSessions(db, 0)).toEqual([{ providerID: "multi", modelID: "m", sessions: 3 }])
     }),
   )
 })

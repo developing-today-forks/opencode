@@ -94,9 +94,9 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
         }
         const targetRows = yield* ModelRouteLog.targetUsage(db, since)
         // targetUsage rows are split by serving credential (#1106); this report is per target,
-        // so fold each target's credential rows back into one. `sessions` sums the per-credential
-        // distinct counts, so a session served by two credentials of one target counts once per
-        // credential in this report's session figure.
+        // so fold each target's credential rows back into one. The folded rows' `sessions` is
+        // replaced below: per-credential distinct counts cannot be summed (one session can sit
+        // in several credential groups), so the report takes the exact target-level count.
         const targetsByID = new Map<string, ModelUsage.TargetRow>()
         for (const row of targetRows) {
           const id = `${row.providerID}/${row.modelID}`
@@ -105,10 +105,15 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
             ...(existing ? ModelUsage.sum([existing, row]) : ModelUsage.sum([row])),
             providerID: row.providerID,
             modelID: row.modelID,
-            sessions: (existing?.sessions ?? 0) + row.sessions,
+            sessions: row.sessions,
             first: existing ? Math.min(existing.first, row.first) : row.first,
             last: existing ? Math.max(existing.last, row.last) : row.last,
           })
+        }
+        const targetSessionCounts = yield* ModelRouteLog.targetSessions(db, since)
+        for (const row of targetSessionCounts) {
+          const target = targetsByID.get(`${row.providerID}/${row.modelID}`)
+          if (target) targetsByID.set(`${row.providerID}/${row.modelID}`, { ...target, sessions: row.sessions })
         }
         const targets = [...targetsByID.values()]
         const days = yield* ModelRouteLog.dailyUsage(db, since)

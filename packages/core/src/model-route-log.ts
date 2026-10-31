@@ -804,6 +804,22 @@ export const targetUsage = (db: Database.Interface["db"], since: number) =>
 
 const DAY = sql`strftime('%Y-%m-%d', ${RouteAttemptTable.time_started} / 1000, 'unixepoch')`
 
+/** Distinct sessions per provider and model since `since`. targetUsage rows split by serving
+ * credential, so their per-group distinct counts cannot be summed back into this figure: a
+ * session served by two credentials of one target (credential fallback, or across the
+ * credential_id migration) sits in two groups but is one session (#1106). */
+export const targetSessions = (db: Database.Interface["db"], since: number) =>
+  db
+    .select({
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
+    })
+    .from(RouteAttemptTable)
+    .where(gte(RouteAttemptTable.time_started, since))
+    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .all()
+
 /** Totals per UTC day, provider and model since `since`, oldest day first. */
 export const dailyUsage = (db: Database.Interface["db"], since: number) =>
   db
