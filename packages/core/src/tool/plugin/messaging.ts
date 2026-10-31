@@ -160,7 +160,7 @@ export const SessionsInput = Schema.Struct({
   offset: Schema.optionalKey(Offset),
   op: Schema.optionalKey(Schema.Literals(["head", "tail", "grep", "search", "pull"])).annotate({
     description:
-      "log: tail (default), head, grep (regex with context), search (ranked, default with query), pull (full text)",
+      "log: tail (default), head, grep (regex with context), search (ranked, default with query), pull (entry text up to chars, capped at 8000)",
   }),
   include: Schema.optionalKey(
     Schema.Array(
@@ -184,7 +184,7 @@ export const SessionsInput = Schema.Struct({
   scope: Schema.optionalKey(Schema.Literals(["all", "context"])).annotate({
     description: "log: all (full transcript, default) or context (what the model currently sees)",
   }),
-  chars: Schema.optionalKey(Count).annotate({ description: "log: maximum characters per entry" }),
+  chars: Schema.optionalKey(Count).annotate({ description: "log: maximum characters per entry; capped at 8000" }),
 })
 
 export const Plugin = {
