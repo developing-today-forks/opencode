@@ -1140,6 +1140,45 @@ describe("ModelRouteLog.observer", () => {
   )
 })
 
+describe("per-credential usage (#1106)", () => {
+  it.live("targetUsage splits by serving credential; unattributed usage feeds no credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const now = Date.now()
+      const serve = (credentialID: string | undefined, input: number) =>
+        ModelRouteLog.observer({
+          routeID: "quota-pool",
+          providerID: "multi",
+          modelID: "m",
+          sessionID: `ses_${credentialID ?? "none"}`,
+          startedAt: now,
+          credentialID,
+        }).done("success", {
+          outputStarted: true,
+          tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
+      serve("cred-a", 900)
+      serve("cred-b", 100)
+      serve(undefined, 500)
+      yield* Effect.sleep("100 millis")
+
+      const rows = yield* db.select().from(RouteAttemptTable).all()
+      expect(rows.map((row) => row.credential_id).toSorted()).toEqual(["cred-a", "cred-b", null])
+
+      const usage = yield* ModelRouteLog.targetUsage(db, 0)
+      // The quota gate's per-credential sum: each credential sees only its own usage, and the
+      // unattributed (env-served) row contributes to neither credential's totals.
+      const forCredential = (credentialID: string) =>
+        ModelUsage.sum(usage.filter((row) => row.providerID === "multi" && row.credentialID === credentialID))
+      expect(forCredential("cred-a").input).toBe(900)
+      expect(forCredential("cred-b").input).toBe(100)
+      expect(usage.find((row) => row.providerID === "multi" && row.credentialID === null)?.input).toBe(500)
+      // The provider scope still sums every row, as it did before the credential dimension.
+      expect(ModelUsage.sum(usage.filter((row) => row.providerID === "multi")).input).toBe(1_500)
+    }),
+  )
+})
+
 describe("hedge accuracy", () => {
   it.live("scores each leg of a hedged pair", () =>
     Effect.gen(function* () {

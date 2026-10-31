@@ -548,6 +548,7 @@ export const layer = Layer.effect(
           providerID: context.model.ref.providerID,
           modelID: context.model.ref.id,
           variant: context.model.ref.variant,
+          credentialID: context.model.routing?.credentialID,
           sessionID: context.session.id,
           assistantMessageID: `compaction-${label}`,
           startedAt: Date.now(),

@@ -55,6 +55,11 @@ export interface RequestObservation {
   readonly providerID: string
   readonly modelID: string
   readonly variant?: string
+  /** The credential that served this request, when the call site knows it authoritatively (the
+   * serving credential captured at resolution, never a pre-load snapshot of the active one).
+   * Omitted when an env connection served or the site cannot know: the attempt is then recorded
+   * unattributed and its usage feeds no credential's quota snapshot (#1106). */
+  readonly credentialID?: string
   readonly sessionID?: string
   readonly assistantMessageID?: string
   readonly startedAt: number
@@ -121,6 +126,7 @@ export const observer = (
           provider_id: request.providerID,
           model_id: request.modelID,
           variant: request.variant,
+          credential_id: request.credentialID,
           outcome,
           ...fields,
           // A failed request's own details win; a successful one keeps what its response said.
@@ -776,12 +782,16 @@ export const sessionTargetUsage = (db: Database.Interface["db"], since: number, 
         )
         .all()
 
-/** Totals per provider and model since `since`, with how many sessions used each. */
+/** Totals per provider, model and serving credential since `since`, with how many sessions used
+ * each. `credentialID` is null for unattributed attempts (env-served, or recorded before the
+ * column existed): consumers summing per-credential usage must exclude those rows, never assign
+ * them to a credential (#1106). */
 export const targetUsage = (db: Database.Interface["db"], since: number) =>
   db
     .select({
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
+      credentialID: RouteAttemptTable.credential_id,
       sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
       first: sql<number>`min(${RouteAttemptTable.time_started})`,
       last: sql<number>`max(${RouteAttemptTable.time_ended})`,
@@ -789,7 +799,7 @@ export const targetUsage = (db: Database.Interface["db"], since: number) =>
     })
     .from(RouteAttemptTable)
     .where(gte(RouteAttemptTable.time_started, since))
-    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id, RouteAttemptTable.credential_id)
     .all()
 
 const DAY = sql`strftime('%Y-%m-%d', ${RouteAttemptTable.time_started} / 1000, 'unixepoch')`

@@ -92,7 +92,25 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
                 )) as ModelUsage.SessionTargetRow[]),
           )
         }
-        const targets = yield* ModelRouteLog.targetUsage(db, since)
+        const targetRows = yield* ModelRouteLog.targetUsage(db, since)
+        // targetUsage rows are split by serving credential (#1106); this report is per target,
+        // so fold each target's credential rows back into one. `sessions` sums the per-credential
+        // distinct counts, so a session served by two credentials of one target counts once per
+        // credential in this report's session figure.
+        const targetsByID = new Map<string, ModelUsage.TargetRow>()
+        for (const row of targetRows) {
+          const id = `${row.providerID}/${row.modelID}`
+          const existing = targetsByID.get(id)
+          targetsByID.set(id, {
+            ...(existing ? ModelUsage.sum([existing, row]) : ModelUsage.sum([row])),
+            providerID: row.providerID,
+            modelID: row.modelID,
+            sessions: (existing?.sessions ?? 0) + row.sessions,
+            first: existing ? Math.min(existing.first, row.first) : row.first,
+            last: existing ? Math.max(existing.last, row.last) : row.last,
+          })
+        }
+        const targets = [...targetsByID.values()]
         const days = yield* ModelRouteLog.dailyUsage(db, since)
         const turns = yield* ModelRouteLog.turnAttempts(db, since, input.session)
         const offers = (yield* ModelRouteLog.offerUsage(db, since, input.route)) as ModelUsage.OfferRow[]

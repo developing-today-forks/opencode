@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "f985ec5e-4a2f-4e0e-b701-d55b545f132f",
-  "prevIds": ["19272635-2391-40b6-8db6-c6943d1b2d28"],
+  "id": "bb94a60a-f0d3-4a7e-a33e-0212a658dc3f",
+  "prevIds": ["f985ec5e-4a2f-4e0e-b701-d55b545f132f"],
   "ddl": [
     {
       "name": "account_state",
@@ -1181,6 +1181,16 @@
       "default": null,
       "generated": null,
       "name": "variant",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "credential_id",
       "entityType": "columns",
       "table": "route_attempt"
     },

@@ -446,29 +446,39 @@ const refreshQuotaGate = (
 
     yield* ModelRouteLog.withDb((db) =>
       Effect.gen(function* () {
-        const totalsByWindow = new Map<string, ModelUsage.Totals>()
+        const rowsByWindow = new Map<string, readonly (ModelUsage.TargetRow & { credentialID: string | null })[]>()
         for (const { plan, window } of windows) {
           if (window.windowHours === undefined) continue
           const key = `${plan.id}:${window.name}`
-          const since = now - window.windowHours * 3_600_000
-          const rows = yield* ModelRouteLog.targetUsage(db, since)
-          const totals = ModelUsage.sum(rows.filter((row) => row.providerID === plan.providerID))
-          totalsByWindow.set(key, totals)
+          if (rowsByWindow.has(key)) continue
+          rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, now - window.windowHours * 3_600_000))
         }
-        const snapshots = QuotaSnapshot.deriveAll(
-          relevantPlans,
-          (plan, window) => totalsByWindow.get(`${plan.id}:${window.name}`) ?? ModelUsage.zero,
-          now,
-          { now },
-        )
         for (const target of targets) {
-          const providerSnapshots = snapshots.filter((s) => s.providerID === target.providerID)
-          if (providerSnapshots.length === 0) continue
-          const fullSnapshot = providerSnapshots
+          const credentialID = credentialByProvider.get(target.providerID)
+          // Snapshots stay plan/provider-scoped, but the totals they are derived from are scoped
+          // to what they will gate (#1106): a credential's snapshot sums only that credential's
+          // rows, so one credential's usage can never mark another known-full. Unattributed rows
+          // (credentialID null: env-served, or recorded before the column existed) never feed a
+          // credential's totals; they feed only the provider scope, whose totals keep the
+          // provider-wide sum this gate always used.
+          const snapshots = QuotaSnapshot.deriveAll(
+            relevantPlans.filter((plan) => plan.providerID === target.providerID),
+            (plan, window) =>
+              ModelUsage.sum(
+                (rowsByWindow.get(`${plan.id}:${window.name}`) ?? []).filter(
+                  (row) =>
+                    row.providerID === plan.providerID &&
+                    (credentialID === undefined || row.credentialID === credentialID),
+                ),
+              ),
+            now,
+            { now },
+          )
+          if (snapshots.length === 0) continue
+          const fullSnapshot = snapshots
             .filter((s) => QuotaSnapshot.isKnownFull(s, now))
             .sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
-          const snapshot = fullSnapshot ?? providerSnapshots[0]
-          const credentialID = credentialByProvider.get(target.providerID)
+          const snapshot = fullSnapshot ?? snapshots[0]
           if (credentialID) {
             ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
           } else {

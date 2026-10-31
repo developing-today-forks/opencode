@@ -75,6 +75,7 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
         providerID: model.ref.providerID,
         modelID: model.ref.id,
         variant: model.ref.variant,
+        credentialID: model.routing?.credentialID,
         sessionID: selection.session.id,
         startedAt: Date.now(),
       },
