@@ -145,6 +145,11 @@ export interface Resolved {
   readonly transport?: Provider.Transport
   /** Milliseconds without streamed data before a WebSocket exchange fails; `false` disables the limit. */
   readonly chunkTimeout?: number | false
+  /** The stored credential that served this resolution, captured by load() from the connection it
+   * built the request from (#6): present on direct resolutions as well as routed ones, so attempt
+   * records attribute usage to the credential that actually served (#1106). Absent when an env
+   * connection served. For routed resolutions it matches `routing.credentialID`. */
+  readonly servingCredentialID?: Credential.ID
   /** Selection and health data for a configured OpenCode model route. */
   readonly routing?: {
     readonly routeID: ID
@@ -543,6 +548,7 @@ export const layer = Layer.effect(
           compaction: runtimeInfo.settings?.compaction,
           transport: provider?.settings?.transport,
           chunkTimeout: Provider.timeout(provider?.settings?.chunkTimeout),
+          ...(connection?.type === "credential" ? { servingCredentialID: connection.id } : {}),
         } satisfies Resolved,
         // #6: the credential that actually served this load, captured from the same active
         // connection the request was built from. Callers must use this — never a snapshot of
