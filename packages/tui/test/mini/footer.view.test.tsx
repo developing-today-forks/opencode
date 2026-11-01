@@ -22,6 +22,7 @@ import {
   RunModelSelectBody,
   RunSettingsBody,
   RunSubagentSelectBody,
+  nestSubagentTabs,
   RunVariantSelectBody,
 } from "../../src/mini/footer.command"
 import { RunFooterView } from "../../src/mini/footer.view"
@@ -119,9 +120,11 @@ function subagent(input: {
   label: string
   description: string
   status?: FooterSubagentTab["status"]
+  parentID?: string
 }) {
   return {
     sessionID: input.sessionID,
+    parentID: input.parentID,
     label: input.label,
     description: input.description,
     status: input.status ?? "running",
@@ -1218,6 +1221,83 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
     expect(inactive).toContain("Write migration plan")
     expect(inactive).toContain("done")
     expect(inactive).toContain("tab show active")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("nestSubagentTabs nests a root -> child -> grandchild family in tree order", () => {
+  const tabs = [
+    subagent({ sessionID: "s-grand", label: "Explore", description: "Dig into token refresh", parentID: "s-child" }),
+    subagent({ sessionID: "s-root", label: "Explore", description: "Inspect auth flow", parentID: "s-main" }),
+    subagent({ sessionID: "s-child", label: "General", description: "Write migration plan", parentID: "s-root" }),
+  ]
+
+  expect(nestSubagentTabs(tabs).map(({ tab, prefix }) => `${prefix}${tab.sessionID}`)).toEqual([
+    "s-root",
+    "└─ s-child",
+    "   └─ s-grand",
+  ])
+
+  // A filtered-out parent stays as a context row for a matching descendant.
+  const mixed = [
+    subagent({ sessionID: "s-root", label: "Explore", description: "Inspect auth flow", parentID: "s-main" }),
+    subagent({
+      sessionID: "s-child",
+      label: "General",
+      description: "Write migration plan",
+      status: "completed",
+      parentID: "s-root",
+    }),
+    subagent({ sessionID: "s-grand", label: "Explore", description: "Dig into token refresh", parentID: "s-child" }),
+  ]
+  expect(
+    nestSubagentTabs(mixed, (tab) => tab.status === "running").map(({ tab }) => tab.sessionID),
+  ).toEqual(["s-root", "s-child", "s-grand"])
+
+  // A parent cycle ends instead of looping.
+  const cyclic = [
+    subagent({ sessionID: "s-x", label: "Explore", description: "X", parentID: "s-y" }),
+    subagent({ sessionID: "s-y", label: "Explore", description: "Y", parentID: "s-x" }),
+  ]
+  expect(nestSubagentTabs(cyclic).map(({ tab }) => tab.sessionID)).toEqual(["s-x", "s-y"])
+})
+
+test("direct subagent panel nests subagents under the session that started them", async () => {
+  const [tabs] = createSignal([
+    subagent({ sessionID: "s-grand", label: "Explore", description: "Dig into token refresh", parentID: "s-child" }),
+    subagent({ sessionID: "s-root", label: "Explore", description: "Inspect auth flow", parentID: "s-main" }),
+    subagent({ sessionID: "s-child", label: "General", description: "Write migration plan", parentID: "s-root" }),
+  ])
+  const [current] = createSignal<string | undefined>("s-grand")
+
+  const app = await testRender(
+    () => (
+      <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
+        <RunSubagentSelectBody
+          theme={() => RUN_THEME_FALLBACK.footer}
+          tabs={tabs}
+          current={current}
+          onClose={() => {}}
+          onSelect={() => {}}
+        />
+      </box>
+    ),
+    {
+      width: 100,
+      height: RUN_SUBAGENT_PANEL_ROWS + 1,
+    },
+  )
+
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+
+    expect(frame).toContain("Select subagent")
+    expect(frame).toContain("└─ Write migration plan")
+    expect(frame).toContain("└─ Dig into token refresh")
+    expect(frame.indexOf("Inspect auth flow")).toBeLessThan(frame.indexOf("Write migration plan"))
+    expect(frame.indexOf("Write migration plan")).toBeLessThan(frame.indexOf("Dig into token refresh"))
   } finally {
     app.renderer.destroy()
   }

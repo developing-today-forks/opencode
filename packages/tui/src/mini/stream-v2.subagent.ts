@@ -103,6 +103,7 @@ type ToolTrack = {
 
 type ChildState = {
   sessionID: string
+  parentID?: string
   label: string
   description: string
   status: FooterSubagentTab["status"]
@@ -192,6 +193,7 @@ function childSessionID(metadata: Record<string, unknown> | undefined) {
 function tab(child: ChildState): FooterSubagentTab {
   return {
     sessionID: child.sessionID,
+    parentID: child.parentID,
     label: child.label,
     description: child.description || child.title || "",
     status: child.status,
@@ -225,11 +227,15 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
   let blockerEpoch = 0
   let closed = false
   const active = (signal = input.signal) => !closed && !input.signal.aborted && !signal.aborted
-  const admitChild = (sessionID: string): ChildState | undefined => {
+  const admitChild = (sessionID: string, parentID?: string): ChildState | undefined => {
     const existing = children.get(sessionID)
+    if (parentID && parentID !== sessionID) {
+      if (existing && !existing.parentID) existing.parentID = parentID
+    }
     if (!existing && children.size >= FAMILY_LIST_LIMIT) return
     const child: ChildState = existing ?? {
       sessionID,
+      parentID: parentID && parentID !== sessionID ? parentID : undefined,
       label: FALLBACK_LABEL,
       description: "",
       status: "running",
@@ -594,7 +600,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
           const buffered = pendingEvents.get(job.sessionID) ?? []
           pendingEvents.delete(job.sessionID)
           for (const item of lineage.toReversed()) {
-            const child = admitChild(item.id)
+            const child = admitChild(item.id, item.parentID ?? undefined)
             if (!child) break
             if (item.agent) child.label = Locale.titlecase(item.agent)
             child.title = item.title
@@ -941,7 +947,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
     if (tool.name !== "subagent" || tool.state.status === "streaming") return
     const found = childSessionID(record(tool.state.metadata))
     if (!found) return
-    const child = admitChild(found.sessionID)
+    const child = admitChild(found.sessionID, input.sessionID)
     if (!child) return
     applyMeta(child, record(tool.state.input))
     if (tool.state.status === "completed" && found.running) child.background = true
@@ -987,7 +993,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
       if (event.type !== "session.tool.progress") pendingCalls.delete(key)
       const found = childSessionID(record(event.data.metadata))
       if (!found) return
-      const child = admitChild(found.sessionID)
+      const child = admitChild(found.sessionID, input.sessionID)
       if (!child) return
       applyMeta(child, pending)
       if (event.type === "session.tool.success" && found.running) {
@@ -1056,7 +1062,7 @@ export function createSubagentTracker(input: SubagentTrackerInput): SubagentTrac
         for (const session of family) {
           if (visited.has(session.id) || children.size >= FAMILY_LIST_LIMIT) continue
           visited.add(session.id)
-          const child = admitChild(session.id)
+          const child = admitChild(session.id, session.parentID ?? owner)
           if (!child) break
           if (session.agent && child.label === FALLBACK_LABEL) child.label = Locale.titlecase(session.agent)
           if (!child.title) child.title = session.title

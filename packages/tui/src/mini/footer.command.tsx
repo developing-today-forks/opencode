@@ -860,6 +860,73 @@ export function RunSettingsBody(props: {
   )
 }
 
+
+type SubagentTabNode<T> = { tab: T; children: SubagentTabNode<T>[] }
+
+// Order subagent tabs as a family forest, mirroring sessionFamily: tabs nest under their
+// parentID, roots are tabs whose parent is not itself a tab (the main session or a session
+// outside the list), and each row carries the tree prefix sessionFamily would draw. A tab
+// that fails `include` stays only as an ancestor of a tab that passes, so a nested row is
+// never drawn under a missing parent. Parent cycles end at the first repeat, and tabs only
+// reachable through a cycle are appended as roots in their original order.
+export function nestSubagentTabs<T extends { sessionID: string; parentID?: string | null }>(
+  tabs: readonly T[],
+  include: (tab: T) => boolean = () => true,
+): Array<{ tab: T; prefix: string }> {
+  const byID = new Map(tabs.map((tab) => [tab.sessionID, tab]))
+  const children = new Map<string, T[]>()
+  const roots: T[] = []
+  tabs.forEach((tab) => {
+    const parent = tab.parentID && tab.parentID !== tab.sessionID ? byID.get(tab.parentID) : undefined
+    if (!parent) {
+      roots.push(tab)
+      return
+    }
+    const group = children.get(parent.sessionID)
+    if (group) group.push(tab)
+    else children.set(parent.sessionID, [tab])
+  })
+
+  const seen = new Set<string>()
+  function build(tab: T): SubagentTabNode<T> {
+    seen.add(tab.sessionID)
+    return {
+      tab,
+      children: (children.get(tab.sessionID) ?? []).filter((child) => !seen.has(child.sessionID)).map(build),
+    }
+  }
+  const forest = roots.map(build)
+  tabs.forEach((tab) => {
+    if (!seen.has(tab.sessionID)) forest.push(build(tab))
+  })
+
+  function prune(nodes: SubagentTabNode<T>[]): SubagentTabNode<T>[] {
+    return nodes.flatMap((node) => {
+      const nested = prune(node.children)
+      return include(node.tab) || nested.length > 0 ? [{ tab: node.tab, children: nested }] : []
+    })
+  }
+
+  function walk(
+    nodes: SubagentTabNode<T>[],
+    ancestors: boolean[],
+  ): Array<{ tab: T; prefix: string }> {
+    return nodes.flatMap((node, index) => {
+      const last = index === nodes.length - 1
+      const prefix =
+        ancestors.length === 0
+          ? ""
+          : ancestors
+              .slice(1)
+              .map((ancestor) => (ancestor ? "   " : "│  "))
+              .join("") + (last ? "└─ " : "├─ ")
+      return [{ tab: node.tab, prefix }, ...walk(node.children, [...ancestors, last])]
+    })
+  }
+
+  return walk(prune(forest), [])
+}
+
 export function RunSubagentSelectBody(props: {
   theme: Accessor<RunFooterTheme>
   tabs: Accessor<FooterSubagentTab[]>
@@ -871,14 +938,12 @@ export function RunSubagentSelectBody(props: {
 }) {
   const [active, setActive] = createSignal(true)
   const entries = createMemo<SubagentEntry[]>(() =>
-    props
-      .tabs()
-      .filter((item) => (active() ? item.status === "running" : item.status !== "running"))
-      .map((item) => {
+    nestSubagentTabs(props.tabs(), (item) => (active() ? item.status === "running" : item.status !== "running")).map(
+      ({ tab: item, prefix }) => {
         const title = item.description || item.title || item.label
         return {
           category: "",
-          display: title,
+          display: prefix + title,
           description: title === item.label ? undefined : item.label,
           footer: subagentStatusLabel(item.status),
           footerTone:
@@ -891,7 +956,8 @@ export function RunSubagentSelectBody(props: {
           sessionID: item.sessionID,
           current: props.current() === item.sessionID,
         }
-      }),
+      },
+    ),
   )
   const controller = createSearchablePanelController({
     entries,
