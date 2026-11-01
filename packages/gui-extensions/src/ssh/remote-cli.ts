@@ -127,12 +127,15 @@ if command -v curl >/dev/null 2>&1; then
   curl -fsSL --connect-timeout 15 --max-time 180 --max-filesize ${MAX_ARCHIVE_BYTES} "$url" -o "$stage/archive.tgz"
 else
   wget -T 180 -O "$stage/archive.tgz" "$url"
-  # wget has no portable maximum-file-size option; check the completed file before extraction.
-  archive_size=$(wc -c < "$stage/archive.tgz" | tr -d '[:space:]')
-  if [ "$archive_size" -gt ${MAX_ARCHIVE_BYTES} ]; then
-    printf 'archive exceeds ${MAX_ARCHIVE_BYTES} bytes\\n' >&2
-    exit 1
-  fi
+fi
+# Neither downloader bounds the staged file on every version: curl's
+# --max-filesize is ignored when the response size is unknown (curl < 8.4) and
+# wget has no portable maximum-file-size option, so check the completed file
+# before extraction on both branches.
+archive_size=$(wc -c < "$stage/archive.tgz" | tr -d '[:space:]')
+if [ "$archive_size" -gt ${MAX_ARCHIVE_BYTES} ]; then
+  printf 'archive exceeds ${MAX_ARCHIVE_BYTES} bytes\\n' >&2
+  exit 1
 fi
 tar -xzf "$stage/archive.tgz" -C "$stage"`
 }
