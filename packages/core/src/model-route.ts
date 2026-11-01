@@ -199,6 +199,7 @@ export const policy = (input?: {
   readonly quotaCooldownMs?: number
 }): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
+  const ladder = currentConstants().bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
@@ -208,8 +209,8 @@ export const policy = (input?: {
       : {}),
     sampleWindow,
     slowThreshold: Math.min(input?.slowThreshold ?? DEFAULT_POLICY.slowThreshold, sampleWindow),
-    cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, 3_600_000),
-    quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, 86_400_000),
+    cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
+    quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
 }
 
@@ -269,7 +270,8 @@ const OUTCOME_WINDOW = 5
 
 const key = (target: Model.Ref) => `${target.providerID}/${target.id}`
 
-const pushOutcome = (outcomes: boolean[], answered: boolean) => [...outcomes, answered].slice(-OUTCOME_WINDOW)
+const pushOutcome = (outcomes: boolean[], answered: boolean) =>
+  [...outcomes, answered].slice(-currentConstants().escalation.outcomeWindow)
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -332,8 +334,10 @@ const recentFailures: Array<{ readonly provider: string; readonly target: string
 /** True when failures hit many unrelated providers within a short window. */
 export const networkSuspect = (now = Date.now()) =>
   new Set(
-    recentFailures.filter((failure) => now - failure.time <= NETWORK_WINDOW_MS).map((failure) => failure.provider),
-  ).size >= NETWORK_PROVIDERS
+    recentFailures
+      .filter((failure) => now - failure.time <= currentConstants().network.windowMs)
+      .map((failure) => failure.provider),
+  ).size >= currentConstants().network.providers
 
 const providerCooldownUntil = (providerID: string, now: number) => {
   const prefix = `${providerID}/`
@@ -344,7 +348,7 @@ const providerCooldownUntil = (providerID: string, now: number) => {
     count++
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= PROVIDER_MODELS ? until : 0
+  return count >= currentConstants().network.providerModels ? until : 0
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now()) => cooldownUntil(target, now) > now
@@ -386,10 +390,11 @@ const bench = (
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
+  const ladder = currentConstants().bench
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
-      ? Math.min(Math.max(hint.retryAfterMs, 1_000), MAX_COOLDOWN_MS)
-      : Math.min(base * 2 ** Math.min(state.consecutiveFailures - 1, 30), MAX_COOLDOWN_MS)
+      ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
+      : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
   state.cooldownUntil = now + cooldown
   logHealth(
     target,
@@ -417,7 +422,10 @@ export const failed = (
       target: credentialID ? credentialKey(target, credentialID) : key(target),
       time: now,
     })
-  while (recentFailures.length > 200 || (recentFailures[0] && now - recentFailures[0].time > NETWORK_WINDOW_MS))
+  while (
+    recentFailures.length > 200 ||
+    (recentFailures[0] && now - recentFailures[0].time > currentConstants().network.windowMs)
+  )
     recentFailures.shift()
   if (hint?.network && networkSuspect(now)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
@@ -492,7 +500,72 @@ export const configure = (
   }
 }
 
-export const currentSettings = () => settings
+/** The machinery constants as config supplies them (experimental.model_route_settings), in
+ * config's own grouping. Every field is optional; an unset field keeps the layer below it.
+ * `demotion.after` / `demotion.windowMs` and the `escalation` fields land in `Settings`
+ * above; the rest land in `Constants` at the end of this file. */
+export interface SettingsConfig {
+  readonly bench?: {
+    readonly maxCooldownMs?: number
+    readonly multiplier?: number
+    readonly retryAfterMinMs?: number
+    readonly cooldownCapMs?: number
+    readonly quotaCooldownCapMs?: number
+  }
+  readonly demotion?: {
+    readonly after?: number
+    readonly windowMs?: number
+    readonly factor?: number
+  }
+  readonly quotaGate?: {
+    readonly maxMs?: number
+    readonly fallbackMs?: number
+    readonly feedTtlMs?: number
+  }
+  readonly escalation?: {
+    readonly enabled?: boolean
+    readonly afterGiveUps?: number
+    readonly outcomeWindow?: number
+  }
+  readonly network?: {
+    readonly windowMs?: number
+    readonly providers?: number
+    readonly providerModels?: number
+  }
+  readonly continuity?: {
+    readonly hedgeRequests?: number
+  }
+  readonly overrides?: {
+    readonly preferredFactor?: number
+  }
+}
+
+let readSettingsConfig: (() => SettingsConfig | undefined) | undefined
+
+/** Registers where the config-derived settings come from (the model-routes config plugin,
+ * mirroring ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
+ * reload is honored without re-registering. */
+export const onSettingsConfig = (read: () => SettingsConfig | undefined) => {
+  readSettingsConfig = read
+}
+
+/** The settings in force: what configure() set, with config over it. */
+const activeSettings = (): Settings => {
+  const config = readSettingsConfig?.()
+  if (!config) return settings
+  return {
+    escalation: {
+      enabled: config.escalation?.enabled ?? settings.escalation.enabled,
+      afterGiveUps: config.escalation?.afterGiveUps ?? settings.escalation.afterGiveUps,
+    },
+    quota: {
+      demoteAfter: config.demotion?.after ?? settings.quota.demoteAfter,
+      windowMs: config.demotion?.windowMs ?? settings.quota.windowMs,
+    },
+  }
+}
+
+export const currentSettings = () => activeSettings()
 
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
@@ -504,12 +577,12 @@ export const giveUps = (target: Model.Ref, credentialID?: string) => {
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
 export const steady = (target: Model.Ref, credentialID?: string) =>
-  giveUps(target, credentialID) < settings.escalation.afterGiveUps
+  giveUps(target, credentialID) < activeSettings().escalation.afterGiveUps
 
 /** A route should race its next target immediately when its current target keeps giving up. Whether a
  * route races at all depends on its autonomy level; see ModelRouteAutonomy.races. */
 export const escalates = (target: Model.Ref, credentialID?: string) =>
-  settings.escalation.enabled && !steady(target, credentialID)
+  activeSettings().escalation.enabled && !steady(target, credentialID)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
 // of every order, instead of being retried first on each new session.
@@ -518,15 +591,16 @@ const quotaEvents = new Map<string, number[]>()
 /** True when a target has hit its quota errors often enough recently to be put last. With a
  * credentialID, only that credential's quota errors count: the demotion is per credential (#6). */
 export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string) => {
+  const quota = activeSettings().quota
   const recent = (quotaEvents.get(credentialID ? credentialKey(target, credentialID) : key(target)) ?? []).filter(
-    (at) => now - at <= settings.quota.windowMs,
+    (at) => now - at <= quota.windowMs,
   )
-  return recent.length >= settings.quota.demoteAfter
+  return recent.length >= quota.demoteAfter
 }
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= settings.quota.windowMs)
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings().quota.windowMs)
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -577,7 +651,8 @@ export const observeProviderQuota = (
   const full = QuotaSnapshot.isKnownFull(snapshot, now)
   providerQuota.set(target.providerID, { snapshot, target, gated: full })
   if (full) {
-    const until = Math.min(snapshot.resetAt ?? now + QUOTA_GATE_FALLBACK_MS, now + QUOTA_GATE_MAX_MS)
+    const gate = currentConstants().quotaGate
+    const until = Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
     addAdjustment({
       id: `quota:${target.providerID}`,
       match: `${target.providerID}/`,
@@ -600,7 +675,7 @@ export const resetQuotaFeed = () => {
   lastQuotaFeedAt = 0
 }
 
-export const shouldFeedQuota = (now = Date.now(), ttlMs = 60_000) => {
+export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quotaGate.feedTtlMs) => {
   if (now - lastQuotaFeedAt < ttlMs) return false
   lastQuotaFeedAt = now
   return true
@@ -630,7 +705,8 @@ export const observeQuotaFailure = (
   resetAt: number | undefined,
   now = Date.now(),
 ) => {
-  const until = Math.min(resetAt ?? now + QUOTA_GATE_FALLBACK_MS, now + QUOTA_GATE_MAX_MS)
+  const gate = currentConstants().quotaGate
+  const until = Math.min(resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
   if (credentialID) {
     observeCredentialQuota(
       target,
@@ -1220,7 +1296,7 @@ export const tracedWeightOf = (
   let weight = afterScheduled
   for (const item of userOverrides("prefer", target, now, scope)) {
     if (item.weight !== undefined) weight = item.weight
-    else weight *= item.factor ?? PREFERRED_FACTOR
+    else weight *= item.factor ?? currentConstants().overrides.preferredFactor
   }
   const afterPrefer = weight
   if (scope.fixed !== true) {
@@ -1236,7 +1312,7 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID) ? DEMOTED_FACTOR : 1),
+    demotion: weight * (demoted(target, now, scope.credentialID) ? currentConstants().demotion.factor : 1),
     gate: null,
   }
 }
@@ -1659,13 +1735,117 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref) =>
   const current = key(target)
   const prior = continuity.get(id)
   if (prior?.origin === undefined || prior.origin === current) return remember(id, { current, away: 0 })
-  remember(id, { current, origin: prior.origin, away: Math.min(prior.away + 1, ORIGIN_HEDGE_REQUESTS) })
+  remember(id, {
+    current,
+    origin: prior.origin,
+    away: Math.min(prior.away + 1, currentConstants().continuity.hedgeRequests),
+  })
 }
 
 /** The origin a session should hedge back to: only just after it moved, and never once it has
  * settled on the new target. */
 export const hedgeHome = (routeID: string, sessionID: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= ORIGIN_HEDGE_REQUESTS) return undefined
+  if (state?.origin === undefined || state.away >= currentConstants().continuity.hedgeRequests) return undefined
   return state.origin
 }
+
+/** The rest of the machinery's constants — everything `Settings` above does not already
+ * hold — assembled here, after the mechanisms they parameterize, from the named constant at
+ * each one. The defaults ARE today's behavior; config (experimental.model_route_settings)
+ * or configureConstants() replaces a value only where it sets one. Deliberately absent, as
+ * invariants rather than knobs: the backoff exponent cap (30 — an overflow guard; 2^30 at a
+ * 1ms base already exceeds the 24h bench cap, so the cap always binds first), the health /
+ * session / continuity LRU bounds, the recent-failure ring (200) and quota-event history
+ * (50) caps, and the usage-accounting bucket widths. */
+export interface Constants {
+  readonly bench: {
+    readonly maxCooldownMs: number
+    readonly multiplier: number
+    readonly retryAfterMinMs: number
+    readonly cooldownCapMs: number
+    readonly quotaCooldownCapMs: number
+  }
+  readonly demotion: { readonly factor: number }
+  readonly quotaGate: { readonly maxMs: number; readonly fallbackMs: number; readonly feedTtlMs: number }
+  readonly escalation: { readonly outcomeWindow: number }
+  readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
+  readonly continuity: { readonly hedgeRequests: number }
+  readonly overrides: { readonly preferredFactor: number }
+}
+
+export const DEFAULT_CONSTANTS: Constants = {
+  bench: {
+    maxCooldownMs: MAX_COOLDOWN_MS,
+    // The `**` ladder in bench(): each consecutive failure multiplies the previous bench.
+    multiplier: 2,
+    // The floor in bench(): a stated retry-after is believed, but never as less than this.
+    retryAfterMinMs: 1_000,
+    // The caps policy() applies to a route health block's bench bases.
+    cooldownCapMs: 3_600_000,
+    quotaCooldownCapMs: 86_400_000,
+  },
+  demotion: { factor: DEMOTED_FACTOR },
+  quotaGate: {
+    maxMs: QUOTA_GATE_MAX_MS,
+    fallbackMs: QUOTA_GATE_FALLBACK_MS,
+    // shouldFeedQuota's default: how often quota snapshots are fed into the gate.
+    feedTtlMs: 60_000,
+  },
+  escalation: { outcomeWindow: OUTCOME_WINDOW },
+  network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },
+  continuity: { hedgeRequests: ORIGIN_HEDGE_REQUESTS },
+  overrides: { preferredFactor: PREFERRED_FACTOR },
+}
+
+type ConstantsPatch = Partial<{
+  bench: Partial<Constants["bench"]>
+  demotion: Partial<Constants["demotion"]>
+  quotaGate: Partial<Constants["quotaGate"]>
+  escalation: Partial<Constants["escalation"]>
+  network: Partial<Constants["network"]>
+  continuity: Partial<Constants["continuity"]>
+  overrides: Partial<Constants["overrides"]>
+}>
+
+let constants: Constants = DEFAULT_CONSTANTS
+
+const mergeConstants = (base: Constants, patch: ConstantsPatch | undefined): Constants =>
+  patch === undefined
+    ? base
+    : {
+        bench: { ...base.bench, ...patch.bench },
+        demotion: { ...base.demotion, ...patch.demotion },
+        quotaGate: { ...base.quotaGate, ...patch.quotaGate },
+        escalation: { ...base.escalation, ...patch.escalation },
+        network: { ...base.network, ...patch.network },
+        continuity: { ...base.continuity, ...patch.continuity },
+        overrides: { ...base.overrides, ...patch.overrides },
+      }
+
+/** Replaces machinery constants wholesale-group by group, the constants counterpart of
+ * configure(). Tests use it; production values arrive through config. */
+export const configureConstants = (next: ConstantsPatch) => {
+  constants = mergeConstants(constants, next)
+}
+
+/** The constants in force: the compiled defaults, then configureConstants(), then config
+ * (experimental.model_route_settings), in that order. The config groups are picked field by
+ * field where config's grouping differs from this one: demotion.after / demotion.windowMs
+ * and the escalation switch live in `Settings`, not here. */
+export const currentConstants = (): Constants => {
+  const config = readSettingsConfig?.()
+  if (!config) return constants
+  return mergeConstants(constants, {
+    ...(config.bench ? { bench: config.bench } : {}),
+    ...(config.demotion?.factor !== undefined ? { demotion: { factor: config.demotion.factor } } : {}),
+    ...(config.quotaGate ? { quotaGate: config.quotaGate } : {}),
+    ...(config.escalation?.outcomeWindow !== undefined
+      ? { escalation: { outcomeWindow: config.escalation.outcomeWindow } }
+      : {}),
+    ...(config.network ? { network: config.network } : {}),
+    ...(config.continuity ? { continuity: config.continuity } : {}),
+    ...(config.overrides ? { overrides: config.overrides } : {}),
+  })
+}
+

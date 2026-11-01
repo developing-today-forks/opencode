@@ -340,3 +340,61 @@ describe("ConfigModel.Selection segment spelling (#456)", () => {
       expect(() => decode(input)).toThrow()
   })
 })
+
+describe("ConfigExperimental model_route_settings", () => {
+  const decode = Schema.decodeUnknownSync(ConfigExperimental.Info)
+
+  test("accepts a full settings block and round-trips it", () => {
+    const input = {
+      model_route_settings: {
+        bench: {
+          maxCooldownMs: 3_600_000,
+          multiplier: 3,
+          retryAfterMinMs: 2_000,
+          cooldownCapMs: 120_000,
+          quotaCooldownCapMs: 7_200_000,
+        },
+        demotion: { after: 5, windowMs: 3_600_000, factor: 0.5 },
+        quotaGate: { maxMs: 86_400_000, fallbackMs: 60_000, feedTtlMs: 30_000 },
+        escalation: { enabled: false, afterGiveUps: 4, outcomeWindow: 8 },
+        network: { windowMs: 10_000, providers: 4, providerModels: 3 },
+        continuity: { hedgeRequests: 5 },
+        overrides: { preferredFactor: 2 },
+      },
+    }
+    const decoded = decode(input)
+    expect(Schema.encodeSync(ConfigExperimental.Info)(decoded)).toEqual(input)
+  })
+
+  test("accepts an empty block and a partial one", () => {
+    expect(decode({ model_route_settings: {} }).model_route_settings).toBeDefined()
+    expect(decode({ model_route_settings: { demotion: { factor: 0.25 } } }).model_route_settings?.demotion?.factor).toBe(
+      0.25,
+    )
+    expect(decode({}).model_route_settings).toBeUndefined()
+  })
+
+  test("rejects nonsense values", () => {
+    const bad = [
+      { bench: { multiplier: 0.5 } },
+      { bench: { multiplier: 0 } },
+      { bench: { maxCooldownMs: -1 } },
+      { bench: { maxCooldownMs: 0 } },
+      { bench: { retryAfterMinMs: 86_400_001 } },
+      { demotion: { factor: 0 } },
+      { demotion: { factor: 1.5 } },
+      { demotion: { factor: -0.5 } },
+      { demotion: { after: 0 } },
+      { demotion: { after: 51 } },
+      { quotaGate: { fallbackMs: -30 } },
+      { quotaGate: { maxMs: 7_776_000_001 } },
+      { network: { providers: 1 } },
+      { network: { windowMs: 0 } },
+      { escalation: { outcomeWindow: 0 } },
+      { escalation: { afterGiveUps: 51 } },
+      { continuity: { hedgeRequests: 0 } },
+      { overrides: { preferredFactor: 0 } },
+    ]
+    for (const settings of bad) expect(() => decode({ model_route_settings: settings })).toThrow()
+  })
+})
