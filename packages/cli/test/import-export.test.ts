@@ -5,6 +5,7 @@ import path from "node:path"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { readBoundedResponseBody } from "../src/util/io"
+import { fetchRemote } from "../src/commands/handlers/session/import"
 import { OPENCODE_VERSION } from "../src/version"
 
 const info = {
@@ -247,6 +248,71 @@ test("readBoundedResponseBody returns a body under the cap and cuts a chunked bo
   await expect(readBoundedResponseBody(chunked(["12345", "67890"]), 8)).rejects.toThrow(
     "Session data too large: response body exceeds the 8-byte limit",
   )
+})
+
+test("readBoundedResponseBody aborts a stalled body read when the signal fires", async () => {
+  const encoder = new TextEncoder()
+  const stalled = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("first chunk"))
+        // Never enqueues again and never closes: without a deadline this
+        // read waits forever, far under the size cap.
+      },
+    }),
+  )
+  await expect(readBoundedResponseBody(stalled, 1024, AbortSignal.timeout(100))).rejects.toThrow()
+})
+
+test("fetchRemote cuts a slow-dripping remote body at the deadline", async () => {
+  // Exercises the production import fetch: one AbortSignal.timeout deadline
+  // is passed to fetch and threaded into readBoundedResponseBody, so the
+  // body phase is bounded by the same deadline as the headers phase.
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("x"))
+            await Bun.sleep(50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(fetchRemote(`${server.url}session.json`, 150)).rejects.toThrow()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("fetchRemote cuts a header stall at the deadline and reads a normal body unchanged", async () => {
+  const stalled = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(fetchRemote(`${stalled.url}session.json`, 100)).rejects.toThrow()
+  } finally {
+    stalled.stop(true)
+  }
+
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) =>
+      new URL(request.url).pathname === "/missing"
+        ? new Response("nope", { status: 404, statusText: "Not Found" })
+        : Response.json({ ok: true }),
+  })
+  try {
+    await expect(fetchRemote(`${server.url}session.json`, 5_000)).resolves.toBe(JSON.stringify({ ok: true }))
+    await expect(fetchRemote(`${server.url}missing`, 5_000)).rejects.toThrow("Failed to fetch session data: Not Found")
+  } finally {
+    server.stop(true)
+  }
 })
 
 test("import rejects a remote body whose declared content-length is over the cap without reading it", async () => {
