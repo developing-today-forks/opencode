@@ -1116,6 +1116,16 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "subagentPolicy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.SubagentPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "additionalProperties": false
@@ -1710,6 +1720,16 @@
                     "anyOf": [
                       {
                         "$ref": "#/components/schemas/Permission.Ruleset"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "subagentPolicy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.SubagentPolicy"
                       },
                       {
                         "type": "null"
@@ -14680,6 +14700,38 @@
           "model": {
             "$ref": "#/components/schemas/Model.Ref"
           },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "excludedModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagentModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagentExcludedModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "maxDepth": {
+            "type": "integer",
+            "minimum": 0
+          },
           "request": {
             "$ref": "#/components/schemas/Provider.Request"
           },
@@ -14781,28 +14833,60 @@
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+                "pattern": "^[^\\s/#]+\\/[^\\s#/]+(?:\\/[^\\s#/]+)*(?:#[^\\s#/]+(?:\\/[^\\s#/]+)*)?$"
               },
               {
                 "type": "object",
                 "properties": {
                   "providerID": {
                     "type": "string",
-                    "pattern": "^[^/#]+$"
+                    "pattern": "^[^/#\\s]+$"
                   },
                   "model": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   },
                   "variant": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   }
                 },
                 "required": ["providerID", "model"],
                 "additionalProperties": false
               }
             ]
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "excluded_models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagent_models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagent_excluded_models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 0
           },
           "request": {
             "type": "object",
@@ -14865,22 +14949,22 @@
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+                "pattern": "^[^\\s/#]+\\/[^\\s#/]+(?:\\/[^\\s#/]+)*(?:#[^\\s#/]+(?:\\/[^\\s#/]+)*)?$"
               },
               {
                 "type": "object",
                 "properties": {
                   "providerID": {
                     "type": "string",
-                    "pattern": "^[^/#]+$"
+                    "pattern": "^[^/#\\s]+$"
                   },
                   "model": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   },
                   "variant": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   }
                 },
                 "required": ["providerID", "model"],
@@ -14980,22 +15064,22 @@
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+                "pattern": "^[^\\s/#]+\\/[^\\s#/]+(?:\\/[^\\s#/]+)*(?:#[^\\s#/]+(?:\\/[^\\s#/]+)*)?$"
               },
               {
                 "type": "object",
                 "properties": {
                   "providerID": {
                     "type": "string",
-                    "pattern": "^[^/#]+$"
+                    "pattern": "^[^/#\\s]+$"
                   },
                   "model": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   },
                   "variant": {
                     "type": "string",
-                    "pattern": "^[^#]+$"
+                    "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
                   }
                 },
                 "required": ["providerID", "model"],
@@ -15352,9 +15436,57 @@
               "$ref": "#/components/schemas/Config.ProviderEncoded"
             }
           },
+          "aliases": {
+            "type": "object",
+            "properties": {
+              "providers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "models": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "variants": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
           "experimental": {
             "type": "object",
             "properties": {
+              "aliases": {
+                "type": "object",
+                "properties": {
+                  "providers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "models": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "variants": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
               "portable_shell_scanner": {
                 "type": "boolean"
               },
@@ -15934,24 +16066,40 @@
           },
           "autonomy": {
             "type": "string",
-            "enum": ["fixed", "rules", "adaptive", "predictive", "agent"]
+            "enum": ["fixed", "rules", "adaptive", "predictive", "agent"],
+            "description": "How much the route may decide for itself; each level includes the ones before it. fixed: configured order with failover only. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing. Unset keeps the behavior from before levels existed."
           },
           "selection": {
             "type": "string",
-            "enum": ["ordered", "round-robin", "weighted"]
+            "enum": ["ordered", "round-robin", "weighted"],
+            "description": "How a session picks its target: ordered uses the configured order (default), round-robin rotates per new session, weighted draws by weights. Either way the choice is sticky for the session and failover falls through the remaining targets in order."
           },
           "weights": {
             "type": "object",
             "additionalProperties": {
               "type": "number",
               "exclusiveMinimum": 0
-            }
+            },
+            "description": "Relative ratios for the weighted selection mode, keyed by target model reference, e.g. { \"openai/gpt-6-luna\": 3, \"github-copilot/gpt-6-luna\": 1 } sends about 3/4 of new sessions to the first target. Targets without a weight count as 1. A nested route is keyed as \"opencode-route/<id>\" and is chosen as one unit by this route; it then picks among its own members using its own selection and weights."
           },
           "schedules": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Config.ModelRoute.ScheduleEncoded"
-            }
+            },
+            "description": "Time-bound weight changes for this route's targets, e.g. peak hours that make a provider lighter. Weights order every selection mode: inside an active window the targets are ranked by effective weight, and equal weights keep their configured order."
+          },
+          "limit": {
+            "type": "object",
+            "properties": {
+              "context": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "description": "Caps the context limit the route presents, below every target's own limit — e.g. 100000 keeps sessions on this route inside a pricing tier that ends at 100k context, or compacts them earlier than the targets would. The effective limit is the smaller of this cap and the targets' minimum, so a cap can never raise a route above what its targets support."
+              }
+            },
+            "required": ["context"],
+            "additionalProperties": false
           }
         },
         "required": ["targets"],
@@ -16004,17 +16152,20 @@
                 "$ref": "#/components/schemas/Config.ModelSelectionEncoded"
               },
               "defaultVariant": {
-                "type": "string"
+                "type": "string",
+                "description": "Variant used when the route is selected without an explicit variant."
               },
               "variants": {
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Remaps a route-level variant to this target's variant, e.g. { \"low\": \"high\" } runs this target at high when the route is selected at low."
               },
               "until": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads."
               }
             },
             "required": ["model"],
@@ -16117,22 +16268,22 @@
         "anyOf": [
           {
             "type": "string",
-            "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+            "pattern": "^[^\\s/#]+\\/[^\\s#/]+(?:\\/[^\\s#/]+)*(?:#[^\\s#/]+(?:\\/[^\\s#/]+)*)?$"
           },
           {
             "type": "object",
             "properties": {
               "providerID": {
                 "type": "string",
-                "pattern": "^[^/#]+$"
+                "pattern": "^[^/#\\s]+$"
               },
               "model": {
                 "type": "string",
-                "pattern": "^[^#]+$"
+                "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
               },
               "variant": {
                 "type": "string",
-                "pattern": "^[^#]+$"
+                "pattern": "^[^\\s#/]+(?:\\/[^\\s#/]+)*$"
               }
             },
             "required": ["providerID", "model"],
@@ -16235,6 +16386,9 @@
         "properties": {
           "canonical": {
             "$ref": "#/components/schemas/Provider.ID"
+          },
+          "instanceOf": {
+            "$ref": "#/components/schemas/Provider.ID_1"
           },
           "name": {
             "type": "string"
@@ -17351,8 +17505,8 @@
       },
       "InstructionEntry.Key": {
         "type": "string",
-        "pattern": "^[a-z0-9][a-z0-9._-]*$",
-        "description": "Instruction entry key (lowercase alphanumerics plus . _ -)"
+        "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9_-])?$",
+        "description": "Instruction entry key (lowercase alphanumerics plus . _ -, never ending with a dot)"
       },
       "InstructionEntryValueTooLargeErrorEncoded": {
         "type": "object",
@@ -21054,6 +21208,10 @@
       "Provider.ID": {
         "type": "string"
       },
+      "Provider.ID_1": {
+        "type": "string",
+        "description": "Make this provider a copy of another provider with its own sign-in, such as `openai.work` with `openai`, so both accounts can be used at the same time"
+      },
       "Provider.Info": {
         "type": "object",
         "properties": {
@@ -21065,6 +21223,9 @@
           },
           "integrationID": {
             "$ref": "#/components/schemas/Integration.ID"
+          },
+          "instanceOf": {
+            "$ref": "#/components/schemas/Provider.ID"
           },
           "name": {
             "type": "string"
@@ -21468,6 +21629,46 @@
         "required": ["_tag", "message"],
         "additionalProperties": false
       },
+      "Session.AgentOverride": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "$ref": "#/components/schemas/Model.Ref"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "excludedModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagentModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "subagentExcludedModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "force": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "Session.ForkBoundary": {
         "anyOf": [
           {
@@ -21795,6 +21996,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/Session.Metadata"
+          },
+          "subagentPolicy": {
+            "$ref": "#/components/schemas/Session.SubagentPolicy"
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
@@ -22803,6 +23007,32 @@
           }
         },
         "required": ["type", "message"],
+        "additionalProperties": false
+      },
+      "Session.SubagentPolicy": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "excludedModels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s/#*]+\\/(?:\\*|[^\\s#/*]+(?:\\/[^\\s#/*]+)*)(?:#[^\\s#/*]+(?:\\/[^\\s#/*]+)*)?$"
+            }
+          },
+          "agentOverrides": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Session.AgentOverride"
+            }
+          }
+        },
         "additionalProperties": false
       },
       "SessionActive": {

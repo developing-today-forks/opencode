@@ -19,17 +19,17 @@ const TargetObject = Schema.Struct({
   model: ConfigModel.Selection.annotate({
     description: "Provider/model reference. A route may reference another route.",
   }),
-  defaultVariant: Schema.String.pipe(optional).annotate({
+  defaultVariant: Schema.String.annotate({
     description: "Variant used when the route is selected without an explicit variant.",
-  }),
-  variants: Schema.Record(Schema.String, Schema.String).pipe(optional).annotate({
+  }).pipe(optional),
+  variants: Schema.Record(Schema.String, Schema.String).annotate({
     description:
       'Remaps a route-level variant to this target\'s variant, e.g. { "low": "high" } runs this target at high when the route is selected at low.',
-  }),
-  until: PositiveInt.pipe(optional).annotate({
+  }).pipe(optional),
+  until: PositiveInt.annotate({
     description:
       "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads.",
-  }),
+  }).pipe(optional),
 })
 export const Target = Schema.Union([ConfigModel.Selection, TargetObject]).annotate({
   identifier: "Config.ModelRoute.Target",
@@ -217,24 +217,30 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     description:
       "Total requests to make against one target before failing over to the next, so 2 allows one retry. Defaults to 2. Retries only happen before any response output, so no tool call ever runs twice.",
   }).pipe(optional),
-  autonomy: Schema.Literals(["fixed", "rules", "adaptive", "predictive", "agent"]).pipe(optional).annotate({
-    description:
-      "How much the route may decide for itself; each level includes the ones before it. fixed: configured order with failover only. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing. Unset keeps the behavior from before levels existed.",
-  }),
-  selection: Schema.Literals(["ordered", "round-robin", "weighted"]).pipe(optional).annotate({
-    description:
-      "How a session picks its target: ordered uses the configured order (default), round-robin rotates per new session, weighted draws by weights. Either way the choice is sticky for the session and failover falls through the remaining targets in order.",
-  }),
+  autonomy: Schema.Literals(["fixed", "rules", "adaptive", "predictive", "agent"])
+    .annotate({
+      description:
+        "How much the route may decide for itself; each level includes the ones before it. fixed: configured order with failover only. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing. Unset keeps the behavior from before levels existed.",
+    })
+    .pipe(optional),
+  selection: Schema.Literals(["ordered", "round-robin", "weighted"])
+    .annotate({
+      description:
+        "How a session picks its target: ordered uses the configured order (default), round-robin rotates per new session, weighted draws by weights. Either way the choice is sticky for the session and failover falls through the remaining targets in order.",
+    })
+    .pipe(optional),
   weights: Schema.Record(Schema.String, Schema.Finite.check(Schema.isGreaterThan(0)))
-    .pipe(optional)
     .annotate({
       description:
         'Relative ratios for the weighted selection mode, keyed by target model reference, e.g. { "openai/gpt-6-luna": 3, "github-copilot/gpt-6-luna": 1 } sends about 3/4 of new sessions to the first target. Targets without a weight count as 1. A nested route is keyed as "opencode-route/<id>" and is chosen as one unit by this route; it then picks among its own members using its own selection and weights.',
-    }),
-  schedules: Schema.Array(Schedule).pipe(optional).annotate({
-    description:
-      "Time-bound weight changes for this route's targets, e.g. peak hours that make a provider lighter. Weights order every selection mode: inside an active window the targets are ranked by effective weight, and equal weights keep their configured order.",
-  }),
+    })
+    .pipe(optional),
+  schedules: Schema.Array(Schedule)
+    .annotate({
+      description:
+        "Time-bound weight changes for this route's targets, e.g. peak hours that make a provider lighter. Weights order every selection mode: inside an active window the targets are ranked by effective weight, and equal weights keep their configured order.",
+    })
+    .pipe(optional),
   limit: Schema.Struct({
     context: PositiveInt.annotate({
       description:

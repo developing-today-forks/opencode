@@ -150,10 +150,15 @@ describe("ConfigModelRoutes field descriptions", () => {
   const described = (schema: Schema.Top) => {
     const { definitions } = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" })
     const fields: Record<string, string | undefined> = {}
-    for (const definition of Object.values(
-      definitions as Record<string, { properties?: Record<string, { description?: string }> }>,
-    ))
-      for (const [name, property] of Object.entries(definition.properties ?? {})) fields[name] ??= property.description
+    const visit = (value: unknown) => {
+      if (typeof value !== "object" || value === null) return
+      const node = value as Record<string, unknown>
+      if (node.properties && typeof node.properties === "object")
+        for (const [name, property] of Object.entries(node.properties))
+          fields[name] ??= (property as { description?: string }).description
+      Object.values(node).forEach(visit)
+    }
+    visit(definitions)
     return fields
   }
 
@@ -175,7 +180,9 @@ describe("ConfigModelRoutes field descriptions", () => {
       [ConfigModelRoutes.Window, ["daysOfWeek", "daysOfMonth", "start", "end", "timezone", "from", "until"]],
       [ConfigModelRoutes.Schedule, ["id", "targets", "factor", "weight", "note"]],
       [ConfigModelRoutes.GlobalSchedule, ["providers", "models", "targets", "routes", "factor", "weight"]],
-      [ConfigModelRoutes.Route, ["budgets", "hedgeAfterMs", "attempts"]],
+      [ConfigModelRoutes.Route, ["budgets", "hedgeAfterMs", "attempts", "autonomy", "selection", "weights", "schedules"]],
+      // The TargetObject arm is private; the exported union exposes its encoded object fields.
+      [ConfigModelRoutes.Target, ["defaultVariant", "variants", "until"]],
       [ConfigModelRoutes.Tuning, ["enabled", "intervalMinutes", "windowHours", "notes"]],
       [ConfigModelRoutes.Log, ["captureErrorBodies"]],
     ]
