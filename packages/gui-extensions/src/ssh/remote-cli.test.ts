@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { MAX_ARCHIVE_BYTES } from "./bootstrap"
 import { RemoteCli } from "./remote-cli"
 
 // The output versionScript produces for a CLI that printed `versionOutput`: the frame
@@ -113,6 +114,29 @@ describe("SSH parseVersion", () => {
       expect(RemoteCli.parseVersion(runVersionScript("2.1.0", "welcome to dev box"))).toBe("2.1.0")
     },
   )
+})
+
+describe("SSH installScript archive size bounds", () => {
+  const script = RemoteCli.installScript({
+    version: "2.0.0",
+    source: { type: "download", url: "https://example.test/archive.tgz" },
+  })
+
+  test("limits the curl download to MAX_ARCHIVE_BYTES", () => {
+    expect(script).toContain(
+      `curl -fsSL --connect-timeout 15 --max-time 180 --max-filesize ${MAX_ARCHIVE_BYTES} "$url" -o "$stage/archive.tgz"`,
+    )
+  })
+
+  test("rejects an oversized wget download before extraction", () => {
+    expect(script).toContain(`wget -T 180 -O "$stage/archive.tgz" "$url"`)
+    expect(script).toContain(`archive_size=$(wc -c < "$stage/archive.tgz" | tr -d '[:space:]')`)
+    expect(script).toContain(
+      `if [ "$archive_size" -gt ${MAX_ARCHIVE_BYTES} ]; then\n    printf 'archive exceeds ${MAX_ARCHIVE_BYTES} bytes\\n' >&2\n    exit 1\n  fi`,
+    )
+    expect(script.indexOf('if [ "$archive_size"')).toBeLessThan(script.indexOf('tar -xzf "$stage/archive.tgz"'))
+    expect(script).toContain(`trap 'rm -rf "$stage"' EXIT`)
+  })
 })
 
 // Runs the real probeScript through `sh`, optionally after preceding login-shell
