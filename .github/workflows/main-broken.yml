@@ -257,25 +257,35 @@ jobs:
             if [ "$LOSER" = "$SURVIVOR" ]; then
               continue
             fi
+            # RUN-LINKS-BEGIN -- pinned by script/main-broken-reconcile.test.ts (#1314).
+            # A loser can itself be a former survivor: run links from an
+            # earlier reconcile live only in its comments, not its body.
+            # Collect every distinct run link from the body AND all
+            # comments so a staged reconcile forwards the full chain.
             LOSER_BODY=$(gh issue view "$LOSER" --repo "$REPO" --json body --jq '.body // ""')
-            LOSER_RUN=$(printf '%s' "$LOSER_BODY" | grep -o 'https://github.com/[^ ]*/actions/runs/[0-9]*' | head -1 || true)
-            if [ -z "$LOSER_RUN" ]; then
-              LOSER_RUN="(run link not found in #$LOSER body)"
+            LOSER_COMMENTS=$(gh issue view "$LOSER" --repo "$REPO" --json comments --jq '[.comments[].body // ""] | join("\n")')
+            LOSER_RUNS=$(printf '%s\n%s\n' "$LOSER_BODY" "$LOSER_COMMENTS" | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+' | awk '!seen[$0]++' || true)
+            if [ -z "$LOSER_RUNS" ]; then
+              LOSER_RUNS="(run link not found in #$LOSER body or comments)"
             fi
-            echo "closing race-loser duplicate #$LOSER (run $LOSER_RUN) in favour of #$SURVIVOR"
+            echo "closing race-loser duplicate #$LOSER (runs: $LOSER_RUNS) in favour of #$SURVIVOR"
             gh issue comment "$LOSER" --repo "$REPO" --body "<!-- agent-note:v1 -->
           agent-note:v1 -- main-broken race-loser reconcile ($NOW)
           - duplicate of #$SURVIVOR for Breakage-ID \`$BID\`
-          - this run: $RUN_URL; loser run: $LOSER_RUN
+          - this run: $RUN_URL; loser runs:
+          $LOSER_RUNS
           - closing so exactly one open main-broken issue remains per Breakage-ID" || true
             gh issue close "$LOSER" --repo "$REPO" --reason "not planned" || gh issue close "$LOSER" --repo "$REPO" || true
             gh issue comment "$SURVIVOR" --repo "$REPO" --body "<!-- agent-note:v1 -->
           agent-note:v1 -- main-broken race-loser reconcile ($NOW)
           - closed duplicate #$LOSER for the same Breakage-ID \`$BID\`
-          - loser run: $LOSER_RUN; reconciling run: $RUN_URL" || true
+          - loser runs (from #$LOSER body and prior reconcile comments):
+          $LOSER_RUNS
+          - reconciling run: $RUN_URL" || true
+            # RUN-LINKS-END
           done
           if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
-            echo "this run created loser #$CREATED -- its link was forwarded to #$SURVIVOR above"
+            echo "this run created loser #$CREATED -- its links were forwarded to # above"
           else
             echo "reconcile complete -- single survivor #$SURVIVOR"
           fi

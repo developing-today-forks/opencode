@@ -162,6 +162,15 @@ jobs:
         working-directory: script
         run: bun test turbo-json.test.ts
 
+      - name: Test main-broken reconcile run links
+        # Same script/ wiring as the mcpx-cleanup step above: script/ is
+        # not a workspace, so the test file is run explicitly. The staged
+        # three-watcher fixture pins #1314: a race-loser that is itself a
+        # former survivor must forward run links inherited via its
+        # reconcile comments, not just the link in its body.
+        working-directory: script
+        run: bun test main-broken-reconcile.test.ts
+
       - name: Test doc env var guard
         # Same script/ wiring as the mcpx-cleanup step above: script/ is
         # not a workspace, so the test file is run explicitly (#116).
