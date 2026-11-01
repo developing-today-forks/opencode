@@ -277,9 +277,12 @@ export function detectFromAcceptLanguage(header: string | null) {
         .slice(1)
         .find((x) => x.startsWith("q="))
         ?.slice(2)
+      const parsed = q ? Number.parseFloat(q) : 1
       return {
         lang,
-        q: q ? Number.parseFloat(q) : 1,
+        // A malformed q value sorts last instead of poisoning the
+        // comparator with NaN (#1302).
+        q: Number.isFinite(parsed) ? parsed : 0,
       }
     })
     .sort((a, b) => b.q - a.q)

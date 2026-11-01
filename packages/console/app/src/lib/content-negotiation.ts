@@ -5,7 +5,10 @@ export function prefersMarkdown(accept: string | null | undefined) {
     accept.split(",").map((part) => {
       const fields = part.split(";").map((value) => value.trim().toLowerCase())
       const quality = fields.slice(1).find((field) => field.startsWith("q="))
-      return [fields[0] ?? "", quality ? Number(quality.slice(2)) : 1] as const
+      const parsed = quality ? Number(quality.slice(2)) : 1
+      // A malformed q value carries no usable preference: weight it 0
+      // instead of letting NaN poison the comparisons below (#1302).
+      return [fields[0] ?? "", Number.isFinite(parsed) ? parsed : 0] as const
     }),
   )
   const markdown = Math.max(weights.get("text/markdown") ?? 0, weights.get("text/x-markdown") ?? 0)

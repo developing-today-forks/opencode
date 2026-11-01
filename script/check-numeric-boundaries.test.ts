@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { SCAN_ROOTS, isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-numeric-boundaries"
+import {
+  SCAN_ROOTS,
+  isScannedFile,
+  parseAllowlist,
+  scanSource,
+  staleEntries,
+  unlistedHits,
+} from "./check-numeric-boundaries"
 
 describe("scanSource", () => {
   test("flags the bare conversion shapes", () => {
@@ -43,7 +50,21 @@ describe("scanSource", () => {
 describe("SCAN_ROOTS", () => {
   test("includes the server package, the network-boundary root added by #1294", () => {
     expect(SCAN_ROOTS).toContain("packages/server/src")
-    expect(SCAN_ROOTS).toEqual(["packages/core/src", "packages/ai/src", "packages/cli/src", "packages/server/src"])
+  })
+
+  test("includes the console and function packages, the network-boundary roots added by #1302", () => {
+    expect(SCAN_ROOTS).toContain("packages/console/app/src")
+    expect(SCAN_ROOTS).toContain("packages/console/function/src")
+    expect(SCAN_ROOTS).toContain("packages/function/src")
+    expect(SCAN_ROOTS).toEqual([
+      "packages/core/src",
+      "packages/ai/src",
+      "packages/cli/src",
+      "packages/server/src",
+      "packages/console/app/src",
+      "packages/console/function/src",
+      "packages/function/src",
+    ])
   })
 })
 
