@@ -35,6 +35,14 @@ export default Runtime.handler(
   }),
 )
 
+// The temp file must be created exclusively: a pre-existing file at the temp
+// path is never truncated or consumed as the rename source, it fails the
+// write instead (EEXIST) and is left byte-for-byte intact. Mirrors
+// writeTempFileExclusive in the sibling mcp add writer (#1291).
+export async function writeRemoveTempFileExclusive(temporary: string, content: string, mode: number) {
+  await writeFile(temporary, content, { mode, flag: "wx" })
+}
+
 export async function removePluginConfig(configPath: string, spec: string) {
   const text = await readFile(configPath, "utf8").catch((error) => {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined
@@ -70,7 +78,7 @@ export async function removePluginConfig(configPath: string, spec: string) {
   const existing = await stat(destination).catch(() => undefined)
   const mode = existing ? existing.mode & 0o600 : 0o600
   const temporary = destination + ".tmp-" + process.pid + "-" + randomUUID()
-  await writeFile(temporary, updated.endsWith("\n") ? updated : updated + "\n", { mode })
+  await writeRemoveTempFileExclusive(temporary, updated.endsWith("\n") ? updated : updated + "\n", mode)
   await rename(temporary, destination)
   return true
 }
