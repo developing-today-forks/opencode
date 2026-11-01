@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Script } from "@opencode/script"
+import { WinGetGitHub } from "./publish-winget-github"
 import { mkdir, rm } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -12,6 +13,7 @@ if (Script.channel !== "latest" || !/^\d+\.\d+\.\d+$/.test(Script.version)) {
 const root = fileURLToPath(new URL("..", import.meta.url))
 const dryRun = process.argv.includes("--dry-run")
 const token = process.env.WINGET_GITHUB_TOKEN
+const github = WinGetGitHub.create(token)
 const cli = path.resolve(process.env.OPENCODE_CLI_DIST ?? path.join(root, "packages", "cli", "dist"))
 const desktop = process.env.OPENCODE_DESKTOP_DIST
 if (!desktop) throw new Error("OPENCODE_DESKTOP_DIST is required")
@@ -136,25 +138,31 @@ async function submit(input: Awaited<ReturnType<typeof prepare>>) {
   const upstream = "microsoft/winget-pkgs"
   const folder = ["manifests", "a", ...input.identifier.split("."), Script.version].join("/")
   const branch = `${input.identifier}-${Script.version}`
-  if ((await github(`/repos/${upstream}/contents/${folder}`)).status === 200) {
+  if ((await github.request(`/repos/${upstream}/contents/${folder}`)).status === 200) {
     console.log(`${input.identifier} ${Script.version} is already in ${upstream}`)
     return
   }
-  const fork: { owner: { login: string }; full_name: string } = await json(
-    await github(`/repos/${upstream}/forks`, { method: "POST", body: { default_branch_only: true } }),
+  const fork: { owner: { login: string }; full_name: string } = await github.json(
+    await github.request(`/repos/${upstream}/forks`, { method: "POST", body: { default_branch_only: true } }),
   )
-  const pulls: unknown[] = await json(
-    await github(`/repos/${upstream}/pulls?state=all&head=${encodeURIComponent(`${fork.owner.login}:${branch}`)}`),
+  const pulls: unknown[] = await github.json(
+    await github.request(
+      `/repos/${upstream}/pulls?state=all&head=${encodeURIComponent(`${fork.owner.login}:${branch}`)}`,
+    ),
   )
   if (pulls.length) {
     console.log(`${input.identifier} ${Script.version} already has a pull request`)
     return
   }
   // Forks share objects with their upstream, so the branch can start from upstream master without syncing the fork.
-  const head: { object: { sha: string } } = await json(await github(`/repos/${upstream}/git/ref/heads/master`))
-  const base: { tree: { sha: string } } = await json(await github(`/repos/${upstream}/git/commits/${head.object.sha}`))
-  const tree: { sha: string } = await json(
-    await github(`/repos/${fork.full_name}/git/trees`, {
+  const head: { object: { sha: string } } = await github.json(
+    await github.request(`/repos/${upstream}/git/ref/heads/master`),
+  )
+  const base: { tree: { sha: string } } = await github.json(
+    await github.request(`/repos/${upstream}/git/commits/${head.object.sha}`),
+  )
+  const tree: { sha: string } = await github.json(
+    await github.request(`/repos/${fork.full_name}/git/trees`, {
       method: "POST",
       body: {
         base_tree: base.tree.sha,
@@ -168,20 +176,20 @@ async function submit(input: Awaited<ReturnType<typeof prepare>>) {
     }),
   )
   const title = `New version: ${input.identifier} version ${Script.version}`
-  const commit: { sha: string } = await json(
-    await github(`/repos/${fork.full_name}/git/commits`, {
+  const commit: { sha: string } = await github.json(
+    await github.request(`/repos/${fork.full_name}/git/commits`, {
       method: "POST",
       body: { message: title, tree: tree.sha, parents: [head.object.sha] },
     }),
   )
-  const created = await github(`/repos/${fork.full_name}/git/refs`, {
+  const created = await github.request(`/repos/${fork.full_name}/git/refs`, {
     method: "POST",
     body: { ref: `refs/heads/${branch}`, sha: commit.sha },
   })
   // A retried release can find the branch from an attempt that failed before opening its pull request.
-  await json(
+  await github.json(
     created.status === 422
-      ? await github(`/repos/${fork.full_name}/git/refs/heads/${branch}`, {
+      ? await github.request(`/repos/${fork.full_name}/git/refs/heads/${branch}`, {
           method: "PATCH",
           body: { sha: commit.sha, force: true },
         })
@@ -190,8 +198,8 @@ async function submit(input: Awaited<ReturnType<typeof prepare>>) {
   const run = process.env.GITHUB_RUN_ID
     ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
     : undefined
-  const pull: { html_url: string } = await json(
-    await github(`/repos/${upstream}/pulls`, {
+  const pull: { html_url: string } = await github.json(
+    await github.request(`/repos/${upstream}/pulls`, {
       method: "POST",
       body: {
         title,
@@ -202,21 +210,4 @@ async function submit(input: Awaited<ReturnType<typeof prepare>>) {
     }),
   )
   console.log(`Opened ${pull.html_url}`)
-}
-
-function github(route: string, init?: { method?: string; body?: unknown }) {
-  return fetch(`https://api.github.com${route}`, {
-    method: init?.method ?? "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
-  })
-}
-
-async function json(response: Response) {
-  if (!response.ok) throw new Error(`GitHub ${response.url} returned ${response.status}: ${await response.text()}`)
-  return response.json()
 }
