@@ -1440,3 +1440,66 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
   })
 })
+
+describe("ModelRoute provider-route groups with no ready members", () => {
+  const sibling = ModelRoute.ref({ providerID: "opendesign", model: "gpt-6-luna" })
+  const groupNode = {
+    routeID: "plan",
+    providerRoute: "plan",
+    selection: "ordered" as const,
+    weights: [] as number[],
+    children: [] as never[],
+  }
+  const capture = () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    return {
+      stop: () => ModelRouteLog.setSink(undefined),
+      decisions: () => events.flatMap((event) => (event.kind === "decision" ? [event.row] : [])),
+    }
+  }
+
+  test("a leafless provider-route group appears in the parent decision's excluded list with a reason", () => {
+    const definition = {
+      id: "luna-plan",
+      targets: [sibling],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [2.5, 1], children: [{ node: 1 }, { leaf: 0 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set([0]), new Set(), undefined, false)).toBe(0)
+    } finally {
+      cap.stop()
+    }
+    const parent = cap.decisions().find((row) => row.route_id === "luna-plan")
+    expect(parent?.chosen).toBe("opendesign/gpt-6-luna")
+    expect((parent?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
+  })
+
+  test("a route whose only seat is a leafless group records the exclusion on its no-candidates decision", () => {
+    const definition = {
+      id: "terra-plan",
+      targets: [],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [1], children: [{ node: 1 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set(), new Set(), undefined, false)).toBeUndefined()
+    } finally {
+      cap.stop()
+    }
+    const row = cap.decisions().find((item) => item.route_id === "terra-plan")
+    expect(row?.reason).toBe("no-candidates")
+    expect((row?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
+  })
+})

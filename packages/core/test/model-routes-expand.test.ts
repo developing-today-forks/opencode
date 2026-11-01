@@ -914,7 +914,7 @@ describe("provider routes", () => {
     expect(nodes[1].weights).toEqual([2, 1])
   })
 
-  test("a member that does not offer the model is skipped, and a model no member offers attaches nothing", () => {
+  test("a member that does not offer the model is skipped, and a model no member offers leaves a leafless group node", () => {
     const partial = catalog([
       [main, ["gpt-6.1-terra"]],
       [alt, ["gpt-6.1-terra", "gpt-6.1-sol"]],
@@ -931,8 +931,13 @@ describe("provider routes", () => {
       providerRoutes("openai-plan"),
     )
     expect(refs(none)).toEqual(["openai.alternate/gpt-6.1-terra"])
-    expect(none.nodes).toHaveLength(1)
-    expect(none.nodes[0].children).toEqual([{ leaf: 0 }])
+    // The unservable group contributes no leaves, but it stays in the tree as a
+    // leafless group node so the decision layer can exclude it with a reason
+    // instead of the seat vanishing silently.
+    expect(none.nodes).toHaveLength(2)
+    expect(none.nodes[0].children).toEqual([{ node: 1 }, { leaf: 0 }])
+    expect(none.nodes[1]).toMatchObject({ routeID: "openai-plan", providerRoute: "openai-plan" })
+    expect(none.nodes[1].children).toEqual([])
   })
 
   test("a member that cannot produce the target's variant is skipped for that dispatch", () => {
@@ -1118,5 +1123,39 @@ describe("configuredProviderRoutes", () => {
     })
     expect(parsed?.has("empty")).toBe(false)
     expect(messages.length).toBeGreaterThan(0)
+  })
+})
+
+describe("provider routes with no ready member (observability)", () => {
+  const main = Provider.ID.make("openai")
+  const alt = Provider.ID.make("openai.alternate")
+  const catalog = (entries: [Provider.ID, string[]][]) =>
+    new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
+      entries.map(
+        ([id, ids]) =>
+          [id, new Map(ids.map((model) => [model, Model.Info.default(id, Model.ID.make(model))] as const))] as const,
+      ),
+    )
+  const providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map([
+    ["openai-plan", { providers: ["openai.alternate", "openai"], selection: "ordered" as const, weights: {} }],
+  ])
+
+  test("a group no member offers the model for stays in the tree as a leafless group node", () => {
+    const defs = catalog([
+      [main, ["gpt-6.1-terra"]],
+      [alt, ["gpt-6.1-terra"]],
+    ])
+    const { leaves, nodes } = expand(
+      "r",
+      route(["openai-plan/gpt-6-luna", "openai.alternate/gpt-6.1-terra"]),
+      defs,
+      new Map(),
+      providerRoutes,
+    )
+    expect(leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}`)).toEqual(["openai.alternate/gpt-6.1-terra"])
+    expect(nodes).toHaveLength(2)
+    expect(nodes[0].children).toEqual([{ node: 1 }, { leaf: 0 }])
+    expect(nodes[1]).toMatchObject({ routeID: "openai-plan", providerRoute: "openai-plan", selection: "ordered" })
+    expect(nodes[1].children).toEqual([])
   })
 })
