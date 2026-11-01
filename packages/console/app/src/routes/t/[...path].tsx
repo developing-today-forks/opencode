@@ -1,6 +1,8 @@
 import type { APIEvent } from "@solidjs/start/server"
 import { LOCALE_HEADER, localeFromCookieHeader, parseLocale, tag } from "~/lib/language"
 
+export const PROXY_TIMEOUT_MS = 8_000
+
 async function handler(evt: APIEvent) {
   const req = evt.request.clone()
   const url = new URL(req.url)
@@ -14,6 +16,7 @@ async function handler(evt: APIEvent) {
     method: req.method,
     headers,
     body: req.body,
+    signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
   })
   return response
 }
