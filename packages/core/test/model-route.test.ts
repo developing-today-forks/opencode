@@ -1147,3 +1147,146 @@ describe("ModelRoute provider route groups", () => {
     expect(outer?.chosen).toBe("plan/m")
   })
 })
+
+describe("ModelRoute machinery constants (experimental.model_route_settings)", () => {
+  const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-sol" })
+  const policy = ModelRoute.policy({ cooldownMs: 60_000 })
+
+  afterEach(() => {
+    ModelRoute.onSettingsConfig(() => undefined)
+    ModelRoute.configureConstants(ModelRoute.DEFAULT_CONSTANTS)
+    ModelRoute.configure({
+      escalation: { enabled: true, afterGiveUps: 2 },
+      quota: { demoteAfter: 3, windowMs: 4 * 3_600_000 },
+    })
+  })
+
+  test("the resolved defaults are exactly the machinery's named constants", () => {
+    expect(ModelRoute.currentConstants()).toEqual({
+      bench: {
+        maxCooldownMs: 86_400_000,
+        multiplier: 2,
+        retryAfterMinMs: 1_000,
+        cooldownCapMs: 3_600_000,
+        quotaCooldownCapMs: 86_400_000,
+      },
+      demotion: { factor: 0.01 },
+      quotaGate: { maxMs: 30 * 86_400_000, fallbackMs: 30 * 60_000, feedTtlMs: 60_000 },
+      escalation: { outcomeWindow: 5 },
+      network: { windowMs: 30_000, providers: 3, providerModels: 2 },
+      continuity: { hedgeRequests: 2 },
+      overrides: { preferredFactor: 3 },
+    })
+    expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+  })
+
+  test("the bench ladder doubles toward the 24h cap by default, and stops at a configured cap", () => {
+    const now = 1_000_000
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 120_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.configureConstants({ bench: { maxCooldownMs: 5_000 } })
+    ModelRoute.failed(target, policy, now)
+    // A bench that would run a full minute stops at the configured cap.
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+  })
+
+  test("the bench multiplier and the caps on the health bases are configurable", () => {
+    const quick = ModelRoute.policy({ cooldownMs: 1_000 })
+    const now = 2_000_000
+    ModelRoute.configureConstants({ bench: { multiplier: 3 } })
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 9_000)
+
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(3_600_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(86_400_000)
+    ModelRoute.configureConstants({ bench: { cooldownCapMs: 120_000, quotaCooldownCapMs: 7_200_000 } })
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(120_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(7_200_000)
+  })
+
+  test("demotion threshold and factor are configurable", () => {
+    const now = Date.now()
+    ModelRoute.configureConstants({ demotion: { factor: 0.5 } })
+    ModelRoute.configure({ quota: { demoteAfter: 2 } })
+    ModelRoute.failed(target, policy, now, { quota: true })
+    expect(ModelRoute.demoted(target, now + 1)).toBe(false)
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+
+  test("the quota gate believes a stated reset up to the cap and falls back when none is stated", () => {
+    const now = 100_000_000
+    ModelRoute.observeQuotaFailure(target, "settings-cred-a", now + 90 * 86_400_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now)?.until).toBe(now + 30 * 86_400_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now)?.until).toBe(now + 30 * 60_000)
+  })
+
+  test("the quota gate fallback and cap are configurable", () => {
+    const now = 100_000_000
+    ModelRoute.configureConstants({ quotaGate: { fallbackMs: 10_000, maxMs: 60_000 } })
+    ModelRoute.observeQuotaFailure(target, "settings-cred-c", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-c", now)?.until).toBe(now + 10_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-d", now + 3_600_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-d", now)?.until).toBe(now + 60_000)
+  })
+
+  test("the quota feed interval follows the gate constants", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_061_000)).toBe(true)
+    ModelRoute.resetQuotaFeed()
+    ModelRoute.configureConstants({ quotaGate: { feedTtlMs: 10_000 } })
+    expect(ModelRoute.shouldFeedQuota(2_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(2_005_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
+  })
+
+  test("the escalation outcome window is configurable", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })
+    // Default window (5): two give-ups still count after two successes.
+    ModelRoute.failed(target, policy, 1_000)
+    ModelRoute.failed(target, policy, 2_000)
+    ModelRoute.completed(target, policy, ok, 3_000)
+    ModelRoute.completed(target, policy, ok, 4_000)
+    expect(ModelRoute.escalates(target)).toBe(true)
+    // Window of 3: the successes push the older give-up out of the window.
+    ModelRoute.configureConstants({ escalation: { outcomeWindow: 3 } })
+    ModelRoute.failed(other, policy, 1_000)
+    ModelRoute.failed(other, policy, 2_000)
+    ModelRoute.completed(other, policy, ok, 3_000)
+    ModelRoute.completed(other, policy, ok, 4_000)
+    expect(ModelRoute.escalates(other)).toBe(false)
+  })
+
+  test("config feeds both layers at once, and behavior follows", () => {
+    ModelRoute.onSettingsConfig(() => ({
+      demotion: { after: 2, factor: 0.5 },
+      bench: { maxCooldownMs: 5_000 },
+      escalation: { afterGiveUps: 4 },
+    }))
+    expect(ModelRoute.currentSettings()).toEqual({
+      escalation: { enabled: true, afterGiveUps: 4 },
+      quota: { demoteAfter: 2, windowMs: 4 * 3_600_000 },
+    })
+    expect(ModelRoute.currentConstants().bench.maxCooldownMs).toBe(5_000)
+    expect(ModelRoute.currentConstants().demotion.factor).toBe(0.5)
+
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+    ModelRoute.failed(target, policy, now, { quota: true })
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+})

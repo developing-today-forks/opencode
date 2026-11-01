@@ -53,6 +53,9 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
+    // The route machinery's constants, from experimental.model_route_settings.
+    ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
+
     // Scheduled review of the routing history, off unless configured.
     yield* ModelRouteTuning.schedule(
       () => configuredTuning(loaded.entries),
@@ -229,6 +232,45 @@ function configuredLog(entries: readonly Entry[]) {
     .reduce<
       ConfigModelRoutes.Log | undefined
     >((found, entry) => entry.info.experimental?.model_route_log ?? found, undefined)
+}
+
+function configuredSettings(entries: readonly Entry[]) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .reduce<
+      ConfigModelRoutes.Settings | undefined
+    >((found, entry) => entry.info.experimental?.model_route_settings ?? found, undefined)
+}
+
+/** The machinery settings in the core's shape: only the fields config actually set, group by
+ * group — a decoded settings block carries every unset field as undefined, and passing those
+ * through would erase the defaults they sit over. */
+function settingsConfig(
+  settings: ConfigModelRoutes.Settings | undefined,
+): ModelRoute.SettingsConfig | undefined {
+  if (!settings) return undefined
+  const group = <T extends object>(value: T | undefined): Partial<T> | undefined => {
+    if (!value) return undefined
+    const fields = Object.entries(value).filter(([, field]) => field !== undefined)
+    return fields.length > 0 ? (Object.fromEntries(fields) as Partial<T>) : undefined
+  }
+  const bench = group(settings.bench)
+  const demotion = group(settings.demotion)
+  const quotaGate = group(settings.quotaGate)
+  const escalation = group(settings.escalation)
+  const network = group(settings.network)
+  const continuity = group(settings.continuity)
+  const overrides = group(settings.overrides)
+  if (!bench && !demotion && !quotaGate && !escalation && !network && !continuity && !overrides) return undefined
+  return {
+    ...(bench ? { bench } : {}),
+    ...(demotion ? { demotion } : {}),
+    ...(quotaGate ? { quotaGate } : {}),
+    ...(escalation ? { escalation } : {}),
+    ...(network ? { network } : {}),
+    ...(continuity ? { continuity } : {}),
+    ...(overrides ? { overrides } : {}),
+  }
 }
 
 function configuredRoutes(entries: readonly Entry[]) {

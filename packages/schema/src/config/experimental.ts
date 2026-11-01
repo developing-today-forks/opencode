@@ -47,4 +47,8 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
   model_route_log: ConfigModelRoutes.Log.annotate({
     description: "What the routing history records about failed requests",
   }).pipe(optional),
+  model_route_settings: ConfigModelRoutes.Settings.annotate({
+    description:
+      "Global defaults for the route machinery: the bench ladder, quota demotion and gating, escalation, network-suspect detection, continuity hedging and the preference default",
+  }).pipe(optional),
 }) {}

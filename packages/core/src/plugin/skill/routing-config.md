@@ -187,6 +187,52 @@ Common changes:
 - `notes`: one line each as `match: text`, where `match` is part of provider/model.
   A text that states a return time skips the match until then.
 
+## Machinery constants: bench ladder, demotion, quota gate
+
+The machinery that benches, demotes and gates targets has global defaults under
+`model_route_settings`. Every value below already defaults to what the machinery does
+without the block, so the block only ever carries what should differ.
+
+```jsonc
+{
+  "experimental": {
+    "model_route_settings": {
+      "bench": { "maxCooldownMs": 86400000, "multiplier": 2, "retryAfterMinMs": 1000 },
+      "demotion": { "after": 3, "windowMs": 14400000, "factor": 0.01 },
+      "quotaGate": { "maxMs": 2592000000, "fallbackMs": 1800000 },
+    },
+  },
+}
+```
+
+- `bench.maxCooldownMs` (default 86400000, 24h): the longest bench any failure can impose.
+- `bench.multiplier` (default 2): each consecutive failure multiplies the bench by this;
+  the failure count resets only on a success. `bench.retryAfterMinMs` (default 1000) is
+  the floor under a provider's stated retry-after, and `bench.cooldownCapMs` (default
+  3600000) / `bench.quotaCooldownCapMs` (default 86400000) cap the bench bases a pool's own
+  health block may set.
+- `demotion.after` (default 3) and `demotion.windowMs` (default 14400000, 4h): quota errors
+  within the window that move a target to the end of every order; `demotion.factor`
+  (default 0.01) is what its weight is multiplied by while demoted.
+- `quotaGate.maxMs` (default 2592000000, 30 days): a stated quota reset further out than
+  this is capped rather than believed. `quotaGate.fallbackMs` (default 1800000, 30 minutes)
+  is the hold when an exhaustion reading states no reset. `quotaGate.feedTtlMs` (default
+  60000) is how often quota snapshots are fed into the gate.
+- `escalation.enabled` (default true) and `escalation.afterGiveUps` (default 2): after
+  that many give-ups among a target's last `escalation.outcomeWindow` (default 5)
+  finished requests, a route races its next target at once.
+- `network.windowMs` (default 30000), `network.providers` (default 3),
+  `network.providerModels` (default 2): when several models of one provider are cooling,
+  the provider itself is demoted; when several unrelated providers fail inside the window,
+  the fault is read as the local network and no target is punished.
+- `continuity.hedgeRequests` (default 2): requests a session that just failed over may
+  hedge back to its origin for. `overrides.preferredFactor` (default 3): how much a
+  "prefer" without an amount lifts a target.
+
+These are global defaults: a pool's own `health` block still overrides the bench bases
+for that pool, bounded by the bench caps here. Change one only when the machinery itself
+should behave differently everywhere, never to fix a single pool.
+
 ## Applying a change
 
 1. Read the current value and show the user the before and after.
