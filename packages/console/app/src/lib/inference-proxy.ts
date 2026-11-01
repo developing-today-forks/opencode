@@ -7,6 +7,14 @@ import { Resource } from "@opencode/console-resource"
 // backend that stalls before headers settles as the 503 below.
 export const INFERENCE_HEADERS_TIMEOUT_MS = 8_000
 
+// Generation routes (every POST here) are different: a non-streaming
+// completion sends its headers only when generation finishes, so a short
+// headers deadline would become a short generation deadline and 503 healthy
+// long completions. Their headers bound follows the codebase's LLM provider
+// precedent: packages/core/src/provider.ts resolves the provider
+// headerTimeout default to 300_000 ms.
+export const INFERENCE_GENERATION_HEADERS_TIMEOUT_MS = 300_000
+
 const paths: Record<string, string | undefined> = {
   "POST /zen/v1/chat/completions": "/openai/v1/chat/completions",
   "POST /zen/v1/responses": "/openai/v1/responses",
@@ -55,7 +63,9 @@ export async function proxyInference(request: Request) {
   if (requestID) forwarded.headers.set("x-opencode-request-id", requestID)
 
   const controller = new AbortController()
-  const headersTimer = setTimeout(() => controller.abort(), INFERENCE_HEADERS_TIMEOUT_MS)
+  const headersTimeoutMs =
+    request.method === "GET" ? INFERENCE_HEADERS_TIMEOUT_MS : INFERENCE_GENERATION_HEADERS_TIMEOUT_MS
+  const headersTimer = setTimeout(() => controller.abort(), headersTimeoutMs)
   const response = await (Resource.INFERENCE as { fetch: typeof fetch })
     .fetch(forwarded, { redirect: "manual", signal: controller.signal })
     .catch(() => undefined)

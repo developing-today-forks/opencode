@@ -14,11 +14,20 @@ mock.module("@opencode/console-resource", () => ({
   },
 }))
 
-const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS } = await import("./inference-proxy")
+const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS, INFERENCE_GENERATION_HEADERS_TIMEOUT_MS } =
+  await import("./inference-proxy")
 
 function request() {
   return new Request("https://opencode.ai/zen/v1/models", {
     headers: { authorization: "Bearer test-key" },
+  })
+}
+
+function generationRequest() {
+  return new Request("https://opencode.ai/zen/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+    body: JSON.stringify({ model: "test", messages: [] }),
   })
 }
 
@@ -89,6 +98,30 @@ describe("proxyInference headers deadline", () => {
     expect(response.status).toBe(400)
     expect(await readBody(response)).toBe("no such model")
   })
+
+  test(
+    "does not abort a non-streaming generation whose headers arrive past the lookup deadline",
+    async () => {
+      expect(INFERENCE_GENERATION_HEADERS_TIMEOUT_MS).toBeGreaterThan(INFERENCE_HEADERS_TIMEOUT_MS)
+      inferenceImpl = async () =>
+        new Promise<Response>((resolve) =>
+          setTimeout(
+            () =>
+              resolve(
+                new Response(`{"choices":[]}`, {
+                  status: 200,
+                  headers: { "content-type": "application/json" },
+                }),
+              ),
+            INFERENCE_HEADERS_TIMEOUT_MS + 500,
+          ),
+        )
+      const response = await proxyInference(generationRequest())
+      expect(response.status).toBe(200)
+      expect(await readBody(response)).toBe(`{"choices":[]}`)
+    },
+    INFERENCE_HEADERS_TIMEOUT_MS + 10_000,
+  )
 
   test(
     "does not cut a streaming body that starts before the deadline",
