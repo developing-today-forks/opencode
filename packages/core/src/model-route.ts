@@ -228,19 +228,27 @@ export const ref = (target: { providerID: string; model: string; variant?: strin
     ...(target.variant ? { variant: Model.VariantID.make(target.variant) } : {}),
   })
 
-const health = new Map<
-  string,
-  { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number }
->()
+/** One target's (or one credential's) failure-health state. `benchReason` / `benchQuotaResetAt`
+ * describe the bench in force: why it was planted, and the trustworthy quota window reset it is
+ * bounded by when one is known (#1123). `probeClaimedAt` marks the single half-open probe a bench
+ * admits at that reset while the bench itself still stands. */
+interface HealthState {
+  samples: boolean[]
+  outcomes: boolean[]
+  cooldownUntil: number
+  consecutiveFailures: number
+  benchReason?: string
+  benchQuotaResetAt?: number
+  probeClaimedAt?: number
+}
+
+const health = new Map<string, HealthState>()
 
 /** Health of one credential serving one target (#6): two credentials behind one provider are
  * distinct here even though they share the target's entry above, so a failure on one never
  * benches the other. Process-local like `health`; transitions are logged through the same
  * health channel. */
-const credentialHealth = new Map<
-  string,
-  { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number }
->()
+const credentialHealth = new Map<string, HealthState>()
 
 const credentialKey = (target: Model.Ref, credentialID: string) => `${target.providerID}/${target.id}#${credentialID}`
 
@@ -290,7 +298,8 @@ const logHealth = (
     | "network-suspect"
     | "rate-limit-window"
     | "quota-gated"
-    | "quota-readmitted",
+    | "quota-readmitted"
+    | "bench-probe",
   reason: string,
   until?: number,
   credentialID?: string,
@@ -310,13 +319,16 @@ const logHealth = (
 
 const recover = (
   target: Model.Ref,
-  state: { samples: boolean[]; cooldownUntil: number },
+  state: HealthState,
   now: number,
   credentialID?: string,
 ) => {
   if (state.cooldownUntil === 0 || state.cooldownUntil > now) return
   state.cooldownUntil = 0
   state.samples = []
+  state.benchReason = undefined
+  state.benchQuotaResetAt = undefined
+  state.probeClaimedAt = undefined
   // Credential expirations are tagged so restart replay ends that credential's restored
   // cooldown, never the target's (#870).
   logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired", undefined, credentialID)
@@ -376,12 +388,13 @@ export interface FailureHint {
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
  * A stated retry-after is believed as-is and never multiplied; every other class doubles its
  * bench per consecutive failure (auth and quota start from the long bench), capped at a day.
- * A quota bench may end sooner at a trustworthy window reset. The count survives recover() and
+ * A quota bench may end sooner at a trustworthy window reset; that reset is remembered on
+ * the state, and one learned later arms the bench the same way (armBenchProbe). The count survives recover() and
  * resets only on a success, so a permanently failing target backs off instead of being retried at
  * full rate forever. */
 const bench = (
   target: Model.Ref,
-  state: { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number },
+  state: HealthState,
   policy: Policy,
   now: number,
   hint?: FailureHint,
@@ -399,23 +412,113 @@ const bench = (
       : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
   const until = now + cooldown
   state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
+  const reason = hint?.quota
+    ? hint.retryAfterMs
+      ? "quota retry-after"
+      : "quota"
+    : hint?.retryAfterMs
+      ? "retry-after"
+      : hint?.auth
+        ? "auth"
+        : "failure"
+  state.benchReason = reason
+  state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
+  state.probeClaimedAt = undefined
   logHealth(
     target,
     "cooldown-start",
-    `${
-      hint?.quota
-        ? hint.retryAfterMs
-          ? "quota retry-after"
-          : "quota"
-        : hint?.retryAfterMs
-          ? "retry-after"
-          : hint?.auth
-            ? "auth"
-            : "failure"
-    }${credentialID ? ` credential:${credentialID}` : ""}`,
+    `${reason}${credentialID ? ` credential:${credentialID}` : ""}`,
     state.cooldownUntil,
     credentialID,
   )
+}
+
+/** Arms a benched quota state with a trustworthy window reset learned after the bench was
+ * planted — the quota feed and the provider's rate-limit reports arrive independently of the
+ * failure that benched the leaf, so the reset a bench should respect is not always known at
+ * bench time (#1123). Only quota-class benches arm: an auth or ordinary bench has no window to
+ * roll over. The earliest known reset wins; a later window's reset does not postpone the probe
+ * the first reset already owes. */
+const armBenchProbe = (target: Model.Ref, credentialID: string | undefined, resetAt: number, now: number) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!state || state.cooldownUntil <= now) return
+  if (state.benchReason !== "quota" && state.benchReason !== "quota retry-after") return
+  if (state.benchQuotaResetAt !== undefined && state.benchQuotaResetAt <= resetAt) return
+  state.benchQuotaResetAt = resetAt
+}
+
+const probeDueState = (state: HealthState | undefined, now: number) =>
+  state !== undefined &&
+  state.cooldownUntil > now &&
+  state.benchQuotaResetAt !== undefined &&
+  state.benchQuotaResetAt <= now &&
+  state.probeClaimedAt === undefined
+
+/** Whether the bench on this target (or on this credential of it, when one is named) is holding
+ * past a known quota window reset, so a half-open probe is due: the window has rolled over, the
+ * bench has not, and no probe is outstanding yet. The independent quota gate still applies on
+ * top of this — a probe never bypasses a gate whose own reset is still ahead. */
+export const probeDue = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) =>
+  probeDueState(credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target)), now)
+
+/** Claims the one half-open probe a due bench admits. Exactly one claim succeeds: while it is
+ * outstanding the bench keeps excluding ordinary candidacy, a probe success ends the bench
+ * (see completed()), and a probe failure re-benches through failed() on the escalated ladder,
+ * bounded by the next known reset when there is one. A claim that never reports an outcome
+ * stops mattering when the bench itself expires. */
+export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!state || !probeDueState(state, now)) return false
+  state.probeClaimedAt = now
+  logHealth(
+    target,
+    "bench-probe",
+    `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}`,
+    state.benchQuotaResetAt,
+    credentialID,
+  )
+  return true
+}
+
+/** One bench in force, as route diagnostics report it (#1123). */
+export interface ActiveBench {
+  readonly providerID: string
+  readonly modelID: string
+  readonly credentialID?: string
+  readonly until: number
+  /** The bench class that planted it: quota, quota retry-after, retry-after, auth, failure, slow. */
+  readonly reason: string
+  readonly consecutiveFailures: number
+  /** The known quota window reset this bench is bounded by, when one is known. */
+  readonly quotaResetAt?: number
+  readonly probeDue: boolean
+  readonly probeClaimed: boolean
+}
+
+/** Every bench in force at `now` — target-level and per-credential — soonest expiry first.
+ * Reading it changes nothing: expired benches are simply absent, so a target benched with no
+ * attempts in the stats window is still visible here. */
+export const activeBenches = (now = Date.now()): ActiveBench[] => {
+  const benches: ActiveBench[] = []
+  const collect = (id: string, state: HealthState, credentialID?: string) => {
+    if (state.cooldownUntil <= now) return
+    const base = credentialID ? id.slice(0, id.lastIndexOf("#")) : id
+    const slash = base.indexOf("/")
+    benches.push({
+      providerID: base.slice(0, slash),
+      modelID: base.slice(slash + 1),
+      ...(credentialID ? { credentialID } : {}),
+      until: state.cooldownUntil,
+      reason: state.benchReason ?? "unknown",
+      consecutiveFailures: state.consecutiveFailures,
+      ...(state.benchQuotaResetAt !== undefined ? { quotaResetAt: state.benchQuotaResetAt } : {}),
+      probeDue: probeDueState(state, now),
+      probeClaimed: state.probeClaimedAt !== undefined,
+    })
+  }
+  for (const [id, state] of health) collect(id, state)
+  for (const [id, state] of credentialHealth) collect(id, state, id.slice(id.lastIndexOf("#") + 1))
+  return benches.toSorted((left, right) => left.until - right.until)
 }
 
 export const failed = (
@@ -449,6 +552,9 @@ export const failed = (
         if (prior.cooldownUntil > now) {
           prior.cooldownUntil = 0
           prior.samples = []
+          prior.benchReason = undefined
+          prior.benchQuotaResetAt = undefined
+          prior.probeClaimedAt = undefined
         }
         prior.consecutiveFailures = 0
       }
@@ -492,6 +598,9 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now()) => {
   if (state.samples.filter(Boolean).length >= policy.slowThreshold) {
     state.samples = []
     state.cooldownUntil = now + policy.cooldownMs
+    state.benchReason = "slow"
+    state.benchQuotaResetAt = undefined
+    state.probeClaimedAt = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
   }
 }
@@ -673,6 +782,10 @@ const observeCredentialQuotaState = (
     ...(actualResetAt !== undefined ? { actualResetAt } : {}),
     ...(resetObservedAt !== undefined ? { resetObservedAt } : {}),
   })
+  // A reset learned after a quota bench was planted arms that bench's probe (#1123). Only the
+  // trusted actual reset counts: the reactive gate's synthesized fallback never reaches this
+  // variable (observeQuotaFailure passes resetAtTrusted=false and keeps the previous actual).
+  if (full && actualResetAt !== undefined) armBenchProbe(target, credentialID, actualResetAt, now)
   if (full && !previous?.gated)
     logHealth(
       target,
@@ -711,6 +824,7 @@ export const observeProviderQuota = (
     resetObservedAt: snapshot.observedAt,
   })
   if (full) {
+    if (snapshot.resetAt !== null) armBenchProbe(target, undefined, snapshot.resetAt, now)
     const gate = currentConstants().quotaGate
     const until = Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
     addAdjustment({
@@ -815,6 +929,28 @@ export const credentialQuotaBlocked = (
   return undefined
 }
 
+/** Ends a state's bench on a success: an ordinary success only ends an expired bench
+ * (recover), but a success on a claimed half-open probe ends the bench outright (#1123) — the
+ * probe was admitted precisely to learn whether the leaf serves again, and it does. */
+const endBench = (target: Model.Ref, state: HealthState, now: number, credentialID?: string) => {
+  if (state.probeClaimedAt === undefined || state.cooldownUntil <= now) {
+    recover(target, state, now, credentialID)
+    return
+  }
+  state.cooldownUntil = 0
+  state.samples = []
+  state.benchReason = undefined
+  state.benchQuotaResetAt = undefined
+  state.probeClaimedAt = undefined
+  logHealth(
+    target,
+    "cooldown-end",
+    credentialID ? `probe succeeded credential:${credentialID}` : "probe succeeded",
+    undefined,
+    credentialID,
+  )
+}
+
 export const completed = (
   target: Model.Ref,
   policy: Policy,
@@ -828,12 +964,12 @@ export const completed = (
     const credentialState = credentialEntry(target, credentialID)
     credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
-    recover(target, credentialState, now, credentialID)
+    endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
-  recover(target, state, now)
+  endBench(target, state, now)
   if (state.cooldownUntil > now) return
   const slow =
     (typeof policy.firstTokenTimeoutMs === "number" && sample.firstTokenMs > policy.firstTokenTimeoutMs) ||
@@ -844,6 +980,9 @@ export const completed = (
   if (state.samples.filter(Boolean).length >= policy.slowThreshold) {
     state.samples = []
     state.cooldownUntil = now + policy.cooldownMs
+    state.benchReason = "slow"
+    state.benchQuotaResetAt = undefined
+    state.probeClaimedAt = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
   }
 }
@@ -1077,6 +1216,10 @@ export const observeRateLimit = (
   limits.delete(id)
   limits.set(id, { snapshot, until })
   while (limits.size > HEALTH_LIMIT) limits.delete(limits.keys().next().value!)
+  // A spent window's reset learned after a quota bench was planted arms that bench's probe
+  // (#1123), in the same scope the snapshot was recorded in.
+  const resetAt = ModelRouteLimits.exhaustedWindowResetAt(snapshot, now, QuotaSnapshot.DEFAULT_MAX_AGE_MS)
+  if (resetAt !== undefined) armBenchProbe(target, credentialID, resetAt, now)
   if (until > now && (previous?.until ?? 0) < until - 1_000)
     logHealth(
       target,
@@ -1243,14 +1386,18 @@ export const removeAdjustment = (id: string) => {
 
 /** Re-applies cooldowns that were still running when the process last stopped. */
 export const seedCooldowns = (
-  rows: ReadonlyArray<{ providerID: string; modelID: string; until: number; credentialID?: string }>,
+  rows: ReadonlyArray<{ providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }>,
 ) => {
   for (const row of rows) {
     const target = ref({ providerID: row.providerID, model: row.modelID })
     // A credential-scoped cooldown restores onto that credential only (#870): the healthy
     // credentials behind the same target stay routable after a restart.
-    if (row.credentialID) credentialEntry(target, row.credentialID).cooldownUntil = row.until
-    else entry(target).cooldownUntil = row.until
+    const state = row.credentialID ? credentialEntry(target, row.credentialID) : entry(target)
+    state.cooldownUntil = row.until
+    // The bench keeps its class across the restart, so a quota reset learned afterwards can
+    // still arm its half-open probe (#1123). The stored reason names the credential on
+    // credential rows; the class is the part before that suffix.
+    if (row.reason) state.benchReason = row.reason.split(" credential:")[0]
   }
 }
 
