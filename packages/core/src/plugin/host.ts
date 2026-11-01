@@ -239,7 +239,14 @@ export const make = Effect.fn("PluginHost.make")(function* (
                 ...definition,
                 sourceConnection:
                   definition.sourceConnection?.type === "credential"
-                    ? { ...definition.sourceConnection, id: Credential.ID.make(definition.sourceConnection.id) }
+                    ? {
+                      ...definition.sourceConnection,
+                      id: Credential.ID.make(definition.sourceConnection.id),
+                      methodID:
+                        definition.sourceConnection.methodID === undefined
+                          ? undefined
+                          : Integration.MethodID.make(definition.sourceConnection.methodID),
+                    }
                     : definition.sourceConnection,
               }),
             update: (id, update) => editor.update(Provider.ID.make(id), update),
@@ -384,14 +391,27 @@ export const make = Effect.fn("PluginHost.make")(function* (
         active: (id) => integration.connection.active(Integration.ID.make(id)),
         resolve: (connection) =>
           integration.connection.resolve(
-            connection.type === "credential" ? { ...connection, id: Credential.ID.make(connection.id) } : connection,
+            connection.type === "credential"
+              ? {
+                  ...connection,
+                  id: Credential.ID.make(connection.id),
+                  methodID: connection.methodID === undefined ? undefined : Integration.MethodID.make(connection.methodID),
+                }
+              : connection,
           ),
         status: (input) =>
           integration.connection.status({
             integrationID: Integration.ID.make(input.integrationID),
             connection:
               input.connection.type === "credential"
-                ? { ...input.connection, id: Credential.ID.make(input.connection.id) }
+                ? {
+                  ...input.connection,
+                  id: Credential.ID.make(input.connection.id),
+                  methodID:
+                    input.connection.methodID === undefined
+                      ? undefined
+                      : Integration.MethodID.make(input.connection.methodID),
+                }
                 : input.connection,
             status: input.status,
           }),

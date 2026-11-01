@@ -94,11 +94,32 @@ export function contentFilterError(summary: string, reason: FinishReasonDetails)
   }
 }
 
+/**
+ * A platform-API 401 reporting missing scopes (api.responses.write / resource.invoke) means the
+ * active token-sharing credential holds a token minted by a different sign-in flow (#1119, the
+ * code#3216 incident): name the mismatch instead of surfacing a generic provider auth failure.
+ */
+function credentialMethodMismatchMessage(body: string | undefined, status: number | undefined): string | undefined {
+  if (!body || (status !== 401 && !body.includes("missing_scopes"))) return undefined
+  if (!/missing[^"]*scopes/i.test(body)) return undefined
+  const missing = ["api.responses.write", "resource.invoke"].filter((scope) => body.includes(scope))
+  if (missing.length === 0) return undefined
+  return (
+    `Credential-method mismatch: the active OpenAI credential uses method chatgpt-token-sharing, ` +
+    `but its token is missing the scopes (${missing.join(", ")}) required by https://api.openai.com/v1. ` +
+    `The token was likely minted by a different sign-in flow (for example Codex browser/headless). ` +
+    `Reconnect with token sharing, or switch to the credential that matches this token.`
+  )
+}
+
 function providerError(type: string, reason: AIError["reason"]): SessionError.Error {
   const status = reason.http?.status
   return {
     type,
-    message: Object.entries(tokenSharingMessages).find(([code]) => reason.body?.includes(code))?.[1] ?? reason.message,
+    message:
+      credentialMethodMismatchMessage(reason.body, status) ??
+      Object.entries(tokenSharingMessages).find(([code]) => reason.body?.includes(code))?.[1] ??
+      reason.message,
     ...(status === undefined ? {} : { status }),
     ...(reason.body === undefined ? {} : { response: { body: reason.body } }),
   }

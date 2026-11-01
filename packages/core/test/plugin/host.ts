@@ -357,14 +357,27 @@ export function integrationHost(integration: Integration.Interface): Plugin.Cont
       active: (id) => integration.connection.active(Integration.ID.make(id)),
       resolve: (connection) =>
         integration.connection.resolve(
-          connection.type === "credential" ? { ...connection, id: Credential.ID.make(connection.id) } : connection,
+          connection.type === "credential"
+              ? {
+                  ...connection,
+                  id: Credential.ID.make(connection.id),
+                  methodID: connection.methodID === undefined ? undefined : Integration.MethodID.make(connection.methodID),
+                }
+              : connection,
         ),
       status: (input) =>
         integration.connection.status({
           integrationID: Integration.ID.make(input.integrationID),
           connection:
             input.connection.type === "credential"
-              ? { ...input.connection, id: Credential.ID.make(input.connection.id) }
+              ? {
+                  ...input.connection,
+                  id: Credential.ID.make(input.connection.id),
+                  methodID:
+                    input.connection.methodID === undefined
+                      ? undefined
+                      : Integration.MethodID.make(input.connection.methodID),
+                }
               : input.connection,
           status: input.status,
         }),

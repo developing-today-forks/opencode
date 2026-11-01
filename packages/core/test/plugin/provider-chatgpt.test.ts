@@ -21,7 +21,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { GithubCopilotPlugin } from "@opencode/core/plugin/provider/github-copilot"
-import { ChatGPTPlugin, fetchModels, verifyIDToken } from "@opencode/core/plugin/provider/chatgpt"
+import { ChatGPTPlugin, credentialMethodMismatch, fetchModels, verifyIDToken } from "@opencode/core/plugin/provider/chatgpt"
 import { OpenAIPlugin } from "@opencode/core/plugin/provider/openai"
 import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
@@ -341,6 +341,76 @@ describe("ChatGPTPlugin", () => {
         decision: { retry: true, delay: 1000 },
       })
       expect(event.decision).toEqual({ retry: true, delay: 1000 })
+    }),
+  )
+
+  it.effect("classifies a token-sharing scopes-401 as a credential-method mismatch (#1119)", () =>
+    Effect.gen(function* () {
+      const body = JSON.stringify({
+        error: { message: "Missing scopes: api.responses.write", type: "invalid_request_error", code: "missing_scopes" },
+      })
+      const mismatch = credentialMethodMismatch(body)
+      expect(mismatch).toContain("Credential-method mismatch")
+      expect(mismatch).toContain("chatgpt-token-sharing")
+      expect(mismatch).toContain("https://api.openai.com/v1")
+      expect(mismatch).toContain("api.responses.write")
+      // Unrelated failures are not classified as mismatches.
+      expect(credentialMethodMismatch(JSON.stringify({ error: { message: "Incorrect API key provided" } }))).toBeUndefined()
+      expect(
+        credentialMethodMismatch(JSON.stringify({ error: { code: "subscription_sharing_usage_limit_exceeded" } })),
+      ).toBeUndefined()
+      expect(credentialMethodMismatch(undefined)).toBeUndefined()
+    }),
+  )
+
+  it.effect("surfaces a platform scopes-401 as a credential-method mismatch and stops retries (#1119)", () =>
+    Effect.gen(function* () {
+      const credentials = yield* Credential.Service
+      yield* credentials.create({
+        integrationID: Integration.ID.make("openai"),
+        value: Credential.OAuth.make({
+          type: "oauth",
+          methodID: Integration.MethodID.make("chatgpt-token-sharing"),
+          access: "chatgpt-token",
+          refresh: "refresh",
+          expires: Date.now() + 60 * 60_000,
+          metadata: { clientID: "oaiapp_issued" },
+        }),
+      })
+      yield* addPlugin()
+      const hooks = yield* PluginHooks.Service
+      const body = JSON.stringify({ error: { message: "Missing scopes: api.responses.write", code: "missing_scopes" } })
+
+      // The session error names the mismatch (method + backend) instead of a generic 401.
+      const cause = new AIError({
+        reason: classifyProviderFailure({ message: "Missing scopes: api.responses.write", rawBody: body, status: 401 }),
+      })
+      const error = toSessionError(cause)
+      expect(error.type).toBe("provider.auth")
+      expect(error.message).toContain("Credential-method mismatch")
+      expect(error.message).toContain("chatgpt-token-sharing")
+      expect(error.message).toContain("https://api.openai.com/v1")
+      expect(error.message).toContain("api.responses.write")
+
+      // Retrying the same token against the same backend can never succeed.
+      const retryEvent = yield* hooks.trigger("session", "retry", {
+        sessionID: Session.ID.make("ses_mismatch"),
+        agent: Agent.ID.make("build"),
+        model: Model.Ref.make({ providerID: Provider.ID.openai, id: Model.ID.make("gpt-5.5") }),
+        error,
+        attempt: 2,
+        decision: { retry: true, delay: 1000 },
+      })
+      expect(retryEvent.decision).toEqual({ retry: false })
+
+      // A 401 that is not a scopes mismatch keeps its original message.
+      const otherBody = JSON.stringify({ error: { message: "Incorrect API key provided" } })
+      const other = toSessionError(
+        new AIError({
+          reason: classifyProviderFailure({ message: "Incorrect API key provided", rawBody: otherBody, status: 401 }),
+        }),
+      )
+      expect(other.message).not.toContain("Credential-method mismatch")
     }),
   )
 

@@ -799,6 +799,7 @@ export type ConnectionCredentialInfo = {
   id: CredentialID
   label: string
   method: "key" | "oauth" | "external"
+  methodID?: IntegrationMethodID
   status?: ConnectionStatus
 }
 
