@@ -100,6 +100,36 @@ describe("SessionStore", () => {
     }),
   )
 
+  it.effect("normalises a present list limit and leaves an omitted limit unbounded", () =>
+    Effect.gen(function* () {
+      yield* seedSessions([
+        { id: "ses_list_a", updated: 30 },
+        { id: "ses_list_b", updated: 20 },
+        { id: "ses_list_c", updated: 10 },
+      ])
+      const store = yield* SessionStore.Service
+      // Direct (unvalidated) callers can pass limits the ListInput schema
+      // would reject; the store boundary must normalise them, never raw.
+      const count = (limit?: number) =>
+        store
+          .list(limit === undefined ? {} : ({ limit } as unknown as SessionStore.ListInput))
+          .pipe(Effect.map((sessions) => sessions.length))
+
+      expect(yield* count()).toBe(3)
+      expect(yield* count(2)).toBe(2)
+      expect(yield* count(2.9)).toBe(2)
+      expect(yield* count(1.5)).toBe(1)
+      expect(yield* count(0.5)).toBe(1)
+      expect(yield* count(0)).toBe(1)
+      expect(yield* count(-1)).toBe(1)
+      expect(yield* count(-5)).toBe(1)
+      // Documented policy: a present non-finite limit is treated as absent.
+      expect(yield* count(Number.NaN)).toBe(3)
+      expect(yield* count(Number.POSITIVE_INFINITY)).toBe(3)
+      expect(yield* count(Number.NEGATIVE_INFINITY)).toBe(3)
+    }),
+  )
+
   it.effect("pages messages by durable sequence, not timestamp or ID, and scopes cursor lookup", () =>
     Effect.gen(function* () {
       const sessionID = Session.ID.make("ses_messages")
