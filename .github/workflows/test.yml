@@ -491,6 +491,7 @@ jobs:
   ci-fix:
     needs: [unit, build, e2e]
     if: failure()
+    timeout-minutes: 10
     permissions:
       id-token: write
       issues: read
