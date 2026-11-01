@@ -16,6 +16,16 @@ const REQUEST_TIMEOUTS = {
   cloudflareTokenVerify: 10_000,
 }
 
+/**
+ * Hard cap on update-artifact response bodies. All three responses read
+ * through readResponseBody are small, schema-known JSON (OIDC token,
+ * publish error text, Cloudflare verify), so 1 MiB leaves generous
+ * headroom while bounding memory. The request deadlines bound duration,
+ * not bytes, so the body is read through the capped reader below
+ * (#1333, in the style of #1250's CHANGELOG_MAX_BYTES).
+ */
+export const UPDATE_ARTIFACT_RESPONSE_MAX_BYTES = 1024 * 1024
+
 type RequestTimeouts = {
   oidcToken: number
   publish: number
@@ -48,7 +58,7 @@ export namespace UpdateArtifact {
         signal,
       })
       if (!tokenResponse.ok) throw new Error(`Failed to request GitHub OIDC token: ${tokenResponse.status}`)
-      return readResponseJson(tokenResponse, signal)
+      return readResponseJson(tokenResponse, signal, "GitHub OIDC token request")
     })
     if (!isRecord(token) || typeof token.value !== "string")
       throw new Error("GitHub OIDC response did not include a token")
@@ -67,10 +77,10 @@ export namespace UpdateArtifact {
         if (response.ok) return { retry: false }
         // D1 can commit the upsert and still time out. Replaying the same artifact is safe.
         if (response.status >= 500 && attempt < 2) {
-          await readResponseBody(response, signal)
+          await readResponseBody(response, signal, "Update artifact publish request")
           return { retry: true, status: response.status }
         }
-        throw new Error(`Failed to publish update artifact: ${response.status} ${await readResponseText(response, signal)}`)
+        throw new Error(`Failed to publish update artifact: ${response.status} ${await readResponseText(response, signal, "Update artifact publish request")}`)
       })
       if (!outcome.retry) return
       console.warn(`Update artifact publication returned ${outcome.status}; retrying`)
@@ -138,7 +148,7 @@ async function credentials(options: Options) {
         signal,
       })
       if (!response.ok) return undefined
-      return readResponseJson(response, signal)
+      return readResponseJson(response, signal, "Cloudflare token verification")
     })
     if (data === undefined) continue
     if (!isRecord(data) || data.success !== true || !isRecord(data.result) || typeof data.result.id !== "string")
@@ -168,17 +178,22 @@ async function withDeadline<T>(operation: string, timeoutMs: number, run: (signa
   }
 }
 
-async function readResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
-  return JSON.parse(new TextDecoder().decode(await readResponseBody(response, signal)))
+async function readResponseJson(response: Response, signal: AbortSignal, operation: string): Promise<unknown> {
+  return JSON.parse(new TextDecoder().decode(await readResponseBody(response, signal, operation)))
 }
 
-async function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
-  return new TextDecoder().decode(await readResponseBody(response, signal))
+async function readResponseText(response: Response, signal: AbortSignal, operation: string): Promise<string> {
+  return new TextDecoder().decode(await readResponseBody(response, signal, operation))
 }
 
-/** Reads a response body until it completes or its request deadline aborts. */
-async function readResponseBody(response: Response, signal: AbortSignal): Promise<Uint8Array> {
+/** Reads a response body until it completes, its request deadline aborts, or it exceeds the byte cap. */
+async function readResponseBody(response: Response, signal: AbortSignal, operation: string): Promise<Uint8Array> {
   if (!response.body) return new Uint8Array()
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > UPDATE_ARTIFACT_RESPONSE_MAX_BYTES) {
+    await response.body.cancel().catch(() => undefined)
+    throw new Error(`${operation} response exceeded ${UPDATE_ARTIFACT_RESPONSE_MAX_BYTES} bytes`)
+  }
   const reader = response.body.getReader()
   const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
   signal.addEventListener("abort", abort, { once: true })
@@ -190,6 +205,10 @@ async function readResponseBody(response: Response, signal: AbortSignal): Promis
       const result = await reader.read()
       if (result.done) break
       size += result.value.byteLength
+      if (size > UPDATE_ARTIFACT_RESPONSE_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(`${operation} response exceeded ${UPDATE_ARTIFACT_RESPONSE_MAX_BYTES} bytes`)
+      }
       chunks.push(result.value)
     }
     // Cancelling a stalled stream may settle its pending read as done; the

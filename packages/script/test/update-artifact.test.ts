@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { UpdateArtifact } from "../../../script/update-artifact"
+import { UPDATE_ARTIFACT_RESPONSE_MAX_BYTES, UpdateArtifact } from "../../../script/update-artifact"
 
 const artifact = {
   channel: "latest",
@@ -127,6 +127,53 @@ describe("UpdateArtifact request deadlines (#1329)", () => {
         expect(publishes).toBe(2)
       },
     )
+  })
+
+  test("an over-cap OIDC body is cancelled and rejected naming the operation and cap", async () => {
+    await withEnv(
+      {
+        GITHUB_ACTIONS: "true",
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://actions.example/token",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "test-token",
+      },
+      async () => {
+        const fetchImpl: typeof fetch = async () => {
+          return new Response("x".repeat(UPDATE_ARTIFACT_RESPONSE_MAX_BYTES + 1))
+        }
+        await expect(UpdateArtifact.publish(artifact, { fetchImpl, timeouts })).rejects.toThrow(
+          `GitHub OIDC token request response exceeded ${UPDATE_ARTIFACT_RESPONSE_MAX_BYTES} bytes`,
+        )
+      },
+    )
+  })
+
+  test("an over-cap body streamed in chunks without a content-length is rejected", async () => {
+    await withEnv(
+      {
+        GITHUB_ACTIONS: "true",
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://actions.example/token",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "test-token",
+      },
+      async () => {
+        const chunk = new Uint8Array(64 * 1024).fill(120)
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < UPDATE_ARTIFACT_RESPONSE_MAX_BYTES / chunk.byteLength + 1; i++) {
+              controller.enqueue(chunk)
+            }
+            controller.close()
+          },
+        })
+        const fetchImpl: typeof fetch = async () => new Response(body)
+        await expect(UpdateArtifact.publish(artifact, { fetchImpl, timeouts })).rejects.toThrow(
+          `GitHub OIDC token request response exceeded ${UPDATE_ARTIFACT_RESPONSE_MAX_BYTES} bytes`,
+        )
+      },
+    )
+  })
+
+  test("the response byte cap is 1 MiB", () => {
+    expect(UPDATE_ARTIFACT_RESPONSE_MAX_BYTES).toBe(1024 * 1024)
   })
 
   test("the publish dry-run path does not make a request", async () => {
