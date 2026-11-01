@@ -56,6 +56,12 @@ describe("SCAN_ROOTS", () => {
     expect(SCAN_ROOTS).toContain("packages/console/app/src")
     expect(SCAN_ROOTS).toContain("packages/console/function/src")
     expect(SCAN_ROOTS).toContain("packages/function/src")
+  })
+
+  test("includes the services workers, the public Cloudflare worker roots added by #1308", () => {
+    expect(SCAN_ROOTS).toContain("services/changelog/src")
+    expect(SCAN_ROOTS).toContain("services/files/src")
+    expect(SCAN_ROOTS).toContain("services/update/src")
     expect(SCAN_ROOTS).toEqual([
       "packages/core/src",
       "packages/ai/src",
@@ -64,6 +70,9 @@ describe("SCAN_ROOTS", () => {
       "packages/console/app/src",
       "packages/console/function/src",
       "packages/function/src",
+      "services/changelog/src",
+      "services/files/src",
+      "services/update/src",
     ])
   })
 })
