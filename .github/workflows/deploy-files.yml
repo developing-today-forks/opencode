@@ -3,8 +3,7 @@ name: deploy-files
 on:
   push:
     branches:
-      - dev
-      - production
+      - main
   workflow_dispatch:
 
 concurrency:
