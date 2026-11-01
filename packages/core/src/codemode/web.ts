@@ -13,9 +13,8 @@ export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 const readBounded = async (response: Response, method: string): Promise<Uint8Array> => {
   const tooLarge = () => new Error(`Response too large (exceeds ${MAX_RESPONSE_BYTES} byte limit)`)
-  // A HEAD response has no body: its `content-length` describes the corresponding GET, so the
-  // declared-size check would reject a HEAD for a resource a later GET could legitimately stream.
-  if (method !== "HEAD") {
+  // HEAD and 304 responses have no body; their content-length may describe the GET representation.
+  if (method !== "HEAD" && response.status !== 304) {
     const declared = Number(response.headers.get("content-length"))
     if (Number.isSafeInteger(declared) && declared > MAX_RESPONSE_BYTES) {
       // Cancel before rejecting: an uncancelled body keeps downloading in the background

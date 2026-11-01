@@ -147,4 +147,21 @@ describe("CodeModeWeb fetch response size cap (#923)", () => {
       server.stop(true)
     }
   })
+
+  test("a 304 response is not rejected by the declared-size check", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(304, { "content-length": String(CodeModeWeb.MAX_RESPONSE_BYTES + 1) })
+      response.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const { port } = server.address() as AddressInfo
+    try {
+      const response = await webFetch(`http://127.0.0.1:${port}/`)
+      expect(response.status).toBe(304)
+      expect(response.headers.get("content-length")).toBe(String(CodeModeWeb.MAX_RESPONSE_BYTES + 1))
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 })
