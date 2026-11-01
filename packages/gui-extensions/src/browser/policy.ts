@@ -17,9 +17,18 @@ export function localFileURL(input: string) {
 
 /** Case-insensitive on Windows, where drive letters and paths compare that way. */
 function canonicalPath(input: string) {
-  const value = decodeURIComponent(input)
-    .replaceAll("\\", "/")
-    .replace(/^\/([A-Za-z]:\/)/, "$1")
+  // A malformed percent sequence (a bare %, an invalid escape, a truncated UTF-8
+  // sequence) has no decoded path: fail closed (undefined never matches) instead of
+  // throwing URIError into the navigation guards, which must always be able to answer.
+  let decoded: string
+
+  try {
+    decoded = decodeURIComponent(input)
+  } catch {
+    return undefined
+  }
+
+  const value = decoded.replaceAll("\\", "/").replace(/^\/([A-Za-z]:\/)/, "$1")
 
   return process.platform === "win32" ? value.toLowerCase() : value
 }
@@ -35,8 +44,14 @@ export function fileURLWithin(input: string, roots: ReadonlyArray<string>) {
   if (!href || roots.length === 0) return false
   const path = canonicalPath(new URL(href).pathname)
 
+  if (path === undefined) return false
+
   return roots.some((root) => {
-    const prefix = canonicalPath(root).replace(/\/+$/, "")
+    const canonical = canonicalPath(root)
+
+    if (canonical === undefined) return false
+
+    const prefix = canonical.replace(/\/+$/, "")
 
     return path === prefix || path.startsWith(`${prefix}/`)
   })

@@ -80,3 +80,22 @@ test("windows workspace roots match drive-letter file URLs", () => {
   expect(fileURLWithin("file:///C:/Users/me/repo2/x.html", roots)).toBe(false)
   expect(fileURLWithin("file:///D:/Users/me/repo/x.html", roots)).toBe(false)
 })
+
+test("malformed percent-encoding in a file URL or a root is refused, never thrown", () => {
+  const roots = ["/home/me/repo"]
+
+  for (const url of [
+    "file:///home/me/repo/100%.html",
+    "file:///home/me/repo/%zz.html",
+    "file:///home/me/repo/%E0%A4%A.html",
+  ]) {
+    expect(fileURLWithin(url, roots)).toBe(false)
+    expect(allowedDestination(url, { fileRoots: roots })).toBe(false)
+    expect(refusal(url, { fileRoots: roots })).toBe("browser.address.workspace")
+  }
+
+  // A root whose own name carries a bare % matches nothing instead of throwing.
+  expect(fileURLWithin("file:///home/me/repo/x.html", ["/home/me/100%repo"])).toBe(false)
+  // A legitimately encoded name still decodes and matches.
+  expect(fileURLWithin("file:///home/me/repo/my%20file.html", roots)).toBe(true)
+})
