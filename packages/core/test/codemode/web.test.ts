@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import { CodeModeWeb } from "@opencode/core/codemode/web"
 
 type WebResponse = {
@@ -100,25 +102,31 @@ describe("CodeModeWeb fetch response size cap (#923)", () => {
   test("a declared over-cap rejection cancels the response body", async () => {
     // Regression (Codex review on #926): rejecting on the declared size without cancelling
     // left the oversized download running in the background until completion/timeout.
-    let cancelled = false
-    const original = globalThis.fetch
-    globalThis.fetch = (async () =>
-      new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array(1024))
-          },
-          cancel() {
-            cancelled = true
-          },
-        }),
-        { headers: { "content-length": String(CodeModeWeb.MAX_RESPONSE_BYTES + 1) } },
-      )) as unknown as typeof fetch
+    // Exercised against a real local server (no global fetch replacement): the server
+    // declares an over-cap length, sends one chunk, and never ends, so its response can
+    // only close early if the client cancels the download. A raw HTTP server is used
+    // because Bun.serve rewrites content-length to the real body size.
+    let closed = false
+    const server = createServer((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": String(CodeModeWeb.MAX_RESPONSE_BYTES + 1),
+      })
+      response.write(new Uint8Array(1024))
+      response.on("close", () => {
+        closed = true
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const { port } = server.address() as AddressInfo
     try {
-      await expect(webFetch("http://example.test/large")).rejects.toThrow("Response too large")
-      expect(cancelled).toBe(true)
+      await expect(webFetch(`http://127.0.0.1:${port}/large`)).rejects.toThrow("Response too large")
+      const deadline = Date.now() + 2_000
+      while (!closed && Date.now() < deadline) await Bun.sleep(10)
+      expect(closed).toBe(true)
     } finally {
-      globalThis.fetch = original
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 
