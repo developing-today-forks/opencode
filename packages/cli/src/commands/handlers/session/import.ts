@@ -25,8 +25,8 @@ export const MAX_SESSION_TRANSFER_BYTES = 256 * 1024 * 1024
 // slow drips, which never finish at any speed.
 export const SESSION_IMPORT_FETCH_TIMEOUT_MS = 600_000
 
-function fetchRemote(url: string) {
-  const signal = AbortSignal.timeout(SESSION_IMPORT_FETCH_TIMEOUT_MS)
+export function fetchRemote(url: string, timeoutMs = SESSION_IMPORT_FETCH_TIMEOUT_MS) {
+  const signal = AbortSignal.timeout(timeoutMs)
   return fetch(url, { signal }).then((response) => {
     if (!response.ok) throw new Error(`Failed to fetch session data: ${response.statusText}`)
     return readBoundedResponseBody(response, MAX_SESSION_TRANSFER_BYTES, signal)

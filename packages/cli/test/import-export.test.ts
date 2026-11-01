@@ -5,6 +5,7 @@ import path from "node:path"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { readBoundedResponseBody } from "../src/util/io"
+import { fetchRemote } from "../src/commands/handlers/session/import"
 import { OPENCODE_VERSION } from "../src/version"
 
 const info = {
@@ -263,10 +264,10 @@ test("readBoundedResponseBody aborts a stalled body read when the signal fires",
   await expect(readBoundedResponseBody(stalled, 1024, AbortSignal.timeout(100))).rejects.toThrow()
 })
 
-test("the import fetch composition cuts a slow-dripping remote body at the deadline", async () => {
-  // Mirrors the session import handler's wiring: one AbortSignal.timeout
-  // deadline is passed to fetch and threaded into readBoundedResponseBody,
-  // so the body phase is bounded by the same deadline as the headers phase.
+test("fetchRemote cuts a slow-dripping remote body at the deadline", async () => {
+  // Exercises the production import fetch: one AbortSignal.timeout deadline
+  // is passed to fetch and threaded into readBoundedResponseBody, so the
+  // body phase is bounded by the same deadline as the headers phase.
   const server = Bun.serve({
     port: 0,
     fetch() {
@@ -282,10 +283,33 @@ test("the import fetch composition cuts a slow-dripping remote body at the deadl
     },
   })
   try {
-    const signal = AbortSignal.timeout(150)
-    const response = await fetch(`${server.url}session.json`, { signal })
-    expect(response.ok).toBe(true)
-    await expect(readBoundedResponseBody(response, 1024, signal)).rejects.toThrow()
+    await expect(fetchRemote(`${server.url}session.json`, 150)).rejects.toThrow()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("fetchRemote cuts a header stall at the deadline and reads a normal body unchanged", async () => {
+  const stalled = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(fetchRemote(`${stalled.url}session.json`, 100)).rejects.toThrow()
+  } finally {
+    stalled.stop(true)
+  }
+
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) =>
+      new URL(request.url).pathname === "/missing"
+        ? new Response("nope", { status: 404, statusText: "Not Found" })
+        : Response.json({ ok: true }),
+  })
+  try {
+    await expect(fetchRemote(`${server.url}session.json`, 5_000)).resolves.toBe(JSON.stringify({ ok: true }))
+    await expect(fetchRemote(`${server.url}missing`, 5_000)).rejects.toThrow("Failed to fetch session data: Not Found")
   } finally {
     server.stop(true)
   }
