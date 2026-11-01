@@ -138,7 +138,9 @@ export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, 
 
 /**
  * The one snapshot of a provider's set that gates a target: a known-full snapshot wins
- * (latest reset first), then a balance snapshot, then the first. An expired credit grant
+ * (a known-dead balance first — it releases only on a balance increase, never on a
+ * timer — otherwise latest reset first), then a balance snapshot, then the first.
+ * An expired credit grant
  * never wins over a live snapshot of the same provider — the plan store retains expired
  * grants as history, and letting one gate would make a funded replacement unable to
  * re-admit the provider. Superseded means superseded by ANOTHER plan, though: a plan
@@ -159,10 +161,13 @@ export const gatingSnapshot = (
   )
   const live = snapshots.filter((snapshot) => !expiredGrants.has(snapshot.planID))
   const pool = live.length > 0 ? live : snapshots
-  const full = pool
-    .filter((snapshot) => isKnownFull(snapshot, now, balanceDeadThreshold))
-    .sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
-  return full ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
+  const full = pool.filter((snapshot) => isKnownFull(snapshot, now, balanceDeadThreshold))
+  // A known-dead balance outranks a resetting full window: the balance gate
+  // releases only on a fresh balance increase, while the window's timed gate
+  // would re-admit the credential at reset with the balance still exhausted.
+  const deadBalance = full.find((snapshot) => snapshot.balance === true)
+  const latestFull = full.sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
+  return deadBalance ?? latestFull ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
 }
 
 /** One snapshot per quota window of every plan, in plan then window order. */

@@ -417,4 +417,45 @@ describe("QuotaSnapshot balance classification and gating selection (#1014 fix p
     )
     expect(QuotaSnapshot.gatingSnapshot([balance, requests, live], now)?.planID).toBe("new-grant")
   })
+
+  test("gatingSnapshot prefers a dead balance over a resetting full window", () => {
+    // The same plan's balance is exhausted and its request window is full
+    // with a reset ahead. Latest-reset ordering would gate on the window,
+    // whose timed gate re-admits the credential at reset while the balance
+    // is still exhausted; the dead balance must win, because its gate
+    // releases only on a fresh balance increase.
+    const mixedPlan = { ...creditPlan, id: "mixed-plan" } as ModelPlan.Plan
+    const balance = QuotaSnapshot.derive(
+      {
+        plan: mixedPlan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 2 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    const requests = QuotaSnapshot.derive(
+      {
+        plan: mixedPlan,
+        window: {
+          name: "requests",
+          unit: "requests",
+          limit: 100,
+          windowHours: 5,
+          resetAt: "2026-10-28T00:00:00.000Z",
+        } as ModelPlan.QuotaWindow,
+        totals: totals({ requests: 100 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(balance.remaining).toBe(0)
+    expect(QuotaSnapshot.isKnownFull(balance, now)).toBe(true)
+    expect(QuotaSnapshot.isKnownFull(requests, now)).toBe(true)
+    expect(requests.resetAt).toBe(Date.parse("2026-10-28T00:00:00.000Z"))
+
+    const gating = QuotaSnapshot.gatingSnapshot([requests, balance], now)
+    expect(gating?.planID).toBe("mixed-plan")
+    expect(gating?.balance).toBe(true)
+  })
 })
