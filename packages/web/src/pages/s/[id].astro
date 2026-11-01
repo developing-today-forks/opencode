@@ -1,10 +1,10 @@
 ---
 import { Base64 } from "js-base64"
 import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro"
-import type { Session } from "opencode/session/index"
 import config from "../../../config.mjs"
 import Share from "../../components/Share.tsx"
 import { shareModelParam } from "./_share-model-param"
+import { loadShareData } from "../../lib/share-data"
 
 const apiUrl = import.meta.env.VITE_API_URL || ""
 const ta = Astro.locals.t as ((key: string) => string) & {
@@ -68,11 +68,14 @@ const messages = {
 }
 
 const id = Astro.params.id || ""
-const res = await fetch(`${apiUrl}/share_data?id=${id}`)
-const data = (await res.json()) as {
-  info?: Session.Info
-  messages: Record<string, { role?: string; modelID?: string }>
+const share = await loadShareData(apiUrl, id)
+if (!share.ok) {
+  return new Response(null, {
+    status: share.status,
+    statusText: share.status === 404 ? tx("share.not_found") : share.message,
+  })
 }
+const data = share.data
 
 if (!data.info) {
   return new Response(null, {

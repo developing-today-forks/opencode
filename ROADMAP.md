@@ -39,6 +39,7 @@ The fork adds named route pools, scheduled weights, request telemetry with cost,
 
 | Title                                         | Horizon | Status | Intent                                                                           | Links |
 | --------------------------------------------- | ------- | ------ | -------------------------------------------------------------------------------- | ----- |
+| Generic OpenAI façades on the server          | Now     | shaped | One `/v1/chat/completions` + `/v1/responses` façade on the server; proxy doors retire behind it. | #1146, [design](specs/2026-11-01T04-10-00Z_design_openai-facades.md) |
 | Failover across credentials on 429            | Later   | idea   | Switch to another credential when quota runs out, through `credential.activate`. | #6    |
 | Show authoritative cost in the desktop header | Later   | idea   | Use the models.dev `cost_usd`.                                                   | #7    |
 | Prompt cache use across model pools           | Later   | idea   | Through `compatibility.cacheFormat`.                                             | #9    |
