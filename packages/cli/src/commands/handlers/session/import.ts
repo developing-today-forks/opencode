@@ -9,6 +9,14 @@ import path from "node:path"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 import { ServerConnection } from "../../../services/server-connection"
+import { readBoundedResponseBody } from "../../../util/io"
+
+// 256 MiB, sized from 514 real session exports (triage on #942): median
+// 0.38 MiB, p90 7.55 MiB, 97.9% under 256 MiB — a lower cap (e.g. 5 MiB)
+// would reject 13.2% of legitimate imports, while the ~512 MiB engine
+// string ceiling makes an unbounded response.text() fail with an opaque
+// RangeError just above this.
+export const MAX_SESSION_TRANSFER_BYTES = 256 * 1024 * 1024
 
 export default Runtime.handler(
   Commands.commands.session.commands.import,
@@ -18,7 +26,7 @@ export default Runtime.handler(
         input.file.startsWith("http://") || input.file.startsWith("https://")
           ? fetch(input.file).then((response) => {
               if (!response.ok) throw new Error(`Failed to fetch session data: ${response.statusText}`)
-              return response.text()
+              return readBoundedResponseBody(response, MAX_SESSION_TRANSFER_BYTES)
             })
           : readFile(input.file, "utf8"),
       catch: (cause) =>
