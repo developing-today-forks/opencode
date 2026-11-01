@@ -678,7 +678,7 @@ const credentialQuota = new Map<string, QuotaGateState>()
  * credentialQuota above and this record is only its persistence. */
 const credentialBaselineID = (credentialID: string) => `quota-credential:${credentialID}`
 
-const persistCredentialBalanceHold = (credentialID: string, hold: BalanceHold) =>
+const persistCredentialBalanceHold = (credentialID: string, hold: BalanceHold, providerID: string) =>
   addAdjustment({
     id: credentialBaselineID(credentialID),
     match: `credential:${credentialID}`,
@@ -686,6 +686,7 @@ const persistCredentialBalanceHold = (credentialID: string, hold: BalanceHold) =
     balanceBaseline: hold.benchedBalance,
     ...(hold.grant !== undefined ? { balanceGrant: hold.grant } : {}),
     credentialID,
+    providerID,
     note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
   })
 
@@ -750,7 +751,7 @@ const observeCredentialQuotaState = (
   })
   // Keep the durable baseline in step with the in-memory hold (#1014): written when a hold
   // arms, cleared when one releases, so a restart restores exactly the hold that was live.
-  if (balanceHold) persistCredentialBalanceHold(credentialID, balanceHold)
+  if (balanceHold) persistCredentialBalanceHold(credentialID, balanceHold, target.providerID)
   else if (hold) removeAdjustment(credentialBaselineID(credentialID))
   if (full && !previous?.gated)
     logHealth(
@@ -779,6 +780,17 @@ export const heldCredentialIDs = (providerID: string): string[] => {
   for (const [credentialID, state] of credentialQuota) {
     if (state.target.providerID !== providerID) continue
     if (state.balanceHold !== undefined || state.gated) held.push(credentialID)
+  }
+  // A credential balance hold restored from its durable baseline after a restart has no
+  // in-memory state yet: without discovery here the gate feed only ever observes the
+  // active credential, so the restored hold could never reach its release check and the
+  // exhausted credential stayed re-selectable (#1014). Records name their provider, so
+  // a restored credential is only ever re-fed under its own provider's plans.
+  for (const item of adjustments) {
+    if (item.credentialID === undefined || item.balanceBaseline === undefined) continue
+    if (item.id !== credentialBaselineID(item.credentialID)) continue
+    if (item.providerID !== providerID) continue
+    if (!held.includes(item.credentialID)) held.push(item.credentialID)
   }
   return held
 }
@@ -911,7 +923,7 @@ export const observeQuotaFailure = (
     }
     if (credentialID) {
       credentialQuota.set(credentialID, { snapshot, target, gated: true, balanceHold })
-      persistCredentialBalanceHold(credentialID, balanceHold)
+      persistCredentialBalanceHold(credentialID, balanceHold, target.providerID)
       logHealth(target, "quota-gated", `credential:${credentialID} balance-insufficient`, undefined, credentialID)
       return
     }
@@ -964,7 +976,9 @@ export const credentialQuotaBlocked = (
   now = Date.now(),
 ): { readonly until: number | null } | undefined => {
   const state = credentialQuota.get(credentialID)
-  if (!state) return undefined
+  // No in-memory state but a durable baseline record: the hold survives the restart and
+  // blocks selection (including credential fallback) until a fed snapshot releases it.
+  if (!state) return restoredCredentialHold(credentialID) ? { until: null } : undefined
   if (state.balanceHold) return { until: null }
   if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)) {
     state.gated = true
@@ -1380,6 +1394,10 @@ export interface Adjustment {
    * credential the baseline belongs to. Such records persist a credential gate across
    * restarts; they are never selection skips (their `match` names the credential). */
   readonly credentialID?: string
+  /** Set on a credential's durable balance-baseline record: the provider the credential
+   * serves. Held-credential discovery is per provider, and a restored record whose
+   * credential is no longer active can only be re-fed under its own provider (#1014). */
+  readonly providerID?: string
   /** Set on learned adjustments: the least autonomy a route needs before this one applies to it. Unset
    * means an operator or agent instruction, which applies wherever a route uses rules. */
   readonly requires?: ModelRouteAutonomy.Level

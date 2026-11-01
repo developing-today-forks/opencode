@@ -584,4 +584,46 @@ describe("ModelRoute balance-hold grants + credential restart baseline (#1014 Co
       ModelRoute.activeAdjustments(30_000).find((item) => item.id === "quota-credential:cred-persist"),
     ).toBeUndefined()
   })
+
+  test("a restored credential baseline is discovered, blocks before any feed, and releases on a fed increase", () => {
+    ModelRoute.resetHealth()
+    // Simulate a restart where the exhausted credential is no longer the active one: the
+    // durable record remains, the in-memory gate state is gone.
+    ModelRoute.setAdjustments([
+      {
+        id: "quota-credential:cred-restored",
+        match: "credential:cred-restored",
+        action: "skip",
+        note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
+        balanceBaseline: 1,
+        credentialID: "cred-restored",
+        providerID: "opencode-go",
+      },
+    ])
+    // Discovery: the gate feed can find the inactive restored credential under its own
+    // provider (and no other), so its snapshots keep reaching the release check.
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual(["cred-restored"])
+    expect(ModelRoute.heldCredentialIDs("cline-pass")).toEqual([])
+    // Enforcement: fallback selection sees the hold even before any feed re-arms it.
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 10_000)).toEqual({ until: null })
+
+    const credBalance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    // A fed read with no increase re-arms the hold in memory and keeps it.
+    ModelRoute.observeCredentialQuota(target, "cred-restored", { ...credBalance, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 20_000)).toEqual({ until: null })
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual(["cred-restored"])
+
+    // A genuine increase releases, and discovery and the durable record go with the hold.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-restored",
+      { ...credBalance, remaining: 1.01, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 30_000)).toBeUndefined()
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual([])
+    expect(
+      ModelRoute.activeAdjustments(30_000).find((item) => item.id === "quota-credential:cred-restored"),
+    ).toBeUndefined()
+  })
 })
