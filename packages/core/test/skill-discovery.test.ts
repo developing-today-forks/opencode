@@ -5,6 +5,7 @@ import { describe, expect } from "bun:test"
 import { NodeHttpServer } from "@effect/platform-node"
 import { Effect } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
+import { Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Global } from "@opencode/util/global"
 import { SkillDiscovery } from "@opencode/core/skill/discovery"
@@ -16,8 +17,9 @@ const fixture = Effect.gen(function* () {
   const state: {
     skills: unknown[]
     files: Record<string, string>
+    responses: Record<string, HttpServerResponse.HttpServerResponse>
     requests: string[]
-  } = { skills: [], files: {}, requests: [] }
+  } = { skills: [], files: {}, responses: {}, requests: [] }
   const server = yield* NodeHttpServer.make(createServer, { host: "127.0.0.1", port: 0 })
   const base = new URL("/catalog/", HttpServer.formatAddress(server.address)).href
   yield* server.serve(
@@ -25,6 +27,7 @@ const fixture = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest
       const url = new URL(request.url, base)
       state.requests.push(url.href)
+      if (url.pathname !== "/catalog/index.json" && state.responses[url.pathname]) return state.responses[url.pathname]
       const body =
         url.pathname === "/catalog/index.json" ? JSON.stringify({ skills: state.skills }) : state.files[url.pathname]
       return HttpServerResponse.text(body ?? "Not Found", { status: body === undefined ? 404 : 200 })
@@ -33,10 +36,15 @@ const fixture = Effect.gen(function* () {
   return {
     cache: tmp.path,
     base,
-    pull: (skills: unknown[], files: Record<string, string> = {}) =>
+    pull: (
+      skills: unknown[],
+      files: Record<string, string> = {},
+      responses: Record<string, HttpServerResponse.HttpServerResponse> = {},
+    ) =>
       Effect.gen(function* () {
         state.skills = skills
         state.files = files
+        state.responses = responses
         state.requests = []
         // Rebuild per pull so repeated calls exercise the disk cache, not a shared service.
         const directories = yield* Effect.gen(function* () {
@@ -149,6 +157,35 @@ describe("SkillDiscovery.pull", () => {
       })
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# New")
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "old.md")).exists())).toBe(false)
+    }),
+  )
+
+  it.live(
+    "rejects skill files over the size cap, declared or streamed",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const skills = [{ name: "deploy", files: ["SKILL.md"] }]
+      // The test server always sends the true content-length, so an actually-oversized
+      // body is what pins the declared-size pre-check here; the chunked stream below
+      // (no declared length) pins the per-chunk bound.
+      const declared = yield* catalog.pull(skills, {
+        "/catalog/deploy/SKILL.md": "x".repeat(SkillDiscovery.MAX_SKILL_FILE_BYTES + 1),
+      })
+      expect(declared.directories).toEqual([])
+      expect(declared.requests).toContain(`${catalog.base}deploy/SKILL.md`)
+
+      const streamed = yield* catalog.pull(
+        skills,
+        {},
+        {
+          "/catalog/deploy/SKILL.md": HttpServerResponse.stream(
+            Stream.make(new Uint8Array(SkillDiscovery.MAX_SKILL_FILE_BYTES + 1)),
+            { contentType: "text/markdown" },
+          ),
+        },
+      )
+      expect(streamed.directories).toEqual([])
+      expect(streamed.requests).toContain(`${catalog.base}deploy/SKILL.md`)
     }),
   )
 })

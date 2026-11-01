@@ -9,9 +9,14 @@ import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { which } from "../util/which.js"
+import { collectBoundedResponseBody } from "../tool/http-body.js"
 
 export namespace RipgrepBinary {
   const VERSION = "15.1.0"
+  // Cap on the downloaded release archive: published ripgrep archives are a few MiB, so 32 MiB leaves
+  // generous headroom across platforms and versions while keeping a wrong/oversized body from being
+  // buffered whole and handed to the extractor.
+  const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
   const PLATFORM = {
     "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
     "arm64-linux": { platform: "aarch64-unknown-linux-gnu", extension: "tar.gz" },
@@ -104,9 +109,18 @@ export namespace RipgrepBinary {
             yield* Effect.logInfo("downloading ripgrep", { url })
             yield* fs.ensureDir(global.bin).pipe(Effect.orDie)
             const bytes = yield* HttpClientRequest.get(url).pipe(
-              http.execute,
-              Effect.flatMap((response) => response.arrayBuffer),
+              HttpClient.withScope(http).execute,
+              Effect.flatMap((response) =>
+                collectBoundedResponseBody(
+                  response,
+                  MAX_ARCHIVE_BYTES,
+                  () => new Error(`ripgrep archive too large (exceeds ${MAX_ARCHIVE_BYTES} byte limit): ${url}`),
+                ),
+              ),
               Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+              // Scoped (withScope above): a declared over-cap rejection aborts the
+              // response instead of leaving the download running until GC.
+              Effect.scoped,
             )
             if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
 
