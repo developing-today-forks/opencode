@@ -1,5 +1,15 @@
-import { describe, expect } from "bun:test"
-import { Effect } from "effect"
+import { describe, expect, test } from "bun:test"
+import { DateTime, Effect } from "effect"
+import { mkdtemp, mkdir, rm, writeFile } from "fs/promises"
+import os from "os"
+import path from "path"
+import { Directory, type Entry } from "@opencode/schema/config"
+import { Money } from "@opencode/schema/money"
+import { ConfigAgentDocuments } from "@opencode/core/config/agent-documents"
+import { NotFoundError } from "@opencode/core/session"
+import { SessionSchema } from "@opencode/core/session/schema"
+import { SubagentDepth } from "@opencode/core/session/subagent-depth"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Agent } from "@opencode/core/agent"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -274,4 +284,85 @@ describe("Session model governance", () => {
       expect(other.model?.id).toBe(Model.ID.make("b"))
     }),
   )
+})
+
+describe("Markdown-defined agents in governance (#1107)", () => {
+  test("a Markdown-defined agent is governed through directory expansion", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "opencode-governance-"))
+    try {
+      await mkdir(path.join(root, "agents"), { recursive: true })
+      await writeFile(
+        path.join(root, "agents", "pinned.md"),
+        ["---", "model: test/pinned", "excluded_models:", "  - test/denied", "max_depth: 1", "---", "Pinned agent."].join(
+          "\n",
+        ),
+      )
+      const entries: Entry[] = [new Directory({ type: "directory", path: AbsolutePath.make(root) })]
+      // The governance definition layer sees nothing in a raw directory entry:
+      // directory expansion is the seam that makes Markdown agents visible.
+      expect(ModelGovernance.agentDefinitions(entries).size).toBe(0)
+
+      const info = (
+        id: string,
+        options: { parentID?: string; agent?: string } = {},
+      ): SessionSchema.Info =>
+        SessionSchema.Info.make({
+          id: SessionSchema.ID.make(id),
+          parentID: options.parentID ? SessionSchema.ID.make(options.parentID) : undefined,
+          projectID: Project.ID.global,
+          agent: options.agent ? Agent.ID.make(options.agent) : undefined,
+          cost: Money.USD.zero,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+          location,
+        })
+      const parent = info("ses_parent")
+      const pinnedSession = info("ses_pinned", { agent: "pinned" })
+      const child = info("ses_child", { parentID: "ses_pinned" })
+      const byID = new Map([parent, pinnedSession, child].map((session) => [session.id, session]))
+      const sessions = {
+        get: (sessionID: SessionSchema.ID) => {
+          const session = byID.get(sessionID)
+          return session ? Effect.succeed(session) : Effect.fail(new NotFoundError({ sessionID }))
+        },
+      }
+
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const fs = yield* FSUtil.Service
+          const expanded = yield* ConfigAgentDocuments.expandEntries(fs, entries)
+          const definitions = ModelGovernance.agentDefinitions(expanded)
+          const checked = ModelGovernance.checkedModel(expanded, { parent, agent: Agent.ID.make("pinned") })
+          const denied = yield* ModelGovernance.assertAllowed(
+            sessions,
+            { entries: () => Effect.succeed(expanded) },
+            { parent, agent: Agent.ID.make("pinned"), model: model("denied") },
+          ).pipe(Effect.flip)
+          const depthError = yield* SubagentDepth.assertWithinLimit(
+            sessions,
+            { entries: () => Effect.succeed(entries) },
+            child,
+            fs,
+          ).pipe(Effect.flip)
+          return { definitions, checked, denied, depthError }
+        }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))),
+      )
+
+      const pinned = result.definitions.get("pinned")
+      expect(pinned?.model?.providerID).toBe("test")
+      expect(pinned?.model?.id).toBe("pinned")
+      expect(pinned?.excludedModels).toEqual(["test/denied"])
+      expect(pinned?.maxDepth).toBe(1)
+      // A model-less child of the Markdown agent runs its pinned default.
+      expect(result.checked?.providerID).toBe("test")
+      expect(result.checked?.id).toBe("pinned")
+      // The Markdown agent's own excluded_models bind its model choice.
+      expect(result.denied).toBeInstanceOf(ModelGovernance.DeniedError)
+      // And its max_depth binds launches below a session it runs.
+      expect(result.depthError).toBeInstanceOf(SubagentDepth.LimitError)
+      expect((result.depthError as SubagentDepth.LimitError).message).toContain("max_depth")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
