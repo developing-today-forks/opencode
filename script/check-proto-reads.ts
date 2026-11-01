@@ -26,7 +26,7 @@
  *   bun run script/check-proto-reads.ts   # exit 1 listing unlisted/stale hits
  */
 import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative, sep } from "node:path"
 
 export const SCAN_ROOT = "packages/core/src"
 export const ALLOWLIST_PATH = "script/check-proto-reads.allowlist.txt"
@@ -93,12 +93,12 @@ export const staleEntries = (hits: Hit[], allowlist: Map<string, string[]>) => {
   return stale
 }
 
-function collect(root: string, dir: string, hits: Hit[]) {
+export function collect(root: string, dir: string, hits: Hit[]) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collect(root, path, hits)
     else if (entry.name.endsWith(".ts"))
-      hits.push(...scanSource(path.slice(root.length + 1), readFileSync(path, "utf8")))
+      hits.push(...scanSource(relative(root, path).split(sep).join("/"), readFileSync(path, "utf8")))
   }
 }
 

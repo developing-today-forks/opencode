@@ -51,7 +51,7 @@
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
  */
 import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative, sep } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
   "packages/ai/src",
@@ -179,7 +179,7 @@ export function collect(root: string, dir: string, hits: Hit[]) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collect(root, path, hits)
     else if (isScannedFile(entry.name))
-      hits.push(...scanSource(path.slice(root.length + 1), readFileSync(path, "utf8")))
+      hits.push(...scanSource(relative(root, path).split(sep).join("/"), readFileSync(path, "utf8")))
   }
 }
 
