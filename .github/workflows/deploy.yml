@@ -8,9 +8,7 @@ name: deploy
 on:
   push:
     branches:
-      - dev
-      - production
-      - beta
+      - main
   workflow_dispatch:
 
 concurrency:
