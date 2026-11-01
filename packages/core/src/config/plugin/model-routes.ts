@@ -524,7 +524,7 @@ export function expand(
     trail: ReadonlySet<string>,
     inheritedCacheFormat: CacheFormat | undefined,
     inheritedLimit: number | undefined,
-    override?: { route: ConfigModelRoutes.Route; providerRoute: string },
+    override?: { route: ConfigModelRoutes.Route; providerRoute: string; keepEmpty?: boolean },
   ): number | undefined => {
     if (trail.has(routeID)) return
     const current = override?.route ?? routes.get(routeID)
@@ -613,6 +613,30 @@ export function expand(
                 weights: Object.fromEntries(
                   Object.entries(providerRoute.weights).map(([member, weight]) => [`${member}/${modelID}`, weight]),
                 ),
+                ...(current.autonomy ? { autonomy: current.autonomy } : {}),
+              } as unknown as ConfigModelRoutes.Route,
+            },
+          )
+          if (group !== undefined) attach({ node: group, ...(gate ? { gate } : {}) }, `${ref.providerID}/${ref.id}`)
+        }
+        if (matched.length === 0) {
+          // No member offers the model: keep the group in the tree as a leafless node so the
+          // decision layer can name the seat in its excluded list with a reason, instead of
+          // the seat vanishing without a trace (the silence that hid the provider-routes
+          // collapse in production). The node carries no leaves, so it is never a candidate
+          // and never changes what a route can serve.
+          const group = visit(
+            String(ref.providerID),
+            ref.variant ?? inheritedVariant,
+            nextTrail,
+            spec.cache_format ?? current.cache_format ?? inheritedCacheFormat,
+            ceiling,
+            {
+              providerRoute: String(ref.providerID),
+              keepEmpty: true,
+              route: {
+                targets: [],
+                selection: providerRoute.selection,
                 ...(current.autonomy ? { autonomy: current.autonomy } : {}),
               } as unknown as ConfigModelRoutes.Route,
             },
@@ -725,7 +749,7 @@ export function expand(
         }
       }
     }
-    return node.children.length > 0 ? nodeIndex : undefined
+    return node.children.length > 0 || override?.keepEmpty ? nodeIndex : undefined
   }
 
   visit(id, undefined, new Set(), undefined, undefined)

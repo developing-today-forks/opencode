@@ -955,3 +955,44 @@ describe("model route cache formats", () => {
     })
   })
 })
+
+describe("provider routes and route settings survive normalization", () => {
+  test("experimental.provider_routes reaches the decoded config (the 2026-11-01 production collapse shape)", () => {
+    const value = decoded({
+      provider: {
+        openai: {
+          models: {
+            "gpt-6-luna": { limit: { context: 1050000, output: 128000 } },
+            "gpt-6.1-terra": { limit: { context: 1050000, output: 128000 } },
+            "gpt-6.1-sol": { limit: { context: 1050000, output: 128000 } },
+          },
+        },
+        "openai.alternate": { instanceOf: "openai", name: "OpenAI Alternate (Student - popesdrew)" },
+      },
+      experimental: {
+        provider_routes: {
+          "openai-plan": { providers: ["openai.alternate", "openai"], selection: "ordered" },
+        },
+        model_routes: {
+          "luna-plan": {
+            targets: ["openai-plan/gpt-6-luna"],
+            selection: "round-robin",
+            autonomy: "rules",
+            weights: { "openai-plan/gpt-6-luna": 2.5 },
+          },
+        },
+      },
+    })
+    const group = value.experimental?.provider_routes?.["openai-plan"]
+    expect(group?.providers).toEqual(["openai.alternate", "openai"])
+    expect(group?.selection).toBe("ordered")
+    expect(value.experimental?.model_routes?.["luna-plan"]?.targets).toHaveLength(1)
+  })
+
+  test("experimental.model_route_settings reaches the decoded config", () => {
+    const value = decoded({
+      experimental: { model_route_settings: { bench: { multiplier: 3 } } },
+    })
+    expect(value.experimental?.model_route_settings?.bench?.multiplier).toBe(3)
+  })
+})
