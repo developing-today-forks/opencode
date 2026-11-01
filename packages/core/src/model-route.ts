@@ -1,6 +1,7 @@
 export * as ModelRoute from "./model-route.js"
 
 import { Model } from "@opencode/schema/model"
+import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
 import { Schema } from "effect"
@@ -89,7 +90,7 @@ const WeightRule = Schema.Struct({
 export type WeightRule = typeof WeightRule.Type
 
 /** An eligibility gate on a child position, resolved at config load from a named window in
- * experimental.model_route_windows. The child is a candidate only while the window is active, or
+ * experimental.routes.windows. The child is a candidate only while the window is active, or
  * only while it is not when `invert` is set. A gate only ever removes a candidate: quota demotion,
  * budgets and health still apply to a gated-in child exactly as before. */
 const Gate = Schema.Struct({
@@ -109,7 +110,7 @@ export const gateOpen = (gate: Gate | undefined, now = Date.now()): boolean =>
 const Node = Schema.Struct({
   /** Route id at this point in the hierarchy. For a provider-route group, the provider route id. */
   routeID: Schema.String.pipe(optional),
-  /** Set on a group that resolves a provider route (experimental.provider_routes):
+  /** Set on a group that resolves a provider route (experimental.routes.providers):
    * the provider route's id. The group's children are the members' concrete leaves for the
    * one model the group serves, and its decision is recorded under this id. */
   providerRoute: Schema.String.pipe(optional),
@@ -160,12 +161,12 @@ const Definition = Schema.Struct({
       context: Schema.Finite.pipe(optional),
     }),
   ).pipe(optional),
-  /** Weight changes in force across every route, from experimental.model_route_schedules. */
+  /** Weight changes in force across every route, from experimental.routes.schedules. */
   schedules: Schema.Array(WeightRule).pipe(optional),
   nodes: Schema.Array(Node),
 })
 
-/** A provider route, validated at config load from experimental.provider_routes: a
+/** A provider route, validated at config load from experimental.routes.providers: a
  * selection over concrete providers. Expansion turns a `<provider-route>/<model>` target into a
  * group node over the members' concrete leaves for that model, so selection, health and
  * decisions treat it exactly like a nested route whose leaves differ only by provider. */
@@ -173,6 +174,14 @@ export interface ProviderRoute {
   readonly providers: readonly string[]
   readonly selection: "ordered" | "round-robin" | "weighted"
   readonly weights: Readonly<Record<string, number>>
+  /** Per-member window gates keyed by provider id (#1140): a member is a candidate only
+   * while its named window allows it — the provider-granularity counterpart of a
+   * model-route target's window gate. */
+  readonly windows?: Readonly<Record<string, ConfigModelRoutes.WindowRef>>
+  /** The provider route's own weight schedules (#1140), in the model-route Schedule
+   * shape: targets are `provider/model` patterns matched against the concrete leaves
+   * this route expands to. */
+  readonly schedules?: readonly ConfigModelRoutes.Schedule[]
 }
 
 /** A concrete provider/model a route sends requests to. */
@@ -636,7 +645,7 @@ export const configure = (
   }
 }
 
-/** The machinery constants as config supplies them (experimental.model_route_settings), in
+/** The machinery constants as config supplies them (experimental.routes.settings), in
  * config's own grouping. Every field is optional; an unset field keeps the layer below it.
  * `demotion.after` / `demotion.windowMs` and the `escalation` fields land in `Settings`
  * above; the rest land in `Constants` at the end of this file. */
@@ -1999,7 +2008,7 @@ export const hedgeHome = (routeID: string, sessionID: string) => {
 
 /** The rest of the machinery's constants — everything `Settings` above does not already
  * hold — assembled here, after the mechanisms they parameterize, from the named constant at
- * each one. The defaults ARE today's behavior; config (experimental.model_route_settings)
+ * each one. The defaults ARE today's behavior; config (experimental.routes.settings)
  * or configureConstants() replaces a value only where it sets one. Deliberately absent, as
  * invariants rather than knobs: the backoff exponent cap (30 — an overflow guard; 2^30 at a
  * 1ms base already exceeds the 24h bench cap, so the cap always binds first), the health /
@@ -2077,7 +2086,7 @@ export const configureConstants = (next: ConstantsPatch) => {
 }
 
 /** The constants in force: the compiled defaults, then configureConstants(), then config
- * (experimental.model_route_settings), in that order. The config groups are picked field by
+ * (experimental.routes.settings), in that order. The config groups are picked field by
  * field where config's grouping differs from this one: demotion.after / demotion.windowMs
  * and the escalation switch live in `Settings`, not here. */
 export const currentConstants = (): Constants => {
