@@ -53,7 +53,7 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
-    // The route machinery's constants, from experimental.model_route_settings.
+    // The route machinery's constants, from experimental.routes.settings.
     ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
 
     // Scheduled review of the routing history, off unless configured.
@@ -223,7 +223,7 @@ function configuredTuning(entries: readonly Entry[]) {
     .filter((entry): entry is Document => entry.type === "document")
     .reduce<
       ModelRouteTuning.Settings | undefined
-    >((found, entry) => entry.info.experimental?.model_route_tuning ?? found, undefined)
+    >((found, entry) => entry.info.experimental?.routes?.tuning ?? found, undefined)
 }
 
 function configuredLog(entries: readonly Entry[]) {
@@ -231,7 +231,7 @@ function configuredLog(entries: readonly Entry[]) {
     .filter((entry): entry is Document => entry.type === "document")
     .reduce<
       ConfigModelRoutes.Log | undefined
-    >((found, entry) => entry.info.experimental?.model_route_log ?? found, undefined)
+    >((found, entry) => entry.info.experimental?.routes?.log ?? found, undefined)
 }
 
 function configuredSettings(entries: readonly Entry[]) {
@@ -239,7 +239,7 @@ function configuredSettings(entries: readonly Entry[]) {
     .filter((entry): entry is Document => entry.type === "document")
     .reduce<
       ConfigModelRoutes.Settings | undefined
-    >((found, entry) => entry.info.experimental?.model_route_settings ?? found, undefined)
+    >((found, entry) => entry.info.experimental?.routes?.settings ?? found, undefined)
 }
 
 /** The machinery settings in the core's shape: only the fields config actually set, group by
@@ -278,7 +278,7 @@ function configuredRoutes(entries: readonly Entry[]) {
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
-      Object.entries(entry.info.experimental?.model_routes ?? {}).forEach(([id, route]) => routes.set(id, route))
+      Object.entries(entry.info.experimental?.routes?.models ?? {}).forEach(([id, route]) => routes.set(id, route))
     })
   return routes
 }
@@ -286,7 +286,7 @@ function configuredRoutes(entries: readonly Entry[]) {
 function configuredSchedules(entries: readonly Entry[]) {
   return entries
     .filter((entry): entry is Document => entry.type === "document")
-    .flatMap((entry) => entry.info.experimental?.model_route_schedules ?? [])
+    .flatMap((entry) => entry.info.experimental?.routes?.schedules ?? [])
 }
 
 /** A named window that cannot be applied is dropped, but never silently (#734): a typo'd or
@@ -302,13 +302,13 @@ export function configuredWindows(entries: readonly Entry[]) {
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
-      Object.entries(entry.info.experimental?.model_route_windows ?? {}).forEach(([name, window]) => {
+      Object.entries(entry.info.experimental?.routes?.windows ?? {}).forEach(([name, window]) => {
         const read = ModelRouteSchedule.parse(window)
         if (read) {
           parsed.set(name, read)
           return
         }
-        warnDroppedWindow(name, "experimental.model_route_windows", "is defined but cannot be parsed")
+        warnDroppedWindow(name, "experimental.routes.windows", "is defined but cannot be parsed")
       })
     })
   // Second pass: resolve each window's excludeWindows against the full set (its own name is on
@@ -321,7 +321,7 @@ export function configuredWindows(entries: readonly Entry[]) {
       windows.set(name, resolved)
       return
     }
-    warnDroppedWindow(name, "experimental.model_route_windows", "names an unknown or cyclic excludeWindows window")
+    warnDroppedWindow(name, "experimental.routes.windows", "names an unknown or cyclic excludeWindows window")
   })
   return windows
 }
@@ -330,7 +330,7 @@ export function configuredWindows(entries: readonly Entry[]) {
  * as for windows): the warning names the provider and why. */
 const warnDroppedProviderRoute = (id: string, reason: string) =>
   console.warn(
-    `provider route ${JSON.stringify(id)} ${reason} (experimental.provider_routes); it is dropped, not applied`,
+    `provider route ${JSON.stringify(id)} ${reason} (experimental.routes.providers); it is dropped, not applied`,
   )
 
 /** The provider routes config declares, validated against the providers that exist and the
@@ -352,7 +352,7 @@ export function configuredProviderRoutes(
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
-      Object.entries(entry.info.experimental?.provider_routes ?? {}).forEach(([id, provider]) =>
+      Object.entries(entry.info.experimental?.routes?.providers ?? {}).forEach(([id, provider]) =>
         declared.set(id, provider),
       )
     })
@@ -397,6 +397,8 @@ export function configuredProviderRoutes(
       providers: members,
       selection: provider.selection ?? "ordered",
       weights: provider.weights ?? {},
+      ...(provider.windows ? { windows: provider.windows } : {}),
+      ...(provider.schedules?.length ? { schedules: provider.schedules } : {}),
     })
   })
   return providerRoutes
@@ -608,11 +610,19 @@ export function expand(
                   model: { providerID: member, model: modelID },
                   ...("variants" in spec && spec.variants ? { variants: spec.variants } : {}),
                   ...("defaultVariant" in spec && spec.defaultVariant ? { defaultVariant: spec.defaultVariant } : {}),
+                  // A member's own window gate (#1140): the provider is a candidate only
+                  // while its named window allows it, exactly as a model-route target's
+                  // gate benches that target's provider/model pair.
+                  ...(providerRoute.windows?.[member] ? { window: providerRoute.windows[member] } : {}),
                 })),
                 selection: providerRoute.selection,
                 weights: Object.fromEntries(
                   Object.entries(providerRoute.weights).map(([member, weight]) => [`${member}/${modelID}`, weight]),
                 ),
+                // The provider route's own schedules ride on the group, so they scale
+                // the concrete member leaves exactly as a model route's schedules
+                // scale its targets (#1140).
+                ...(providerRoute.schedules?.length ? { schedules: providerRoute.schedules } : {}),
                 ...(current.autonomy ? { autonomy: current.autonomy } : {}),
               } as unknown as ConfigModelRoutes.Route,
             },

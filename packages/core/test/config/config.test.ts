@@ -997,14 +997,14 @@ describe("Config", () => {
     const migrated = migrateV1({
       experimental: { model_route_tuning: { enabled: true, intervalMinutes: 30, windowHours: 12 } },
     })
-    expect(migrated.experimental?.model_route_tuning).toEqual({ enabled: true, intervalMinutes: 30, windowHours: 12 })
+    expect(migrated.experimental?.routes?.tuning).toEqual({ enabled: true, intervalMinutes: 30, windowHours: 12 })
     expect(migrateV1({ experimental: { model_route_tuning: { intervalMinutes: 0 } } }).experimental).toBeUndefined()
   })
 
   test("keeps the tuner's notes, which the configuration docs describe under model_route_tuning", () => {
     const notes = ["openai/gpt-6-luna: out of quota, back in 3 hours"]
     const migrated = migrateV1({ experimental: { model_route_tuning: { enabled: true, notes } } })
-    expect(migrated.experimental?.model_route_tuning).toEqual({ enabled: true, notes })
+    expect(migrated.experimental?.routes?.tuning).toEqual({ enabled: true, notes })
   })
 
   test("normalizes ordered model routes inside experimental config", () => {
@@ -1032,7 +1032,7 @@ describe("Config", () => {
       },
     })
 
-    expect(migrated.experimental?.model_routes?.["cheap-fast"]).toMatchObject({
+    expect(migrated.experimental?.routes?.models?.["cheap-fast"]).toMatchObject({
       name: "Cheap / fast",
       targets: [
         { providerID: "openai", model: "gpt-6-luna" },
@@ -1040,7 +1040,7 @@ describe("Config", () => {
       ],
       health: { maxResponseTimeMs: 45_000 },
     })
-    expect(migrated.experimental?.model_routes?.["luna-stack"]).toMatchObject({
+    expect(migrated.experimental?.routes?.models?.["luna-stack"]).toMatchObject({
       selection: "weighted",
       weights: { "openai/gpt-6-luna": 3, "anthropic/claude-sonnet-5": 1 },
       targets: [

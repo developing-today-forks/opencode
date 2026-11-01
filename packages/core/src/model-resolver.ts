@@ -666,16 +666,24 @@ export const layer = Layer.effect(
               limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
             const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now) : undefined
-            if (until > now) unavailable.set(index, `cooldown-until:${until}`)
-            else if (credentialUntil > now) unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
+            // Half-open probe (#1123): a bench whose known quota window reset has passed admits
+            // one probe attempt instead of excluding the leaf until the ladder expires. This
+            // admission is tentative — the claim is spent only when selection actually picks
+            // the target, below — so a probe is never consumed by a target the route passed over.
+            const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
+            const credentialProbe =
+              credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
+            else if (credentialUntil > now && !credentialProbe)
+              unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, "user-skip")
             else if (isOverBudget) unavailable.set(index, "soft-budget")
             else if (isOverLimit) unavailable.set(index, "over-limit")
             return (
-              until <= now &&
-              credentialUntil <= now &&
+              (until <= now || targetProbe) &&
+              (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
               (limited <= now || kept) &&
               !isSkipped &&
@@ -712,6 +720,13 @@ export const layer = Layer.effect(
           if (index === undefined) break
           triedTargets.add(index)
           const target = definition.targets[index]
+          // Spend a due bench's probe claim on the target selection actually picked (#1123):
+          // exactly one resolution walks away with it, and its outcome (completed/failed in
+          // the runner) is what ends or renews the bench. Claims on scopes that are not due
+          // — an ordinary eligible target — are refused and change nothing.
+          ModelRoute.claimBenchProbe(target, undefined, now)
+          const probeCredential = credentialByProvider.get(target.providerID)
+          if (probeCredential) ModelRoute.claimBenchProbe(target, probeCredential, now)
           const source = yield* models.get(target.providerID, target.id)
           if (!source?.enabled) continue
           const targetVariants = definition.targetVariants[index]

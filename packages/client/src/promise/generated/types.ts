@@ -370,6 +370,55 @@ export type ConfigModelReasoning =
   | { supported: false }
   | { supported: true; toggle?: boolean; effort?: Array<string>; budget?: { min?: number; max?: number } }
 
+export type ConfigModelRouteProviderRoutes = {
+  [x: string]: {
+    providers: Array<string>
+    selection?: "ordered" | "round-robin" | "weighted"
+    weights?: { [x: string]: number }
+    windows?: { [x: string]: string | { name: string; invert?: boolean } }
+    schedules?: Array<{
+      id?: string
+      targets?: Array<string>
+      when:
+        | {
+            daysOfWeek?: Array<
+              | "sun"
+              | "sunday"
+              | "mon"
+              | "monday"
+              | "tue"
+              | "tuesday"
+              | "tues"
+              | "wed"
+              | "wednesday"
+              | "thu"
+              | "thursday"
+              | "thur"
+              | "thurs"
+              | "fri"
+              | "friday"
+              | "sat"
+              | "saturday"
+              | number
+            >
+            daysOfMonth?: Array<-1 | number>
+            dates?: Array<string>
+            excludeDates?: Array<string>
+            excludeWindows?: Array<string>
+            start?: string
+            end?: string
+            timezone?: string
+            from?: number
+            until?: number
+          }
+        | string
+      factor?: number
+      weight?: number
+      note?: string
+    }>
+  }
+}
+
 export type ConfigModelRouteWindows = {
   [x: string]: {
     daysOfWeek?: Array<
@@ -393,6 +442,9 @@ export type ConfigModelRouteWindows = {
       | number
     >
     daysOfMonth?: Array<-1 | number>
+    dates?: Array<string>
+    excludeDates?: Array<string>
+    excludeWindows?: Array<string>
     start?: string
     end?: string
     timezone?: string
@@ -2198,6 +2250,9 @@ export type ConfigModelRoutes = {
               | number
             >
             daysOfMonth?: Array<-1 | number>
+            dates?: Array<string>
+            excludeDates?: Array<string>
+            excludeWindows?: Array<string>
             start?: string
             end?: string
             timezone?: string
@@ -2646,6 +2701,8 @@ export type ConfigEntry =
             | {
                 tier?: string
                 url?: string
+                sha256?: string
+                size?: number
                 path?: string
                 pooling?: "last" | "mean" | "cls"
                 query?: string
@@ -2723,7 +2780,73 @@ export type ConfigEntry =
             resource: string
             effect: "allow" | "deny"
           }>
+          routes?: {
+            models?: ConfigModelRoutes
+            providers?: ConfigModelRouteProviderRoutes
+            schedules?: Array<{
+              id?: string
+              providers?: Array<string>
+              models?: Array<string>
+              targets?: Array<string>
+              routes?: Array<string>
+              when:
+                | {
+                    daysOfWeek?: Array<
+                      | "sun"
+                      | "sunday"
+                      | "mon"
+                      | "monday"
+                      | "tue"
+                      | "tuesday"
+                      | "tues"
+                      | "wed"
+                      | "wednesday"
+                      | "thu"
+                      | "thursday"
+                      | "thur"
+                      | "thurs"
+                      | "fri"
+                      | "friday"
+                      | "sat"
+                      | "saturday"
+                      | number
+                    >
+                    daysOfMonth?: Array<-1 | number>
+                    dates?: Array<string>
+                    excludeDates?: Array<string>
+                    excludeWindows?: Array<string>
+                    start?: string
+                    end?: string
+                    timezone?: string
+                    from?: number
+                    until?: number
+                  }
+                | string
+              factor?: number
+              weight?: number
+              note?: string
+            }>
+            windows?: ConfigModelRouteWindows
+            tuning?: { enabled?: boolean; intervalMinutes?: number; windowHours?: number; notes?: Array<string> }
+            log?: { captureErrorBodies?: boolean }
+            settings?: {
+              bench?: {
+                maxCooldownMs?: number
+                multiplier?: number
+                retryAfterMinMs?: number
+                cooldownCapMs?: number
+                quotaCooldownCapMs?: number
+              }
+              demotion?: { after?: number; windowMs?: number; factor?: number }
+              quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number }
+              escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
+              network?: { windowMs?: number; providers?: number; providerModels?: number }
+              continuity?: { hedgeRequests?: number }
+              overrides?: { preferredFactor?: number }
+            }
+          }
           model_routes?: ConfigModelRoutes
+          provider_routes?: ConfigModelRouteProviderRoutes
           model_route_schedules?: Array<{
             id?: string
             providers?: Array<string>
@@ -2753,6 +2876,9 @@ export type ConfigEntry =
                     | number
                   >
                   daysOfMonth?: Array<-1 | number>
+                  dates?: Array<string>
+                  excludeDates?: Array<string>
+                  excludeWindows?: Array<string>
                   start?: string
                   end?: string
                   timezone?: string
@@ -2772,6 +2898,21 @@ export type ConfigEntry =
             notes?: Array<string>
           }
           model_route_log?: { captureErrorBodies?: boolean }
+          model_route_settings?: {
+            bench?: {
+              maxCooldownMs?: number
+              multiplier?: number
+              retryAfterMinMs?: number
+              cooldownCapMs?: number
+              quotaCooldownCapMs?: number
+            }
+            demotion?: { after?: number; windowMs?: number; factor?: number }
+            quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number }
+            escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
+            network?: { windowMs?: number; providers?: number; providerModels?: number }
+            continuity?: { hedgeRequests?: number }
+            overrides?: { preferredFactor?: number }
+          }
         }
       }
     }

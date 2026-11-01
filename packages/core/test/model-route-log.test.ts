@@ -129,6 +129,7 @@ describe("per-pool history", () => {
       expect(decisions).toEqual([
         expect.objectContaining({
           routeID: "pool-cheap",
+          selection: "weighted",
           candidates: ["openai/gpt-6-luna", "azure/gpt-6-luna"],
           chosen: "openai/gpt-6-luna",
           reason: "drawn",

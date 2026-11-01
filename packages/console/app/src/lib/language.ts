@@ -277,15 +277,22 @@ export function detectFromAcceptLanguage(header: string | null) {
         .slice(1)
         .find((x) => x.startsWith("q="))
         ?.slice(2)
+      const parsed = q ? Number.parseFloat(q) : 1
       return {
         lang,
-        q: q ? Number.parseFloat(q) : 1,
+        // A malformed q value sorts last instead of poisoning the
+        // comparator with NaN (#1302).
+        q: Number.isFinite(parsed) ? parsed : 0,
+        // An explicit q=0 (or negative) is a refusal, not a low
+        // preference: the language is not offered at all (#1309). A
+        // malformed q is not a refusal — it stays a last-resort offer.
+        refused: q !== undefined && Number.isFinite(parsed) && parsed <= 0,
       }
     })
     .sort((a, b) => b.q - a.q)
 
   for (const item of items) {
-    if (!item.lang || item.lang === "*") continue
+    if (!item.lang || item.lang === "*" || item.refused) continue
     const locale = match(item.lang)
     if (locale) return locale
   }

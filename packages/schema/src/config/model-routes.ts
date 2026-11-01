@@ -19,6 +19,19 @@ const LongDurationMs = PositiveInt.check(Schema.isLessThanOrEqualTo(7_776_000_00
  * The match cannot hold a colon, so the first colon is the separator. */
 export const NOTE_LINE = /^[^:\r\n]*[^\s:][^:\r\n]*:[^\r\n]*\S[^\r\n]*$/
 
+/** A reference to a named window in experimental.routes.windows: the name alone, or
+ * `{ "name": ..., "invert": true }` for eligibility only while the window is NOT active.
+ * Shared by model-route targets and provider-route members so a window gate means the
+ * same thing at provider, model, pair and route granularity in both route kinds (#1140). */
+export const WindowRef = Schema.Union([
+  Schema.String,
+  Schema.Struct({
+    name: Schema.String,
+    invert: Schema.Boolean.pipe(optional),
+  }),
+])
+export type WindowRef = typeof WindowRef.Type
+
 /** An ordered model target: either `provider/model`, `provider/model#variant`, or an object with
  * per-target variant defaults and remaps. A target whose provider is `*` is a door-set target
  * (#637): it runs its model on every door (provider) whose catalog lists the model, minus the
@@ -56,18 +69,10 @@ const TargetObject = Schema.Struct({
     })
     .pipe(optional),
   cache_format: CacheFormat.pipe(optional),
-  window: Schema.Union([
-    Schema.String,
-    Schema.Struct({
-      name: Schema.String,
-      invert: Schema.Boolean.pipe(optional),
-    }),
-  ])
-    .annotate({
-      description:
-        'Eligibility gate: the name of a window defined in experimental.model_route_windows, or { "name": ..., "invert": true }. The target is only in the route while the named window is active, or while it is not active when inverted — e.g. a DeepSeek target gated on the inverse of "deepseek-peak" is a candidate off-peak only, and the same target gated on "deepseek-peak" itself is the peak fallback. An unknown window name drops the gate, leaving the target always eligible.',
-    })
-    .pipe(optional),
+  window: WindowRef.annotate({
+    description:
+      'Eligibility gate: the name of a window defined in experimental.routes.windows, or { "name": ..., "invert": true }. The target is only in the route while the named window is active, or while it is not active when inverted — e.g. a DeepSeek target gated on the inverse of "deepseek-peak" is a candidate off-peak only, and the same target gated on "deepseek-peak" itself is the peak fallback. An unknown window name drops the gate, leaving the target always eligible.',
+  }).pipe(optional),
 })
 export const Target = Schema.Union([ConfigModel.Selection, TargetObject]).annotate({
   identifier: "Config.ModelRoute.Target",
@@ -179,7 +184,7 @@ export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
   excludeWindows: Schema.Array(WindowName)
     .annotate({
       description:
-        "Names of windows defined in experimental.model_route_windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion.",
+        "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion.",
     })
     .pipe(optional),
   start: Schema.String.annotate({
@@ -201,10 +206,10 @@ export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
 }) {}
 
 /** A schedule's window: inline, or the name of a window defined once in
- * experimental.model_route_windows and reused by every rule that shares the meter's clock. */
+ * experimental.routes.windows and reused by every rule that shares the meter's clock. */
 const ScheduleWindow = Schema.Union([Window, Schema.String]).annotate({
   description:
-    "When the change is in force: a window object, or the name of a window from experimental.model_route_windows. An unknown name drops the rule.",
+    "When the change is in force: a window object, or the name of a window from experimental.routes.windows. An unknown name drops the rule.",
 })
 
 /** A time-bound weight change inside one route. `factor` scales a target's weight; `weight` replaces
@@ -501,6 +506,18 @@ export class ProviderRoute extends Schema.Class<ProviderRoute>("Config.ModelRout
         'Relative weights keyed by member provider id, e.g. { "openai.alternate": 2, "openai": 1 }. Members without a weight count as 1. In a round-robin provider route a weight is a priority tier; in a weighted one it is a relative ratio; in an ordered one weights rank the failover order.',
     })
     .pipe(optional),
+  windows: Schema.Record(Schema.String, WindowRef)
+    .annotate({
+      description:
+        'Per-member eligibility gates keyed by member provider id: the name of a window defined in experimental.routes.windows, or { "name": ..., "invert": true }. A member is a candidate only while its named window is active (or, inverted, only while it is not) — the provider-granularity counterpart of a model-route target\'s `window` gate, so a provider can be benched by the clock wherever it participates: as a model-route leaf or as a provider-route member (#1140). An unknown window name drops the gate, leaving the member always eligible.',
+    })
+    .pipe(optional),
+  schedules: Schema.Array(Schedule)
+    .annotate({
+      description:
+        "Time-bound weight changes for this provider route's members, in the same shape as a model route's schedules: `targets` are `provider/model` patterns (`*` allowed), so a rule can name a provider (`openai/*`), a model (`*/gpt-6-*`), a provider/model pair, or every member (empty targets). The rules apply to the concrete leaves the provider route expands to, exactly as a model route's schedules apply to its targets.",
+    })
+    .pipe(optional),
 }) {}
 
 /** Named, reusable time windows, defined once and referenced by schedules and target gates.
@@ -509,7 +526,7 @@ export class ProviderRoute extends Schema.Class<ProviderRoute>("Config.ModelRout
 export const Windows = Schema.Record(WindowName, Window).annotate({ identifier: "Config.ModelRoute.Windows" })
 export type Windows = typeof Windows.Type
 
-/** The provider routes defined in experimental.provider_routes, keyed by id. An id that
+/** The provider routes defined in experimental.routes.providers, keyed by id. An id that
  * names a concrete provider, the routes provider, or a configured route is rejected at load:
  * concrete providers always win a `<id>/<model>` reference. */
 export const ProviderRoutes = Schema.Record(RouteID, ProviderRoute).annotate({

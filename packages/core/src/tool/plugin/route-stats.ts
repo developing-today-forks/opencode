@@ -15,7 +15,7 @@ export const name = "route_stats"
 
 export const description = `Read how routed models (opencode-route/*) have actually performed, to explain a routing problem or tune it.
 
-Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; request and token usage; and the adjustments in force.
+Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; the active benches with which leaves are benched, until when, and why (including any known quota reset and probe state); request and token usage; and the adjustments in force.
 It also returns each pool: its configuration, and per member how often it was offered and chosen, how often its new-session draws matched its weight, why it was left out (cooldown, provider limit, budget, user skip, context limit), and its latency, speed, errors and request sizes. Set \`route\` to one pool id to narrow that view. The tuner's notes come back too.
 It lists suggested adjustments derived from that history (a high failure rate, repeated quota errors, unusually slow first output). Set \`apply\` to true to put the suggestions in force; they only lower a target's share or skip it, expire in 30 minutes, and are replaced by the next run. Apply them only when asked to tune routing or when the data clearly shows a problem.`
 
@@ -29,6 +29,7 @@ export const Input = Schema.Struct({
 export type Input = typeof Input.Type
 
 export const Output = Schema.Struct({
+  benches: Schema.Array(Schema.Unknown),
   targets: Schema.Array(Schema.Unknown),
   hedges: Schema.Array(Schema.Unknown),
   predictions: Schema.Array(Schema.Unknown),
@@ -103,6 +104,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
       if (input.route === undefined || id === input.route) pools.set(id, ModelRouteReview.configured(route))
     }
     return {
+      benches: ModelRoute.activeBenches(now),
       targets,
       hedges,
       predictions,
@@ -163,7 +165,7 @@ const describeMember = (member: ModelRouteReview.Member) => {
   parts.push(`offered ${member.offered}, chosen ${member.chosen}`)
   if (member.takeRate !== null)
     parts.push(
-      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, weight promised ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
+      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, expected ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
     )
   if (member.weightLayers)
     parts.push(
@@ -187,6 +189,10 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>, applied: n
   for (const row of report.targets)
     lines.push(
       `${row.providerID}/${row.modelID}: ${row.attempts} attempts, ${row.failures} failed, ${row.timeouts} timed out, first output ${row.avgFirstTokenMs === null ? "n/a" : `${Math.round(row.avgFirstTokenMs)}ms`}, ${row.avgTokensPerSecond === null ? "n/a" : `${row.avgTokensPerSecond.toFixed(1)} tok/s`}${row.cooldownSeconds > 0 ? `, cooling ${row.cooldownSeconds}s` : ""}${row.heldBackSeconds > 0 ? `, held back ${row.heldBackSeconds}s by the provider's rate limit` : ""}${rateLimitText(row.rateLimit)}; used ${row.usedLastDay.requests} requests / ${row.usedLastDay.tokens} tokens in 24h`,
+    )
+  for (const bench of report.benches)
+    lines.push(
+      `benched: ${bench.providerID}/${bench.modelID}${bench.credentialID ? ` credential:${bench.credentialID}` : ""} until ${new Date(bench.until).toISOString()} (${bench.reason}, ${bench.consecutiveFailures} consecutive failures${bench.quotaResetAt !== undefined ? `, quota reset ${new Date(bench.quotaResetAt).toISOString()}` : ""}${bench.probeClaimed ? ", probe in flight" : bench.probeDue ? ", probe due" : ""})`,
     )
   for (const error of report.errors)
     lines.push(
@@ -242,6 +248,7 @@ export const add = (editor: ToolEditor, permission: Permission.Interface, source
         }
         return {
           output: {
+            benches: report.benches,
             targets: report.targets,
             hedges: report.hedges,
             predictions: report.predictions,

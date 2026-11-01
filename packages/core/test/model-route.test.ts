@@ -491,6 +491,128 @@ describe("ModelRoute quota bench reset", () => {
   })
 })
 
+describe("ModelRoute quota bench probe (#1123)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "probe-provider", model: "quota" })
+  const day = 86_400_000
+  const sample = { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }
+
+  const exhaustLadder = (now: number, credentialID?: string) => {
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(target, policy, now + index, { quota: true }, credentialID)
+  }
+
+  const knownFull = (resetAt: number, observedAt: number) => ({
+    planID: "plan",
+    window: "five-hours",
+    providerID: "probe-provider",
+    percent: 100,
+    remaining: 0,
+    resetAt,
+    observedAt,
+    stale: false,
+  })
+
+  test("a reset learned after the bench arms exactly one probe at rollover; probe success unbenched and clears the ladder", () => {
+    const now = 600_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    // The bench is planted before any reset is known: the generic ladder runs to the 24h cap.
+    exhaustLadder(now, "cred-probe")
+    const benchUntil = now + 7 + day
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", now + 7)).toBe(benchUntil)
+
+    // The quota feed then learns the credential's actual window reset, hours before the bench ends.
+    ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+
+    // Route stats surface the active bench with its reason, expiry and known reset.
+    expect(ModelRoute.activeBenches(now + 11)).toEqual([
+      {
+        providerID: "probe-provider",
+        modelID: "quota",
+        credentialID: "cred-probe",
+        until: benchUntil,
+        reason: "quota",
+        consecutiveFailures: 8,
+        quotaResetAt: resetAt,
+        probeDue: false,
+        probeClaimed: false,
+      },
+    ])
+
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt - 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt)).toBe(true)
+    // Exactly one probe: the first claim wins, later claims are refused while it is outstanding,
+    // and ordinary candidacy stays excluded the whole time.
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt)).toBe(false)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt)).toBe(benchUntil)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+
+    // Probe success fully unbenched the credential (the bench had ~19h left) and clears the ladder:
+    // the next quota failure benches at the base again instead of escalating.
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-probe")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBe(0)
+    expect(ModelRoute.activeBenches(resetAt + 1)).toEqual([])
+    ModelRoute.failed(target, policy, resetAt + 2, { quota: true }, "cred-probe")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 2)).toBe(resetAt + 2 + 900_000)
+  })
+
+  test("a failed probe re-benches on the escalated ladder, capped at the next known reset", () => {
+    const now = 700_000_000
+    const resetAt = now + 5 * 3_600_000
+    const nextResetAt = resetAt + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now, "cred-probe-fail")
+    ModelRoute.observeCredentialQuota(target, "cred-probe-fail", knownFull(resetAt, now + 10), now + 10)
+    // The next window's reset becomes known before the probe runs.
+    ModelRoute.observeCredentialQuota(target, "cred-probe-fail", knownFull(nextResetAt, resetAt), resetAt)
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe-fail", resetAt)).toBe(true)
+
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-probe-fail")
+    // Ninth consecutive failure: the ladder alone would cap at 24h; the next known reset bounds it.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe-fail", resetAt + 1)).toBe(nextResetAt)
+    expect(ModelRoute.probeDue(target, "cred-probe-fail", resetAt + 1)).toBe(false)
+    // The re-bench ends AT the next reset, so candidacy returns there without needing a probe.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe-fail", nextResetAt)).toBe(0)
+    // Sibling credentials were never benched or probed.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-other", resetAt + 1)).toBe(0)
+    expect(ModelRoute.probeDue(target, "cred-other", nextResetAt)).toBe(false)
+  })
+
+  test("a target-level quota bench probes at a provider window reset learned after the bench", () => {
+    const now = 800_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(now + 7 + day)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.probeDue(target, undefined, resetAt - 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(false)
+    ModelRoute.completed(target, policy, sample, resetAt + 1)
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
+  })
+
+  test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
+    const now = 900_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
+    ModelRoute.observeCredentialQuota(target, "cred-auth", knownFull(resetAt, now + 1), now + 1)
+    expect(ModelRoute.probeDue(target, "cred-auth", resetAt)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, "cred-auth", resetAt)).toBe(false)
+
+    ModelRoute.resetHealth()
+    exhaustLadder(now, "cred-fallback")
+    ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now + 10)
+    expect(ModelRoute.activeBenches(now + 11)[0]?.quotaResetAt).toBeUndefined()
+    expect(ModelRoute.probeDue(target, "cred-fallback", now + day)).toBe(false)
+  })
+})
+
 describe("ModelRoute budgets", () => {
   const t = ModelRoute.ref({ providerID: "openai", model: "budgeted" })
 

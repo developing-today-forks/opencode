@@ -3,12 +3,39 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { writePluginConfig } from "../src/commands/handlers/plugin/add"
-import { removePluginConfig } from "../src/commands/handlers/plugin/remove"
+import { writePluginConfig, writePluginTempFileExclusive } from "../src/commands/handlers/plugin/add"
+import { removePluginConfig, writeRemoveTempFileExclusive } from "../src/commands/handlers/plugin/remove"
 
 async function mode(file: string) {
   return (await fs.stat(file)).mode & 0o777
 }
+
+describe("plugin config temp creation", () => {
+  for (const [name, writeTemp] of [
+    ["add", writePluginTempFileExclusive],
+    ["remove", writeRemoveTempFileExclusive],
+  ] as const) {
+    test(`${name} temp creation refuses a pre-existing file and leaves it intact`, async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-plugin-config-"))
+      const temporary = path.join(directory, "opencode.json.tmp-fixed")
+      await fs.writeFile(temporary, "sentinel\n")
+
+      await expect(writeTemp(temporary, "replacement", 0o600)).rejects.toThrow()
+
+      expect(await fs.readFile(temporary, "utf8")).toBe("sentinel\n")
+    })
+
+    test(`${name} temp creation writes a fresh file with the requested mode`, async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-plugin-config-"))
+      const temporary = path.join(directory, "opencode.json.tmp-fixed")
+
+      await writeTemp(temporary, "content\n", 0o600)
+
+      expect(await fs.readFile(temporary, "utf8")).toBe("content\n")
+      if (process.platform !== "win32") expect(await mode(temporary)).toBe(0o600)
+    })
+  }
+})
 
 describe("plugin config write", () => {
   test("add creates a fresh config owner-only via temp file and rename", async () => {
