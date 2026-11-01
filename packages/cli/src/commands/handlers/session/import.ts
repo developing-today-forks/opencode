@@ -18,16 +18,28 @@ import { readBoundedResponseBody } from "../../../util/io"
 // RangeError just above this.
 export const MAX_SESSION_TRANSFER_BYTES = 256 * 1024 * 1024
 
+// One deadline covers both the fetch and the bounded body read. A remote
+// import can legitimately move 256 MiB, so the value is sized for a
+// slow-but-real transfer (~3.4 MiB/s floor) rather than the CLI's
+// small-payload precedents (5-30 s): it exists to cut header stalls and
+// slow drips, which never finish at any speed.
+export const SESSION_IMPORT_FETCH_TIMEOUT_MS = 600_000
+
+function fetchRemote(url: string) {
+  const signal = AbortSignal.timeout(SESSION_IMPORT_FETCH_TIMEOUT_MS)
+  return fetch(url, { signal }).then((response) => {
+    if (!response.ok) throw new Error(`Failed to fetch session data: ${response.statusText}`)
+    return readBoundedResponseBody(response, MAX_SESSION_TRANSFER_BYTES, signal)
+  })
+}
+
 export default Runtime.handler(
   Commands.commands.session.commands.import,
   Effect.fn("cli.session.import")(function* (input) {
     const text = yield* Effect.tryPromise({
       try: () =>
         input.file.startsWith("http://") || input.file.startsWith("https://")
-          ? fetch(input.file).then((response) => {
-              if (!response.ok) throw new Error(`Failed to fetch session data: ${response.statusText}`)
-              return readBoundedResponseBody(response, MAX_SESSION_TRANSFER_BYTES)
-            })
+          ? fetchRemote(input.file)
           : readFile(input.file, "utf8"),
       catch: (cause) =>
         new Error(`Failed to read session data: ${cause instanceof Error ? cause.message : String(cause)}`),

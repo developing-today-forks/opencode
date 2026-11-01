@@ -249,6 +249,48 @@ test("readBoundedResponseBody returns a body under the cap and cuts a chunked bo
   )
 })
 
+test("readBoundedResponseBody aborts a stalled body read when the signal fires", async () => {
+  const encoder = new TextEncoder()
+  const stalled = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("first chunk"))
+        // Never enqueues again and never closes: without a deadline this
+        // read waits forever, far under the size cap.
+      },
+    }),
+  )
+  await expect(readBoundedResponseBody(stalled, 1024, AbortSignal.timeout(100))).rejects.toThrow()
+})
+
+test("the import fetch composition cuts a slow-dripping remote body at the deadline", async () => {
+  // Mirrors the session import handler's wiring: one AbortSignal.timeout
+  // deadline is passed to fetch and threaded into readBoundedResponseBody,
+  // so the body phase is bounded by the same deadline as the headers phase.
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("x"))
+            await Bun.sleep(50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    const signal = AbortSignal.timeout(150)
+    const response = await fetch(`${server.url}session.json`, { signal })
+    expect(response.ok).toBe(true)
+    await expect(readBoundedResponseBody(response, 1024, signal)).rejects.toThrow()
+  } finally {
+    server.stop(true)
+  }
+})
+
 test("import rejects a remote body whose declared content-length is over the cap without reading it", async () => {
   // A raw HTTP stub, because Bun.serve rewrites content-length to the real
   // body size: this declares far over the cap and never sends a body, so
