@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-bounded-http"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  SCAN_ROOTS,
+  collect,
+  isScannedFile,
+  parseAllowlist,
+  scanSource,
+  staleEntries,
+  unlistedHits,
+  type Hit,
+} from "./check-bounded-http"
 
 describe("scanSource", () => {
   test("flags the P-A fetch shape, with or without a signal", () => {
@@ -53,6 +65,46 @@ describe("scanSource", () => {
       ["// never call fetch(url) without a signal", "* response.text() buffers the body", "const x = 1"].join("\n"),
     )
     expect(hits).toEqual([])
+  })
+})
+
+describe("services scan roots (#1256)", () => {
+  test("SCAN_ROOTS covers every services/*/src tree", () => {
+    expect(SCAN_ROOTS).toContain("services/changelog/src")
+    expect(SCAN_ROOTS).toContain("services/files/src")
+    expect(SCAN_ROOTS).toContain("services/update/src")
+    expect(SCAN_ROOTS).toContain("services/www/src")
+  })
+
+  test("collect walks a services tree on disk and reports hits under their repo-relative path", () => {
+    const root = mkdtempSync(join(tmpdir(), "bounded-http-collect-"))
+    try {
+      const pages = join(root, "services/www/src/pages")
+      mkdirSync(pages, { recursive: true })
+      writeFileSync(join(pages, "install.astro"), 'const response = await fetch("https://example.com/install")\n')
+      writeFileSync(join(pages, "notes.md"), 'const ignored = await fetch("https://example.com/ignored")\n')
+      const hits: Hit[] = []
+      collect(root, join(root, "services/www/src"), hits)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].file).toBe("services/www/src/pages/install.astro")
+      expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a services/ fixture hit fails the gate until dispositioned", () => {
+    const hits = scanSource(
+      "services/www/src/pages/install.astro",
+      'const response = await fetch("https://example.com/install")',
+    )
+    expect(hits).toHaveLength(1)
+    expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    const allowlist = parseAllowlist(
+      'services/www/src/pages/install.astro :: const response = await fetch("https://example.com/install") :: tracked by #1246\n',
+    )
+    expect(unlistedHits(hits, allowlist)).toEqual([])
+    expect(staleEntries(hits, allowlist)).toEqual([])
   })
 })
 
