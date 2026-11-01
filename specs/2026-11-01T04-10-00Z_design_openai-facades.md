@@ -43,7 +43,8 @@ HTTP surface declared in one new protocol group and one new handler file under
 
 1. Registration in `packages/server/src/routes.ts` / `api.ts` (one group, one handler).
 2. The model-call path of §3 (existing services, no changes to their semantics).
-3. The demotion config wiring of §6 (one `configure` call at config load).
+3. The demotion config wiring of §6 (Location-scoped policy resolution,
+   replacing the module-global `configure` setter).
 
 Nothing in the session runner changes. Upstream merges should conflict, at worst, in
 the registration lines.
@@ -51,8 +52,15 @@ the registration lines.
 ### 2. Façade surface
 
 Base: the existing OpenCode server (same host/port, same `ServerAuth` —
-`packages/server/src/auth.ts`: server password as HTTP Basic or bearer-style API key;
-pairing session tokens accepted anywhere the password is). Tailnet/localhost only for
+`packages/server/src/auth.ts`: server password as HTTP Basic or the `auth_token`
+query parameter; pairing session tokens accepted anywhere the password is).
+Bearer-style API keys are **not** an existing capability: `credentialFromRequest`
+(`packages/server/src/middleware/authorization.ts`) recognizes only the query token
+and Basic, so step 1 (#1147) explicitly includes extracting
+`Authorization: Bearer <password>` in that middleware, covered by
+authenticated-request tests for all three credential forms. OpenAI-shaped clients
+send Bearer by default; without this, the advertised surface rejects them whenever
+a server password is configured. Tailnet/localhost only for
 now; per-caller keys are a stretch goal (§12).
 
 | Endpoint | Behaviour |
@@ -128,11 +136,18 @@ the prior turn's items. Emulation over stateless provider calls:
   *requested* ref/route string), `resolved_model` (concrete ref that served it),
   `request_items` and `response_items` (JSON, the full normalized item list after this
   turn), `usage` totals. One row per response; a chain is a linked list via
-  `previous_response_id` stored on the row.
-- **Chain resolution.** On `previous_response_id`, the façade loads the chain
-  (bounded: at most 64 links, then 400 asking the client to resend full input — the
-  same failure a real Responses server gives for an expired chain), concatenates the
-  stored items with the new input items, and makes one stateless provider call.
+  `previous_response_id` and the chain `depth` (parent depth + 1) stored on the row.
+- **Chain resolution.** The store is cumulative: each row's stored items are the
+  full normalized history *after* that turn, so on `previous_response_id` the
+  façade loads **only the immediately referenced response's row** — never its
+  ancestors. Concatenating ancestor snapshots would repeat every earlier exchange
+  (the second response's snapshot already contains the first), inflating token
+  usage and duplicating tool-call ids. The referenced row's stored items are
+  concatenated with the new input items and one stateless provider call is made.
+  The 64-link bound applies to the chain *depth recorded on the row*, not to rows
+  loaded: a request whose parent depth is already 64 gets a 400 asking the client
+  to resend full input — the same failure a real Responses server gives for an
+  expired chain.
   Function-call outputs are matched to their call items by `call_id` during this
   reconstruction; an unmatched output is a 400, not a silent drop.
 - **TTL / eviction.** Rows expire 24h after creation (configurable, §6); expired rows
@@ -187,9 +202,18 @@ Design: one config surface, both consumers.
   `packages/schema/src/config/experimental.ts` (fields optional; defaults 3 and
   14_400_000 — today's values, so an unconfigured fleet behaves exactly as now).
 - Wiring: the model-routes config plugin
-  (`packages/core/src/config/plugin/model-routes.ts`) passes the parsed values to
-  `ModelRoute.configure({ quota: { demoteAfter: threshold, windowMs: window_ms } })`
-  at load, alongside its existing `ModelRouteLog` wiring.
+  (`packages/core/src/config/plugin/model-routes.ts`) passes the parsed values into
+  the demotion read path at load, alongside its existing `ModelRouteLog` wiring —
+  but **not** through today's `ModelRoute.configure`: that setter mutates a
+  module-global `settings` value (`packages/core/src/model-route.ts`) that every
+  `demoted` call reads, so on a server serving two project Locations with different
+  demotion settings, whichever Location loads last would silently rewrite the
+  other's policy. Model resolution is Location-scoped (root `AGENTS.md`), so this
+  step (#1151) makes the demotion policy Location-scoped too: the parsed values are
+  stored per Location and `demoted` resolves the policy for the target's Location,
+  falling back to the defaults when a Location configures none. The module-global
+  setter is removed, or reduced to the default fallback, in the same change; a
+  two-Location test with divergent thresholds is part of the step's acceptance.
 - Source of truth for counts: the `route_attempt` ledger (durable, shared), not the
   proxy's private SQL and not only the in-process map. Session traffic already lands
   there; façade traffic lands there (§7); the resolver's demotion read is backed by
@@ -308,12 +332,15 @@ The façade must preserve, or explicitly re-home, each behaviour callers depend 
 
 Filed from this design and linked from #1146 (one per step, in order):
 
-1. Façade skeleton: protocol group + handlers + auth + `/v1/models`, chat
+1. Façade skeleton: protocol group + handlers + auth (including Bearer-token
+   extraction in the authorization middleware, §2) + `/v1/models`, chat
    completions non-streaming, concrete refs only. — #1147
 2. Chat completions streaming + route-name models + failover + ledger rows (§7). — #1148
-3. Responses façade: non-streaming + item store + `previous_response_id` (§4). — #1149
+3. Responses façade: non-streaming + item store (cumulative snapshots; a chain
+   loads only the referenced row, §4) + `previous_response_id`. — #1149
 4. Responses streaming grammar (§5). — #1150
-5. Demotion config: schema + `ModelRoute.configure` wiring + ledger-backed counts (§6). — #1151
+5. Demotion config: schema + Location-scoped demotion policy (replacing the
+   module-global `ModelRoute.configure`) + ledger-backed counts (§6). — #1151
 6. Parity test-suite against the live doors (§10 step 1). — #1152
 7. Route-proxy retirement in developing-today/code (§10 step 2) — cross-repo,
    tracked from #1146 per the fleet's one-issue-per-set rule. — #1153
