@@ -3,6 +3,11 @@ import { AwsClient } from "aws4fetch"
 
 let client: AwsClient | undefined
 
+/** Bound on the SES call (#1143): a stalled SES endpoint must reject within this window
+ * instead of pinning the enterprise-form request that awaits it. Matches the sibling
+ * EmailOctopus bound in the same flow. */
+export const SEND_EMAIL_TIMEOUT_MS = 5_000
+
 export async function sendEmail(input: { to: string; subject: string; body: string; replyTo?: string }) {
   client ??= new AwsClient({
     accessKeyId: Resource.AWS_SES_ACCESS_KEY_ID.value,
@@ -10,6 +15,7 @@ export async function sendEmail(input: { to: string; subject: string; body: stri
     region: "us-east-1",
   })
   const res = await client.fetch("https://email.us-east-1.amazonaws.com/v2/email/outbound-emails", {
+    signal: AbortSignal.timeout(SEND_EMAIL_TIMEOUT_MS),
     method: "POST",
     headers: {
       "X-Amz-Target": "SES.SendEmail",
