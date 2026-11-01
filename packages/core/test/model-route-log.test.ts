@@ -995,6 +995,52 @@ describe("credential attempt snapshot restore (#1116)", () => {
   )
 })
 
+describe("quota cooldown reset restore (#1123)", () => {
+  it.live("caps a previously persisted long quota bench at its matching exhausted window reset", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const resetAt = now - 1_000 + 5 * 3_600_000
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 1_000,
+          provider_id: "restore-quota",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-a",
+          until: now + 86_400_000,
+          credential_id: "cred-a",
+        },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "restore-quota",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 2_000,
+          time_ended: now - 1_000,
+          outcome: "failure",
+          quota: {
+            limit: { requests: "100" },
+            remaining: { requests: "0" },
+            reset: { requests: "18000" },
+          },
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restore-quota", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now)).toBe(resetAt)
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+    }),
+  )
+})
+
 describe("rate-limit hold release restore (#870)", () => {
   it.live("a cleared hold stays cleared after a restart", () =>
     Effect.gen(function* () {

@@ -218,6 +218,16 @@ export const windows = (value: Snapshot): Window[] =>
     ]
   })
 
+/** The latest future reset among this fresh snapshot's actually exhausted windows. A nearby
+ * unexhausted window is not evidence of when a quota failure can recover. */
+export const exhaustedWindowResetAt = (value: Snapshot, now: number, maxAgeMs: number): number | undefined => {
+  if (value.at > now || now - value.at > maxAgeMs) return undefined
+  const resets = windows(value).flatMap((window) =>
+    window.remaining <= 0 && window.resetAt !== undefined && window.resetAt > now ? [window.resetAt] : [],
+  )
+  return resets.length > 0 ? Math.max(...resets) : undefined
+}
+
 /**
  * When the provider's own numbers say a target should be left alone until: a window that is empty,
  * or nearly so with a stated reset, holds the target back until it resets. Zero when nothing needs

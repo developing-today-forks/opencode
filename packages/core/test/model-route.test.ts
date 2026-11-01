@@ -341,6 +341,156 @@ describe("ModelRoute failure hints", () => {
   })
 })
 
+describe("ModelRoute quota bench reset", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "reset-provider", model: "quota" })
+  const day = 86_400_000
+
+  const exhaustLadder = (now: number, credentialID?: string) => {
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(target, policy, now + index, { quota: true }, credentialID)
+  }
+
+  test("caps a credential bench at its exhausted window reset, not an unrelated window", () => {
+    const now = 100_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { short: "100", long: "1000" },
+        remaining: { short: "0", long: "100" },
+        reset: { short: "5h", long: "24h" },
+      },
+      now,
+      "cred-a",
+    )
+
+    exhaustLadder(now, "cred-a")
+
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt - 1)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+
+    ModelRoute.completed(target, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, resetAt, "cred-a")
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-a")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt + 1)).toBe(resetAt + 1 + 900_000)
+  })
+
+  test("uses a fresh known-full plan reset but never the reactive fallback as an actual reset", () => {
+    const now = 200_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-plan",
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, "cred-plan", undefined, now)
+    exhaustLadder(now + 1, "cred-plan")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-plan", now + 8)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    exhaustLadder(now)
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now)
+    exhaustLadder(now, "cred-fallback")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-fallback", now + 7)).toBe(now + 7 + day)
+  })
+
+  test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
+    const now = 300_000_000
+    const snapshots = [
+      { at: now, remaining: { requests: "0" } },
+      { at: now, remaining: { requests: "0" }, reset: { requests: "not-a-reset" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "5h" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "1h" } },
+    ]
+
+    for (const snapshot of snapshots) {
+      ModelRoute.resetHealth()
+      ModelRoute.observeRateLimit(target, snapshot, now, "cred-a")
+      exhaustLadder(now, "cred-a")
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(now + 7 + day)
+    }
+  })
+
+  test("does not cap auth or ordinary benches, and retry-after still wins unless the quota window is sooner", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 60_000
+    const spent = {
+      at: now,
+      limit: { requests: "100" },
+      remaining: { requests: "0" },
+      reset: { requests: "5m" },
+    }
+    ModelRoute.observeRateLimit(target, spent, now, "cred-auth")
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-auth", now)).toBe(now + 900_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-ordinary")
+    ModelRoute.failed(target, policy, now, undefined, "cred-ordinary")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-ordinary", now)).toBe(now + 60_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 120_000 }, "cred-retry")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry", now)).toBe(now + 120_000)
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry-long")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 10 * 60_000 }, "cred-retry-long")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry-long", now)).toBe(resetAt)
+  })
+
+  test("a quota bench can expire while an independent provider gate remains active", () => {
+    const now = 500_000_000
+    const resetAt = now + 5 * 60_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { requests: "100" },
+        remaining: { requests: "0" },
+        reset: { requests: "5m" },
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, undefined, now + day, now)
+    exhaustLadder(now)
+
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+    expect(ModelRoute.skipped(target, resetAt + 1)).toBe(true)
+  })
+})
+
 describe("ModelRoute budgets", () => {
   const t = ModelRoute.ref({ providerID: "openai", model: "budgeted" })
 

@@ -376,8 +376,9 @@ export interface FailureHint {
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
  * A stated retry-after is believed as-is and never multiplied; every other class doubles its
  * bench per consecutive failure (auth and quota start from the long bench), capped at a day.
- * The count survives recover() and resets only on a success, so a permanently failing target
- * backs off instead of being retried at full rate forever. */
+ * A quota bench may end sooner at a trustworthy window reset. The count survives recover() and
+ * resets only on a success, so a permanently failing target backs off instead of being retried at
+ * full rate forever. */
 const bench = (
   target: Model.Ref,
   state: { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number },
@@ -385,6 +386,7 @@ const bench = (
   now: number,
   hint?: FailureHint,
   credentialID?: string,
+  quotaResetAt?: number,
 ) => {
   state.samples = []
   state.outcomes = pushOutcome(state.outcomes, false)
@@ -395,13 +397,22 @@ const bench = (
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
       : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
-  state.cooldownUntil = now + cooldown
+  const until = now + cooldown
+  state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
   logHealth(
     target,
     "cooldown-start",
-    `${hint?.retryAfterMs ? "retry-after" : hint?.quota ? "quota" : hint?.auth ? "auth" : "failure"}${
-      credentialID ? ` credential:${credentialID}` : ""
-    }`,
+    `${
+      hint?.quota
+        ? hint.retryAfterMs
+          ? "quota retry-after"
+          : "quota"
+        : hint?.retryAfterMs
+          ? "retry-after"
+          : hint?.auth
+            ? "auth"
+            : "failure"
+    }${credentialID ? ` credential:${credentialID}` : ""}`,
     state.cooldownUntil,
     credentialID,
   )
@@ -448,10 +459,26 @@ export const failed = (
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   if (credentialID) {
-    bench(target, credentialEntry(target, credentialID), policy, now, hint, credentialID)
+    bench(
+      target,
+      credentialEntry(target, credentialID),
+      policy,
+      now,
+      hint,
+      credentialID,
+      hint?.quota ? quotaResetAt(target, credentialID, now) : undefined,
+    )
     return
   }
-  bench(target, entry(target), policy, now, hint)
+  bench(
+    target,
+    entry(target),
+    policy,
+    now,
+    hint,
+    undefined,
+    hint?.quota ? quotaResetAt(target, undefined, now) : undefined,
+  )
 }
 
 /** Counts a request that was given up on for being slow, so a target that keeps losing hedges
@@ -609,14 +636,22 @@ const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
 // (#587); this is only the gate state consumers read. An unknown or stale observation never
 // replaces a known one, so a gated credential is re-admitted only by its reset passing or by a
 // fresher known snapshot below the limit — never by losing the signal.
-const credentialQuota = new Map<string, { snapshot: QuotaSnapshot.Snapshot; target: Model.Ref; gated: boolean }>()
+type QuotaGateState = {
+  snapshot: QuotaSnapshot.Snapshot
+  target: Model.Ref
+  gated: boolean
+  actualResetAt?: number
+  resetObservedAt?: number
+}
+const credentialQuota = new Map<string, QuotaGateState>()
 
 /** Feeds one credential's latest quota snapshot into the gate. */
-export const observeCredentialQuota = (
+const observeCredentialQuotaState = (
   target: Model.Ref,
   credentialID: string,
   snapshot: QuotaSnapshot.Snapshot,
-  now = Date.now(),
+  now: number,
+  resetAtTrusted: boolean,
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -625,7 +660,19 @@ export const observeCredentialQuota = (
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now)
-  credentialQuota.set(credentialID, { snapshot, target, gated: full })
+  const actualResetAt = resetAtTrusted
+    ? snapshot.resetAt ?? undefined
+    : previous?.actualResetAt !== undefined && previous.actualResetAt > now
+      ? previous.actualResetAt
+      : undefined
+  const resetObservedAt = resetAtTrusted ? snapshot.observedAt : previous?.resetObservedAt
+  credentialQuota.set(credentialID, {
+    snapshot,
+    target,
+    gated: full,
+    ...(actualResetAt !== undefined ? { actualResetAt } : {}),
+    ...(resetObservedAt !== undefined ? { resetObservedAt } : {}),
+  })
   if (full && !previous?.gated)
     logHealth(
       target,
@@ -637,7 +684,14 @@ export const observeCredentialQuota = (
   if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
 }
 
-const providerQuota = new Map<string, { snapshot: QuotaSnapshot.Snapshot; target: Model.Ref; gated: boolean }>()
+export const observeCredentialQuota = (
+  target: Model.Ref,
+  credentialID: string,
+  snapshot: QuotaSnapshot.Snapshot,
+  now = Date.now(),
+) => observeCredentialQuotaState(target, credentialID, snapshot, now, true)
+
+const providerQuota = new Map<string, QuotaGateState>()
 
 /** Feeds one provider's latest quota snapshot into the gate (for credential-less providers). */
 export const observeProviderQuota = (
@@ -649,7 +703,13 @@ export const observeProviderQuota = (
   if (previous && !QuotaSnapshot.known(snapshot)) return
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now)
-  providerQuota.set(target.providerID, { snapshot, target, gated: full })
+  providerQuota.set(target.providerID, {
+    snapshot,
+    target,
+    gated: full,
+    ...(snapshot.resetAt !== null ? { actualResetAt: snapshot.resetAt } : {}),
+    resetObservedAt: snapshot.observedAt,
+  })
   if (full) {
     const gate = currentConstants().quotaGate
     const until = Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
@@ -708,7 +768,7 @@ export const observeQuotaFailure = (
   const gate = currentConstants().quotaGate
   const until = Math.min(resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
   if (credentialID) {
-    observeCredentialQuota(
+    observeCredentialQuotaState(
       target,
       credentialID,
       {
@@ -722,6 +782,7 @@ export const observeQuotaFailure = (
         stale: false,
       },
       now,
+      false,
     )
     return
   }
@@ -1054,6 +1115,35 @@ export const limitedUntil = (target: Model.Ref, now = Date.now(), credentialID?:
 /** The latest rate-limit snapshot seen for the target, if any. */
 export const rateLimitOf = (target: Model.Ref, credentialID?: string) =>
   limits.get(credentialID ? credentialKey(target, credentialID) : key(target))?.snapshot
+
+/** A reset usable to cap a quota bench must belong to this target and serving credential, describe an
+ * actually exhausted provider window (not a nearby window), and still be a fresh future reset. Plan
+ * snapshots are provider/credential scoped and already carry their own freshness and full-window checks.
+ * The reactive quota gate's bounded fallback is deliberately not considered a window reset. */
+const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: number): number | undefined => {
+  const resets: number[] = []
+  const rateLimit = rateLimitOf(target, credentialID)
+  const providerReset = rateLimit
+    ? ModelRouteLimits.exhaustedWindowResetAt(rateLimit, now, QuotaSnapshot.DEFAULT_MAX_AGE_MS)
+    : undefined
+  if (providerReset !== undefined) resets.push(providerReset)
+
+  const planQuota = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
+  if (
+    planQuota &&
+    planQuota.target.providerID === target.providerID &&
+    QuotaSnapshot.isKnownFull(planQuota.snapshot, now) &&
+    planQuota.snapshot.observedAt <= now &&
+    planQuota.resetObservedAt !== undefined &&
+    planQuota.resetObservedAt <= now &&
+    now - planQuota.resetObservedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS &&
+    planQuota.actualResetAt !== undefined &&
+    planQuota.actualResetAt > now
+  )
+    resets.push(planQuota.actualResetAt)
+
+  return resets.length > 0 ? Math.max(...resets) : undefined
+}
 
 /** The longest rate-limit hold on a target across its target-level and per-credential entries,
  * for diagnostics (route_stats) that report per target rather than per serving credential (#870). */
@@ -1848,4 +1938,3 @@ export const currentConstants = (): Constants => {
     ...(config.overrides ? { overrides: config.overrides } : {}),
   })
 }
-
