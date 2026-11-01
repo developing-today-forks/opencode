@@ -1,5 +1,5 @@
 import { $ } from "bun"
-import { fetchRegistryVersion } from "./registry"
+import { fetchRegistryVersion } from "./registry.js"
 import semver from "semver"
 import path from "path"
 
