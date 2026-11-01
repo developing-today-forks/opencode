@@ -210,7 +210,7 @@ function routeTargets(
 ): Model.Ref[] {
   if (seen.has(routeID)) return []
   seen.add(routeID)
-  const routes = Config.latest(entries, "experimental")?.model_routes
+  const routes = Config.latest(entries, "experimental")?.routes?.models
   // Own-property lookup: a route named after an Object.prototype member
   // (e.g. "constructor") must read as an unknown route, not the inherited
   // member (#831).

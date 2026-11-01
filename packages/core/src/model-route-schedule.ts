@@ -31,7 +31,7 @@ export interface Window {
   /** Local calendar dates (same entry shape as `dates`) on which the window is never active.
    * Exclusions win over every other field. */
   readonly excludeDates?: readonly string[]
-  /** Names of windows in experimental.model_route_windows; while any of them is active this
+  /** Names of windows in experimental.routes.windows; while any of them is active this
    * window is not. Resolved by `resolveExclusions` at config load, or by `active`'s map argument. */
   readonly excludeWindows?: readonly string[]
   /** The `excludeWindows` references already resolved to window objects (set by
@@ -111,7 +111,7 @@ const dateEntry = (value: unknown): string | undefined => {
 
 export const isDateEntry = (value: unknown): value is string => dateEntry(value) !== undefined
 
-/** A window name, the same pattern the config schema uses for model_route_windows keys. */
+/** A window name, the same pattern the config schema uses for routes.windows keys. */
 const WINDOW_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
 
 export const isDayOfWeek = (value: unknown): value is number | string => dayOfWeek(value) !== undefined

@@ -73,7 +73,7 @@ describe("ConfigNormalize with Aliases", () => {
 
     // 4. Route targets resolved to structured model targets
     const experimental = result.encoded.experimental as Record<string, any>
-    const targets = experimental.model_routes["fast-pool"].targets
+    const targets = experimental.routes.models["fast-pool"].targets
     expect(targets[0]).toEqual({
       providerID: "deepseek",
       model: "deepseek-chat",
@@ -114,7 +114,7 @@ describe("ConfigNormalize with Aliases", () => {
       variant: "high",
     })
 
-    const routes = (result.encoded.experimental as Record<string, any>).model_routes as Record<string, any>
+    const routes = (result.encoded.experimental as Record<string, any>).routes.models as Record<string, any>
     expect(Object.prototype.hasOwnProperty.call(routes, "__proto__")).toBe(true)
     expect(Object.getPrototypeOf(routes)).toBe(Object.prototype)
     expect(routes["__proto__"].targets[0]).toEqual({

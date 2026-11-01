@@ -7,6 +7,7 @@ import { Location } from "@opencode/core/location"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { NotFoundError } from "@opencode/core/session"
+import { ConfigNormalize } from "@opencode/core/config/normalize"
 import { ModelGovernance } from "@opencode/core/session/model-governance"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { Money } from "@opencode/schema/money"
@@ -53,12 +54,21 @@ type Input = Parameters<typeof ModelGovernance.assertAllowed>[2] & {
   catalogInput?: Record<string, Record<string, { enabled?: boolean; variants?: readonly string[] }>>
 }
 
+// Entries in production are the normalizer's output, so fixtures go through the same
+// seam: flat `experimental.model_routes` inputs fold into the canonical nested
+// `experimental.routes.models` shape governance now reads (#1140).
+const normalizedInfo = (input: Record<string, unknown>) => {
+  const result = ConfigNormalize.normalize(input)
+  if (result.type !== "normalized") throw new Error("expected normalized config")
+  return decodeInfo(result.encoded)
+}
+
 const entriesConfig = (input: Input) => ({
   entries: () =>
     Effect.succeed([
       {
         type: "document" as const,
-        info: decodeInfo(input.configInput ?? {}),
+        info: normalizedInfo(input.configInput ?? {}),
       } as never,
     ]),
   catalog: () =>

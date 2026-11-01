@@ -77,8 +77,44 @@ function withoutEmptyCompatibilityContainers(input: Record<string, unknown>) {
 /** Normalization drops each note line that does not match NOTE_LINE, so the expected config drops it too. */
 function withoutMalformedNotes(input: Record<string, unknown>) {
   const result = structuredClone(input)
-  const tuning = (result.experimental as { model_route_tuning?: { notes?: string[] } } | undefined)?.model_route_tuning
-  if (tuning?.notes) tuning.notes = tuning.notes.filter((line) => ConfigModelRoutes.NOTE_LINE.test(line))
+  const experimental = result.experimental as
+    | {
+        model_route_tuning?: { notes?: string[] }
+        routes?: { tuning?: { notes?: string[] } }
+      }
+    | undefined
+  for (const tuning of [experimental?.model_route_tuning, experimental?.routes?.tuning])
+    if (tuning?.notes) tuning.notes = tuning.notes.filter((line) => ConfigModelRoutes.NOTE_LINE.test(line))
+  return result
+}
+
+/** The flat routing keys are deprecated spellings of `experimental.routes.*` (#1140):
+ * normalization folds them into the nested shape, nested winning per key, so the
+ * expected side of a survival comparison folds the same way. */
+function withFlatRoutesFolded(input: Record<string, unknown>) {
+  const result = structuredClone(input)
+  const experimental = result.experimental as Record<string, unknown> | undefined
+  if (typeof experimental !== "object" || experimental === null || Array.isArray(experimental)) return result
+  const pairs: [string, string][] = [
+    ["model_routes", "models"],
+    ["provider_routes", "providers"],
+    ["model_route_schedules", "schedules"],
+    ["model_route_windows", "windows"],
+    ["model_route_tuning", "tuning"],
+    ["model_route_log", "log"],
+    ["model_route_settings", "settings"],
+  ]
+  if (!pairs.some(([flat]) => flat in experimental)) return result
+  const routes = (
+    typeof experimental.routes === "object" && experimental.routes !== null && !Array.isArray(experimental.routes)
+      ? { ...(experimental.routes as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>
+  for (const [flat, nested] of pairs) {
+    if (flat in experimental && !(nested in routes)) routes[nested] = experimental[flat]
+    delete experimental[flat]
+  }
+  experimental.routes = routes
   return result
 }
 
@@ -150,7 +186,9 @@ describe("ConfigNormalize", () => {
           const source = JSON.parse(JSON.stringify(Schema.encodeSync(Info)(info)))
           const result = normalized(source)
           expect(Schema.decodeUnknownSync(Info)(result.encoded)).toEqual(
-            Schema.decodeUnknownSync(Info)(withoutMalformedNotes(withoutEmptyCompatibilityContainers(source))),
+            Schema.decodeUnknownSync(Info)(
+              withFlatRoutesFolded(withoutMalformedNotes(withoutEmptyCompatibilityContainers(source))),
+            ),
           )
           return true
         },
@@ -791,8 +829,10 @@ describe("model route tuning and log settings", () => {
   const experimentalOf = (encoded: Readonly<Record<string, unknown>>) =>
     encoded.experimental as
       | {
-          model_route_tuning?: ModelRouteTuning.Settings
-          model_route_log?: { captureErrorBodies?: boolean }
+          routes?: {
+            tuning?: ModelRouteTuning.Settings
+            log?: { captureErrorBodies?: boolean }
+          }
         }
       | undefined
 
@@ -810,7 +850,7 @@ describe("model route tuning and log settings", () => {
     })
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
-    const notes = ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.model_route_tuning?.notes)
+    const notes = ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.routes?.tuning?.notes)
     expect(notes).toEqual([
       { match: "anthropic/claude-opus-5", text: "promo credits, reset at 2026-01-04T00:00:00Z" },
       { match: "openai/gpt-6-luna", text: "out of quota, back in 3 hours" },
@@ -845,7 +885,7 @@ describe("model route tuning and log settings", () => {
           "omitted malformed note: expected match: text, with a non-empty match before the first colon and non-empty text after it",
       },
     ])
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({
       enabled: true,
       notes: ["openai/gpt-6-luna: out of quota, back in 3 hours", "anthropic/claude-opus-5: promo credits"],
     })
@@ -868,7 +908,7 @@ describe("model route tuning and log settings", () => {
         message,
       })),
     )
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({ enabled: true, notes: ["match: text"] })
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({ enabled: true, notes: ["match: text"] })
   })
 
   test("a second colon belongs to the text, so x::y is kept", () => {
@@ -878,7 +918,7 @@ describe("model route tuning and log settings", () => {
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
     expect(result.diagnostics).toEqual([])
-    expect(ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.model_route_tuning?.notes)).toEqual([
+    expect(ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.routes?.tuning?.notes)).toEqual([
       { match: "x", text: ":y" },
     ])
   })
@@ -894,7 +934,7 @@ describe("model route tuning and log settings", () => {
       path: ["experimental", "model_route_tuning", "intervall"],
       message: "omitted unknown setting",
     })
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({ enabled: true, intervalMinutes: 30 })
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({ enabled: true, intervalMinutes: 30 })
   })
 
   test("captureErrorBodies is kept through normalization, and an unknown log key is reported", () => {
@@ -903,7 +943,7 @@ describe("model route tuning and log settings", () => {
     })
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
-    expect(experimentalOf(result.encoded)?.model_route_log).toEqual({ captureErrorBodies: true })
+    expect(experimentalOf(result.encoded)?.routes?.log).toEqual({ captureErrorBodies: true })
     expect(result.diagnostics).toContainEqual({
       kind: "invalid",
       path: ["experimental", "model_route_log", "captureErrorBody"],
@@ -914,7 +954,7 @@ describe("model route tuning and log settings", () => {
 
 describe("model route cache formats", () => {
   const routesOf = (encoded: Readonly<Record<string, unknown>>) =>
-    (encoded.experimental as { model_routes?: Record<string, unknown> } | undefined)?.model_routes
+    (encoded.experimental as { routes?: { models?: Record<string, unknown> } } | undefined)?.routes?.models
 
   test("a route and a target decode the compatibility cache format values", () => {
     const value = decoded({
@@ -927,7 +967,7 @@ describe("model route cache formats", () => {
         },
       },
     })
-    const pool = value.experimental?.model_routes?.pool
+    const pool = value.experimental?.routes?.models?.pool
     expect(pool?.cache_format).toBe("anthropic")
     expect(JSON.parse(JSON.stringify(pool?.targets))).toEqual([
       { providerID: "openai", model: "gpt-6-luna" },
@@ -984,17 +1024,17 @@ describe("provider routes and route settings survive normalization", () => {
         },
       },
     })
-    const group = value.experimental?.provider_routes?.["openai-plan"]
+    const group = value.experimental?.routes?.providers?.["openai-plan"]
     expect(group?.providers).toEqual(["openai.alternate", "openai"])
     expect(group?.selection).toBe("ordered")
-    expect(value.experimental?.model_routes?.["luna-plan"]?.targets).toHaveLength(1)
+    expect(value.experimental?.routes?.models?.["luna-plan"]?.targets).toHaveLength(1)
   })
 
   test("experimental.model_route_settings reaches the decoded config", () => {
     const value = decoded({
       experimental: { model_route_settings: { bench: { multiplier: 3 } } },
     })
-    expect(value.experimental?.model_route_settings?.bench?.multiplier).toBe(3)
+    expect(value.experimental?.routes?.settings?.bench?.multiplier).toBe(3)
   })
 })
 
@@ -1052,6 +1092,15 @@ describe("per-field normalization survival guard (#1285)", () => {
     model_route_tuning: { enabled: true, notes: ["match: text"] },
     model_route_log: { captureErrorBodies: true },
     model_route_settings: { bench: { multiplier: 3 } },
+    routes: {
+      models: { pool: { targets: ["openai/gpt-6-luna"] } },
+      providers: { "openai-plan": { providers: ["openai", "openai.alternate"], selection: "ordered" } },
+      schedules: [{ when: { start: "01:00", end: "04:00" }, factor: 2 }],
+      windows: { peak: { start: "01:00", end: "04:00", timezone: "UTC" } },
+      tuning: { enabled: true, notes: ["match: text"] },
+      log: { captureErrorBodies: true },
+      settings: { bench: { multiplier: 3 } },
+    },
   }
 
   // Same comparison as the Arbitrary round-trip test above: the decoded
@@ -1065,7 +1114,7 @@ describe("per-field normalization survival guard (#1285)", () => {
     expect(result.diagnostics).toEqual([])
     expect(Schema.decodeUnknownSync(Info)(result.encoded)).toEqual(
       Schema.decodeUnknownSync(Info)(
-        withoutMalformedNotes(withoutEmptyCompatibilityContainers(structuredClone(source))),
+        withFlatRoutesFolded(withoutMalformedNotes(withoutEmptyCompatibilityContainers(structuredClone(source)))),
       ),
     )
   }

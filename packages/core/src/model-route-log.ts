@@ -223,7 +223,7 @@ const reasonOf = (failure: unknown) => {
  * stored as not retryable instead of being guessed from the presence of a tag. */
 const observerRetryable = (failure: unknown) => (failure instanceof AIError ? isRetryable(failure) : false)
 
-/** Whether failed requests keep their provider error body: `experimental.model_route_log`, read live. */
+/** Whether failed requests keep their provider error body: `experimental.routes.log`, read live. */
 let captureErrorBodies: () => boolean = () => false
 
 export const onCaptureErrorBodies = (read: () => boolean) => {

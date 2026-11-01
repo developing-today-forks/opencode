@@ -421,12 +421,13 @@ describe("named windows", () => {
         type: "document",
         info: {
           experimental: {
-            model_route_windows: {
+            routes: { windows: {
               bad: { start: "25:99", end: "17:00" },
               peak: { daysOfWeek: [1, 5], start: "09:00", end: "17:00" },
             },
           },
         },
+      },
       },
     ] as unknown as Entry[]
     let parsed: ReturnType<typeof configuredWindows> | undefined
@@ -437,7 +438,7 @@ describe("named windows", () => {
     expect(parsed?.has("peak")).toBe(true)
     expect(messages).toHaveLength(1)
     expect(messages[0]).toContain('"bad"')
-    expect(messages[0]).toContain("model_route_windows")
+    expect(messages[0]).toContain("routes.windows")
   })
 
   test("configuredWindows resolves excludeWindows and drops an unknown or cyclic reference with a warning (#821)", () => {
@@ -446,7 +447,7 @@ describe("named windows", () => {
         type: "document",
         info: {
           experimental: {
-            model_route_windows: {
+            routes: { windows: {
               "cn-holidays": { dates: ["2026-10-01"], timezone: "Asia/Shanghai" },
               peak: {
                 daysOfWeek: [1, 2, 3, 4, 5],
@@ -460,6 +461,7 @@ describe("named windows", () => {
             },
           },
         },
+      },
       },
     ] as unknown as Entry[]
     let parsed: ReturnType<typeof configuredWindows> | undefined
@@ -1055,8 +1057,8 @@ describe("provider routes", () => {
 })
 
 describe("configuredProviderRoutes", () => {
-  const entriesWith = (provider_routes: unknown) =>
-    [{ type: "document", info: { experimental: { provider_routes } } }] as unknown as Entry[]
+  const entriesWith = (providers: unknown) =>
+    [{ type: "document", info: { experimental: { routes: { providers } } } }] as unknown as Entry[]
   const known = new Set(["openai", "openai.alternate", "anthropic"])
   const noRoutes = new Map<string, ConfigModelRoutes.Route>()
 
