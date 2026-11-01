@@ -190,7 +190,7 @@ export function fromDocsPathname(pathname: string) {
   const value = next.split("/")[2]?.toLowerCase()
   if (!value) return null
   if (!next.startsWith("/docs/")) return null
-  if (!(value in DOCS_LOCALE)) return null
+  if (!Object.hasOwn(DOCS_LOCALE, value)) return null
   return DOCS_LOCALE[value as keyof typeof DOCS_LOCALE]
 }
 
@@ -310,7 +310,11 @@ export function localeFromCookieHeader(header: string | null) {
     ?.slice(`${LOCALE_COOKIE}=`.length)
 
   if (!raw) return null
-  return parseLocale(decodeURIComponent(raw))
+  try {
+    return parseLocale(decodeURIComponent(raw))
+  } catch {
+    return null
+  }
 }
 
 export function localeFromRequest(request: Request) {
