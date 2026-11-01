@@ -91,3 +91,33 @@ it.live("Plugin session.list normalises an unusable limit before the store", () 
     expect(nan.data).toHaveLength(all.data.length)
   }),
 )
+
+it.live("Plugin session list defaults to the newest 50 and the cursor reaches the remainder", () =>
+  Effect.gen(function* () {
+    const plugins = yield* Plugin.Service
+    const context = yield* PluginHost.make(plugins)
+    const parent = yield* context.session.create({ title: "Plugin list default parent" })
+    const ids: Array<typeof parent.id> = []
+    for (let i = 0; i < 55; i++) {
+      const child = yield* context.session.create({ parentID: parent.id, title: `Plugin list default child ${i}` })
+      ids.push(child.id)
+    }
+
+    const page = yield* context.session.list({ parentID: parent.id })
+    expect(page.data).toHaveLength(50)
+    expect(page.cursor.next).toBeDefined()
+
+    const rest = yield* context.session.list({ parentID: parent.id, cursor: page.cursor.next })
+    expect(rest.data).toHaveLength(5)
+
+    const combined = [...page.data, ...rest.data].map((session) => session.id)
+    expect(new Set(combined).size).toBe(55)
+    expect(new Set(combined)).toEqual(new Set(ids))
+
+    const explicit = yield* context.session.list({ parentID: parent.id, limit: 100 })
+    expect(explicit.data).toHaveLength(55)
+
+    const small = yield* context.session.list({ parentID: parent.id, limit: 2 })
+    expect(small.data).toHaveLength(2)
+  }),
+)
