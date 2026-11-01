@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-bounded-http"
+import { isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-bounded-http"
 
 describe("scanSource", () => {
   test("flags the P-A fetch shape, with or without a signal", () => {
@@ -53,6 +53,16 @@ describe("scanSource", () => {
       ["// never call fetch(url) without a signal", "* response.text() buffers the body", "const x = 1"].join("\n"),
     )
     expect(hits).toEqual([])
+  })
+})
+
+describe("isScannedFile", () => {
+  test("includes Astro sources (executable frontmatter) and TS/TSX, excludes docs/data", () => {
+    expect(isScannedFile("page.astro")).toBe(true)
+    expect(isScannedFile("page.ts")).toBe(true)
+    expect(isScannedFile("page.tsx")).toBe(true)
+    expect(isScannedFile("page.mdx")).toBe(false)
+    expect(isScannedFile("page.json")).toBe(false)
   })
 })
 

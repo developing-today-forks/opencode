@@ -11,7 +11,7 @@
  * reader (`readBoundedResponseText` / `readExcerptResponseText` from
  * `@opencode/util/http-body`, or `collectBoundedResponseBody` from
  * packages/core/src/tool/http-body.ts for Effect HttpClient sites).
- * This gate scans every `src` tree under packages/ with the two sweep
+ * This gate scans every `src` tree under packages/ (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
  * patterns —
  *   P-A: a `fetch(` call site. The pattern is deliberately line-shaped:
  *        a call whose options carry a signal still matches, exactly as
@@ -157,11 +157,16 @@ export const staleEntries = (hits: Hit[], allowlist: Map<string, string[]>) => {
   return stale
 }
 
+/** Extensions whose files execute code: TS/TSX plus Astro (frontmatter runs server-side). */
+export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx", ".astro"]
+
+export const isScannedFile = (name: string) => SCANNED_EXTENSIONS.some((ext) => name.endsWith(ext))
+
 function collect(root: string, dir: string, hits: Hit[]) {
   for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collect(root, path, hits)
-    else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))
+    else if (isScannedFile(entry.name))
       hits.push(...scanSource(path.slice(root.length + 1), readFileSync(path, "utf8")))
   }
 }
