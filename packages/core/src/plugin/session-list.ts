@@ -6,6 +6,7 @@ import { AbsolutePath, RelativePath } from "@opencode/schema/schema"
 import type { Plugin } from "@opencode/plugin/effect"
 import { Base64Url } from "effect/encoding"
 import { Effect, Result, Schema } from "effect"
+import { pageLimit } from "../util/number.js"
 
 /** Filter fields shared by the HTTP session list query and its pagination cursor. */
 export interface SessionListFilter {
@@ -39,8 +40,7 @@ export const DEFAULT_SESSION_LIMIT = 50
  * surface applies none, so a positive integer passes through unchanged.
  */
 export function sessionListLimit(limit?: number): number {
-  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_SESSION_LIMIT
-  return Math.max(Math.trunc(limit), 1)
+  return pageLimit(limit, { default: DEFAULT_SESSION_LIMIT })
 }
 
 export type SessionListOutput = Effect.Success<ReturnType<Plugin.Context["session"]["list"]>>
