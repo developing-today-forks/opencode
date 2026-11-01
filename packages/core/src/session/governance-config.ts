@@ -3,6 +3,8 @@ export * as GovernanceConfig from "./governance-config.js"
 import { Context, Effect, LayerMap, Option } from "effect"
 import type { Entry } from "@opencode/schema/config"
 import { Config } from "../config.js"
+import { ConfigAgentDocuments } from "../config/agent-documents.js"
+import { FSUtil } from "@opencode/util/fs-util"
 import type { Instance } from "../instance.js"
 import { Location } from "../location.js"
 import { Model } from "../model.js"
@@ -40,7 +42,14 @@ export const load = (
       if (Option.isNone(context))
         return { entries: [] as Entry[], catalog: undefined as ModelGovernance.Catalog | undefined }
       const config = Context.getOption(context.value, Config.Service)
-      const entries = config._tag === "Some" ? yield* config.value.entries() : ([] as Entry[])
+      const rawEntries = config._tag === "Some" ? yield* config.value.entries() : ([] as Entry[])
+      // Governance judges the directory-expanded entries, so agents defined
+      // only in Markdown under a config directory are governed by the same
+      // fields the agent editor applies (#1107). Without an FS in this
+      // location the raw entries are judged as before.
+      const fs = Context.getOption(context.value, FSUtil.Service)
+      const entries =
+        fs._tag === "Some" ? yield* ConfigAgentDocuments.expandEntries(fs.value, rawEntries) : rawEntries
       const provider = Context.getOption(context.value, Provider.Service)
       if (provider._tag === "None") return { entries, catalog: undefined }
       const snapshot = yield* provider.value.snapshot()

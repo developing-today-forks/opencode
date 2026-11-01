@@ -2,6 +2,8 @@ export * as SubagentDepth from "./subagent-depth.js"
 
 import { Effect, Schema } from "effect"
 import { Config } from "../config.js"
+import { ConfigAgentDocuments } from "../config/agent-documents.js"
+import { FSUtil } from "@opencode/util/fs-util"
 import type { Session } from "../session.js"
 import { ModelGovernance } from "./model-governance.js"
 import { SessionSchema } from "./schema.js"
@@ -31,8 +33,12 @@ export const assertWithinLimit = Effect.fn("SubagentDepth.assertWithinLimit")(fu
   sessions: Pick<Session.Interface, "get">,
   config: Pick<Config.Interface, "entries">,
   parent: SessionSchema.Info,
+  fs?: FSUtil.Interface,
 ) {
-  const entries = yield* config.entries()
+  const rawEntries = yield* config.entries()
+  // With an FS, judge the directory-expanded entries so a Markdown-defined
+  // ancestor agent's max_depth binds like a document-defined one (#1107).
+  const entries = fs ? yield* ConfigAgentDocuments.expandEntries(fs, rawEntries) : rawEntries
   const limit = Config.latest(entries, "experimental")?.subagent_depth ?? 5
   const definitions = ModelGovernance.agentDefinitions(entries)
   const globalMessage = `Subagent depth limit reached (${limit}). Do this work in the current session; "experimental.subagent_depth" sets the limit.`

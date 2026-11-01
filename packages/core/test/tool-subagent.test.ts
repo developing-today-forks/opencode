@@ -7,6 +7,7 @@ import path from "path"
 import { Money } from "@opencode/schema/money"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
+import { FSUtil } from "@opencode/util/fs-util"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
@@ -132,6 +133,7 @@ const subagentPluginSupervisor = makeLocationNode({
     SubagentJob.node,
     Tool.node,
     PluginHooks.node,
+    FSUtil.node,
   ],
 })
 
