@@ -245,7 +245,8 @@ describe("field descriptions beyond model-routes (#650)", () => {
       [ConfigMessaging.Search, ["match", "model"]],
       [ConfigMessaging.Embedding, ["tier", "pooling", "gpu_layers"]],
       [ConfigMessaging.Remote, ["key"]],
-      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "model_route_schedules"]],
+      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "routes"]],
+      [ConfigExperimental.Routes, ["schedules"]],
       [ConfigAlias.Info, ["providers", "models", "variants"]],
       [ConfigWarming.Info, ["prompt"]],
       [Mcp.TimeoutConfig, ["startup", "catalog", "execution"]],
@@ -341,37 +342,44 @@ describe("ConfigModel.Selection segment spelling (#456)", () => {
   })
 })
 
-describe("ConfigExperimental model_route_settings", () => {
+describe("ConfigExperimental routes.settings (#1140)", () => {
   const decode = Schema.decodeUnknownSync(ConfigExperimental.Info)
+  const settings = {
+    bench: {
+      maxCooldownMs: 3_600_000,
+      multiplier: 3,
+      retryAfterMinMs: 2_000,
+      cooldownCapMs: 120_000,
+      quotaCooldownCapMs: 7_200_000,
+    },
+    demotion: { after: 5, windowMs: 3_600_000, factor: 0.5 },
+    quotaGate: { maxMs: 86_400_000, fallbackMs: 60_000, feedTtlMs: 30_000 },
+    escalation: { enabled: false, afterGiveUps: 4, outcomeWindow: 8 },
+    network: { windowMs: 10_000, providers: 4, providerModels: 3 },
+    continuity: { hedgeRequests: 5 },
+    overrides: { preferredFactor: 2 },
+  }
 
-  test("accepts a full settings block and round-trips it", () => {
-    const input = {
-      model_route_settings: {
-        bench: {
-          maxCooldownMs: 3_600_000,
-          multiplier: 3,
-          retryAfterMinMs: 2_000,
-          cooldownCapMs: 120_000,
-          quotaCooldownCapMs: 7_200_000,
-        },
-        demotion: { after: 5, windowMs: 3_600_000, factor: 0.5 },
-        quotaGate: { maxMs: 86_400_000, fallbackMs: 60_000, feedTtlMs: 30_000 },
-        escalation: { enabled: false, afterGiveUps: 4, outcomeWindow: 8 },
-        network: { windowMs: 10_000, providers: 4, providerModels: 3 },
-        continuity: { hedgeRequests: 5 },
-        overrides: { preferredFactor: 2 },
-      },
-    }
+  test("accepts a full nested settings block and round-trips it", () => {
+    const input = { routes: { settings } }
     const decoded = decode(input)
     expect(Schema.encodeSync(ConfigExperimental.Info)(decoded)).toEqual(input)
   })
 
+  test("still accepts the deprecated flat model_route_settings spelling in the schema", () => {
+    // The flat keys stay in the schema so existing config files — and external file
+    // readers — keep validating; normalization folds them into routes.settings.
+    const decoded = decode({ model_route_settings: settings })
+    expect(decoded.model_route_settings?.bench?.multiplier).toBe(3)
+    expect(decoded.routes).toBeUndefined()
+  })
+
   test("accepts an empty block and a partial one", () => {
-    expect(decode({ model_route_settings: {} }).model_route_settings).toBeDefined()
-    expect(decode({ model_route_settings: { demotion: { factor: 0.25 } } }).model_route_settings?.demotion?.factor).toBe(
+    expect(decode({ routes: { settings: {} } }).routes?.settings).toBeDefined()
+    expect(decode({ routes: { settings: { demotion: { factor: 0.25 } } } }).routes?.settings?.demotion?.factor).toBe(
       0.25,
     )
-    expect(decode({}).model_route_settings).toBeUndefined()
+    expect(decode({}).routes?.settings).toBeUndefined()
   })
 
   test("rejects nonsense values", () => {
@@ -395,6 +403,6 @@ describe("ConfigExperimental model_route_settings", () => {
       { continuity: { hedgeRequests: 0 } },
       { overrides: { preferredFactor: 0 } },
     ]
-    for (const settings of bad) expect(() => decode({ model_route_settings: settings })).toThrow()
+    for (const value of bad) expect(() => decode({ routes: { settings: value } })).toThrow()
   })
 })
