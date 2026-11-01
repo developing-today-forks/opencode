@@ -1082,19 +1082,19 @@ describe("ModelRoute round-robin tiers (#1122)", () => {
   })
 })
 
-describe("ModelRoute synthetic provider groups", () => {
+describe("ModelRoute provider route groups", () => {
   const policy = ModelRoute.policy()
-  const alt = ModelRoute.ref({ providerID: "synthetic-alt", model: "m" })
-  const main = ModelRoute.ref({ providerID: "synthetic-main", model: "m" })
+  const alt = ModelRoute.ref({ providerID: "route-alt", model: "m" })
+  const main = ModelRoute.ref({ providerID: "route-main", model: "m" })
   const build = (selection: "ordered" | "round-robin" | "weighted", weights: number[] = [1, 1]) =>
     ({
-      id: "synthetic-route",
+      id: "outer-route",
       targets: [alt, main],
       targetVariants: [],
       health: policy,
       nodes: [
         { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
-        { routeID: "plan", synthetic: "plan", selection, weights, children: [{ leaf: 0 }, { leaf: 1 }] },
+        { routeID: "plan", providerRoute: "plan", selection, weights, children: [{ leaf: 0 }, { leaf: 1 }] },
       ],
     }) as unknown as ModelRoute.Definition
   const all = new Set([0, 1])
@@ -1130,7 +1130,7 @@ describe("ModelRoute synthetic provider groups", () => {
     expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
   })
 
-  test("the decision records show the synthetic resolution: the group under its own id, the member it chose", () => {
+  test("the decision records show the provider route resolution: the group under its own id, the member it chose", () => {
     const events: ModelRouteLog.Event[] = []
     ModelRouteLog.setSink((event) => events.push(event))
     try {
@@ -1140,9 +1140,9 @@ describe("ModelRoute synthetic provider groups", () => {
     }
     const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
     const inner = decisions.find((row) => row.route_id === "plan")
-    expect(inner?.candidates).toEqual(["synthetic-alt/m", "synthetic-main/m"])
-    expect(inner?.chosen).toBe("synthetic-alt/m")
-    const outer = decisions.find((row) => row.route_id === "synthetic-route")
+    expect(inner?.candidates).toEqual(["route-alt/m", "route-main/m"])
+    expect(inner?.chosen).toBe("route-alt/m")
+    const outer = decisions.find((row) => row.route_id === "outer-route")
     expect(outer?.candidates).toEqual(["plan/m"])
     expect(outer?.chosen).toBe("plan/m")
   })

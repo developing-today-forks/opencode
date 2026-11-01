@@ -81,9 +81,9 @@ export const Plugin = define({
       const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
         providers.list().map((record) => [record.provider.id, record.models] as const),
       )
-      const synthetics = configuredSynthetics(loaded.entries, new Set(definitions.keys()), routes)
+      const providerRoutes = configuredProviderRoutes(loaded.entries, new Set(definitions.keys()), routes)
       const models = Array.from(routes, ([id, route]) => {
-        const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, synthetics)
+        const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
         const first = expanded[0].model
         // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
@@ -188,12 +188,12 @@ export const Plugin = define({
       for (const routeModel of models.list(ModelRoute.PROVIDER_ID)) {
         const current = ModelRoute.definition(routeModel)
         if (!current) continue
-        const synthetics = configuredSynthetics(
+        const providerRoutes = configuredProviderRoutes(
           loaded.entries,
           new Set(models.provider.list().map((record) => record.provider.id)),
           routes,
         )
-        const next = retargetDefinition(current, routes, models, windows, synthetics)
+        const next = retargetDefinition(current, routes, models, windows, providerRoutes)
         if (!next) continue
         // The advertised variants were computed by the provider transform, before the
         // transform-created targets existed, so a retargeted leaf that cannot produce a
@@ -284,80 +284,80 @@ export function configuredWindows(entries: readonly Entry[]) {
   return windows
 }
 
-/** A synthetic provider that cannot be applied is dropped, but never silently (#734's rule,
+/** A provider route that cannot be applied is dropped, but never silently (#734's rule,
  * as for windows): the warning names the provider and why. */
-const warnDroppedSynthetic = (id: string, reason: string) =>
+const warnDroppedProviderRoute = (id: string, reason: string) =>
   console.warn(
-    `synthetic provider ${JSON.stringify(id)} ${reason} (experimental.synthetic_providers); it is dropped, not applied`,
+    `provider route ${JSON.stringify(id)} ${reason} (experimental.provider_routes); it is dropped, not applied`,
   )
 
-/** The synthetic providers config declares, validated against the providers that exist and the
+/** The provider routes config declares, validated against the providers that exist and the
  * routes that are configured, in the runtime's shape. An id that names a concrete provider, the
  * routes provider, or a configured route is dropped with a warning: the id shares the provider
  * namespace at a route's reference site, so a concrete provider always wins the reference, and
  * a route's name would make decision records ambiguous. Members resolve concrete-first, like
  * targets: a member that names a concrete provider is a member, and only a member naming no
- * concrete provider can be a nesting attempt - another synthetic provider (or the routes
- * provider) named as a member is dropped with a warning, since synthetic providers do not
+ * concrete provider can be a nesting attempt - another provider route (or the routes
+ * provider) named as a member is dropped with a warning, since provider routes do not
  * nest. A member that names no known provider is kept, with a warning: it contributes no
  * leaves, like a target naming an unknown provider. */
-export function configuredSynthetics(
+export function configuredProviderRoutes(
   entries: readonly Entry[],
   knownProviders: ReadonlySet<string>,
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
 ) {
-  const declared = new Map<string, ConfigModelRoutes.SyntheticProvider>()
+  const declared = new Map<string, ConfigModelRoutes.ProviderRoute>()
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
-      Object.entries(entry.info.experimental?.synthetic_providers ?? {}).forEach(([id, provider]) =>
+      Object.entries(entry.info.experimental?.provider_routes ?? {}).forEach(([id, provider]) =>
         declared.set(id, provider),
       )
     })
-  const synthetics = new Map<string, ModelRoute.SyntheticProvider>()
+  const providerRoutes = new Map<string, ModelRoute.ProviderRoute>()
   declared.forEach((provider, id) => {
     if (id === ModelRoute.PROVIDER_ID || knownProviders.has(id)) {
-      warnDroppedSynthetic(id, "names a concrete provider, which keeps the reference")
+      warnDroppedProviderRoute(id, "names a concrete provider, which keeps the reference")
       return
     }
     if (routes.has(id)) {
-      warnDroppedSynthetic(id, "names a configured route, which would make decision records ambiguous")
+      warnDroppedProviderRoute(id, "names a configured route, which would make decision records ambiguous")
       return
     }
     const members: string[] = []
     for (const member of provider.providers) {
       // A member resolves concrete-first, like a target: a known provider is a member even
-      // when a (rejected) synthetic shares its id. Only a member that names no concrete
-      // provider can be a nesting attempt - another synthetic, or the routes provider.
+      // when a (rejected) provider route shares its id. Only a member that names no concrete
+      // provider can be a nesting attempt - another provider route, or the routes provider.
       if (!knownProviders.has(member) && (member === ModelRoute.PROVIDER_ID || declared.has(member))) {
         console.warn(
-          `synthetic provider ${JSON.stringify(id)}: member ${JSON.stringify(member)} is not a concrete provider (synthetic providers do not nest); the member is dropped`,
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is not a concrete provider (provider routes do not nest); the member is dropped`,
         )
         continue
       }
       if (members.includes(member)) {
         console.warn(
-          `synthetic provider ${JSON.stringify(id)}: member ${JSON.stringify(member)} is listed twice; the duplicate is dropped`,
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is listed twice; the duplicate is dropped`,
         )
         continue
       }
       if (!knownProviders.has(member))
         console.warn(
-          `synthetic provider ${JSON.stringify(id)}: member ${JSON.stringify(member)} names no known provider; it contributes no leaves`,
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} names no known provider; it contributes no leaves`,
         )
       members.push(member)
     }
     if (members.length === 0) {
-      warnDroppedSynthetic(id, "has no concrete member providers")
+      warnDroppedProviderRoute(id, "has no concrete member providers")
       return
     }
-    synthetics.set(id, {
+    providerRoutes.set(id, {
       providers: members,
       selection: provider.selection ?? "ordered",
       weights: provider.weights ?? {},
     })
   })
-  return synthetics
+  return providerRoutes
 }
 
 /** A schedule's window: inline (parsed as before), or the name of a configured window.
@@ -468,7 +468,7 @@ export function expand(
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
-  synthetics: ReadonlyMap<string, ModelRoute.SyntheticProvider> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
 ) {
   const result: SourceModel[] = []
   const nodes: ModelRoute.Node[] = []
@@ -482,7 +482,7 @@ export function expand(
     trail: ReadonlySet<string>,
     inheritedCacheFormat: CacheFormat | undefined,
     inheritedLimit: number | undefined,
-    override?: { route: ConfigModelRoutes.Route; synthetic: string },
+    override?: { route: ConfigModelRoutes.Route; providerRoute: string },
   ): number | undefined => {
     if (trail.has(routeID)) return
     const current = override?.route ?? routes.get(routeID)
@@ -491,14 +491,14 @@ export function expand(
     const nodeIndex = nodes.length
     const node: {
       routeID: string
-      synthetic?: string
+      providerRoute?: string
       selection: ModelRoute.Node["selection"]
       weights: number[]
       schedules: ModelRoute.WeightRule[]
       children: ModelRoute.Node["children"][number][]
     } = {
       routeID,
-      ...(override ? { synthetic: override.synthetic } : {}),
+      ...(override ? { providerRoute: override.providerRoute } : {}),
       selection: ModelRouteAutonomy.usesRules(current.autonomy) ? (current.selection ?? "ordered") : "ordered",
       weights: [],
       schedules: routeWeightRules(current, windows),
@@ -532,19 +532,19 @@ export function expand(
         }
         continue
       }
-      const synthetic = synthetics.get(String(ref.providerID))
-      if (synthetic && !definitions.has(ref.providerID)) {
-        // A synthetic provider target: the members' leaves for this one model, grouped under
-        // the synthetic's own selection. The group is built by visiting a route shaped like
-        // the synthetic for the model, so every leaf rule (variant producibility, ceilings,
+      const providerRoute = providerRoutes.get(String(ref.providerID))
+      if (providerRoute && !definitions.has(ref.providerID)) {
+        // A provider route target: the members' leaves for this one model, grouped under
+        // the provider route's own selection. The group is built by visiting a route shaped like
+        // the provider route for the model, so every leaf rule (variant producibility, ceilings,
         // budgets, dedup) applies verbatim; the referencing route's autonomy gates the
         // group's selection and weights exactly as it gates the route's own. One group per
         // matched model id, so a glob fans out per model and a group never mixes models.
-        // Concrete providers win the reference: a synthetic whose id a real provider holds
+        // Concrete providers win the reference: a provider route whose id a real provider holds
         // is never consulted (config load drops those; this is the same rule at expansion).
         const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
         const matched: string[] = []
-        for (const member of synthetic.providers) {
+        for (const member of providerRoute.providers) {
           for (const [modelID] of ModelRouteExpansion.matchingModels(
             String(ref.id),
             definitions.get(Provider.ID.make(member)),
@@ -560,16 +560,16 @@ export function expand(
             spec.cache_format ?? current.cache_format ?? inheritedCacheFormat,
             ceiling,
             {
-              synthetic: String(ref.providerID),
+              providerRoute: String(ref.providerID),
               route: {
-                targets: synthetic.providers.map((member) => ({
+                targets: providerRoute.providers.map((member) => ({
                   model: { providerID: member, model: modelID },
                   ...("variants" in spec && spec.variants ? { variants: spec.variants } : {}),
                   ...("defaultVariant" in spec && spec.defaultVariant ? { defaultVariant: spec.defaultVariant } : {}),
                 })),
-                selection: synthetic.selection,
+                selection: providerRoute.selection,
                 weights: Object.fromEntries(
-                  Object.entries(synthetic.weights).map(([member, weight]) => [`${member}/${modelID}`, weight]),
+                  Object.entries(providerRoute.weights).map(([member, weight]) => [`${member}/${modelID}`, weight]),
                 ),
                 ...(current.autonomy ? { autonomy: current.autonomy } : {}),
               } as unknown as ConfigModelRoutes.Route,
@@ -729,7 +729,7 @@ export function retargetDefinition(
     }
   },
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
-  synthetics: ReadonlyMap<string, ModelRoute.SyntheticProvider> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
 ): Retargeted | undefined {
   const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
     editor.provider.list().map((record) => [record.provider.id, record.models] as const),
@@ -747,12 +747,12 @@ export function retargetDefinition(
           if (providerID !== ModelRoute.PROVIDER_ID) targeted.add(providerID)
         }
       } else if (ref.providerID !== ModelRoute.PROVIDER_ID) {
-        // A synthetic provider target: its members are the concrete providers whose
-        // transform-created models the re-expansion must see. The synthetic id itself
-        // stays out of `definitions`, or it would shadow the synthetic at expansion.
-        const synthetic = synthetics.get(String(ref.providerID))
-        if (synthetic && !definitions.has(ref.providerID))
-          synthetic.providers.forEach((member) => targeted.add(Provider.ID.make(member)))
+        // A provider route target: its members are the concrete providers whose
+        // transform-created models the re-expansion must see. The provider route id itself
+        // stays out of `definitions`, or it would shadow the provider route at expansion.
+        const providerRoute = providerRoutes.get(String(ref.providerID))
+        if (providerRoute && !definitions.has(ref.providerID))
+          providerRoute.providers.forEach((member) => targeted.add(Provider.ID.make(member)))
         else targeted.add(ref.providerID)
       }
     }
@@ -774,7 +774,7 @@ export function retargetDefinition(
     }
     definitions.set(providerID, merged)
   }
-  const { leaves, nodes } = expand(String(current.id), routes, definitions, windows, synthetics)
+  const { leaves, nodes } = expand(String(current.id), routes, definitions, windows, providerRoutes)
   if (leaves.length === 0) return undefined
   // The variants the route can still advertise, decided over the retargeted leaves by the
   // same rule the provider transform used over the catalog alone (#869).

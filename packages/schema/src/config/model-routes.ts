@@ -344,15 +344,15 @@ const RouteID = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]
 export const Info = Schema.Record(RouteID, Route).annotate({ identifier: "Config.ModelRoutes" })
 export type Info = typeof Info.Type
 
-/** A virtual provider: a selection over concrete providers, with the same selection modes as a
+/** A provider route: a selection over concrete providers, with the same selection modes as a
  * model route - ordered, round-robin (weights are priority tiers), weighted - except at provider
- * level. A route target names a synthetic provider exactly like a concrete one
+ * level. A route target names a provider route exactly like a concrete one
  * (`openai-plan/gpt-6.1-terra`), and resolution picks the member that serves the model, so an
  * account order is defined once instead of once per model. */
-export class SyntheticProvider extends Schema.Class<SyntheticProvider>("Config.ModelRoute.SyntheticProvider")({
+export class ProviderRoute extends Schema.Class<ProviderRoute>("Config.ModelRoute.ProviderRoute")({
   providers: Schema.Array(Schema.String).annotate({
     description:
-      "Member provider ids, in configured order. Members must be concrete providers: a synthetic provider cannot name another synthetic provider (no nesting), and the routes provider is not a member. A member that names no known provider contributes no leaves.",
+      "Member provider ids, in configured order. Members must be concrete providers: a provider route cannot name another provider route (no nesting), and the routes provider is not a member. A member that names no known provider contributes no leaves.",
   }),
   selection: Schema.Literals(["ordered", "round-robin", "weighted"])
     .annotate({
@@ -363,7 +363,7 @@ export class SyntheticProvider extends Schema.Class<SyntheticProvider>("Config.M
   weights: Schema.Record(Schema.String, Schema.Finite.check(Schema.isGreaterThan(0)))
     .annotate({
       description:
-        'Relative weights keyed by member provider id, e.g. { "openai.alternate": 2, "openai": 1 }. Members without a weight count as 1. In a round-robin synthetic a weight is a priority tier; in a weighted one it is a relative ratio; in an ordered one weights rank the failover order.',
+        'Relative weights keyed by member provider id, e.g. { "openai.alternate": 2, "openai": 1 }. Members without a weight count as 1. In a round-robin provider route a weight is a priority tier; in a weighted one it is a relative ratio; in an ordered one weights rank the failover order.',
     })
     .pipe(optional),
 }) {}
@@ -374,10 +374,10 @@ export class SyntheticProvider extends Schema.Class<SyntheticProvider>("Config.M
 export const Windows = Schema.Record(WindowName, Window).annotate({ identifier: "Config.ModelRoute.Windows" })
 export type Windows = typeof Windows.Type
 
-/** The synthetic providers defined in experimental.synthetic_providers, keyed by id. An id that
+/** The provider routes defined in experimental.provider_routes, keyed by id. An id that
  * names a concrete provider, the routes provider, or a configured route is rejected at load:
  * concrete providers always win a `<id>/<model>` reference. */
-export const SyntheticProviders = Schema.Record(RouteID, SyntheticProvider).annotate({
-  identifier: "Config.ModelRoute.SyntheticProviders",
+export const ProviderRoutes = Schema.Record(RouteID, ProviderRoute).annotate({
+  identifier: "Config.ModelRoute.ProviderRoutes",
 })
-export type SyntheticProviders = typeof SyntheticProviders.Type
+export type ProviderRoutes = typeof ProviderRoutes.Type

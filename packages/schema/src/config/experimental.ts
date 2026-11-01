@@ -27,9 +27,9 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
   model_routes: ConfigModelRoutes.Info.annotate({
     description: "Named ordered provider/model routes with failure and performance failover",
   }).pipe(optional),
-  synthetic_providers: ConfigModelRoutes.SyntheticProviders.annotate({
+  provider_routes: ConfigModelRoutes.ProviderRoutes.annotate({
     description:
-      "Virtual providers defined as a selection over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model.",
+      "Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model.",
   }).pipe(optional),
   model_route_schedules: Schema.Array(ConfigModelRoutes.GlobalSchedule)
     .annotate({
