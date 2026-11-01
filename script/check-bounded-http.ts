@@ -174,7 +174,7 @@ export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx", ".astro"]
 
 export const isScannedFile = (name: string) => SCANNED_EXTENSIONS.some((ext) => name.endsWith(ext))
 
-function collect(root: string, dir: string, hits: Hit[]) {
+export function collect(root: string, dir: string, hits: Hit[]) {
   for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collect(root, path, hits)
