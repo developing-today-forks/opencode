@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { MAX_ARCHIVE_BYTES } from "./bootstrap"
 import { RemoteCli } from "./remote-cli"
 
 // The output versionScript produces for a CLI that printed `versionOutput`: the frame
@@ -113,6 +114,106 @@ describe("SSH parseVersion", () => {
       expect(RemoteCli.parseVersion(runVersionScript("2.1.0", "welcome to dev box"))).toBe("2.1.0")
     },
   )
+})
+
+// Runs the real installScript through `sh` in a sandbox PATH that contains
+// only symlinks to the shell tools the script needs plus one fake downloader
+// (curl or wget). The fake records its argv and serves either a real small
+// archive holding a fake CLI or, when FAKE_OVERSIZE=1, a sparse file one byte
+// over MAX_ARCHIVE_BYTES — so the size bound, the rejection before extraction,
+// and the EXIT-trap cleanup are exercised, not matched as shell text.
+const SH = spawnSync("sh", ["-c", "command -v sh"], { encoding: "utf8" }).stdout.trim()
+
+function runInstallScript(downloader: "curl" | "wget", oversize: boolean) {
+  const root = mkdtempSync(path.join(tmpdir(), "ssh-install-"))
+  const home = path.join(root, "home")
+  const bin = path.join(root, "bin")
+  mkdirSync(home)
+  mkdirSync(bin)
+
+  for (const tool of ["mkdir", "dirname", "mktemp", "rm", "chmod", "mv", "wc", "tr", "awk", "sed", "tar", "gzip", "cp", "truncate"]) {
+    const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim()
+
+    if (resolved) symlinkSync(resolved, path.join(bin, tool))
+  }
+
+  const fixture = path.join(root, "fixture")
+  const cli = path.join(fixture, "package/bin/opencode")
+  mkdirSync(path.dirname(cli), { recursive: true })
+  writeFileSync(cli, "#!/bin/sh\nprintf '2.0.0\\n'\n")
+  chmodSync(cli, 0o755)
+  const archive = path.join(root, "archive.tgz")
+  const tar = spawnSync("tar", ["-czf", archive, "-C", fixture, "package"], { encoding: "utf8" })
+
+  if (tar.status !== 0) throw new Error(`fixture tar failed: ${tar.stderr}`)
+
+  const log = path.join(root, "downloader.log")
+  const flag = downloader === "curl" ? "-o" : "-O"
+  const fake = path.join(bin, downloader)
+  writeFileSync(
+    fake,
+    [
+      `#!${SH}`,
+      `echo "$@" > "$FAKE_LOG"`,
+      "out=",
+      "prev=",
+      `for a in "$@"; do if [ "$prev" = "${flag}" ]; then out="$a"; fi; prev="$a"; done`,
+      `if [ "$FAKE_OVERSIZE" = "1" ]; then truncate -s ${MAX_ARCHIVE_BYTES + 1} "$out"; else cp "$FAKE_ARCHIVE" "$out"; fi`,
+      "",
+    ].join("\n"),
+  )
+  chmodSync(fake, 0o755)
+
+  const script = RemoteCli.installScript({
+    version: "2.0.0",
+    source: { type: "download", url: "https://example.test/archive.tgz" },
+  })
+
+  const result = spawnSync(SH, ["-s"], {
+    input: script,
+    encoding: "utf8",
+    env: { HOME: home, PATH: bin, FAKE_LOG: log, FAKE_ARCHIVE: archive, FAKE_OVERSIZE: oversize ? "1" : "0" },
+  })
+
+  const destination = path.join(home, ".opencode/bin/opencode")
+
+  const staged = existsSync(path.dirname(destination))
+    ? readdirSync(path.dirname(destination)).filter((entry) => entry.startsWith(".install-"))
+    : []
+
+  const argv = existsSync(log) ? readFileSync(log, "utf8") : ""
+  const installed = existsSync(destination)
+  rmSync(root, { recursive: true, force: true })
+
+  return { result, argv, installed, staged }
+}
+
+describe("SSH installScript archive size bounds", () => {
+  test.skipIf(process.platform === "win32")("installs a normal archive through the curl branch", () => {
+    const { result, argv, installed } = runInstallScript("curl", false)
+    expect(result.status).toBe(0)
+    expect(installed).toBe(true)
+    expect(argv).toContain(`--max-filesize ${MAX_ARCHIVE_BYTES}`)
+  })
+
+  test.skipIf(process.platform === "win32")("installs a normal archive through the wget branch", () => {
+    const { result, installed } = runInstallScript("wget", false)
+    expect(result.status).toBe(0)
+    expect(installed).toBe(true)
+  })
+
+  for (const downloader of ["curl", "wget"] as const) {
+    test.skipIf(process.platform === "win32")(
+      `rejects an oversized ${downloader} download before extraction and cleans the stage`,
+      () => {
+        const { result, installed, staged } = runInstallScript(downloader, true)
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain(`archive exceeds ${MAX_ARCHIVE_BYTES} bytes`)
+        expect(installed).toBe(false)
+        expect(staged).toEqual([])
+      },
+    )
+  }
 })
 
 // Runs the real probeScript through `sh`, optionally after preceding login-shell

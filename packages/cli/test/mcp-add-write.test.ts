@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { writeMcpConfig } from "../src/commands/handlers/mcp/add"
+import { writeMcpConfig, writeTempFileExclusive } from "../src/commands/handlers/mcp/add"
 
 const remote = { type: "remote", url: "https://example.com/mcp", headers: { Authorization: "Bearer secret" } }
 
@@ -78,6 +78,26 @@ describe("mcp add config write", () => {
     }
     expect(Object.keys(configObject.mcp.servers)).toHaveLength(1)
     expect(await fs.readdir(directory)).toEqual(["opencode.json"])
+  })
+
+  test("temp creation refuses a pre-existing file and leaves it intact", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
+    const temporary = path.join(directory, "opencode.json.tmp-fixed")
+    await fs.writeFile(temporary, "sentinel\n")
+
+    await expect(writeTempFileExclusive(temporary, "replacement", 0o600)).rejects.toThrow()
+
+    expect(await fs.readFile(temporary, "utf8")).toBe("sentinel\n")
+  })
+
+  test("temp creation writes a fresh file with the requested mode", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
+    const temporary = path.join(directory, "opencode.json.tmp-fixed")
+
+    await writeTempFileExclusive(temporary, "content\n", 0o600)
+
+    expect(await fs.readFile(temporary, "utf8")).toBe("content\n")
+    if (process.platform !== "win32") expect(await mode(temporary)).toBe(0o600)
   })
 
   test("keeps a read-only existing config read-only", async () => {

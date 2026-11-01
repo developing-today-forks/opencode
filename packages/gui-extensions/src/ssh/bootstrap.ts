@@ -59,8 +59,7 @@ export function parseRegistration(output: string) {
 // Legitimate CLI archives are tens of megabytes, so this generous ceiling
 // costs a normal install nothing; it stops a buggy or hostile mirror from
 // making the desktop process buffer an archive without limit. The primary
-// remote path (remote-cli.ts stageBinary) caps only time (curl --max-time
-// 180), never size, so the fallback needs its own bound.
+// remote path (remote-cli.ts stageBinary) uses the same size ceiling.
 export const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 
 // Comparable to the primary path's curl --max-time 180 bound.

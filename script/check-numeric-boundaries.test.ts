@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-numeric-boundaries"
+import { SCAN_ROOTS, isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-numeric-boundaries"
 
 describe("scanSource", () => {
   test("flags the bare conversion shapes", () => {
@@ -37,6 +37,13 @@ describe("scanSource", () => {
       ["// never call Number(input) on raw strings", "* parseInt(x) truncates", "const x = 1"].join("\n"),
     )
     expect(hits).toEqual([])
+  })
+})
+
+describe("SCAN_ROOTS", () => {
+  test("includes the server package, the network-boundary root added by #1294", () => {
+    expect(SCAN_ROOTS).toContain("packages/server/src")
+    expect(SCAN_ROOTS).toEqual(["packages/core/src", "packages/ai/src", "packages/cli/src", "packages/server/src"])
   })
 })
 
