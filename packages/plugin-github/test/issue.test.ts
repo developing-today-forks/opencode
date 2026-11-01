@@ -360,4 +360,112 @@ describe("github issues", () => {
       }),
     ),
   )
+
+  it.live("comment_update rejects prototype node types without authorizing or sending a mutation", () =>
+    withEnv(env, () =>
+      Effect.gen(function* () {
+        const github = fakeGitHub({
+          "GRAPHQL node(id: $id)": (request) => ({
+            body: {
+              node: {
+                __typename: (request.body as Body).variables.id,
+                repository: { nameWithOwner: "acme/widgets" },
+              },
+            },
+          }),
+          // Keep the pre-fix non-string query path deterministic so the assertions can detect it.
+          "GRAPHQL ": { body: {} },
+          "POST /graphql": { body: {} },
+        })
+        const { deps, asserted } = yield* makeDeps({ http: github.http })
+        const tool = find(GitHubIssues.tools(deps), "comment_update")
+        const cases = ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"].flatMap((typename) =>
+          ["edit", "delete"].map((action) => ({ typename, action })),
+        )
+        const failures = yield* Effect.forEach(cases, ({ typename, action }) =>
+          run(tool, {
+            repo: "acme/widgets",
+            id: typename,
+            ...(action === "edit" ? { body: "Edited" } : { delete: true }),
+          }).pipe(Effect.flip),
+        )
+
+        expect(failures.map((error) => error.message)).toEqual(
+          cases.map(
+            ({ typename }) =>
+              `github.comment_update: ${typename} is a ${typename}, not a comment this tool can change.`,
+          ),
+        )
+        const calls = graphql(github.requests)
+        expect(calls).toHaveLength(cases.length)
+        expect(calls.every((request) => request.query.includes("node(id: $id)"))).toBe(true)
+        expect(rest(github.requests)).toEqual([])
+        expect(asserted).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("comment_update edits and deletes all supported comment types", () =>
+    withEnv(env, () =>
+      Effect.gen(function* () {
+        const types = ["IssueComment", "DiscussionComment", "PullRequestReviewComment"] as const
+        const operations = types.flatMap((typename) =>
+          ["edit", "delete"].map((action) => ({ typename, action, id: `${typename}-${action}` })),
+        )
+        const github = fakeGitHub({
+          "GRAPHQL node(id: $id)": (request) => {
+            const id = String((request.body as Body).variables.id)
+            const typename = id.slice(0, id.lastIndexOf("-"))
+            return {
+              body: {
+                node: {
+                  __typename: typename,
+                  repository: { nameWithOwner: "acme/widgets" },
+                  ...(typename === "DiscussionComment"
+                    ? { discussion: { repository: { nameWithOwner: "acme/widgets" } } }
+                    : {}),
+                },
+              },
+            }
+          },
+          "GRAPHQL updateIssueComment(": { body: { result: { comment: { url: "https://example.test/issue" } } } },
+          "GRAPHQL updateDiscussionComment(": {
+            body: { result: { comment: { url: "https://example.test/discussion" } } },
+          },
+          "GRAPHQL updatePullRequestReviewComment(": {
+            body: { result: { comment: { url: "https://example.test/review" } } },
+          },
+          "GRAPHQL deleteIssueComment(": { body: { result: { clientMutationId: "issue" } } },
+          "GRAPHQL deleteDiscussionComment(": { body: { result: { clientMutationId: "discussion" } } },
+          "GRAPHQL deletePullRequestReviewComment(": { body: { result: { clientMutationId: "review" } } },
+        })
+        const { deps, asserted } = yield* makeDeps({ http: github.http })
+        const tool = find(GitHubIssues.tools(deps), "comment_update")
+        const outputs = yield* Effect.forEach(operations, ({ id, action }) =>
+          run(tool, {
+            repo: "acme/widgets",
+            id,
+            ...(action === "edit" ? { body: "Edited" } : { delete: true }),
+          }),
+        )
+
+        expect(outputs).toHaveLength(operations.length)
+        const mutations = graphql(github.requests)
+          .filter(({ query }) => query.includes("mutation"))
+          .map(({ query }) => query)
+        expect(mutations).toHaveLength(operations.length)
+        expect(
+          [
+            "updateIssueComment",
+            "updateDiscussionComment",
+            "updatePullRequestReviewComment",
+            "deleteIssueComment",
+            "deleteDiscussionComment",
+            "deletePullRequestReviewComment",
+          ].every((name) => mutations.some((query) => query.includes(name))),
+        ).toBe(true)
+        expect(asserted).toHaveLength(operations.length)
+      }),
+    ),
+  )
 })
