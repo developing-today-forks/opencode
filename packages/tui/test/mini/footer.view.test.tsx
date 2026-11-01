@@ -1602,7 +1602,7 @@ test("direct footer rejects local commands submitted with the queue shortcut", a
 
 // OpenTUI currently crashes Bun in the full `test/cli/run` directory run here.
 // Re-enable after the upstream OpenTUI fix lands in this repo.
-test.skip("direct footer recreates the frame across command panel transitions", async () => {
+test("direct footer recreates the frame across command panel transitions", async () => {
   const app = await renderFooter()
 
   try {
@@ -1626,7 +1626,7 @@ test.skip("direct footer recreates the frame across command panel transitions", 
   }
 })
 
-test.skip("direct footer dispatches leader variant binding only when leader is registered", async () => {
+test("direct footer dispatches leader variant binding only when leader is registered", async () => {
   const calls: string[] = []
   const app = await renderFooter({
     tuiConfig: createTuiResolvedConfig({ keybinds: { leader: "ctrl+x", "variant.cycle": "<leader>t" } }),
