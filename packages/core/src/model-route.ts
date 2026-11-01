@@ -107,8 +107,12 @@ export const gateOpen = (gate: Gate | undefined, now = Date.now()): boolean =>
 /** A group of targets with its own selection mode. Children are leaf target indexes or nested
  * groups; `weights` is parallel to `children`. Group 0 is the route itself. */
 const Node = Schema.Struct({
-  /** Route id at this point in the hierarchy. */
+  /** Route id at this point in the hierarchy. For a synthetic-provider group, the synthetic id. */
   routeID: Schema.String.pipe(optional),
+  /** Set on a group that resolves a synthetic provider (experimental.synthetic_providers):
+   * the synthetic provider's id. The group's children are the members' concrete leaves for the
+   * one model the group serves, and its decision is recorded under this id. */
+  synthetic: Schema.String.pipe(optional),
   selection: Mode,
   weights: Schema.Array(Schema.Finite.check(Schema.isGreaterThan(0))),
   /** Weight changes declared on this route, in force while a target under this node is judged. */
@@ -160,6 +164,16 @@ const Definition = Schema.Struct({
   schedules: Schema.Array(WeightRule).pipe(optional),
   nodes: Schema.Array(Node),
 })
+
+/** A virtual provider, validated at config load from experimental.synthetic_providers: a
+ * selection over concrete providers. Expansion turns a `<synthetic>/<model>` target into a
+ * group node over the members' concrete leaves for that model, so selection, health and
+ * decisions treat it exactly like a nested route whose leaves differ only by provider. */
+export interface SyntheticProvider {
+  readonly providers: readonly string[]
+  readonly selection: "ordered" | "round-robin" | "weighted"
+  readonly weights: Readonly<Record<string, number>>
+}
 
 /** A concrete provider/model a route sends requests to. */
 export type Target = Model.Ref
@@ -1351,12 +1365,20 @@ export const nextTarget = (
       eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index)))
     )
   }
-  const label = (child: Node["children"][number]) =>
-    child.leaf !== undefined
-      ? `${definition.targets[child.leaf]?.providerID}/${definition.targets[child.leaf]?.id}`
-      : child.node !== undefined
-        ? `opencode-route/${definition.nodes[child.node]?.routeID ?? child.node}`
-        : "unknown"
+  const label = (child: Node["children"][number]) => {
+    if (child.leaf !== undefined)
+      return `${definition.targets[child.leaf]?.providerID}/${definition.targets[child.leaf]?.id}`
+    if (child.node === undefined) return "unknown"
+    const group = definition.nodes[child.node]
+    // A synthetic-provider group is named by its reference as written in config: the
+    // synthetic id plus the one model the group serves (`openai-plan/gpt-6.1-terra`).
+    if (group?.synthetic !== undefined) {
+      const first = leaves(child.node)[0]
+      const model = first === undefined ? undefined : definition.targets[first]?.id
+      return model === undefined ? group.synthetic : `${group.synthetic}/${model}`
+    }
+    return `opencode-route/${group?.routeID ?? child.node}`
+  }
   const walk = (
     nodeIndex: number,
     inherited: readonly WeightRule[] = [],

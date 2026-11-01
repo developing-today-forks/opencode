@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
 
 const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-luna" })
 
@@ -1078,5 +1079,71 @@ describe("ModelRoute round-robin tiers (#1122)", () => {
     // The weight-2 group is demoted as a unit: the weight-1 leaf leads, the group serves after.
     expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([2, 0, 1])
     expect(head(route, all, "gd")).toBe(2)
+  })
+})
+
+describe("ModelRoute synthetic provider groups", () => {
+  const policy = ModelRoute.policy()
+  const alt = ModelRoute.ref({ providerID: "synthetic-alt", model: "m" })
+  const main = ModelRoute.ref({ providerID: "synthetic-main", model: "m" })
+  const build = (selection: "ordered" | "round-robin" | "weighted", weights: number[] = [1, 1]) =>
+    ({
+      id: "synthetic-route",
+      targets: [alt, main],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        { routeID: "plan", synthetic: "plan", selection, weights, children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const all = new Set([0, 1])
+  const demote = (target: ModelRoute.Target) => {
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    expect(ModelRoute.demoted(target)).toBe(true)
+  }
+
+  test("ordered: the first ready member serves, and an unavailable member falls through", () => {
+    const route = build("ordered")
+    expect(ModelRoute.nextTarget(route, all, new Set(), "s1", true)).toBe(0)
+    // The resolver expresses a benched member by leaving it out of the ready set.
+    expect(ModelRoute.nextTarget(route, new Set([1]), new Set(), "s2", true)).toBe(1)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1])
+  })
+
+  test("ordered: a quota-demoted member drops behind the live member and still serves last", () => {
+    demote(alt)
+    const route = build("ordered")
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+    expect(ModelRoute.nextTarget(route, all, new Set(), "d1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(0)
+  })
+
+  test("round-robin: a quota-demoted member sorts below the live tier inside the group", () => {
+    demote(alt)
+    const route = build("round-robin", [2, 1])
+    // Alt outweighs main 2:1, but demotion holds it below the live tier: main serves,
+    // and the demoted member remains the last resort rather than a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set(), "r1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "r2", true)).toBe(0)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+  })
+
+  test("the decision records show the synthetic resolution: the group under its own id, the member it chose", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    try {
+      expect(ModelRoute.nextTarget(build("ordered"), all, new Set(), "dec-session", true)).toBe(0)
+    } finally {
+      ModelRouteLog.setSink(undefined)
+    }
+    const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
+    const inner = decisions.find((row) => row.route_id === "plan")
+    expect(inner?.candidates).toEqual(["synthetic-alt/m", "synthetic-main/m"])
+    expect(inner?.chosen).toBe("synthetic-alt/m")
+    const outer = decisions.find((row) => row.route_id === "synthetic-route")
+    expect(outer?.candidates).toEqual(["plan/m"])
+    expect(outer?.chosen).toBe("plan/m")
   })
 })

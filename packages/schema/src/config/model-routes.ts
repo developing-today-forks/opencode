@@ -344,8 +344,40 @@ const RouteID = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]
 export const Info = Schema.Record(RouteID, Route).annotate({ identifier: "Config.ModelRoutes" })
 export type Info = typeof Info.Type
 
+/** A virtual provider: a selection over concrete providers, with the same selection modes as a
+ * model route - ordered, round-robin (weights are priority tiers), weighted - except at provider
+ * level. A route target names a synthetic provider exactly like a concrete one
+ * (`openai-plan/gpt-6.1-terra`), and resolution picks the member that serves the model, so an
+ * account order is defined once instead of once per model. */
+export class SyntheticProvider extends Schema.Class<SyntheticProvider>("Config.ModelRoute.SyntheticProvider")({
+  providers: Schema.Array(Schema.String).annotate({
+    description:
+      "Member provider ids, in configured order. Members must be concrete providers: a synthetic provider cannot name another synthetic provider (no nesting), and the routes provider is not a member. A member that names no known provider contributes no leaves.",
+  }),
+  selection: Schema.Literals(["ordered", "round-robin", "weighted"])
+    .annotate({
+      description:
+        "How the serving member is picked for a model: ordered uses the first ready member, round-robin rotates per session (a weight is a priority tier there), weighted draws by weights. The choice is sticky per session and failover falls through the remaining members in order - the model-route selection modes, at provider level. Defaults to ordered.",
+    })
+    .pipe(optional),
+  weights: Schema.Record(Schema.String, Schema.Finite.check(Schema.isGreaterThan(0)))
+    .annotate({
+      description:
+        'Relative weights keyed by member provider id, e.g. { "openai.alternate": 2, "openai": 1 }. Members without a weight count as 1. In a round-robin synthetic a weight is a priority tier; in a weighted one it is a relative ratio; in an ordered one weights rank the failover order.',
+    })
+    .pipe(optional),
+}) {}
+
 /** Named, reusable time windows, defined once and referenced by schedules and target gates.
  * Windows belong to the meter, not the model: `deepseek-peak` is defined here a single time and
  * every rule that follows DeepSeek's clock names it. */
 export const Windows = Schema.Record(WindowName, Window).annotate({ identifier: "Config.ModelRoute.Windows" })
 export type Windows = typeof Windows.Type
+
+/** The synthetic providers defined in experimental.synthetic_providers, keyed by id. An id that
+ * names a concrete provider, the routes provider, or a configured route is rejected at load:
+ * concrete providers always win a `<id>/<model>` reference. */
+export const SyntheticProviders = Schema.Record(RouteID, SyntheticProvider).annotate({
+  identifier: "Config.ModelRoute.SyntheticProviders",
+})
+export type SyntheticProviders = typeof SyntheticProviders.Type

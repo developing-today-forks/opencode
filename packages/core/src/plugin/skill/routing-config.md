@@ -106,6 +106,37 @@ Common changes:
 - A new pool: add a new key under `model_routes`. Then point a category at
   `opencode-route/<id>` in OpenChamber (Settings → Routing).
 
+## Synthetic providers: one pool of providers for every model
+
+- A synthetic provider is a named selection over concrete providers, declared once
+  under `experimental.synthetic_providers` and then used like a provider in any pool:
+  `"<synthetic>/<model>"`. One definition serves every model the members offer - use
+  it when the same accounts should back several models (two subscriptions for one
+  provider's models, say), instead of repeating the pair in a pool per model.
+
+```jsonc
+"experimental": {
+  "synthetic_providers": {
+    "openai-plan": { "providers": ["openai.alternate", "openai"], "selection": "ordered" },
+  },
+},
+```
+
+- `providers` is the member list, in order. `selection` is `ordered` (the default),
+  `round-robin`, or `weighted` - the same modes pools use, tiered weights included.
+  `weights` keys by member provider id (an unset member weighs 1) and applies the
+  same way pool weights do.
+- A member serves a dispatch only when it offers the model and can produce the
+  target's variant - the same skip rule as a direct leaf. Health is per concrete
+  provider, model, and credential, so a benched or quota-demoted member falls
+  through inside the synthetic's own selection; nothing is tracked per synthetic.
+- Members must be concrete providers: synthetic providers do not nest. A synthetic
+  id that names a concrete provider, a pool, or `opencode-route` is dropped at load
+  with a warning - references always resolve to the concrete provider.
+- Decision records show the synthetic as its own step (synthetic id, chosen member),
+  and pools label the member group `"<synthetic>/<model>"`, so a walk stays
+  explainable.
+
 ## Time-of-day and temporary weights
 
 - Inside one pool, `schedules` is a list. Each entry has `targets` (optional,
