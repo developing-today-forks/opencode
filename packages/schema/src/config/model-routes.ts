@@ -408,6 +408,11 @@ export class QuotaGate extends Schema.Class<QuotaGate>("Config.ModelRoute.Settin
   feedTtlMs: LongDurationMs.annotate({
     description: "How often quota snapshots are fed into the gate. Defaults to 60000.",
   }).pipe(optional),
+  balanceDeadThreshold: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
+    .annotate({
+      description: "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1.",
+    })
+    .pipe(optional),
 }) {}
 
 /** Escalation: when a route races its next target because the current one keeps giving up. */

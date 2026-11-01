@@ -226,6 +226,35 @@ describe("ModelRoute quota-failure gate (#984)", () => {
     expect(ModelRoute.credentialQuotaBlocked("cred-lab", 10_000)).toEqual({ until: 10_000 + 30 * 86_400_000 })
   })
 
+  test("a credit-balance failure has no timer readmission and releases only after a fresh increase", () => {
+    const balance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeCredentialQuota(target, "cred-balance", balance, 10_000)
+    ModelRoute.observeQuotaFailure(target, "cred-balance", undefined, 10_000)
+
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 10_000 + 86_400_000)).toEqual({ until: null })
+    ModelRoute.observeCredentialQuota(target, "cred-balance", { ...balance, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 20_000)).toEqual({ until: null })
+
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-balance",
+      { ...balance, remaining: 1.01, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 30_000)).toBeUndefined()
+  })
+
+  test("a rate-limit failure on a balance-shaped pool keeps timed recovery, not a balance hold", () => {
+    const balance = snap({ percent: null, remaining: 20, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeCredentialQuota(target, "cred-ratelimit", balance, 10_000)
+    ModelRoute.observeQuotaFailure(target, "cred-ratelimit", 100_000, 10_000, "rate-limit")
+
+    // The stated reset governs: gated until it, re-admitted when it passes -- no balance
+    // increase is demanded for a temporary rate limit.
+    expect(ModelRoute.credentialQuotaBlocked("cred-ratelimit", 10_000)).toEqual({ until: 100_000 })
+    expect(ModelRoute.credentialQuotaBlocked("cred-ratelimit", 100_000)).toBeUndefined()
+  })
+
   test("a credential-less exhaustion skips the provider until the reset, then lapses", () => {
     const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
     ModelRoute.observeQuotaFailure(plain, undefined, 100_000, 10_000)
@@ -309,6 +338,26 @@ describe("ModelRoute proactive provider quota gate (#984)", () => {
     const activeCapped = ModelRoute.activeAdjustments(10_000)
     expect(activeCapped[0]?.until).toBe(10_000 + 30 * 86_400_000)
   })
+
+  test("a balance-shaped provider gate has no expiry and clears only on increased balance", () => {
+    ModelRoute.resetHealth()
+    const balance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeProviderQuota(plain, balance, 10_000)
+    ModelRoute.observeQuotaFailure(plain, undefined, undefined, 10_000)
+
+    expect(ModelRoute.skipped(plain, 10_000 + 86_400_000)).toBe(true)
+    expect(ModelRoute.activeAdjustments(10_000 + 86_400_000)[0]?.until).toBeUndefined()
+
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1.01, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(false)
+
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([
+      { id: "quota:cline-pass", match: "cline-pass/", action: "skip", note: "restored balance gate" },
+    ])
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1.01, observedAt: 30_000 }, 30_000)
+    expect(ModelRoute.skipped(plain, 30_000)).toBe(false)
+  })
 })
 
 describe("ModelRoute health credential column (#1055)", () => {
@@ -372,5 +421,209 @@ describe("ModelRoute health credential column (#1055)", () => {
     // The provider-quota rows name the provider in the reason: a distinct dimension that
     // must never be read back as a credential.
     expect(rows[1]?.reason).toContain("provider:no-cred-pass")
+  })
+})
+
+describe("ModelRoute balance-hold restart baseline + held credentials (#1014 fix pass)", () => {
+  const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
+  const balance = snap({
+    planID: "cline-balance",
+    providerID: "cline-pass",
+    percent: null,
+    remaining: 1,
+    resetAt: null,
+    balance: true,
+    expired: false,
+  })
+
+  test("an attempt-created balance skip persists its benched balance as the baseline", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(plain, balance, 10_000)
+    ModelRoute.observeQuotaFailure(plain, undefined, undefined, 10_000)
+    const active = ModelRoute.activeAdjustments(10_000)
+    expect(active[0]?.balanceBaseline).toBe(1)
+  })
+
+  test("a restored balance skip clears only on an increase over its persisted baseline", () => {
+    ModelRoute.resetHealth()
+    // Simulate a restart: the adjustment record is restored, the in-memory gate state is not.
+    ModelRoute.setAdjustments([
+      {
+        id: "quota:cline-pass",
+        match: "cline-pass/",
+        action: "skip",
+        note: "balance exhausted (attempt-reported); held until a fresh balance increase",
+        balanceBaseline: 1,
+      },
+    ])
+    // Above the dead threshold but not above the benched balance: no increase, no release.
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(true)
+    // A genuine increase releases.
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1.01, observedAt: 30_000 }, 30_000)
+    expect(ModelRoute.skipped(plain, 30_000)).toBe(false)
+  })
+
+  test("heldCredentialIDs names balance-held credentials until a fresh increase clears them", () => {
+    ModelRoute.resetHealth()
+    const credBalance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeCredentialQuota(target, "cred-held", credBalance, 10_000)
+    ModelRoute.observeQuotaFailure(target, "cred-held", undefined, 10_000)
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual(["cred-held"])
+    expect(ModelRoute.heldCredentialIDs("cline-pass")).toEqual([])
+
+    ModelRoute.observeCredentialQuota(target, "cred-held", { ...credBalance, remaining: 1.01, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual([])
+  })
+})
+
+describe("ModelRoute balance-hold grants + credential restart baseline (#1014 Codex pass)", () => {
+  const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
+
+  test("a funded replacement grant releases a credential balance hold without beating the dead grant's leftover", () => {
+    const dead = snap({ percent: null, remaining: 10, resetAt: null, balance: true, expired: true })
+    ModelRoute.observeCredentialQuota(target, "cred-grant", dead, 10_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-grant", 10_000)).toEqual({ until: null })
+
+    // The same grant alive again but not increased: still held.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-grant",
+      { ...dead, expired: false, remaining: 5, observedAt: 20_000 },
+      20_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-grant", 20_000)).toEqual({ until: null })
+
+    // A different grant with less money is a funded replacement, not a shortfall.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-grant",
+      { ...dead, planID: "opencode-go-lab-2", expired: false, remaining: 5, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-grant", 30_000)).toBeUndefined()
+  })
+
+  test("a funded replacement grant releases a provider balance hold without beating the dead grant's leftover", () => {
+    ModelRoute.resetHealth()
+    const dead = snap({
+      planID: "cline-balance",
+      providerID: "cline-pass",
+      percent: null,
+      remaining: 10,
+      resetAt: null,
+      balance: true,
+      expired: true,
+    })
+    ModelRoute.observeProviderQuota(plain, dead, 10_000)
+    expect(ModelRoute.skipped(plain, 10_000)).toBe(true)
+
+    ModelRoute.observeProviderQuota(
+      plain,
+      { ...dead, planID: "cline-balance-2", expired: false, remaining: 5, observedAt: 20_000 },
+      20_000,
+    )
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(false)
+    expect(ModelRoute.activeAdjustments(20_000).find((item) => item.id === "quota:cline-pass")).toBeUndefined()
+  })
+
+  test("a restored provider baseline from a dead grant does not block its funded replacement", () => {
+    ModelRoute.resetHealth()
+    // Simulate a restart: the adjustment record is restored, the in-memory gate state is not.
+    ModelRoute.setAdjustments([
+      {
+        id: "quota:cline-pass",
+        match: "cline-pass/",
+        action: "skip",
+        note: "balance exhausted (attempt-reported); held until a fresh balance increase",
+        balanceBaseline: 10,
+        balanceGrant: "cline-balance\nmonthly",
+      },
+    ])
+    const balance = snap({
+      planID: "cline-balance-2",
+      providerID: "cline-pass",
+      percent: null,
+      remaining: 5,
+      resetAt: null,
+      balance: true,
+      expired: false,
+    })
+    ModelRoute.observeProviderQuota(plain, balance, 20_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(false)
+  })
+
+  test("a credential balance hold persists its baseline and a restart re-arms it until an increase", () => {
+    const credBalance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeCredentialQuota(target, "cred-persist", credBalance, 10_000)
+    ModelRoute.observeQuotaFailure(target, "cred-persist", undefined, 10_000)
+
+    const record = ModelRoute.activeAdjustments(10_000).find((item) => item.id === "quota-credential:cred-persist")
+    expect(record?.balanceBaseline).toBe(1)
+    // The record is not a selection skip: its match names the credential, never the target.
+    expect(ModelRoute.skipped(target, 10_000)).toBe(false)
+
+    // Simulate a restart: in-memory gate state is gone, the durable record remains.
+    const restoredRecords = ModelRoute.activeAdjustments(10_000)
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments(restoredRecords)
+
+    // Above the dead threshold but not above the benched balance: the hold re-arms.
+    ModelRoute.observeCredentialQuota(target, "cred-persist", { ...credBalance, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-persist", 20_000)).toEqual({ until: null })
+
+    // A genuine increase releases, and the durable record goes with the hold.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-persist",
+      { ...credBalance, remaining: 1.01, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-persist", 30_000)).toBeUndefined()
+    expect(
+      ModelRoute.activeAdjustments(30_000).find((item) => item.id === "quota-credential:cred-persist"),
+    ).toBeUndefined()
+  })
+
+  test("a restored credential baseline is discovered, blocks before any feed, and releases on a fed increase", () => {
+    ModelRoute.resetHealth()
+    // Simulate a restart where the exhausted credential is no longer the active one: the
+    // durable record remains, the in-memory gate state is gone.
+    ModelRoute.setAdjustments([
+      {
+        id: "quota-credential:cred-restored",
+        match: "credential:cred-restored",
+        action: "skip",
+        note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
+        balanceBaseline: 1,
+        credentialID: "cred-restored",
+        providerID: "opencode-go",
+      },
+    ])
+    // Discovery: the gate feed can find the inactive restored credential under its own
+    // provider (and no other), so its snapshots keep reaching the release check.
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual(["cred-restored"])
+    expect(ModelRoute.heldCredentialIDs("cline-pass")).toEqual([])
+    // Enforcement: fallback selection sees the hold even before any feed re-arms it.
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 10_000)).toEqual({ until: null })
+
+    const credBalance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    // A fed read with no increase re-arms the hold in memory and keeps it.
+    ModelRoute.observeCredentialQuota(target, "cred-restored", { ...credBalance, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 20_000)).toEqual({ until: null })
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual(["cred-restored"])
+
+    // A genuine increase releases, and discovery and the durable record go with the hold.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-restored",
+      { ...credBalance, remaining: 1.01, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", 30_000)).toBeUndefined()
+    expect(ModelRoute.heldCredentialIDs("opencode-go")).toEqual([])
+    expect(
+      ModelRoute.activeAdjustments(30_000).find((item) => item.id === "quota-credential:cred-restored"),
+    ).toBeUndefined()
   })
 })
