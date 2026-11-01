@@ -48,6 +48,11 @@ export async function fetchRegistryVersion(
       }
       chunks.push(result.value)
     }
+    // The abort handler above cancels the reader, which settles a pending
+    // read as done — so a body that stalls after a complete document would
+    // otherwise parse as a success at the deadline. The deadline still owns
+    // this read: an aborted signal rejects before the document is accepted.
+    signal.throwIfAborted()
     const bytes = new Uint8Array(size)
     let offset = 0
     for (const chunk of chunks) {

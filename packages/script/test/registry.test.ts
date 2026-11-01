@@ -34,6 +34,18 @@ describe("fetchRegistryVersion (#1275)", () => {
     expect(Date.now() - start).toBeLessThan(5_000)
   })
 
+  test("a body that stalls after a complete doc still rejects at the deadline", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(doc("2.3.4")))
+      },
+    })
+    const fetchImpl = fetchReturning(new Response(stream))
+    const start = Date.now()
+    await expect(fetchRegistryVersion(fetchImpl, { timeoutMs: 50 })).rejects.toThrow()
+    expect(Date.now() - start).toBeLessThan(5_000)
+  })
+
   test("a declared content-length over the cap fails fast", async () => {
     const fetchImpl = fetchReturning(
       new Response(doc("2.3.4"), { headers: { "content-length": String(2048) } }),
