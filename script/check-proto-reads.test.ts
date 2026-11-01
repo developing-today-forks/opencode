@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-proto-reads"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { collect, parseAllowlist, scanSource, staleEntries, unlistedHits, type Hit } from "./check-proto-reads"
 
 describe("scanSource", () => {
   test("flags the P-A uppercase-table shape and the P-C ?? shape", () => {
@@ -65,5 +68,24 @@ describe("allowlist accounting", () => {
 
   test("a malformed allowlist line throws", () => {
     expect(() => parseAllowlist("f.ts :: no disposition")).toThrow("Malformed allowlist line")
+  })
+})
+
+describe("collect on disk (#1286)", () => {
+  test("collect walks a packages/core tree on disk and reports hits under their repo-relative path", () => {
+    const root = mkdtempSync(join(tmpdir(), "proto-reads-collect-"))
+    try {
+      const dir = join(root, "packages/core/src/util")
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, "example.ts"), "const a = TABLE[key]\n")
+      writeFileSync(join(dir, "notes.md"), "const ignored = TABLE[key]\n")
+      const hits: Hit[] = []
+      collect(root, join(root, "packages/core/src"), hits)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].file).toBe("packages/core/src/util/example.ts")
+      expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
