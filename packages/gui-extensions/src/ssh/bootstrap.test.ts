@@ -3,9 +3,16 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { Effect } from "effect"
-import { HttpClientRequest, HttpClientResponse } from "effect/http"
-import { binaryPath, collectArchive, MAX_ARCHIVE_BYTES, parseRegistration, startScript } from "./bootstrap"
+import { Effect, Layer } from "effect"
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+import {
+  binaryPath,
+  collectArchive,
+  downloadArchive,
+  MAX_ARCHIVE_BYTES,
+  parseRegistration,
+  startScript,
+} from "./bootstrap"
 import { RemoteCli } from "./remote-cli"
 
 test("ignores stopped services and registrations that do not match the healthy endpoint", () => {
@@ -118,6 +125,74 @@ test("collectArchive bounds a streamed body in flight when no content-length is 
   await expect(Effect.runPromise(collectArchive(response))).rejects.toThrow(
     `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`,
   )
+})
+
+function downloadHttp(respond: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response>) {
+  // makeWith, not HttpClient.make: make resolves the request URL against
+  // globalThis.location, which this package's happy-dom test preload
+  // registers as about:blank, so every URL would fail with InvalidUrl.
+  return Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.makeWith(
+      (request: Effect.Effect<HttpClientRequest.HttpClientRequest, HttpClientError.HttpClientError>) =>
+        Effect.flatMap(request, (req) =>
+          respond(req).pipe(Effect.map((response) => HttpClientResponse.fromWeb(req, response))),
+        ),
+      (request: HttpClientRequest.HttpClientRequest) => Effect.succeed(request),
+    ),
+  )
+}
+
+test("downloadArchive returns a prompt body under the deadline", async () => {
+  const http = downloadHttp(() => Effect.succeed(new Response(streamOf(new Uint8Array([97, 98, 99])))))
+
+  const archive = await Effect.runPromise(
+    downloadArchive({
+      url: "https://example.test/archive.tgz",
+      version: "2.0.0",
+      target: "linux-x64",
+      timeout: "5 seconds",
+    }).pipe(Effect.provide(http)),
+  )
+
+  expect(Array.from(archive)).toEqual([97, 98, 99])
+})
+
+test("downloadArchive fails a non-2xx response before reading the body", async () => {
+  const http = downloadHttp(() => Effect.succeed(new Response("missing", { status: 404 })))
+  await expect(
+    Effect.runPromise(
+      downloadArchive({
+        url: "https://example.test/archive.tgz",
+        version: "2.0.0",
+        target: "linux-x64",
+        timeout: "5 seconds",
+      }).pipe(Effect.provide(http)),
+    ),
+  ).rejects.toThrow('"status":404')
+})
+
+test("downloadArchive bounds request + body by one overall deadline, not one per phase", async () => {
+  // The response consumes most of the deadline, then the body stalls. A
+  // per-phase timeout would grant the body a fresh full budget (~150ms of
+  // headers + 200ms of body = ~350ms); the single overall deadline must
+  // cut the download at ~200ms total.
+  const http = downloadHttp(() =>
+    Effect.sleep("150 millis").pipe(Effect.map(() => new Response(new ReadableStream<Uint8Array>({ start() {} })))),
+  )
+
+  const started = Date.now()
+  await expect(
+    Effect.runPromise(
+      downloadArchive({
+        url: "https://example.test/archive.tgz",
+        version: "2.0.0",
+        target: "linux-x64",
+        timeout: "200 millis",
+      }).pipe(Effect.provide(http)),
+    ),
+  ).rejects.toThrow()
+  expect(Date.now() - started).toBeLessThan(320)
 })
 
 test("rejects unsafe versions and platforms in remote installation paths", () => {
