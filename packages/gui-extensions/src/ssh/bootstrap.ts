@@ -62,7 +62,8 @@ export function parseRegistration(output: string) {
 // remote path (remote-cli.ts stageBinary) uses the same size ceiling.
 export const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 
-// Comparable to the primary path's curl --max-time 180 bound.
+// One overall deadline for the whole fallback download (request + body),
+// comparable to the primary path's curl --max-time 180 total-transfer bound.
 export const ARCHIVE_DOWNLOAD_TIMEOUT = "180 seconds"
 
 /**
@@ -102,6 +103,31 @@ export function collectArchive(response: HttpClientResponse.HttpClientResponse) 
 
     return archive
   })
+}
+
+/**
+ * Fallback archive download under ONE overall deadline: the request phase
+ * and the body phase share ARCHIVE_DOWNLOAD_TIMEOUT, so a slow response
+ * cannot earn the body a second full budget (the previous per-phase
+ * timeouts composed to roughly 2x the stated bound). A non-2xx status
+ * fails before the body is read: 404 means the requested version was
+ * never published.
+ */
+export function downloadArchive(input: { url: string; version: string; target: string | undefined }) {
+  return Effect.gen(function* () {
+    const http = yield* HttpClient.HttpClient
+    const response = yield* http.get(input.url)
+
+    if (response.status < 200 || response.status >= 300)
+      return yield* Effect.fail(
+        new SshFailure(
+          response.status === 404 ? "unpublished" : "install",
+          JSON.stringify({ version: input.version, target: input.target, url: input.url, status: response.status }),
+        ),
+      )
+
+    return yield* collectArchive(response)
+  }).pipe(Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT), Effect.mapError(SshFailure.from))
 }
 
 export function binaryPath(version: string) {
@@ -174,24 +200,7 @@ export const bootstrap = Effect.fn("Ssh.bootstrap")(function* (input: {
       Effect.catch(
         Effect.fnUntraced(function* (error) {
           yield* input.stage("uploading")
-          const http = yield* HttpClient.HttpClient
-
-          const response = yield* http
-            .get(url)
-            .pipe(Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT), Effect.mapError(SshFailure.from))
-
-          if (response.status < 200 || response.status >= 300)
-            return yield* Effect.fail(
-              new SshFailure(
-                response.status === 404 ? "unpublished" : "install",
-                JSON.stringify({ version, target, url, status: response.status }),
-              ),
-            )
-
-          const archive = yield* collectArchive(response).pipe(
-            Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT),
-            Effect.mapError(SshFailure.from),
-          )
+          const archive = yield* downloadArchive({ url, version, target })
 
           // The upload uses stdin; the script itself must be the remote command.
           return yield* runSsh({
