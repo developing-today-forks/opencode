@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { delimiter, join } from "node:path"
 
 const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "main-broken.yml"), "utf8")
 
@@ -43,7 +43,7 @@ function collect(body: string, comments: string) {
   const proc = Bun.spawnSync(["bash", "-c", `set -euo pipefail\n${snippet()}\nprintf '%s' "$LOSER_RUNS"`], {
     env: {
       ...process.env,
-      PATH: `${dir}:${process.env.PATH}`,
+      PATH: `${dir}${delimiter}${process.env.PATH ?? ""}`,
       FIXTURE_DIR: dir,
       LOSER: "11",
       REPO: "developing-today/opencode",
