@@ -141,15 +141,23 @@ export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, 
  * (latest reset first), then a balance snapshot, then the first. An expired credit grant
  * never wins over a live snapshot of the same provider — the plan store retains expired
  * grants as history, and letting one gate would make a funded replacement unable to
- * re-admit the provider. Only when every snapshot is an expired balance does the expired
- * one still gate: there is no live grant to prefer.
+ * re-admit the provider. Superseded means superseded by ANOTHER plan, though: a plan
+ * whose credit balance has expired is one dead grant, and its windowed snapshots are
+ * not evidence of a live replacement, so the whole plan only stops gating when a
+ * different plan contributes a live snapshot. Only when no live grant exists does the
+ * expired balance still gate: there is nothing live to prefer.
  */
 export const gatingSnapshot = (
   snapshots: readonly Snapshot[],
   now: number,
   balanceDeadThreshold = DEFAULT_BALANCE_DEAD_THRESHOLD,
 ): Snapshot | undefined => {
-  const live = snapshots.filter((snapshot) => !(snapshot.balance === true && snapshot.expired === true))
+  const expiredGrants = new Set(
+    snapshots
+      .filter((snapshot) => snapshot.balance === true && snapshot.expired === true)
+      .map((snapshot) => snapshot.planID),
+  )
+  const live = snapshots.filter((snapshot) => !expiredGrants.has(snapshot.planID))
   const pool = live.length > 0 ? live : snapshots
   const full = pool
     .filter((snapshot) => isKnownFull(snapshot, now, balanceDeadThreshold))

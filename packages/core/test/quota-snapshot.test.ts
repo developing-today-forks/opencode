@@ -365,4 +365,56 @@ describe("QuotaSnapshot balance classification and gating selection (#1014 fix p
     // With no live grant, the expired one still gates.
     expect(QuotaSnapshot.gatingSnapshot([expired], now)?.planID).toBe("old-grant")
   })
+
+  test("gatingSnapshot does not let an expired plan's own window supersede its expired balance", () => {
+    // One plan carrying both a non-windowed USD balance and a windowed request
+    // quota: when the plan's grant expires, derive marks only the balance
+    // snapshot expired. The request snapshot is part of the same dead grant,
+    // not a live replacement, so the expired balance must still gate —
+    // otherwise the provider stays eligible on an expired grant.
+    const expiredPlan = {
+      ...creditPlan,
+      id: "expired-plan",
+      expiresOn: "2026-10-20T00:00:00.000Z",
+    } as ModelPlan.Plan
+    const balance = QuotaSnapshot.derive(
+      {
+        plan: expiredPlan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals(),
+        observedAt: now,
+      },
+      { now },
+    )
+    const requests = QuotaSnapshot.derive(
+      {
+        plan: expiredPlan,
+        window: { name: "requests", unit: "requests", limit: 100, windowHours: 5 } as ModelPlan.QuotaWindow,
+        totals: totals({ requests: 10 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(balance.expired).toBe(true)
+    expect(requests.balance).toBeUndefined()
+    expect(QuotaSnapshot.isKnownFull(requests, now)).toBe(false)
+
+    const gating = QuotaSnapshot.gatingSnapshot([balance, requests], now)
+    expect(gating?.planID).toBe("expired-plan")
+    expect(gating?.balance).toBe(true)
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(true)
+
+    // A live balance from a different plan is a replacement grant: it wins,
+    // and the expired plan's snapshots (balance and window alike) stop gating.
+    const live = QuotaSnapshot.derive(
+      {
+        plan: { ...creditPlan, id: "new-grant" } as ModelPlan.Plan,
+        window: { name: "credits", unit: "usd", limit: 5 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 1 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(QuotaSnapshot.gatingSnapshot([balance, requests, live], now)?.planID).toBe("new-grant")
+  })
 })
