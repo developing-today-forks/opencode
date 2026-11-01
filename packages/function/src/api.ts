@@ -6,6 +6,7 @@ import { createAppAuth } from "@octokit/auth-app"
 import { Octokit } from "@octokit/rest"
 import { Resource } from "sst"
 import { parseRepositoryClaim } from "./github"
+import { postDiscordSupportMessage } from "./discord"
 
 type Env = {
   SYNC_SERVER: DurableObjectNamespace<SyncServer>
@@ -235,24 +236,18 @@ export default new Hono<{ Bindings: Env }>()
     const threadId = body.event?.message?.root_id || body.event?.message?.message_id
     if (threadId) message = `${message} [${threadId}]`
 
-    const response = await fetch(
-      `https://discord.com/api/v10/channels/${Resource.DISCORD_SUPPORT_CHANNEL_ID.value}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bot ${Resource.DISCORD_SUPPORT_BOT_TOKEN.value}`,
-        },
-        body: JSON.stringify({
-          content: `${message}`,
-        }),
-      },
-    )
-
-    if (!response.ok) {
-      console.error(await response.text())
+    let delivered: boolean
+    try {
+      delivered = await postDiscordSupportMessage({
+        channelId: Resource.DISCORD_SUPPORT_CHANNEL_ID.value,
+        token: Resource.DISCORD_SUPPORT_BOT_TOKEN.value,
+        content: `${message}`,
+      })
+    } catch (err) {
+      console.error("Failed to relay support message to Discord:", err)
       return c.json({ error: "Discord bot message failed" }, { status: 502 })
     }
+    if (!delivered) return c.json({ error: "Discord bot message failed" }, { status: 502 })
 
     return c.json({ ok: true })
   })
