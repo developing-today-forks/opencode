@@ -4,6 +4,7 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro"
 import type { Session } from "opencode/session/index"
 import config from "../../../config.mjs"
 import Share from "../../components/Share.tsx"
+import { shareModelParam } from "./share-model-param"
 
 const apiUrl = import.meta.env.VITE_API_URL || ""
 const ta = Astro.locals.t as ((key: string) => string) & {
@@ -95,13 +96,7 @@ const encodedTitle = encodeURIComponent(
   ),
 )
 
-const modelsArray = Array.from(models)
-const modelParam =
-  modelsArray.length === 1
-    ? modelsArray[0]
-    : modelsArray.length === 2
-      ? encodeURIComponent(`${modelsArray[0]} & ${modelsArray[1]}`)
-      : encodeURIComponent(`${modelsArray[0]} & ${modelsArray.length - 1} others`)
+const modelParam = shareModelParam(Array.from(models))
 
 const ogImage = `${config.socialCard}/opencode-share/${encodedTitle}.png?model=${modelParam}&version=${version}&id=${id}`
 ---
