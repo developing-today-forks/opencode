@@ -1,11 +1,12 @@
 export * as ModelRouteLog from "./model-route-log.js"
 
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm" 
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { snapshot as takeSnapshot, type Snapshot } from "./model-route-limits.js"
+import { ModelRouteLimits } from "./model-route-limits.js"
+import { DEFAULT_MAX_AGE_MS } from "./quota-snapshot.js"
 import { Database } from "./database/database.js"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable, RouteNoteTable } from "./model-route-log/sql.js"
 
@@ -330,7 +331,7 @@ export const onRestoreUsage = (next: typeof restoreUsage) => {
   restoreUsage = next
 }
 
-type CooldownRow = { providerID: string; modelID: string; until: number; credentialID?: string }
+type CooldownRow = { providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }
 let restoreCooldowns: ((rows: readonly CooldownRow[]) => void) | undefined
 
 export const onRestoreCooldowns = (next: typeof restoreCooldowns) => {
@@ -365,7 +366,7 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       .all()
       .pipe(Effect.orElseSucceed(() => []))
     const latest = new Map<string, CooldownRow>()
-    const windows = new Map<string, CooldownRow & { snapshot?: Snapshot }>()
+    const windows = new Map<string, CooldownRow & { snapshot?: ModelRouteLimits.Snapshot }>()
     for (const row of rows) {
       // A credential-scoped health row carries its credential in `credential_id`: it restores
       // onto that credential only, never onto the whole target (#870). Rows written before the
@@ -378,6 +379,7 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
         providerID: row.provider_id,
         modelID: row.model_id,
         until: row.until ?? 0,
+        ...(row.reason ? { reason: row.reason } : {}),
         ...(credentialID ? { credentialID } : {}),
       }
       if (row.kind === "rate-limit-window") windows.set(id, entry)
@@ -410,11 +412,11 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       const id = row.credentialID
         ? `${row.providerID}/${row.modelID}#${row.credentialID}`
         : `${row.providerID}/${row.modelID}`
-      const stored = (row.quota ?? {}) as Partial<Snapshot>
+      const stored = (row.quota ?? {}) as Partial<ModelRouteLimits.Snapshot>
       const parsed =
         typeof stored !== "object" || stored === null
           ? undefined
-          : takeSnapshot(
+          : ModelRouteLimits.snapshot(
               {
                 limit: stored.limit,
                 remaining: stored.remaining,
@@ -434,6 +436,16 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
           snapshot: parsed,
           ...(row.credentialID ? { credentialID: row.credentialID } : {}),
         })
+    }
+    // Older persisted quota benches may predate the cap. Restore them no later than the
+    // corresponding fresh, exhausted provider window; unrelated or stale windows do not apply.
+    for (const [id, row] of latest) {
+      const snapshot = windows.get(id)?.snapshot
+      const resetAt =
+        row.reason?.includes("quota") && snapshot
+          ? ModelRouteLimits.exhaustedWindowResetAt(snapshot, now, DEFAULT_MAX_AGE_MS)
+          : undefined
+      if (resetAt !== undefined && resetAt < row.until) latest.set(id, { ...row, until: resetAt })
     }
     restoreCooldowns?.([...latest.values()].filter((row) => row.until > now))
     restoreLimits?.(
