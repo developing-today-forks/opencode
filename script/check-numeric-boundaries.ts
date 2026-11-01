@@ -17,7 +17,9 @@
  * packages/function/src (added by #1302, the public console and
  * function packages) and services/changelog/src, services/files/src
  * and services/update/src (added by #1308, the public Cloudflare
- * workers) with the sweep patterns —
+ * workers) and packages/plugin-github/src (added by #1318, the
+ * GitHub API client / Copilot review-loop plugin) with the sweep
+ * patterns —
  *   P-A: a `Number(` call. The pattern is deliberately line-shaped and
  *        word-bounded: `Number.isFinite(` / `Number.isNaN(` are
  *        internal arithmetic predicates, not conversions, and do not
@@ -57,6 +59,7 @@ export const SCAN_ROOTS: string[] = [
   "services/changelog/src",
   "services/files/src",
   "services/update/src",
+  "packages/plugin-github/src",
 ]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"
