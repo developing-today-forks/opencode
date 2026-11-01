@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
 
 const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-luna" })
 
@@ -224,6 +225,22 @@ describe("ModelRoute correlation and adjustments", () => {
     expect(ModelRoute.networkSuspect(40_000)).toBe(false)
   })
 
+  test("network-suspect undo also forgives the escalation count", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(model("openai", "a"), policy, 1_000, { network: true })
+    ModelRoute.failed(model("azure", "a"), policy, 2_000, { network: true })
+    ModelRoute.failed(model("anthropic", "a"), policy, 3_000, { network: true })
+    expect(ModelRoute.networkSuspect(3_000)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 3_000)).toBe(false)
+
+    // After the outage is forgiven, a later single genuine failure benches at the
+    // first-offence (1x) length, not doubled by the undone failure (#1034).
+    ModelRoute.failed(model("openai", "a"), policy, 40_000)
+    expect(ModelRoute.cooldownUntil(model("openai", "a"), 40_000)).toBe(100_000)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 99_999)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 100_000)).toBe(false)
+  })
+
   test("does not classify provider quota failures as a network outage", () => {
     ModelRoute.resetHealth()
     ModelRoute.failed(model("openai", "a"), policy, 1_000, { quota: true })
@@ -321,6 +338,156 @@ describe("ModelRoute failure hints", () => {
     ModelRoute.resetHealth()
     for (let index = 0; index < 30; index++) ModelRoute.failed(t, policy, 1_000)
     expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 86_400_000)
+  })
+})
+
+describe("ModelRoute quota bench reset", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "reset-provider", model: "quota" })
+  const day = 86_400_000
+
+  const exhaustLadder = (now: number, credentialID?: string) => {
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(target, policy, now + index, { quota: true }, credentialID)
+  }
+
+  test("caps a credential bench at its exhausted window reset, not an unrelated window", () => {
+    const now = 100_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { short: "100", long: "1000" },
+        remaining: { short: "0", long: "100" },
+        reset: { short: "5h", long: "24h" },
+      },
+      now,
+      "cred-a",
+    )
+
+    exhaustLadder(now, "cred-a")
+
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt - 1)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+
+    ModelRoute.completed(target, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, resetAt, "cred-a")
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-a")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt + 1)).toBe(resetAt + 1 + 900_000)
+  })
+
+  test("uses a fresh known-full plan reset but never the reactive fallback as an actual reset", () => {
+    const now = 200_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-plan",
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, "cred-plan", undefined, now)
+    exhaustLadder(now + 1, "cred-plan")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-plan", now + 8)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    exhaustLadder(now)
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now)
+    exhaustLadder(now, "cred-fallback")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-fallback", now + 7)).toBe(now + 7 + day)
+  })
+
+  test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
+    const now = 300_000_000
+    const snapshots = [
+      { at: now, remaining: { requests: "0" } },
+      { at: now, remaining: { requests: "0" }, reset: { requests: "not-a-reset" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "5h" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "1h" } },
+    ]
+
+    for (const snapshot of snapshots) {
+      ModelRoute.resetHealth()
+      ModelRoute.observeRateLimit(target, snapshot, now, "cred-a")
+      exhaustLadder(now, "cred-a")
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(now + 7 + day)
+    }
+  })
+
+  test("does not cap auth or ordinary benches, and retry-after still wins unless the quota window is sooner", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 60_000
+    const spent = {
+      at: now,
+      limit: { requests: "100" },
+      remaining: { requests: "0" },
+      reset: { requests: "5m" },
+    }
+    ModelRoute.observeRateLimit(target, spent, now, "cred-auth")
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-auth", now)).toBe(now + 900_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-ordinary")
+    ModelRoute.failed(target, policy, now, undefined, "cred-ordinary")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-ordinary", now)).toBe(now + 60_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 120_000 }, "cred-retry")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry", now)).toBe(now + 120_000)
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry-long")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 10 * 60_000 }, "cred-retry-long")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry-long", now)).toBe(resetAt)
+  })
+
+  test("a quota bench can expire while an independent provider gate remains active", () => {
+    const now = 500_000_000
+    const resetAt = now + 5 * 60_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { requests: "100" },
+        remaining: { requests: "0" },
+        reset: { requests: "5m" },
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, undefined, now + day, now)
+    exhaustLadder(now)
+
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+    expect(ModelRoute.skipped(target, resetAt + 1)).toBe(true)
   })
 })
 
@@ -727,6 +894,27 @@ describe("ModelRoute scheduled weights", () => {
     ])
     expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
   })
+
+  test('a definition with date constraints survives the settings round trip', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const window = {
+      timezone: 'UTC',
+      dates: ['2026-12-25'],
+      excludeDates: ['2026-12-24'],
+      excludeWindows: ['holidays'],
+      excludedWindows: [{ dates: [today], timezone: 'UTC' }],
+    }
+    const built = definition([1, 1], [{ window, match: { targets: ['p/b'] }, factor: 10 }], [a, b])
+    const info = {
+      providerID: ModelRoute.PROVIDER_ID,
+      id: 'r',
+      settings: { [ModelRoute.SETTING]: built },
+    } as unknown as Parameters<typeof ModelRoute.definition>[0]
+    const decoded = ModelRoute.definition(info)
+    expect(decoded?.nodes[0].schedules).toEqual([{ window, match: { targets: ['p/b'] }, factor: 10 }])
+    // The resolved holiday exclusion is active today, so the rule stays out of force.
+    expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
+  })
 })
 
 describe("ModelRoute window gates", () => {
@@ -900,5 +1088,418 @@ describe("ModelRoute per-target context limits", () => {
     const decoded = ModelRoute.definition(info)
     expect(decoded?.limit).toEqual({ context: 200_000 })
     expect(decoded?.targetLimits).toEqual([{ context: 100_000 }, {}])
+  })
+})
+
+describe("ModelRoute round-robin tiers (#1122)", () => {
+  const policy = ModelRoute.policy()
+  const leaf = (model: string) => ModelRoute.ref({ providerID: "tiers-p", model })
+  const flat = (id: string, weights: number[], targets: ModelRoute.Target[]) =>
+    ({
+      id,
+      targets,
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights, children: targets.map((_, index) => ({ leaf: index })) },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const head = (route: ModelRoute.Definition, ready: ReadonlySet<number>, session: string) =>
+    ModelRoute.nextTarget(route, ready, new Set(), session, true)
+
+  test("a single tier rotates evenly across sessions, as plain round-robin always did", () => {
+    const route = flat("tier-single", [1, 1, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("the lower tier is never drawn while any top-tier member is ready", () => {
+    const route = flat("tier-two", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    // The session-less walk order is the tier order too: both weight-2 leaves before the weight-1.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    const walked = ModelRoute.orderTargets(route, all, "sx", true)
+    expect([...walked.slice(0, 2)].sort()).toEqual([0, 1])
+    expect(walked[2]).toBe(2)
+  })
+
+  test("the next tier engages once every member above it has failed or left", () => {
+    const route = flat("tier-fall", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    // Top tier unavailable: the weight-1 leaf serves.
+    expect(head(route, new Set([2]), "down")).toBe(2)
+    // Top tier tried within this dispatch: the walk falls through instead of retrying it.
+    expect(ModelRoute.nextTarget(route, new Set([0, 1, 2]), new Set([0, 1]), "walk", true)).toBe(2)
+  })
+
+  test("a session stuck to a lower tier returns to the top tier when it recovers", () => {
+    const route = flat("tier-sticky", [2, 1], [leaf("a"), leaf("b")])
+    expect(head(route, new Set([1]), "s1")).toBe(1)
+    // The top tier is back: the sticky pick in the lower tier no longer binds the session.
+    expect(head(route, new Set([0, 1]), "s1")).toBe(0)
+    expect(ModelRoute.sessionTarget("tier-sticky#0", "s1")).toBe(0)
+  })
+
+  test("rotation persists across dispatches inside the tier, wrapping instead of falling through", () => {
+    const route = flat("tier-cycle", [2, 2, 2, 1], [leaf("a"), leaf("b"), leaf("c"), leaf("d")])
+    const all = new Set([0, 1, 2, 3])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("an unset weight lands in the same tier as weight 1", () => {
+    // Only the first target lists a weight; the other two default to 1.
+    const route = flat("tier-default", [2], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    // The lone weight-2 target is the whole top tier, so every session starts there.
+    expect(head(route, all, "s1")).toBe(0)
+    expect(head(route, all, "s2")).toBe(0)
+    // With it gone, the two default-weight targets rotate evenly between themselves.
+    const rest = new Set([1, 2])
+    const heads = ["t1", "t2", "t3", "t4"].map((session) => head(route, rest, session))
+    expect(heads).toEqual([1, 2, 1, 2])
+  })
+
+  test("a quota-demoted leaf sorts below every live tier, whatever its weight, and still serves last", () => {
+    const heavy = leaf("heavy")
+    const route = flat("tier-demoted", [100, 2, 1], [heavy, leaf("mid"), leaf("low")])
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(heavy, policy, at, { quota: true })
+    expect(ModelRoute.demoted(heavy)).toBe(true)
+    const all = new Set([0, 1, 2])
+    // Weight order among the live tiers (2 before 1); the demoted 100 goes last — the old 0.01
+    // factor would have tied it with the weight-1 leaf in configured order, [1, 0, 2].
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 2, 0])
+    // Draws stay in the live tiers while any of them can serve...
+    expect(head(route, all, "d1")).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(2)
+    // ...and the demoted leaf is the last resort, not a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set([1, 2]), "d3", true)).toBe(0)
+  })
+
+  test("a nested route reference is a tier member with its group weight", () => {
+    const targets = [leaf("a"), leaf("b"), leaf("c")]
+    const build = (weights: number[]) =>
+      ({
+        id: "tier-nested",
+        targets,
+        targetVariants: [],
+        health: policy,
+        nodes: [
+          { selection: "round-robin" as const, weights, children: [{ node: 1 }, { leaf: 2 }] },
+          { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+        ],
+      }) as unknown as ModelRoute.Definition
+    const all = new Set([0, 1, 2])
+
+    // Group at weight 2 over the weight-1 leaf: sessions rotate inside the group, leaf 2 waits.
+    const grouped = build([2, 1])
+    const heads = ["g1", "g2", "g3", "g4"].map((session) => head(grouped, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    expect(ModelRoute.orderTargets(grouped, all, undefined, false)).toEqual([0, 1, 2])
+    expect(head(grouped, new Set([2]), "only")).toBe(2)
+
+    // Leaf at weight 2 over the weight-1 group: the leaf is the top tier now.
+    ModelRoute.resetSelection()
+    const leafFirst = build([1, 2])
+    expect(head(leafFirst, all, "top")).toBe(2)
+    expect(ModelRoute.orderTargets(leafFirst, all, undefined, false)).toEqual([2, 0, 1])
+  })
+
+  test("a group whose every door is demoted drops below the live tiers as one demoted member", () => {
+    const a = leaf("ga")
+    const b = leaf("gb")
+    const route = {
+      id: "tier-group-demoted",
+      targets: [a, b, leaf("gc")],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights: [2, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    } as unknown as ModelRoute.Definition
+    const now = Date.now()
+    for (const target of [a, b])
+      for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    const all = new Set([0, 1, 2])
+    // The weight-2 group is demoted as a unit: the weight-1 leaf leads, the group serves after.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([2, 0, 1])
+    expect(head(route, all, "gd")).toBe(2)
+  })
+})
+
+describe("ModelRoute provider route groups", () => {
+  const policy = ModelRoute.policy()
+  const alt = ModelRoute.ref({ providerID: "route-alt", model: "m" })
+  const main = ModelRoute.ref({ providerID: "route-main", model: "m" })
+  const build = (selection: "ordered" | "round-robin" | "weighted", weights: number[] = [1, 1]) =>
+    ({
+      id: "outer-route",
+      targets: [alt, main],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        { routeID: "plan", providerRoute: "plan", selection, weights, children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const all = new Set([0, 1])
+  const demote = (target: ModelRoute.Target) => {
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    expect(ModelRoute.demoted(target)).toBe(true)
+  }
+
+  test("ordered: the first ready member serves, and an unavailable member falls through", () => {
+    const route = build("ordered")
+    expect(ModelRoute.nextTarget(route, all, new Set(), "s1", true)).toBe(0)
+    // The resolver expresses a benched member by leaving it out of the ready set.
+    expect(ModelRoute.nextTarget(route, new Set([1]), new Set(), "s2", true)).toBe(1)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1])
+  })
+
+  test("ordered: a quota-demoted member drops behind the live member and still serves last", () => {
+    demote(alt)
+    const route = build("ordered")
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+    expect(ModelRoute.nextTarget(route, all, new Set(), "d1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(0)
+  })
+
+  test("round-robin: a quota-demoted member sorts below the live tier inside the group", () => {
+    demote(alt)
+    const route = build("round-robin", [2, 1])
+    // Alt outweighs main 2:1, but demotion holds it below the live tier: main serves,
+    // and the demoted member remains the last resort rather than a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set(), "r1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "r2", true)).toBe(0)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+  })
+
+  test("the decision records show the provider route resolution: the group under its own id, the member it chose", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    try {
+      expect(ModelRoute.nextTarget(build("ordered"), all, new Set(), "dec-session", true)).toBe(0)
+    } finally {
+      ModelRouteLog.setSink(undefined)
+    }
+    const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
+    const inner = decisions.find((row) => row.route_id === "plan")
+    expect(inner?.candidates).toEqual(["route-alt/m", "route-main/m"])
+    expect(inner?.chosen).toBe("route-alt/m")
+    const outer = decisions.find((row) => row.route_id === "outer-route")
+    expect(outer?.candidates).toEqual(["plan/m"])
+    expect(outer?.chosen).toBe("plan/m")
+  })
+})
+
+describe("ModelRoute machinery constants (experimental.model_route_settings)", () => {
+  const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-sol" })
+  const policy = ModelRoute.policy({ cooldownMs: 60_000 })
+
+  afterEach(() => {
+    ModelRoute.onSettingsConfig(() => undefined)
+    ModelRoute.configureConstants(ModelRoute.DEFAULT_CONSTANTS)
+    ModelRoute.configure({
+      escalation: { enabled: true, afterGiveUps: 2 },
+      quota: { demoteAfter: 3, windowMs: 4 * 3_600_000 },
+    })
+  })
+
+  test("the resolved defaults are exactly the machinery's named constants", () => {
+    expect(ModelRoute.currentConstants()).toEqual({
+      bench: {
+        maxCooldownMs: 86_400_000,
+        multiplier: 2,
+        retryAfterMinMs: 1_000,
+        cooldownCapMs: 3_600_000,
+        quotaCooldownCapMs: 86_400_000,
+      },
+      demotion: { factor: 0.01 },
+      quotaGate: { maxMs: 30 * 86_400_000, fallbackMs: 30 * 60_000, feedTtlMs: 60_000 },
+      escalation: { outcomeWindow: 5 },
+      network: { windowMs: 30_000, providers: 3, providerModels: 2 },
+      continuity: { hedgeRequests: 2 },
+      overrides: { preferredFactor: 3 },
+    })
+    expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+  })
+
+  test("the bench ladder doubles toward the 24h cap by default, and stops at a configured cap", () => {
+    const now = 1_000_000
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 120_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.configureConstants({ bench: { maxCooldownMs: 5_000 } })
+    ModelRoute.failed(target, policy, now)
+    // A bench that would run a full minute stops at the configured cap.
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+  })
+
+  test("the bench multiplier and the caps on the health bases are configurable", () => {
+    const quick = ModelRoute.policy({ cooldownMs: 1_000 })
+    const now = 2_000_000
+    ModelRoute.configureConstants({ bench: { multiplier: 3 } })
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 9_000)
+
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(3_600_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(86_400_000)
+    ModelRoute.configureConstants({ bench: { cooldownCapMs: 120_000, quotaCooldownCapMs: 7_200_000 } })
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(120_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(7_200_000)
+  })
+
+  test("demotion threshold and factor are configurable", () => {
+    const now = Date.now()
+    ModelRoute.configureConstants({ demotion: { factor: 0.5 } })
+    ModelRoute.configure({ quota: { demoteAfter: 2 } })
+    ModelRoute.failed(target, policy, now, { quota: true })
+    expect(ModelRoute.demoted(target, now + 1)).toBe(false)
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+
+  test("the quota gate believes a stated reset up to the cap and falls back when none is stated", () => {
+    const now = 100_000_000
+    ModelRoute.observeQuotaFailure(target, "settings-cred-a", now + 90 * 86_400_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now)?.until).toBe(now + 30 * 86_400_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now)?.until).toBe(now + 30 * 60_000)
+  })
+
+  test("the quota gate fallback and cap are configurable", () => {
+    const now = 100_000_000
+    ModelRoute.configureConstants({ quotaGate: { fallbackMs: 10_000, maxMs: 60_000 } })
+    ModelRoute.observeQuotaFailure(target, "settings-cred-c", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-c", now)?.until).toBe(now + 10_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-d", now + 3_600_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-d", now)?.until).toBe(now + 60_000)
+  })
+
+  test("the quota feed interval follows the gate constants", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_061_000)).toBe(true)
+    ModelRoute.resetQuotaFeed()
+    ModelRoute.configureConstants({ quotaGate: { feedTtlMs: 10_000 } })
+    expect(ModelRoute.shouldFeedQuota(2_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(2_005_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
+  })
+
+  test("the escalation outcome window is configurable", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })
+    // Default window (5): two give-ups still count after two successes.
+    ModelRoute.failed(target, policy, 1_000)
+    ModelRoute.failed(target, policy, 2_000)
+    ModelRoute.completed(target, policy, ok, 3_000)
+    ModelRoute.completed(target, policy, ok, 4_000)
+    expect(ModelRoute.escalates(target)).toBe(true)
+    // Window of 3: the successes push the older give-up out of the window.
+    ModelRoute.configureConstants({ escalation: { outcomeWindow: 3 } })
+    ModelRoute.failed(other, policy, 1_000)
+    ModelRoute.failed(other, policy, 2_000)
+    ModelRoute.completed(other, policy, ok, 3_000)
+    ModelRoute.completed(other, policy, ok, 4_000)
+    expect(ModelRoute.escalates(other)).toBe(false)
+  })
+
+  test("config feeds both layers at once, and behavior follows", () => {
+    ModelRoute.onSettingsConfig(() => ({
+      demotion: { after: 2, factor: 0.5 },
+      bench: { maxCooldownMs: 5_000 },
+      escalation: { afterGiveUps: 4 },
+    }))
+    expect(ModelRoute.currentSettings()).toEqual({
+      escalation: { enabled: true, afterGiveUps: 4 },
+      quota: { demoteAfter: 2, windowMs: 4 * 3_600_000 },
+    })
+    expect(ModelRoute.currentConstants().bench.maxCooldownMs).toBe(5_000)
+    expect(ModelRoute.currentConstants().demotion.factor).toBe(0.5)
+
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+    ModelRoute.failed(target, policy, now, { quota: true })
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+})
+
+describe("ModelRoute provider-route groups with no ready members", () => {
+  const sibling = ModelRoute.ref({ providerID: "opendesign", model: "gpt-6-luna" })
+  const groupNode = {
+    routeID: "plan",
+    providerRoute: "plan",
+    selection: "ordered" as const,
+    weights: [] as number[],
+    children: [] as never[],
+  }
+  const capture = () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    return {
+      stop: () => ModelRouteLog.setSink(undefined),
+      decisions: () => events.flatMap((event) => (event.kind === "decision" ? [event.row] : [])),
+    }
+  }
+
+  test("a leafless provider-route group appears in the parent decision's excluded list with a reason", () => {
+    const definition = {
+      id: "luna-plan",
+      targets: [sibling],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [2.5, 1], children: [{ node: 1 }, { leaf: 0 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set([0]), new Set(), undefined, false)).toBe(0)
+    } finally {
+      cap.stop()
+    }
+    const parent = cap.decisions().find((row) => row.route_id === "luna-plan")
+    expect(parent?.chosen).toBe("opendesign/gpt-6-luna")
+    expect((parent?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
+  })
+
+  test("a route whose only seat is a leafless group records the exclusion on its no-candidates decision", () => {
+    const definition = {
+      id: "terra-plan",
+      targets: [],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [1], children: [{ node: 1 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set(), new Set(), undefined, false)).toBeUndefined()
+    } finally {
+      cap.stop()
+    }
+    const row = cap.decisions().find((item) => item.route_id === "terra-plan")
+    expect(row?.reason).toBe("no-candidates")
+    expect((row?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
   })
 })

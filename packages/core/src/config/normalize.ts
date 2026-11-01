@@ -544,6 +544,29 @@ function normalizeExperimental(
         )
           result.model_routes = value
       }
+      if (own(experimental, "provider_routes")) {
+        const value = decodeMap(
+          experimental.provider_routes,
+          ConfigModelRoutes.ProviderRoute,
+          ["experimental", "provider_routes"],
+          diagnostics,
+          decodeEncoded,
+        )
+        if (
+          Object.keys(value).length ||
+          (isRecord(experimental.provider_routes) && !Object.keys(experimental.provider_routes).length)
+        )
+          result.provider_routes = value
+      }
+      if (own(experimental, "model_route_settings")) {
+        const value = decodeEncoded(
+          ConfigExperimental.Info.fields.model_route_settings,
+          experimental.model_route_settings,
+          ["experimental", "model_route_settings"],
+          diagnostics,
+        )
+        if (value !== undefined) result.model_route_settings = value
+      }
       if (own(experimental, "aliases") && !encoded.aliases) {
         const value = decodeEncoded(
           ConfigAlias.Info,

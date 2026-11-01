@@ -54,7 +54,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'failure' &&
-       github.event.workflow_run.head_branch == 'main')
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -93,6 +94,12 @@ jobs:
           BRANCH=$(jq -r '.head_branch' run.json)
           if [ "$BRANCH" != "main" ]; then
             echo "run $RUN_ID is on branch '$BRANCH', not main -- skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HEAD_REPO=$(jq -r '.head_repository.full_name' run.json)
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "run $RUN_ID is from repository '$HEAD_REPO', not $REPO -- skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -161,6 +168,8 @@ jobs:
           {
             echo "skip=false"
             echo "existing=$EXISTING"
+            echo "bid=$BID"
+            echo "run_url=$URL"
             echo "title=main-broken: $REPO $WF @$SHORT -- $FIRST"
             echo "prompt<<PROMPT_EOF"
             cat prompt.md
@@ -199,3 +208,74 @@ jobs:
           priority: "critical"
           kind: "ci_investigation"
           issue_number: ${{ steps.filing.outputs.existing }}
+
+      # Race-loser reconcile (issue #1037): the workflow-level concurrency
+      # group is per-run by design so watchers never cancel each other
+      # (cancel-in-progress stays false), which means two watchers for the
+      # same Breakage-ID can both observe no existing issue and both file.
+      # The loser closes its duplicate with a pointer to the survivor and
+      # the survivor keeps exactly one open issue plus every run link.
+      - name: Reconcile duplicate main-broken issues for this Breakage-ID
+        if: steps.filing.outputs.skip == 'false'
+        env:
+          BID: ${{ steps.filing.outputs.bid }}
+          RUN_URL: ${{ steps.filing.outputs.run_url }}
+          CREATED: ${{ steps.queue-new.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if [ -z "${BID:-}" ]; then
+            echo "no Breakage-ID -- skipping reconcile"
+            exit 0
+          fi
+          echo "reconciling Breakage-ID $BID (created=${CREATED:-none} run=$RUN_URL)"
+          CANDIDATES=$(gh issue list --repo "$REPO" --state open --label main-broken \
+            --search "$BID" --json number --jq 'map(.number) | sort | join(" ")')
+          if [ -z "$CANDIDATES" ]; then
+            echo "no open main-broken issues mention $BID -- nothing to reconcile"
+            exit 0
+          fi
+          # Keep only issues whose body actually carries this Breakage-ID
+          # (search is lexical and can match neighbours).
+          MATCHED=""
+          for N in $CANDIDATES; do
+            BODY=$(gh issue view "$N" --repo "$REPO" --json body --jq '.body // ""')
+            case "$BODY" in
+              *"$BID"*) MATCHED="$MATCHED $N" ;;
+              *) echo "issue #$N does not contain $BID -- skipping" ;;
+            esac
+          done
+          MATCHED=$(echo "$MATCHED" | xargs)
+          if [ -z "$MATCHED" ]; then
+            echo "no open issue with Breakage-ID $BID -- nothing to reconcile"
+            exit 0
+          fi
+          SURVIVOR=$(echo "$MATCHED" | tr ' ' '\n' | sort -n | head -1)
+          echo "survivor is #$SURVIVOR; candidates:$MATCHED"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          for LOSER in $MATCHED; do
+            if [ "$LOSER" = "$SURVIVOR" ]; then
+              continue
+            fi
+            LOSER_BODY=$(gh issue view "$LOSER" --repo "$REPO" --json body --jq '.body // ""')
+            LOSER_RUN=$(printf '%s' "$LOSER_BODY" | grep -o 'https://github.com/[^ ]*/actions/runs/[0-9]*' | head -1 || true)
+            if [ -z "$LOSER_RUN" ]; then
+              LOSER_RUN="(run link not found in #$LOSER body)"
+            fi
+            echo "closing race-loser duplicate #$LOSER (run $LOSER_RUN) in favour of #$SURVIVOR"
+            gh issue comment "$LOSER" --repo "$REPO" --body "<!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken race-loser reconcile ($NOW)
+          - duplicate of #$SURVIVOR for Breakage-ID \`$BID\`
+          - this run: $RUN_URL; loser run: $LOSER_RUN
+          - closing so exactly one open main-broken issue remains per Breakage-ID" || true
+            gh issue close "$LOSER" --repo "$REPO" --reason "not planned" || gh issue close "$LOSER" --repo "$REPO" || true
+            gh issue comment "$SURVIVOR" --repo "$REPO" --body "<!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken race-loser reconcile ($NOW)
+          - closed duplicate #$LOSER for the same Breakage-ID \`$BID\`
+          - loser run: $LOSER_RUN; reconciling run: $RUN_URL" || true
+          done
+          if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
+            echo "this run created loser #$CREATED -- its link was forwarded to #$SURVIVOR above"
+          else
+            echo "reconcile complete -- single survivor #$SURVIVOR"
+          fi

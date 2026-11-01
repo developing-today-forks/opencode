@@ -188,6 +188,35 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run check:proto-reads
 
+      - name: Test bounded-http guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1129).
+        working-directory: script
+        run: bun test check-bounded-http.test.ts
+
+      - name: Check bounded-http calls are dispositioned
+        # Every fetch / direct response-read sweep hit in packages/*/src
+        # must carry a signal or a bounded reader, or be listed with a
+        # disposition in the allowlist, or the unbounded outbound class
+        # regrows one call at a time (#1129, design #1127).
+        if: runner.os == 'Linux'
+        run: bun run check:bounded-http
+
+      - name: Test numeric-boundaries guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#995).
+        working-directory: script
+        run: bun test check-numeric-boundaries.test.ts
+
+      - name: Check numeric-boundary conversions are dispositioned
+        # Every bare Number(/parseInt(/parseFloat( sweep hit in
+        # packages/core/src, packages/ai/src and packages/cli/src must be
+        # converted through the #993 primitives or listed with a
+        # disposition in the allowlist, or the bare-conversion class
+        # regrows one call at a time (#995, design #992).
+        if: runner.os == 'Linux'
+        run: bun run check:numeric-boundaries
+
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"

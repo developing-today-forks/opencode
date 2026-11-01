@@ -154,6 +154,7 @@ export const responseHttp = (response: HttpClientResponse.HttpClientResponse) =>
   })
 
 const MAX_BODY_CHARS = 2000
+const MAX_ERROR_BODY_BYTES = 64 * 1024
 
 // Without a recognized message, show the raw body so the provider's explanation is never dropped.
 const providerMessage = (status: number, body: string | void) => {
@@ -169,7 +170,20 @@ const providerMessage = (status: number, body: string | void) => {
 const statusError = (response: HttpClientResponse.HttpClientResponse) =>
   Effect.gen(function* () {
     if (response.status < 400) return response
-    const result = yield* response.text.pipe(Effect.result)
+    // Classification sees only the prefix when a provider sends an oversized error body.
+    let remaining = MAX_ERROR_BODY_BYTES
+    const decoder = new TextDecoder()
+    const result = yield* response.stream.pipe(
+      Stream.map((chunk) => {
+        const bytes = chunk.subarray(0, remaining)
+        remaining -= bytes.byteLength
+        return { bytes, done: remaining === 0 }
+      }),
+      Stream.takeUntil((chunk) => chunk.done),
+      Stream.runFold(() => "", (text, chunk) => text + decoder.decode(chunk.bytes, { stream: true })),
+      Effect.map((text) => text + decoder.decode()),
+      Effect.result,
+    )
     return yield* httpFailure({
       message: providerMessage(response.status, result._tag === "Success" ? result.success : undefined),
       url: response.request.url,

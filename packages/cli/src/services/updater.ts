@@ -97,6 +97,55 @@ function errorDetail(cause: unknown): string {
   return errorMessage(cause)
 }
 
+/**
+ * Size cap for the updater release-metadata response body. The update API
+ * returns a few KB of JSON and the largest source, a Homebrew formula
+ * document, is a few hundred KB; 1 MiB leaves generous headroom while
+ * keeping a huge or hostile metadata response from buffering unbounded
+ * into memory on this automatic check (#1031). This mirrors core's
+ * `readBoundedResponseText` (`packages/core/src/tool/http-body.ts`),
+ * which cli cannot import under the repo's dependency layering.
+ */
+export const releaseMaxResponseBytes = 1024 * 1024
+
+const readBoundedReleaseText = async (response: Response, maximumBytes: number): Promise<string> => {
+  const tooLarge = () => new Error(`Release information response exceeded ${maximumBytes} bytes`)
+  const contentLength = response.headers.get("content-length")
+  const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+  const declaredSize =
+    parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
+  if (declaredSize !== undefined && declaredSize > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined)
+    throw tooLarge()
+  }
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) throw tooLarge()
+    return text
+  }
+  const reader = response.body.getReader()
+  const chunks: Array<Uint8Array> = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value || value.byteLength === 0) continue
+    if (size + value.byteLength > maximumBytes) {
+      await reader.cancel().catch(() => undefined)
+      throw tooLarge()
+    }
+    chunks.push(value)
+    size += value.byteLength
+  }
+  const body = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(body)
+}
+
 function resultDetail(result: { code: number; stdout: string; stderr: string }) {
   return (
     conciseDetail(result.stderr) ??
@@ -306,7 +355,7 @@ const make = Effect.gen(function* () {
       )
     const data: { version?: string; metadata?: { package?: string }; versions?: { stable?: string } } =
       yield* Effect.tryPromise({
-        try: () => response.json(),
+        try: async () => JSON.parse(await readBoundedReleaseText(response, releaseMaxResponseBytes)),
         catch: (cause) =>
           new UpgradeError(
             {

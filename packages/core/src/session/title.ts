@@ -66,6 +66,7 @@ export const layer = Layer.effect(
           providerID: input.model.ref.providerID,
           modelID: input.model.ref.id,
           variant: input.model.ref.variant,
+          credentialID: input.model.servingCredentialID ?? input.model.routing?.credentialID,
           sessionID: input.session.id,
           startedAt: Date.now(),
           inputTokens: estimate,

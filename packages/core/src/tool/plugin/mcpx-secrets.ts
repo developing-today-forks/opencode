@@ -6,7 +6,13 @@ import { Effect, Option } from "effect"
 // Core never reads, logs, stores, or sends a secret value. It works with names, statuses, and request ids from the
 // daemon. A missing secret is waited for, and if it does not arrive the tool call fails before anything runs.
 
-export type DaemonCall = (path: string, method?: string, body?: any, headers?: Record<string, string>) => Promise<any>
+export type DaemonCall = (
+  path: string,
+  method?: string,
+  body?: any,
+  headers?: Record<string, string>,
+  timeoutMs?: number,
+) => Promise<any>
 
 /** The daemon answered with a non-2xx status: the request was received and refused or failed. */
 export class DaemonHTTPError extends Error {
@@ -22,6 +28,14 @@ export class DaemonHTTPError extends Error {
 
 /** No daemon answered, so nothing was sent. Only this lets mcpx_exec fall back to the CLI. */
 export class DaemonUnreachableError extends Error {}
+
+/**
+ * The daemon did not answer within the request timeout. Unlike
+ * DaemonUnreachableError this does NOT establish that the daemon never
+ * received the request — an execution may already be running — so it
+ * never lets mcpx_exec replay the request through the CLI.
+ */
+export class DaemonTimeoutError extends Error {}
 
 const parseBody = (text: string): unknown => {
   try {

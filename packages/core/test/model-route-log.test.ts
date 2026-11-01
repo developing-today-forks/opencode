@@ -829,6 +829,218 @@ describe("credential cooldown restore (#870)", () => {
   )
 })
 
+describe("credential column restore (#1055)", () => {
+  it.live("restores from the credential_id column when the reason names no credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-col",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota",
+          until: now + 60_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-col", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a")).toBe(now + 60_000)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-a")).toBe(true)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-b")).toBe(false)
+      expect(ModelRoute.coolingDown(target)).toBe(false)
+    }),
+  )
+
+  it.live("restores a column-only rate-limit window onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "limit-col",
+          model_id: "m",
+          kind: "rate-limit-window",
+          reason: "provider-reported",
+          until: now + 120_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "limit-col", model: "m" })
+      expect(ModelRoute.limitedUntil(target, now, "cred-a")).toBe(now + 120_000)
+      expect(ModelRoute.limitedUntil(target, now, "cred-b")).toBe(0)
+      expect(ModelRoute.limitedUntil(target, now)).toBe(0)
+    }),
+  )
+
+  it.live("prefers the credential_id column over a stale credential in the reason", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-prefer",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-b",
+          until: now + 60_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-prefer", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a")).toBe(now + 60_000)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-b")).toBe(false)
+      expect(ModelRoute.coolingDown(target)).toBe(false)
+    }),
+  )
+
+  it.live("a provider-scoped reason never restores onto a credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-prov",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "provider:restart-prov quota-known-full",
+          until: now + 60_000,
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-prov", model: "m" })
+      // The hold belongs to the target: no credential inherits it.
+      expect(ModelRoute.coolingDown(target)).toBe(true)
+      expect(ModelRoute.credentialCoolingDown(target, "restart-prov")).toBe(false)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-a")).toBe(false)
+    }),
+  )
+})
+
+describe("credential attempt snapshot restore (#1116)", () => {
+  it.live("restores each credential's attempt snapshot onto its own window, never target-wide", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const snap = (remaining: string) => ({
+        limit: { tokens: "1000" },
+        remaining: { tokens: remaining },
+        reset: { tokens: "3600" },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 5_000,
+          time_ended: now - 4_000,
+          quota: snap("11"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-b",
+          time_started: now - 5_000,
+          time_ended: now - 3_000,
+          quota: snap("22"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          time_started: now - 5_000,
+          time_ended: now - 2_000,
+          quota: snap("33"),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "snapshots", model: "m" })
+      expect(ModelRoute.rateLimitOf(target, "cred-a")?.remaining).toEqual({ tokens: "11" })
+      expect(ModelRoute.rateLimitOf(target, "cred-b")?.remaining).toEqual({ tokens: "22" })
+      // The credential-less snapshot keeps the pre-column target-wide behavior.
+      expect(ModelRoute.rateLimitOf(target)?.remaining).toEqual({ tokens: "33" })
+    }),
+  )
+})
+
+describe("quota cooldown reset restore (#1123)", () => {
+  it.live("caps a previously persisted long quota bench at its matching exhausted window reset", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const resetAt = now - 1_000 + 5 * 3_600_000
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 1_000,
+          provider_id: "restore-quota",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-a",
+          until: now + 86_400_000,
+          credential_id: "cred-a",
+        },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "restore-quota",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 2_000,
+          time_ended: now - 1_000,
+          outcome: "failure",
+          quota: {
+            limit: { requests: "100" },
+            remaining: { requests: "0" },
+            reset: { requests: "18000" },
+          },
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restore-quota", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now)).toBe(resetAt)
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+    }),
+  )
+})
+
 describe("rate-limit hold release restore (#870)", () => {
   it.live("a cleared hold stays cleared after a restart", () =>
     Effect.gen(function* () {
@@ -1025,6 +1237,60 @@ describe("ModelRouteLog.observer", () => {
         ["hedged-out", true],
         ["success", true],
       ])
+    }),
+  )
+})
+
+describe("per-credential usage (#1106)", () => {
+  it.live("targetUsage splits by serving credential; unattributed usage feeds no credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const now = Date.now()
+      const serve = (credentialID: string | undefined, input: number) =>
+        ModelRouteLog.observer({
+          routeID: "quota-pool",
+          providerID: "multi",
+          modelID: "m",
+          sessionID: `ses_${credentialID ?? "none"}`,
+          startedAt: now,
+          credentialID,
+        }).done("success", {
+          outputStarted: true,
+          tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
+      serve("cred-a", 900)
+      serve("cred-b", 100)
+      serve(undefined, 500)
+      // One session served by two credentials of the same target (credential fallback).
+      ModelRouteLog.observer({
+        routeID: "quota-pool",
+        providerID: "multi",
+        modelID: "m",
+        sessionID: "ses_cred-a",
+        startedAt: now,
+        credentialID: "cred-b",
+      }).done("success", {
+        outputStarted: true,
+        tokens: { input: 50, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+      yield* Effect.sleep("100 millis")
+
+      const rows = yield* db.select().from(RouteAttemptTable).all()
+      expect(rows.map((row) => row.credential_id).toSorted()).toEqual(["cred-a", "cred-b", "cred-b", null])
+
+      const usage = yield* ModelRouteLog.targetUsage(db, 0)
+      // The quota gate's per-credential sum: each credential sees only its own usage, and the
+      // unattributed (env-served) row contributes to neither credential's totals.
+      const forCredential = (credentialID: string) =>
+        ModelUsage.sum(usage.filter((row) => row.providerID === "multi" && row.credentialID === credentialID))
+      expect(forCredential("cred-a").input).toBe(900)
+      expect(forCredential("cred-b").input).toBe(150)
+      expect(usage.find((row) => row.providerID === "multi" && row.credentialID === null)?.input).toBe(500)
+      // The provider scope still sums every row, as it did before the credential dimension.
+      expect(ModelUsage.sum(usage.filter((row) => row.providerID === "multi")).input).toBe(1_550)
+      // Distinct sessions per target stays exact despite the credential split: ses_cred-a was
+      // served by both credentials but is one session.
+      expect(yield* ModelRouteLog.targetSessions(db, 0)).toEqual([{ providerID: "multi", modelID: "m", sessions: 3 }])
     }),
   )
 })

@@ -380,6 +380,7 @@ export const make = Effect.gen(function* () {
               provider_id: input.model.ref.providerID,
               model_id: input.model.ref.id,
               variant: input.model.ref.variant,
+              credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
               outcome: "failure",
               error_tag: "ContextOverflow",
               error_message: overflow?.message,
@@ -410,7 +411,9 @@ export const make = Effect.gen(function* () {
             : providerFailure
               ? new AIError({ reason: new UnknownProviderError({ message: providerFailure.message }) })
               : unknownFinish
-        const failureError = llmFailure ? toSessionError(llmFailure) : undefined
+        const failureError = llmFailure
+          ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID })
+          : undefined
         const llmError = failureError && !recorded.providerFailed ? failureError : undefined
         // Usage and rate-limit state are recorded where the outcome is first known. The attempt
         // row itself is written via recordAttempt below, after the failover decision, so it
@@ -487,6 +490,7 @@ export const make = Effect.gen(function* () {
               provider_id: input.model.ref.providerID,
               model_id: input.model.ref.id,
               variant: input.model.ref.variant,
+              credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
               outcome: streamInterrupted ? "interrupted" : timedOut ? "timeout" : failed ? "failure" : "success",
               ...failureLog,
               // A failed request's own details win; a successful one keeps what its response said.
@@ -794,6 +798,7 @@ export const make = Effect.gen(function* () {
           route_id: routing.routeID,
           provider_id: loser?.ref.providerID ?? input.model.ref.providerID,
           model_id: loser?.ref.id ?? input.model.ref.id,
+          credential_id: loser?.servingCredentialID ?? loser?.routing?.credentialID,
           outcome: "hedged-out",
           hedged: true,
           output_started: false,

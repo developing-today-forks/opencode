@@ -20,7 +20,7 @@ export const Plugin = define({
     const loaded = yield* ConfigEntryObserver.observe(
       config,
       ctx.event,
-      ["providers"],
+      ["providers", "model"],
       ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload())),
     )
     yield* ctx.integration.transform((integrations) => {

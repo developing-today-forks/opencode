@@ -6,6 +6,8 @@ import { Provider } from "./provider.js"
 import { Command } from "./command.js"
 import { Config } from "./config.js"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { FSUtil } from "@opencode/util/fs-util"
+import { filesystem } from "@opencode/util/effect/app-node-platform"
 import { Node } from "@opencode/util/effect/app-node"
 import { FileMutation } from "./file-mutation.js"
 import { Environment } from "./environment/index.js"
@@ -56,6 +58,17 @@ import { Vcs } from "./vcs.js"
 export * as Instance from "./instance.js"
 export { Service, node, type Interface } from "./instance/service.js"
 
+// FSUtil.node is a global node, so it cannot be a root of the location
+// graph; this location node re-provides its service so location-context
+// readers (GovernanceConfig.load) can find an FS in Instance.Services.
+// As a private dependency of other nodes it never reaches the compiled
+// context (#1107 Codex P1).
+const fsUtilNode = Node.makeLocationNode({
+  service: FSUtil.Service,
+  layer: FSUtil.layer,
+  deps: [filesystem],
+})
+
 const nodes = [
   Location.node,
   LocationLifecycle.node,
@@ -78,6 +91,7 @@ const nodes = [
   WorktreeStrategies.node,
   FileSystemSearch.node,
   FileSystem.node,
+  fsUtilNode,
   ShellSelect.node,
   Pty.node,
   Shell.node,

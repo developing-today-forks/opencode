@@ -8,15 +8,14 @@ Sources: open issues, [`TODO.md`](TODO.md), the fork notice in [`README.md`](REA
 
 ## Areas
 
-| Area                                                        | Current focus                                                   |
-| ----------------------------------------------------------- | --------------------------------------------------------------- |
-| [Nested subsessions](#nested-subsessions-and-their-asks)    | Shipped across the TUI, the app and ACP. One follow-up left     |
-| [mcpx integration](#mcpx-integration)                       | Where the flake gets mcpx                                       |
-| [Serve handover and restarts](#serve-handover-and-restarts) | Prove the handover under real systemd                           |
-| [Routing, cost and plans](#routing-cost-and-plans)          | Feature requests for failover, cost display and cache use       |
-| [Plugin API](#plugin-api)                                   | Gaps found while building v2 plugins                            |
-| [CI and test health](#ci-and-test-health)                   | A main branch whose checks are green                            |
-| [Upstream sync](#upstream-sync)                             | Daily sync verified working                                     |
+| Area                                                        | Current focus                                             |
+| ----------------------------------------------------------- | --------------------------------------------------------- |
+| [Nested subsessions](#nested-subsessions-and-their-asks)    | Shipped across the TUI, the app and ACP                   |
+| [mcpx integration](#mcpx-integration)                       | Tool projection and daemon lifecycle                      |
+| [Serve handover and restarts](#serve-handover-and-restarts) | Session state outside the server process                  |
+| [Routing, cost and plans](#routing-cost-and-plans)          | Feature requests for failover, cost display and cache use |
+| [CI and test health](#ci-and-test-health)                   | A main branch whose checks are green                      |
+| [Upstream sync](#upstream-sync)                             | Daily sync verified working                               |
 
 ## Nested subsessions and their asks
 
@@ -40,6 +39,7 @@ The fork adds named route pools, scheduled weights, request telemetry with cost,
 
 | Title                                         | Horizon | Status | Intent                                                                           | Links |
 | --------------------------------------------- | ------- | ------ | -------------------------------------------------------------------------------- | ----- |
+| Generic OpenAI façades on the server          | Now     | shaped | One `/v1/chat/completions` + `/v1/responses` façade on the server; proxy doors retire behind it. | #1146, [design](specs/2026-11-01T04-10-00Z_design_openai-facades.md) |
 | Show authoritative cost in the desktop header | Later   | idea   | Use the models.dev `cost_usd`.                                                   | #7    |
 | Prompt cache use across model pools           | Later   | idea   | Through `compatibility.cacheFormat`.                                             | #9    |
 | Auto-check plan steps                         | Later   | idea   | Use turn file change summaries to tick plan steps.                               | #10   |

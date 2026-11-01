@@ -30,12 +30,19 @@ on:
         default: false
 
 concurrency:
-  # Releases are never cancelled mid-publish: push-to-main, tag pushes and
-  # manual dispatches are keyed by run_id (unique group, cancel can never
-  # fire); branch pushes keep the ref-keyed group and cancel on supersede.
-  # Standard pattern: design ci-fast-pr-full-main §4 / .github/ci-policy.md.
-  group: ${{ github.workflow }}-${{ ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || github.event_name == 'workflow_dispatch') && github.run_id || github.ref }}
-  cancel-in-progress: true
+  # This workflow runs ONLY on manual dispatch, and dispatches must serialize:
+  # the release step reads the latest github-v* tag and computes its successor,
+  # so two dispatches at once can pick the same next version and race the
+  # tag/publish. All dispatches share one group keyed by workflow + ref, are
+  # never cancelled mid-publish, and queue instead (queue: max keeps every
+  # dispatch waiting rather than dropping all but one pending run).
+  # This deviates from the standard pattern's run_id keying (design
+  # ci-fast-pr-full-main §4 / .github/ci-policy.md) on purpose: that keying is
+  # for push/tag-triggered publish workflows, and a run_id group is unique per
+  # run, so for a dispatch-only workflow it serializes nothing (#1035).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write

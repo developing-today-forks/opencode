@@ -1600,9 +1600,7 @@ test("direct footer rejects local commands submitted with the queue shortcut", a
   }
 })
 
-// OpenTUI currently crashes Bun in the full `test/cli/run` directory run here.
-// Re-enable after the upstream OpenTUI fix lands in this repo.
-test.skip("direct footer recreates the frame across command panel transitions", async () => {
+test("direct footer recreates the frame across command panel transitions", async () => {
   const app = await renderFooter()
 
   try {
@@ -1614,11 +1612,18 @@ test.skip("direct footer recreates the frame across command panel transitions", 
       await app.renderOnce()
 
       expect(app.captureCharFrame()).toContain("Commands")
-      expect(footerComposerFrame(app.renderer.root)).not.toBe(composerFrame)
+      // The composer is unmounted while the command panel is open (the footer
+      // Switch renders the panel body in its place), so there is no
+      // TextareaRenderable to locate the composer frame from in this state.
+      // Recreation is pinned on the return transition instead: the composer
+      // that comes back must live in a new frame object.
       app.mockInput.pressKey("c", { ctrl: true })
       await app.renderOnce()
       expect(app.captureCharFrame()).not.toContain("Commands")
-      expect(app.captureCharFrame()).not.toContain("┃")
+      expect(footerComposerFrame(app.renderer.root)).not.toBe(composerFrame)
+      // The returning composer renders its rail again; the panel frame's
+      // solid border glyph must not leak into it.
+      expect(app.captureCharFrame()).toContain("┃")
       expect(app.captureCharFrame()).not.toContain("█")
     }
   } finally {
@@ -1626,7 +1631,7 @@ test.skip("direct footer recreates the frame across command panel transitions", 
   }
 })
 
-test.skip("direct footer dispatches leader variant binding only when leader is registered", async () => {
+test("direct footer dispatches leader variant binding only when leader is registered", async () => {
   const calls: string[] = []
   const app = await renderFooter({
     tuiConfig: createTuiResolvedConfig({ keybinds: { leader: "ctrl+x", "variant.cycle": "<leader>t" } }),

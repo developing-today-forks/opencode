@@ -63,6 +63,20 @@ const messagesLimit = (limit: number) => {
   return Math.min(MessageLimit.max, Math.max(MessageLimit.min, Math.floor(limit)))
 }
 
+/**
+ * Normalise a present list limit at the store boundary. Unlike messages there
+ * is no ceiling (the HTTP surface applies none), so a finite limit is only
+ * truncated to an integer and floored to 1: SQLite treats a negative LIMIT as
+ * unlimited, so a raw negative would silently widen the query to every
+ * session, and a fractional or non-finite value defects the read. A present
+ * non-finite limit is treated as absent (unbounded), matching the behaviour
+ * an omitted limit has for internal callers.
+ */
+const listLimit = (limit: number): number | undefined => {
+  if (!Number.isFinite(limit)) return undefined
+  return Math.max(Math.trunc(limit), 1)
+}
+
 export interface Interface {
   readonly get: (sessionID: Session.ID) => Effect.Effect<Session.Info | undefined>
   readonly list: (input?: ListInput) => Effect.Effect<Session.Info[]>
@@ -145,9 +159,8 @@ const layer = Layer.effect(
             order === "asc" ? asc(sortColumn) : desc(sortColumn),
             order === "asc" ? asc(SessionTable.id) : desc(SessionTable.id),
           )
-        const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
-          Effect.orDie,
-        )
+        const limit = input.limit === undefined ? undefined : listLimit(input.limit)
+        const rows = yield* (limit === undefined ? query.all() : query.limit(limit).all()).pipe(Effect.orDie)
         return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
       }),
       messages: Effect.fn("SessionStore.messages")(function* (input) {

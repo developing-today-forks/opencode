@@ -1,6 +1,7 @@
 export * as PluginVcsBranchList from "./branch-list.js"
 
 import type { BranchOptions, Interface } from "../../vcs.js"
+import { pageLimit } from "../../util/number.js"
 
 /**
  * Page the plugin `vcs.branch.list` surface returns when the plugin supplies no
@@ -18,8 +19,7 @@ export const MAX_BRANCH_LIMIT = 100
  * values are clamped to a positive integer instead of failing the git call.
  */
 export function branchListLimit(limit?: number): number {
-  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_BRANCH_LIMIT
-  return Math.min(Math.max(Math.trunc(limit), 1), MAX_BRANCH_LIMIT)
+  return pageLimit(limit, { default: DEFAULT_BRANCH_LIMIT, max: MAX_BRANCH_LIMIT })
 }
 
 /** The plugin `vcs.branch.list` call, with its page size normalised first. */

@@ -396,3 +396,117 @@ describe("ReadToolFileSystem", () => {
     }),
   )
 })
+
+describe("ReadToolFileSystem page normalisation", () => {
+  const lines = "one\ntwo\nthree\nfour\n"
+  const full = { content: "one\ntwo\nthree\nfour", offset: 1, truncated: false, next: undefined }
+  const first = { content: "one", offset: 1, truncated: true, next: 2 }
+  const textCases = [
+    { name: "floors offset -100 to the first line", page: { offset: -100 }, ...full },
+    { name: "floors offset -1 to the first line", page: { offset: -1 }, ...full },
+    { name: "floors offset 0 to the first line", page: { offset: 0 }, ...full },
+    { name: "truncates offset 0.5 to the first line", page: { offset: 0.5 }, ...full },
+    { name: "truncates offset 1.5 to the first line", page: { offset: 1.5 }, ...full },
+    { name: "defaults a NaN offset to the first line", page: { offset: NaN }, ...full },
+    { name: "defaults an infinite offset to the first line", page: { offset: Infinity }, ...full },
+    { name: "defaults a negative infinite offset to the first line", page: { offset: -Infinity }, ...full },
+    { name: "floors limit -100 to one line with an advancing next", page: { limit: -100 }, ...first },
+    { name: "floors limit -1 to one line with an advancing next", page: { limit: -1 }, ...first },
+    { name: "floors limit 0 to one line with an advancing next", page: { limit: 0 }, ...first },
+    { name: "truncates limit 0.5 to one line with an advancing next", page: { limit: 0.5 }, ...first },
+    { name: "truncates limit 1.5 to one line with an advancing next", page: { limit: 1.5 }, ...first },
+    { name: "defaults a NaN limit to the whole page", page: { limit: NaN }, ...full },
+    { name: "defaults an infinite limit to the whole page", page: { limit: Infinity }, ...full },
+    { name: "defaults a negative infinite limit to the whole page", page: { limit: -Infinity }, ...full },
+    {
+      name: "keeps a valid page bit-identical",
+      page: { offset: 2, limit: 2 },
+      content: "two\nthree",
+      offset: 2,
+      truncated: true,
+      next: 4,
+    },
+  ]
+
+  textCases.forEach((input) => {
+    it.effect(input.name, () =>
+      Effect.gen(function* () {
+        const { environment, files, directory } = yield* fixture
+        const file = path.join(directory, "lines.txt")
+        yield* files.writeFileString(file, lines)
+
+        const result = yield* ReadToolFileSystem.read(environment, absolute(file), "lines.txt", input.page)
+
+        expect(result.type).toBe("text-page")
+        if (result.type !== "text-page") return
+        expect(result.content).toBe(input.content)
+        expect(result.offset).toBe(input.offset)
+        expect(result.truncated).toBe(input.truncated)
+        expect(result.next).toBe(input.next)
+      }),
+    )
+  })
+
+  const listCases: Array<{
+    readonly name: string
+    readonly page: { readonly offset: number; readonly limit: number }
+    readonly entries: Array<{ readonly path: string; readonly type: "directory" | "file" | "symlink" }>
+    readonly truncated: boolean
+    readonly next?: number
+  }> = [
+    {
+      name: "floors a negative directory page to the first entry with an advancing next",
+      page: { offset: -1, limit: -1 },
+      entries: [{ path: `c${path.sep}`, type: "directory" }],
+      truncated: true,
+      next: 2,
+    },
+    {
+      name: "truncates a fractional directory page to the first entry with an advancing next",
+      page: { offset: 1.5, limit: 1.5 },
+      entries: [{ path: `c${path.sep}`, type: "directory" }],
+      truncated: true,
+      next: 2,
+    },
+    {
+      name: "defaults a NaN directory page to the whole listing",
+      page: { offset: NaN, limit: NaN },
+      entries: [
+        { path: `c${path.sep}`, type: "directory" },
+        { path: "a.txt", type: "file" },
+        { path: "b.txt", type: "file" },
+      ],
+      truncated: false,
+      next: undefined,
+    },
+    {
+      name: "keeps a valid directory page bit-identical",
+      page: { offset: 2, limit: 2 },
+      entries: [
+        { path: "a.txt", type: "file" },
+        { path: "b.txt", type: "file" },
+      ],
+      truncated: false,
+      next: undefined,
+    },
+  ]
+
+  listCases.forEach((input) => {
+    it.effect(input.name, () =>
+      Effect.gen(function* () {
+        const { environment, files, directory } = yield* fixture
+        yield* files.makeDirectory(path.join(directory, "c"))
+        yield* files.writeFileString(path.join(directory, "a.txt"), "")
+        yield* files.writeFileString(path.join(directory, "b.txt"), "")
+
+        const result = yield* ReadToolFileSystem.read(environment, absolute(directory), "folder", input.page)
+
+        expect(result.type).toBe("list-page")
+        if (result.type !== "list-page") return
+        expect(result.entries.map((entry) => ({ path: String(entry.path), type: entry.type }))).toEqual(input.entries)
+        expect(result.truncated).toBe(input.truncated)
+        expect(result.next).toBe(input.next)
+      }),
+    )
+  })
+})

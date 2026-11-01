@@ -14,6 +14,7 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentDepth } from "../../session/subagent-depth.js"
+import { FSUtil } from "@opencode/util/fs-util"
 import { SubagentJob } from "../../session/subagent-job.js"
 import { McpxSubagent } from "./mcpx-subagent.js"
 
@@ -83,6 +84,7 @@ export const Plugin = {
     const jobs = yield* Job.Service
     const agents = yield* Agent.Service
     const config = yield* Config.Service
+    const fs = yield* FSUtil.Service
     const permission = yield* Permission.Service
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
@@ -137,7 +139,7 @@ export const Plugin = {
                     (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
                   ),
                 )
-              yield* SubagentDepth.assertWithinLimit(sessions, config, parent).pipe(
+              yield* SubagentDepth.assertWithinLimit(sessions, config, parent, fs).pipe(
                 Effect.mapError((error) => new ToolFailure({ message: error.message })),
               )
               const agent = yield* agents.resolve(input.agent)

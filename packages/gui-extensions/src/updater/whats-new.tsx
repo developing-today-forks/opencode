@@ -3,6 +3,7 @@ import { Effect, Option, Predicate, Schema } from "effect"
 import { Button } from "@opencode/ui/button"
 import { Dialog } from "@opencode/ui/dialog"
 import { useExtension, type DialogHandle, type SetupContext } from "../sdk"
+import { readBoundedChangelogText } from "./changelog"
 import type definition from "./index"
 
 const CHANGELOG_URL = "https://opencode.ai/changelog.json"
@@ -62,7 +63,7 @@ export function showWhatsNew(
   ctx.signal.addEventListener("abort", () => timers.forEach(clearTimeout))
 
   fetch(CHANGELOG_URL, { signal: ctx.signal, headers: { Accept: "application/json" } })
-    .then((response) => (response.ok ? response.json() : undefined))
+    .then(async (response) => (response.ok ? JSON.parse(await readBoundedChangelogText(response)) : undefined))
     .then((json) => {
       if (!json) return
 

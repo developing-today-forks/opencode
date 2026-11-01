@@ -53,6 +53,9 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
+    // The route machinery's constants, from experimental.model_route_settings.
+    ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
+
     // Scheduled review of the routing history, off unless configured.
     yield* ModelRouteTuning.schedule(
       () => configuredTuning(loaded.entries),
@@ -81,8 +84,9 @@ export const Plugin = define({
       const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
         providers.list().map((record) => [record.provider.id, record.models] as const),
       )
+      const providerRoutes = configuredProviderRoutes(loaded.entries, new Set(definitions.keys()), routes)
       const models = Array.from(routes, ([id, route]) => {
-        const { leaves: expanded, nodes } = expand(id, routes, definitions, windows)
+        const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
         const first = expanded[0].model
         // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
@@ -187,7 +191,12 @@ export const Plugin = define({
       for (const routeModel of models.list(ModelRoute.PROVIDER_ID)) {
         const current = ModelRoute.definition(routeModel)
         if (!current) continue
-        const next = retargetDefinition(current, routes, models, windows)
+        const providerRoutes = configuredProviderRoutes(
+          loaded.entries,
+          new Set(models.provider.list().map((record) => record.provider.id)),
+          routes,
+        )
+        const next = retargetDefinition(current, routes, models, windows, providerRoutes)
         if (!next) continue
         // The advertised variants were computed by the provider transform, before the
         // transform-created targets existed, so a retargeted leaf that cannot produce a
@@ -225,6 +234,45 @@ function configuredLog(entries: readonly Entry[]) {
     >((found, entry) => entry.info.experimental?.model_route_log ?? found, undefined)
 }
 
+function configuredSettings(entries: readonly Entry[]) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .reduce<
+      ConfigModelRoutes.Settings | undefined
+    >((found, entry) => entry.info.experimental?.model_route_settings ?? found, undefined)
+}
+
+/** The machinery settings in the core's shape: only the fields config actually set, group by
+ * group — a decoded settings block carries every unset field as undefined, and passing those
+ * through would erase the defaults they sit over. */
+function settingsConfig(
+  settings: ConfigModelRoutes.Settings | undefined,
+): ModelRoute.SettingsConfig | undefined {
+  if (!settings) return undefined
+  const group = <T extends object>(value: T | undefined): Partial<T> | undefined => {
+    if (!value) return undefined
+    const fields = Object.entries(value).filter(([, field]) => field !== undefined)
+    return fields.length > 0 ? (Object.fromEntries(fields) as Partial<T>) : undefined
+  }
+  const bench = group(settings.bench)
+  const demotion = group(settings.demotion)
+  const quotaGate = group(settings.quotaGate)
+  const escalation = group(settings.escalation)
+  const network = group(settings.network)
+  const continuity = group(settings.continuity)
+  const overrides = group(settings.overrides)
+  if (!bench && !demotion && !quotaGate && !escalation && !network && !continuity && !overrides) return undefined
+  return {
+    ...(bench ? { bench } : {}),
+    ...(demotion ? { demotion } : {}),
+    ...(quotaGate ? { quotaGate } : {}),
+    ...(escalation ? { escalation } : {}),
+    ...(network ? { network } : {}),
+    ...(continuity ? { continuity } : {}),
+    ...(overrides ? { overrides } : {}),
+  }
+}
+
 function configuredRoutes(entries: readonly Entry[]) {
   const routes = new Map<string, ConfigModelRoutes.Route>()
   entries
@@ -250,20 +298,108 @@ const warnDroppedWindow = (name: string, site: string, reason: string) =>
 /** The named windows defined in config, parsed once so schedules and target gates can reference
  * them by name. An entry with an unreadable window is dropped rather than applied. */
 export function configuredWindows(entries: readonly Entry[]) {
-  const windows = new Map<string, ModelRouteSchedule.Window>()
+  const parsed = new Map<string, ModelRouteSchedule.Window>()
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
       Object.entries(entry.info.experimental?.model_route_windows ?? {}).forEach(([name, window]) => {
-        const parsed = ModelRouteSchedule.parse(window)
-        if (parsed) {
-          windows.set(name, parsed)
+        const read = ModelRouteSchedule.parse(window)
+        if (read) {
+          parsed.set(name, read)
           return
         }
         warnDroppedWindow(name, "experimental.model_route_windows", "is defined but cannot be parsed")
       })
     })
+  // Second pass: resolve each window's excludeWindows against the full set (its own name is on
+  // the resolution path, so a self-reference is a cycle). An unknown name or a cycle drops the
+  // window with a warning, like an unparseable one — never apply it without its exclusion.
+  const windows = new Map<string, ModelRouteSchedule.Window>()
+  parsed.forEach((window, name) => {
+    const resolved = ModelRouteSchedule.resolveExclusions(window, parsed, new Set([name]))
+    if (resolved) {
+      windows.set(name, resolved)
+      return
+    }
+    warnDroppedWindow(name, "experimental.model_route_windows", "names an unknown or cyclic excludeWindows window")
+  })
   return windows
+}
+
+/** A provider route that cannot be applied is dropped, but never silently (#734's rule,
+ * as for windows): the warning names the provider and why. */
+const warnDroppedProviderRoute = (id: string, reason: string) =>
+  console.warn(
+    `provider route ${JSON.stringify(id)} ${reason} (experimental.provider_routes); it is dropped, not applied`,
+  )
+
+/** The provider routes config declares, validated against the providers that exist and the
+ * routes that are configured, in the runtime's shape. An id that names a concrete provider, the
+ * routes provider, or a configured route is dropped with a warning: the id shares the provider
+ * namespace at a route's reference site, so a concrete provider always wins the reference, and
+ * a route's name would make decision records ambiguous. Members resolve concrete-first, like
+ * targets: a member that names a concrete provider is a member, and only a member naming no
+ * concrete provider can be a nesting attempt - another provider route (or the routes
+ * provider) named as a member is dropped with a warning, since provider routes do not
+ * nest. A member that names no known provider is kept, with a warning: it contributes no
+ * leaves, like a target naming an unknown provider. */
+export function configuredProviderRoutes(
+  entries: readonly Entry[],
+  knownProviders: ReadonlySet<string>,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+) {
+  const declared = new Map<string, ConfigModelRoutes.ProviderRoute>()
+  entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .forEach((entry) => {
+      Object.entries(entry.info.experimental?.provider_routes ?? {}).forEach(([id, provider]) =>
+        declared.set(id, provider),
+      )
+    })
+  const providerRoutes = new Map<string, ModelRoute.ProviderRoute>()
+  declared.forEach((provider, id) => {
+    if (id === ModelRoute.PROVIDER_ID || knownProviders.has(id)) {
+      warnDroppedProviderRoute(id, "names a concrete provider, which keeps the reference")
+      return
+    }
+    if (routes.has(id)) {
+      warnDroppedProviderRoute(id, "names a configured route, which would make decision records ambiguous")
+      return
+    }
+    const members: string[] = []
+    for (const member of provider.providers) {
+      // A member resolves concrete-first, like a target: a known provider is a member even
+      // when a (rejected) provider route shares its id. Only a member that names no concrete
+      // provider can be a nesting attempt - another provider route, or the routes provider.
+      if (!knownProviders.has(member) && (member === ModelRoute.PROVIDER_ID || declared.has(member))) {
+        console.warn(
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is not a concrete provider (provider routes do not nest); the member is dropped`,
+        )
+        continue
+      }
+      if (members.includes(member)) {
+        console.warn(
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is listed twice; the duplicate is dropped`,
+        )
+        continue
+      }
+      if (!knownProviders.has(member))
+        console.warn(
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} names no known provider; it contributes no leaves`,
+        )
+      members.push(member)
+    }
+    if (members.length === 0) {
+      warnDroppedProviderRoute(id, "has no concrete member providers")
+      return
+    }
+    providerRoutes.set(id, {
+      providers: members,
+      selection: provider.selection ?? "ordered",
+      weights: provider.weights ?? {},
+    })
+  })
+  return providerRoutes
 }
 
 /** A schedule's window: inline (parsed as before), or the name of a configured window.
@@ -273,7 +409,15 @@ const resolveWindow = (
   windows: ReadonlyMap<string, ModelRouteSchedule.Window>,
   site: string,
 ): ModelRouteSchedule.Window | undefined => {
-  if (typeof when !== "string") return ModelRouteSchedule.parse(when)
+  if (typeof when !== "string") {
+    const parsed = ModelRouteSchedule.parse(when)
+    if (!parsed) return undefined
+    if (!parsed.excludeWindows?.length) return parsed
+    const resolved = ModelRouteSchedule.resolveExclusions(parsed, windows)
+    if (!resolved)
+      warnDroppedWindow(parsed.excludeWindows.join(", "), site, "names an unknown or cyclic excludeWindows window")
+    return resolved
+  }
   const window = windows.get(when)
   if (!window) warnDroppedWindow(when, site, "is not a defined window")
   return window
@@ -366,6 +510,7 @@ export function expand(
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
 ) {
   const result: SourceModel[] = []
   const nodes: ModelRoute.Node[] = []
@@ -379,20 +524,23 @@ export function expand(
     trail: ReadonlySet<string>,
     inheritedCacheFormat: CacheFormat | undefined,
     inheritedLimit: number | undefined,
+    override?: { route: ConfigModelRoutes.Route; providerRoute: string; keepEmpty?: boolean },
   ): number | undefined => {
     if (trail.has(routeID)) return
-    const current = routes.get(routeID)
+    const current = override?.route ?? routes.get(routeID)
     if (!current) return
     const nextTrail = new Set(trail).add(routeID)
     const nodeIndex = nodes.length
     const node: {
       routeID: string
+      providerRoute?: string
       selection: ModelRoute.Node["selection"]
       weights: number[]
       schedules: ModelRoute.WeightRule[]
       children: ModelRoute.Node["children"][number][]
     } = {
       routeID,
+      ...(override ? { providerRoute: override.providerRoute } : {}),
       selection: ModelRouteAutonomy.usesRules(current.autonomy) ? (current.selection ?? "ordered") : "ordered",
       weights: [],
       schedules: routeWeightRules(current, windows),
@@ -423,6 +571,77 @@ export function expand(
         if (child !== undefined) {
           const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
           attach({ node: child, ...(gate ? { gate } : {}) }, `${ModelRoute.PROVIDER_ID}/${ref.id}`)
+        }
+        continue
+      }
+      const providerRoute = providerRoutes.get(String(ref.providerID))
+      if (providerRoute && !definitions.has(ref.providerID)) {
+        // A provider route target: the members' leaves for this one model, grouped under
+        // the provider route's own selection. The group is built by visiting a route shaped like
+        // the provider route for the model, so every leaf rule (variant producibility, ceilings,
+        // budgets, dedup) applies verbatim; the referencing route's autonomy gates the
+        // group's selection and weights exactly as it gates the route's own. One group per
+        // matched model id, so a glob fans out per model and a group never mixes models.
+        // Concrete providers win the reference: a provider route whose id a real provider holds
+        // is never consulted (config load drops those; this is the same rule at expansion).
+        const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
+        const matched: string[] = []
+        for (const member of providerRoute.providers) {
+          for (const [modelID] of ModelRouteExpansion.matchingModels(
+            String(ref.id),
+            definitions.get(Provider.ID.make(member)),
+          )) {
+            if (!matched.includes(modelID)) matched.push(modelID)
+          }
+        }
+        for (const modelID of matched) {
+          const group = visit(
+            String(ref.providerID),
+            ref.variant ?? inheritedVariant,
+            nextTrail,
+            spec.cache_format ?? current.cache_format ?? inheritedCacheFormat,
+            ceiling,
+            {
+              providerRoute: String(ref.providerID),
+              route: {
+                targets: providerRoute.providers.map((member) => ({
+                  model: { providerID: member, model: modelID },
+                  ...("variants" in spec && spec.variants ? { variants: spec.variants } : {}),
+                  ...("defaultVariant" in spec && spec.defaultVariant ? { defaultVariant: spec.defaultVariant } : {}),
+                })),
+                selection: providerRoute.selection,
+                weights: Object.fromEntries(
+                  Object.entries(providerRoute.weights).map(([member, weight]) => [`${member}/${modelID}`, weight]),
+                ),
+                ...(current.autonomy ? { autonomy: current.autonomy } : {}),
+              } as unknown as ConfigModelRoutes.Route,
+            },
+          )
+          if (group !== undefined) attach({ node: group, ...(gate ? { gate } : {}) }, `${ref.providerID}/${ref.id}`)
+        }
+        if (matched.length === 0) {
+          // No member offers the model: keep the group in the tree as a leafless node so the
+          // decision layer can name the seat in its excluded list with a reason, instead of
+          // the seat vanishing without a trace (the silence that hid the provider-routes
+          // collapse in production). The node carries no leaves, so it is never a candidate
+          // and never changes what a route can serve.
+          const group = visit(
+            String(ref.providerID),
+            ref.variant ?? inheritedVariant,
+            nextTrail,
+            spec.cache_format ?? current.cache_format ?? inheritedCacheFormat,
+            ceiling,
+            {
+              providerRoute: String(ref.providerID),
+              keepEmpty: true,
+              route: {
+                targets: [],
+                selection: providerRoute.selection,
+                ...(current.autonomy ? { autonomy: current.autonomy } : {}),
+              } as unknown as ConfigModelRoutes.Route,
+            },
+          )
+          if (group !== undefined) attach({ node: group, ...(gate ? { gate } : {}) }, `${ref.providerID}/${ref.id}`)
         }
         continue
       }
@@ -530,7 +749,7 @@ export function expand(
         }
       }
     }
-    return node.children.length > 0 ? nodeIndex : undefined
+    return node.children.length > 0 || override?.keepEmpty ? nodeIndex : undefined
   }
 
   visit(id, undefined, new Set(), undefined, undefined)
@@ -576,6 +795,7 @@ export function retargetDefinition(
     }
   },
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
 ): Retargeted | undefined {
   const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
     editor.provider.list().map((record) => [record.provider.id, record.models] as const),
@@ -592,7 +812,15 @@ export function retargetDefinition(
         for (const providerID of definitions.keys()) {
           if (providerID !== ModelRoute.PROVIDER_ID) targeted.add(providerID)
         }
-      } else if (ref.providerID !== ModelRoute.PROVIDER_ID) targeted.add(ref.providerID)
+      } else if (ref.providerID !== ModelRoute.PROVIDER_ID) {
+        // A provider route target: its members are the concrete providers whose
+        // transform-created models the re-expansion must see. The provider route id itself
+        // stays out of `definitions`, or it would shadow the provider route at expansion.
+        const providerRoute = providerRoutes.get(String(ref.providerID))
+        if (providerRoute && !definitions.has(ref.providerID))
+          providerRoute.providers.forEach((member) => targeted.add(Provider.ID.make(member)))
+        else targeted.add(ref.providerID)
+      }
     }
   }
   for (const providerID of targeted) {
@@ -612,7 +840,7 @@ export function retargetDefinition(
     }
     definitions.set(providerID, merged)
   }
-  const { leaves, nodes } = expand(String(current.id), routes, definitions, windows)
+  const { leaves, nodes } = expand(String(current.id), routes, definitions, windows, providerRoutes)
   if (leaves.length === 0) return undefined
   // The variants the route can still advertise, decided over the retargeted leaves by the
   // same rule the provider transform used over the catalog alone (#869).

@@ -118,6 +118,32 @@ const SEMANTIC_EMBED_LIMIT = 512
 const MAX_WAIT_SECONDS = 600
 /** Delivered notices carry at most this much of a message; the full text stays readable in its topic. */
 const DELIVERED_CHARS = 8000
+/** The largest per-entry character budget log() honours; larger requests clamp to it. */
+const MAX_CHARS = 8000
+
+/**
+ * Normalises a log chars budget at the service boundary. HTTP payload decode already enforces
+ * the contract PositiveInt, but plugin and tool callers reach the service directly with plain
+ * numbers, so a negative chars would make clip() return the wrong end of an entry and NaN would
+ * replace the entry text with a garbage marker. Fractional chars are floored, negative and
+ * sub-1 values clamp to 1, values above MAX_CHARS clamp to MAX_CHARS, and NaN is treated as
+ * absent (the caller's default). Valid budgets pass through unchanged. Context normalisation
+ * for grep is normalizeContext below; limit (#948) and offset (#953) are out of scope.
+ */
+function normalizeChars(value: number | undefined, fallback: number): number {
+  if (value === undefined || Number.isNaN(value)) return fallback
+  return Math.min(Math.max(Math.floor(value), 1), MAX_CHARS)
+}
+
+/**
+ * Normalises a grep context count at the service boundary: fractional counts are floored and
+ * negative, NaN and non-finite counts clamp to 0, so the selection loop only ever indexes the
+ * entry list with integers. Valid counts (including 0) pass through unchanged.
+ */
+function normalizeContext(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0
+  return Math.max(0, Math.floor(value))
+}
 
 /**
  * Page size at the service boundary. Callers reach the service directly (plugins, the CLI), so a limit may arrive
@@ -1860,7 +1886,7 @@ const layer = Layer.effect(
       const op = input.op ?? (input.query ? "search" : "tail")
       const limit = pageLimit(input.limit, op === "pull" ? 50 : DEFAULT_LIMIT)
       const offset = normalizeOffset(input.offset)
-      const chars = input.chars ?? (op === "pull" ? 4000 : 500)
+      const chars = normalizeChars(input.chars, op === "pull" ? 4000 : 500)
       const keyOf = (entry: MessagingLog.Entry) => `${entry.message}:${entry.index}:${entry.part}`
       const output = (
         entries: ReadonlyArray<MessagingLog.Entry & { readonly match?: boolean; readonly score?: number }>,
@@ -1899,7 +1925,7 @@ const layer = Layer.effect(
           (item) => item.entry.text,
         )
         const hits = result.matched.map((item) => item.index)
-        const context = input.context ?? 0
+        const context = normalizeContext(input.context)
         const selected = new Map<number, boolean>()
         for (const index of hits.slice(offset, offset + limit)) {
           for (let near = Math.max(0, index - context); near <= Math.min(all.length - 1, index + context); near++)

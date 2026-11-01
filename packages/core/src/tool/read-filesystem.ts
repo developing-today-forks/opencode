@@ -119,12 +119,13 @@ export const read = Effect.fn("ReadTool.read")(function* (
   resource: string,
   page: PageInput = {},
 ) {
+  const paging = normalisePage(page)
   const first = yield* files.read(input, { offset: 0, length: FIRST_CHUNK }).pipe(
     Effect.catchTag("Environment.WrongKind", (error) => {
       if (error.actual !== "directory")
         return Effect.fail(new PathKindError({ resource, expected: "a file or directory" }))
       return files.list(input).pipe(
-        Effect.map((entries) => list(entries, page)),
+        Effect.map((entries) => list(entries, paging)),
         Effect.catchTag("Environment.WrongKind", () =>
           Effect.fail(new PathKindError({ resource, expected: "a file or directory" })),
         ),
@@ -162,7 +163,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
   }
 
   if (first.bytes.length >= first.info.size) {
-    const result = textPage(first.bytes, true, page)
+    const result = textPage(first.bytes, true, paging)
     if (result === undefined) return yield* Effect.die("Read page did not settle for a complete first chunk")
     return yield* makeTextPage(
       input,
@@ -173,8 +174,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
     )
   }
 
-  const offset = page.offset || 1
-  const limit = Math.min(page.limit || MAX_READ_LINES, MAX_READ_LINES)
+  const offset = paging.offset
+  const limit = paging.limit
   const leaves = [textLeaf(first.bytes)]
   let bytes = first.bytes.length
   let lines = leaves[0].summary.lines
@@ -221,6 +222,14 @@ export const read = Effect.fn("ReadTool.read")(function* (
     bytes += leaf.summary.bytes
     lines += leaf.summary.lines
   }
+})
+
+const normalisePage = (page: PageInput) => ({
+  offset: page.offset === undefined || !Number.isFinite(page.offset) ? 1 : Math.max(1, Math.trunc(page.offset)),
+  limit:
+    page.limit === undefined || !Number.isFinite(page.limit)
+      ? MAX_READ_LINES
+      : Math.min(Math.max(1, Math.trunc(page.limit)), MAX_READ_LINES),
 })
 
 const readFile = (

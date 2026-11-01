@@ -21,6 +21,12 @@ export class Embedding extends Schema.Class<Embedding>("Config.Messaging.Embeddi
     description: 'Built-in model tier: "tiny", "default", "step-up", "top", or "off" (default: "default")',
   }).pipe(optional),
   url: Schema.String.annotate({ description: "GGUF download URL used instead of the tier's model" }).pipe(optional),
+  sha256: Schema.String.annotate({
+    description: "Expected SHA-256 of the custom GGUF file; verified after download when set",
+  }).pipe(optional),
+  size: PositiveInt.annotate({
+    description: "Expected size in bytes of the custom GGUF file; bounds the download exactly when set",
+  }).pipe(optional),
   path: Schema.String.annotate({ description: "Existing local GGUF file used instead of downloading" }).pipe(optional),
   pooling: Schema.Literals(["last", "mean", "cls"])
     .annotate({

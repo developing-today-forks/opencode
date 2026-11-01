@@ -2,6 +2,7 @@ export * as Connection from "./connection.js"
 
 import { Schema } from "effect"
 import { Credential } from "./credential.js"
+import { IntegrationMethodID } from "./integration-id.js"
 import { optional } from "./schema.js"
 
 /**
@@ -22,6 +23,8 @@ export const CredentialInfo = Schema.Struct({
   label: Schema.String,
   /** Whether the connection stores a key, an OAuth grant, or an external credential-source reference. */
   method: Schema.Literals(["key", "oauth", "external"]),
+  /** The integration method that minted the credential, for OAuth and external credentials (#1119). */
+  methodID: optional(IntegrationMethodID),
   status: optional(Status),
 }).annotate({ identifier: "Connection.CredentialInfo" })
 

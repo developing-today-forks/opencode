@@ -211,3 +211,38 @@ test("throws on proxy failure so the plugin can fail soft", async () => {
     await server.stop(true)
   }
 })
+
+
+test("rejects an over-cap Modal models body with a declared length (#1017)", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [], pad: "x".repeat(ModalModels.modelsMaxResponseBytes) }),
+  })
+  try {
+    await expect(ModalModels.load(server.url.origin, "test-key")).rejects.toThrow(
+      `Modal models response from ${server.url.origin}/models exceeded ${ModalModels.modelsMaxResponseBytes} bytes`,
+    )
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test("rejects a streamed over-cap Modal models body in flight (#1017)", async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(120)
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunk)
+    },
+  })
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(stream, { headers: { "content-type": "application/json" } }),
+  })
+  try {
+    await expect(ModalModels.load(server.url.origin, "test-key")).rejects.toThrow(
+      `Modal models response from ${server.url.origin}/models exceeded ${ModalModels.modelsMaxResponseBytes} bytes`,
+    )
+  } finally {
+    await server.stop(true)
+  }
+})

@@ -1,6 +1,6 @@
 export * as Media from "./media.js"
 
-import { Effect, FileSystem, Schema, SchemaGetter } from "effect"
+import { Effect, FileSystem, Schema, SchemaGetter, Stream } from "effect"
 import { Base64 } from "effect/encoding"
 import { HttpClientRequest } from "effect/http"
 import { ProviderID } from "./schema/ids.js"
@@ -12,6 +12,15 @@ import { detectMediaType, fileMediaType } from "./utils/media-type.js"
 export { detectMediaType } from "./utils/media-type.js"
 
 const OCTET_STREAM = "application/octet-stream"
+
+/**
+ * Cap on a downloaded `url` source body. The URL can come straight from raw provider output, so the body is
+ * untrusted: without a bound one oversized response OOMs the whole process. 20 MiB matches the media-ingest
+ * limit the core read tool already enforces (`MAX_MEDIA_INGEST_BYTES`), so a larger asset could not be
+ * ingested downstream anyway. (`packages/core` has the shared `collectBoundedResponseBody` helper; this
+ * package cannot depend on core, so the same logic is kept local here.)
+ */
+export const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 // Source — the serializable wire/persistence form of a media asset
@@ -248,19 +257,58 @@ const download = Effect.fn("Media.download")(function* (
   const response = yield* executor.execute(
     HttpClientRequest.get(source.url).pipe(HttpClientRequest.setHeaders(headers ?? {})),
   )
-  const buffer = yield* response.arrayBuffer.pipe(
-    Effect.mapError(
-      (cause) =>
-        new AIError({
-          reason: new InvalidProviderOutputError({
-            message: `Failed to read media from ${source.url}`,
-            http: new HttpContext({ url: response.request.url, status: response.status, headers: response.headers }),
-            cause,
+  const http = new HttpContext({ url: response.request.url, status: response.status, headers: response.headers })
+  const tooLarge = new AIError({
+    reason: new InvalidProviderOutputError({
+      message: `Media response too large (exceeds ${MAX_DOWNLOAD_BYTES} byte limit): ${source.url}`,
+      http,
+    }),
+  })
+  // Declared-size pre-check, then a per-chunk bound while streaming — the same shape as core's
+  // `collectBoundedResponseBody`, so a chunked body with no `content-length` is bounded too.
+  const contentLength = response.headers["content-length"]
+  const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+  const declaredSize =
+    parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
+  if (declaredSize !== undefined && declaredSize > MAX_DOWNLOAD_BYTES) {
+    // The request executor is unscoped, so returning here would leave the oversized
+    // response downloading in the background. Acquiring the stream's pull registers a
+    // scope finalizer that cancels the underlying reader; closing the scope without
+    // reading therefore aborts the body before the error is returned.
+    yield* Stream.toPull(response.stream).pipe(Effect.scoped, Effect.ignore)
+    return yield* tooLarge
+  }
+  let body = Buffer.allocUnsafe(Math.min(MAX_DOWNLOAD_BYTES, declaredSize || 64 * 1024))
+  let size = 0
+  yield* Stream.runForEach(response.stream, (chunk) =>
+    Effect.suspend(() => {
+      if (chunk.byteLength === 0) return Effect.void
+      if (size + chunk.byteLength > MAX_DOWNLOAD_BYTES) return Effect.fail(tooLarge)
+      if (size + chunk.byteLength > body.byteLength) {
+        const grown = Buffer.allocUnsafe(
+          Math.min(MAX_DOWNLOAD_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)),
+        )
+        body.copy(grown, 0, 0, size)
+        body = grown
+      }
+      body.set(chunk, size)
+      size += chunk.byteLength
+      return Effect.void
+    }),
+  ).pipe(
+    Effect.mapError((cause) =>
+      cause instanceof AIError
+        ? cause
+        : new AIError({
+            reason: new InvalidProviderOutputError({
+              message: `Failed to read media from ${source.url}`,
+              http,
+              cause,
+            }),
           }),
-        }),
     ),
   )
-  return new Uint8Array(buffer)
+  return new Uint8Array(body.subarray(0, size))
 })
 
 // ---------------------------------------------------------------------------

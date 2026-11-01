@@ -27,6 +27,10 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
   model_routes: ConfigModelRoutes.Info.annotate({
     description: "Named ordered provider/model routes with failure and performance failover",
   }).pipe(optional),
+  provider_routes: ConfigModelRoutes.ProviderRoutes.annotate({
+    description:
+      "Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model.",
+  }).pipe(optional),
   model_route_schedules: Schema.Array(ConfigModelRoutes.GlobalSchedule)
     .annotate({
       description:
@@ -42,5 +46,9 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
   }).pipe(optional),
   model_route_log: ConfigModelRoutes.Log.annotate({
     description: "What the routing history records about failed requests",
+  }).pipe(optional),
+  model_route_settings: ConfigModelRoutes.Settings.annotate({
+    description:
+      "Global defaults for the route machinery: the bench ladder, quota demotion and gating, escalation, network-suspect detection, continuity hedging and the preference default",
   }).pipe(optional),
 }) {}

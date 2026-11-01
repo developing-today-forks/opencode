@@ -48,12 +48,30 @@ const ScheduleMatch = Schema.Struct({
   routes: Schema.Array(Schema.String).pipe(optional),
 })
 
-const ScheduleWindow = Schema.Struct({
+export interface ScheduleWindow {
+  readonly daysOfWeek?: readonly number[]
+  readonly daysOfMonth?: readonly number[]
+  readonly start?: string
+  readonly end?: string
+  readonly timezone?: string
+  readonly dates?: readonly string[]
+  readonly excludeDates?: readonly string[]
+  readonly excludeWindows?: readonly string[]
+  readonly excludedWindows?: readonly ScheduleWindow[]
+  readonly from?: number
+  readonly until?: number
+}
+
+const ScheduleWindow: Schema.Codec<ScheduleWindow, ScheduleWindow, never, never> = Schema.Struct({
   daysOfWeek: Schema.Array(Schema.Finite).pipe(optional),
   daysOfMonth: Schema.Array(Schema.Finite).pipe(optional),
   start: Schema.String.pipe(optional),
   end: Schema.String.pipe(optional),
   timezone: Schema.String.pipe(optional),
+  dates: Schema.Array(Schema.String).pipe(optional),
+  excludeDates: Schema.Array(Schema.String).pipe(optional),
+  excludeWindows: Schema.Array(Schema.String).pipe(optional),
+  excludedWindows: Schema.Array(Schema.suspend(() => ScheduleWindow)).pipe(optional),
   from: Schema.Finite.pipe(optional),
   until: Schema.Finite.pipe(optional),
 })
@@ -69,7 +87,6 @@ const WeightRule = Schema.Struct({
 })
 
 export type WeightRule = typeof WeightRule.Type
-export type ScheduleWindow = typeof ScheduleWindow.Type
 
 /** An eligibility gate on a child position, resolved at config load from a named window in
  * experimental.model_route_windows. The child is a candidate only while the window is active, or
@@ -90,8 +107,12 @@ export const gateOpen = (gate: Gate | undefined, now = Date.now()): boolean =>
 /** A group of targets with its own selection mode. Children are leaf target indexes or nested
  * groups; `weights` is parallel to `children`. Group 0 is the route itself. */
 const Node = Schema.Struct({
-  /** Route id at this point in the hierarchy. */
+  /** Route id at this point in the hierarchy. For a provider-route group, the provider route id. */
   routeID: Schema.String.pipe(optional),
+  /** Set on a group that resolves a provider route (experimental.provider_routes):
+   * the provider route's id. The group's children are the members' concrete leaves for the
+   * one model the group serves, and its decision is recorded under this id. */
+  providerRoute: Schema.String.pipe(optional),
   selection: Mode,
   weights: Schema.Array(Schema.Finite.check(Schema.isGreaterThan(0))),
   /** Weight changes declared on this route, in force while a target under this node is judged. */
@@ -144,6 +165,16 @@ const Definition = Schema.Struct({
   nodes: Schema.Array(Node),
 })
 
+/** A provider route, validated at config load from experimental.provider_routes: a
+ * selection over concrete providers. Expansion turns a `<provider-route>/<model>` target into a
+ * group node over the members' concrete leaves for that model, so selection, health and
+ * decisions treat it exactly like a nested route whose leaves differ only by provider. */
+export interface ProviderRoute {
+  readonly providers: readonly string[]
+  readonly selection: "ordered" | "round-robin" | "weighted"
+  readonly weights: Readonly<Record<string, number>>
+}
+
 /** A concrete provider/model a route sends requests to. */
 export type Target = Model.Ref
 export type Node = typeof Node.Type
@@ -168,6 +199,7 @@ export const policy = (input?: {
   readonly quotaCooldownMs?: number
 }): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
+  const ladder = currentConstants().bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
@@ -177,8 +209,8 @@ export const policy = (input?: {
       : {}),
     sampleWindow,
     slowThreshold: Math.min(input?.slowThreshold ?? DEFAULT_POLICY.slowThreshold, sampleWindow),
-    cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, 3_600_000),
-    quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, 86_400_000),
+    cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
+    quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
 }
 
@@ -238,7 +270,8 @@ const OUTCOME_WINDOW = 5
 
 const key = (target: Model.Ref) => `${target.providerID}/${target.id}`
 
-const pushOutcome = (outcomes: boolean[], answered: boolean) => [...outcomes, answered].slice(-OUTCOME_WINDOW)
+const pushOutcome = (outcomes: boolean[], answered: boolean) =>
+  [...outcomes, answered].slice(-currentConstants().escalation.outcomeWindow)
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -260,10 +293,19 @@ const logHealth = (
     | "quota-readmitted",
   reason: string,
   until?: number,
+  credentialID?: string,
 ) =>
   ModelRouteLog.record({
     kind: "health",
-    row: { time: Date.now(), provider_id: target.providerID, model_id: target.id, kind, reason, until },
+    row: {
+      time: Date.now(),
+      provider_id: target.providerID,
+      model_id: target.id,
+      kind,
+      reason,
+      until,
+      ...(credentialID ? { credential_id: credentialID } : {}),
+    },
   })
 
 const recover = (
@@ -277,7 +319,7 @@ const recover = (
   state.samples = []
   // Credential expirations are tagged so restart replay ends that credential's restored
   // cooldown, never the target's (#870).
-  logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired")
+  logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired", undefined, credentialID)
 }
 
 // A provider-wide fault looks different from a model-specific one. When several models of the same
@@ -292,8 +334,10 @@ const recentFailures: Array<{ readonly provider: string; readonly target: string
 /** True when failures hit many unrelated providers within a short window. */
 export const networkSuspect = (now = Date.now()) =>
   new Set(
-    recentFailures.filter((failure) => now - failure.time <= NETWORK_WINDOW_MS).map((failure) => failure.provider),
-  ).size >= NETWORK_PROVIDERS
+    recentFailures
+      .filter((failure) => now - failure.time <= currentConstants().network.windowMs)
+      .map((failure) => failure.provider),
+  ).size >= currentConstants().network.providers
 
 const providerCooldownUntil = (providerID: string, now: number) => {
   const prefix = `${providerID}/`
@@ -304,7 +348,7 @@ const providerCooldownUntil = (providerID: string, now: number) => {
     count++
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= PROVIDER_MODELS ? until : 0
+  return count >= currentConstants().network.providerModels ? until : 0
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now()) => cooldownUntil(target, now) > now
@@ -332,8 +376,9 @@ export interface FailureHint {
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
  * A stated retry-after is believed as-is and never multiplied; every other class doubles its
  * bench per consecutive failure (auth and quota start from the long bench), capped at a day.
- * The count survives recover() and resets only on a success, so a permanently failing target
- * backs off instead of being retried at full rate forever. */
+ * A quota bench may end sooner at a trustworthy window reset. The count survives recover() and
+ * resets only on a success, so a permanently failing target backs off instead of being retried at
+ * full rate forever. */
 const bench = (
   target: Model.Ref,
   state: { samples: boolean[]; outcomes: boolean[]; cooldownUntil: number; consecutiveFailures: number },
@@ -341,23 +386,35 @@ const bench = (
   now: number,
   hint?: FailureHint,
   credentialID?: string,
+  quotaResetAt?: number,
 ) => {
   state.samples = []
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
+  const ladder = currentConstants().bench
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
-      ? Math.min(Math.max(hint.retryAfterMs, 1_000), MAX_COOLDOWN_MS)
-      : Math.min(base * 2 ** Math.min(state.consecutiveFailures - 1, 30), MAX_COOLDOWN_MS)
-  state.cooldownUntil = now + cooldown
+      ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
+      : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
+  const until = now + cooldown
+  state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
   logHealth(
     target,
     "cooldown-start",
-    `${hint?.retryAfterMs ? "retry-after" : hint?.quota ? "quota" : hint?.auth ? "auth" : "failure"}${
-      credentialID ? ` credential:${credentialID}` : ""
-    }`,
+    `${
+      hint?.quota
+        ? hint.retryAfterMs
+          ? "quota retry-after"
+          : "quota"
+        : hint?.retryAfterMs
+          ? "retry-after"
+          : hint?.auth
+            ? "auth"
+            : "failure"
+    }${credentialID ? ` credential:${credentialID}` : ""}`,
     state.cooldownUntil,
+    credentialID,
   )
 }
 
@@ -376,16 +433,24 @@ export const failed = (
       target: credentialID ? credentialKey(target, credentialID) : key(target),
       time: now,
     })
-  while (recentFailures.length > 200 || (recentFailures[0] && now - recentFailures[0].time > NETWORK_WINDOW_MS))
+  while (
+    recentFailures.length > 200 ||
+    (recentFailures[0] && now - recentFailures[0].time > currentConstants().network.windowMs)
+  )
     recentFailures.shift()
   if (hint?.network && networkSuspect(now)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
     // shared the same local outage, so treating each provider as independently unhealthy is wrong.
+    // The escalation count is undone with the cooldown: a forgiven failure must not double the
+    // target's next bench (#1034).
     for (const failure of recentFailures) {
       const prior = health.get(failure.target) ?? credentialHealth.get(failure.target)
-      if (prior && prior.cooldownUntil > now) {
-        prior.cooldownUntil = 0
-        prior.samples = []
+      if (prior) {
+        if (prior.cooldownUntil > now) {
+          prior.cooldownUntil = 0
+          prior.samples = []
+        }
+        prior.consecutiveFailures = 0
       }
     }
     logHealth(target, "network-suspect", "transport failures across unrelated providers; target cooldowns cleared")
@@ -394,10 +459,26 @@ export const failed = (
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   if (credentialID) {
-    bench(target, credentialEntry(target, credentialID), policy, now, hint, credentialID)
+    bench(
+      target,
+      credentialEntry(target, credentialID),
+      policy,
+      now,
+      hint,
+      credentialID,
+      hint?.quota ? quotaResetAt(target, credentialID, now) : undefined,
+    )
     return
   }
-  bench(target, entry(target), policy, now, hint)
+  bench(
+    target,
+    entry(target),
+    policy,
+    now,
+    hint,
+    undefined,
+    hint?.quota ? quotaResetAt(target, undefined, now) : undefined,
+  )
 }
 
 /** Counts a request that was given up on for being slow, so a target that keeps losing hedges
@@ -446,7 +527,72 @@ export const configure = (
   }
 }
 
-export const currentSettings = () => settings
+/** The machinery constants as config supplies them (experimental.model_route_settings), in
+ * config's own grouping. Every field is optional; an unset field keeps the layer below it.
+ * `demotion.after` / `demotion.windowMs` and the `escalation` fields land in `Settings`
+ * above; the rest land in `Constants` at the end of this file. */
+export interface SettingsConfig {
+  readonly bench?: {
+    readonly maxCooldownMs?: number
+    readonly multiplier?: number
+    readonly retryAfterMinMs?: number
+    readonly cooldownCapMs?: number
+    readonly quotaCooldownCapMs?: number
+  }
+  readonly demotion?: {
+    readonly after?: number
+    readonly windowMs?: number
+    readonly factor?: number
+  }
+  readonly quotaGate?: {
+    readonly maxMs?: number
+    readonly fallbackMs?: number
+    readonly feedTtlMs?: number
+  }
+  readonly escalation?: {
+    readonly enabled?: boolean
+    readonly afterGiveUps?: number
+    readonly outcomeWindow?: number
+  }
+  readonly network?: {
+    readonly windowMs?: number
+    readonly providers?: number
+    readonly providerModels?: number
+  }
+  readonly continuity?: {
+    readonly hedgeRequests?: number
+  }
+  readonly overrides?: {
+    readonly preferredFactor?: number
+  }
+}
+
+let readSettingsConfig: (() => SettingsConfig | undefined) | undefined
+
+/** Registers where the config-derived settings come from (the model-routes config plugin,
+ * mirroring ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
+ * reload is honored without re-registering. */
+export const onSettingsConfig = (read: () => SettingsConfig | undefined) => {
+  readSettingsConfig = read
+}
+
+/** The settings in force: what configure() set, with config over it. */
+const activeSettings = (): Settings => {
+  const config = readSettingsConfig?.()
+  if (!config) return settings
+  return {
+    escalation: {
+      enabled: config.escalation?.enabled ?? settings.escalation.enabled,
+      afterGiveUps: config.escalation?.afterGiveUps ?? settings.escalation.afterGiveUps,
+    },
+    quota: {
+      demoteAfter: config.demotion?.after ?? settings.quota.demoteAfter,
+      windowMs: config.demotion?.windowMs ?? settings.quota.windowMs,
+    },
+  }
+}
+
+export const currentSettings = () => activeSettings()
 
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
@@ -458,12 +604,12 @@ export const giveUps = (target: Model.Ref, credentialID?: string) => {
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
 export const steady = (target: Model.Ref, credentialID?: string) =>
-  giveUps(target, credentialID) < settings.escalation.afterGiveUps
+  giveUps(target, credentialID) < activeSettings().escalation.afterGiveUps
 
 /** A route should race its next target immediately when its current target keeps giving up. Whether a
  * route races at all depends on its autonomy level; see ModelRouteAutonomy.races. */
 export const escalates = (target: Model.Ref, credentialID?: string) =>
-  settings.escalation.enabled && !steady(target, credentialID)
+  activeSettings().escalation.enabled && !steady(target, credentialID)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
 // of every order, instead of being retried first on each new session.
@@ -472,15 +618,16 @@ const quotaEvents = new Map<string, number[]>()
 /** True when a target has hit its quota errors often enough recently to be put last. With a
  * credentialID, only that credential's quota errors count: the demotion is per credential (#6). */
 export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string) => {
+  const quota = activeSettings().quota
   const recent = (quotaEvents.get(credentialID ? credentialKey(target, credentialID) : key(target)) ?? []).filter(
-    (at) => now - at <= settings.quota.windowMs,
+    (at) => now - at <= quota.windowMs,
   )
-  return recent.length >= settings.quota.demoteAfter
+  return recent.length >= quota.demoteAfter
 }
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= settings.quota.windowMs)
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings().quota.windowMs)
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -489,14 +636,22 @@ const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
 // (#587); this is only the gate state consumers read. An unknown or stale observation never
 // replaces a known one, so a gated credential is re-admitted only by its reset passing or by a
 // fresher known snapshot below the limit — never by losing the signal.
-const credentialQuota = new Map<string, { snapshot: QuotaSnapshot.Snapshot; target: Model.Ref; gated: boolean }>()
+type QuotaGateState = {
+  snapshot: QuotaSnapshot.Snapshot
+  target: Model.Ref
+  gated: boolean
+  actualResetAt?: number
+  resetObservedAt?: number
+}
+const credentialQuota = new Map<string, QuotaGateState>()
 
 /** Feeds one credential's latest quota snapshot into the gate. */
-export const observeCredentialQuota = (
+const observeCredentialQuotaState = (
   target: Model.Ref,
   credentialID: string,
   snapshot: QuotaSnapshot.Snapshot,
-  now = Date.now(),
+  now: number,
+  resetAtTrusted: boolean,
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -505,10 +660,85 @@ export const observeCredentialQuota = (
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now)
-  credentialQuota.set(credentialID, { snapshot, target, gated: full })
+  const actualResetAt = resetAtTrusted
+    ? snapshot.resetAt ?? undefined
+    : previous?.actualResetAt !== undefined && previous.actualResetAt > now
+      ? previous.actualResetAt
+      : undefined
+  const resetObservedAt = resetAtTrusted ? snapshot.observedAt : previous?.resetObservedAt
+  credentialQuota.set(credentialID, {
+    snapshot,
+    target,
+    gated: full,
+    ...(actualResetAt !== undefined ? { actualResetAt } : {}),
+    ...(resetObservedAt !== undefined ? { resetObservedAt } : {}),
+  })
   if (full && !previous?.gated)
-    logHealth(target, "quota-gated", `credential:${credentialID} quota-known-full`, snapshot.resetAt ?? undefined)
-  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`)
+    logHealth(
+      target,
+      "quota-gated",
+      `credential:${credentialID} quota-known-full`,
+      snapshot.resetAt ?? undefined,
+      credentialID,
+    )
+  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+}
+
+export const observeCredentialQuota = (
+  target: Model.Ref,
+  credentialID: string,
+  snapshot: QuotaSnapshot.Snapshot,
+  now = Date.now(),
+) => observeCredentialQuotaState(target, credentialID, snapshot, now, true)
+
+const providerQuota = new Map<string, QuotaGateState>()
+
+/** Feeds one provider's latest quota snapshot into the gate (for credential-less providers). */
+export const observeProviderQuota = (
+  target: Model.Ref,
+  snapshot: QuotaSnapshot.Snapshot,
+  now = Date.now(),
+) => {
+  const previous = providerQuota.get(target.providerID)
+  if (previous && !QuotaSnapshot.known(snapshot)) return
+  if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
+  const full = QuotaSnapshot.isKnownFull(snapshot, now)
+  providerQuota.set(target.providerID, {
+    snapshot,
+    target,
+    gated: full,
+    ...(snapshot.resetAt !== null ? { actualResetAt: snapshot.resetAt } : {}),
+    resetObservedAt: snapshot.observedAt,
+  })
+  if (full) {
+    const gate = currentConstants().quotaGate
+    const until = Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
+    addAdjustment({
+      id: `quota:${target.providerID}`,
+      match: `${target.providerID}/`,
+      action: "skip",
+      until,
+      note: "quota exhausted (proactive snapshot); held until the stated reset",
+    })
+    if (!previous?.gated)
+      logHealth(target, "quota-gated", `provider:${target.providerID} quota-known-full`, snapshot.resetAt ?? undefined)
+  }
+  if (!full && previous?.gated) {
+    removeAdjustment(`quota:${target.providerID}`)
+    logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
+  }
+}
+
+let lastQuotaFeedAt = 0
+
+export const resetQuotaFeed = () => {
+  lastQuotaFeedAt = 0
+}
+
+export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quotaGate.feedTtlMs) => {
+  if (now - lastQuotaFeedAt < ttlMs) return false
+  lastQuotaFeedAt = now
+  return true
 }
 
 /** The longest a single exhaustion reading may hold a gate: a stated reset further out than
@@ -535,9 +765,10 @@ export const observeQuotaFailure = (
   resetAt: number | undefined,
   now = Date.now(),
 ) => {
-  const until = Math.min(resetAt ?? now + QUOTA_GATE_FALLBACK_MS, now + QUOTA_GATE_MAX_MS)
+  const gate = currentConstants().quotaGate
+  const until = Math.min(resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
   if (credentialID) {
-    observeCredentialQuota(
+    observeCredentialQuotaState(
       target,
       credentialID,
       {
@@ -551,6 +782,7 @@ export const observeQuotaFailure = (
         stale: false,
       },
       now,
+      false,
     )
     return
   }
@@ -578,7 +810,7 @@ export const credentialQuotaBlocked = (
   }
   if (state.gated) {
     state.gated = false
-    logHealth(state.target, "quota-readmitted", `credential:${credentialID}`)
+    logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
   }
   return undefined
 }
@@ -624,9 +856,11 @@ export const resetHealth = () => {
   health.clear()
   credentialHealth.clear()
   credentialQuota.clear()
+  providerQuota.clear()
   quotaEvents.clear()
   continuity.clear()
   recentFailures.length = 0
+  lastQuotaFeedAt = 0
 }
 
 /** Per-route selection state: rotation counters for round-robin, sticky session choices, both
@@ -655,7 +889,9 @@ export const sessionTarget = (routeID: string, sessionID: string) => {
 }
 
 /** Chooses the session's target index. `ordered` always returns the first entry; round-robin
- * rotates by smooth weights; weighted draws by relative ratio. Only the outcome is sticky. */
+ * rotates by smooth weights over the candidates it is given — the walk passes only the active
+ * tier's candidates, so that rotation is the within-tier one (#1122); weighted draws by relative
+ * ratio. Only the outcome is sticky. */
 export const selectSessionTarget = (
   routeID: string,
   sessionID: string,
@@ -847,6 +1083,7 @@ export const observeRateLimit = (
       "rate-limit-window",
       credentialID ? `provider-reported credential:${credentialID}` : "provider-reported",
       until,
+      credentialID,
     )
 }
 
@@ -864,6 +1101,7 @@ export const clearRateLimit = (target: Model.Ref, credentialID?: string, now = D
       "rate-limit-window",
       credentialID ? `provider-released credential:${credentialID}` : "provider-released",
       0,
+      credentialID,
     )
 }
 
@@ -877,6 +1115,35 @@ export const limitedUntil = (target: Model.Ref, now = Date.now(), credentialID?:
 /** The latest rate-limit snapshot seen for the target, if any. */
 export const rateLimitOf = (target: Model.Ref, credentialID?: string) =>
   limits.get(credentialID ? credentialKey(target, credentialID) : key(target))?.snapshot
+
+/** A reset usable to cap a quota bench must belong to this target and serving credential, describe an
+ * actually exhausted provider window (not a nearby window), and still be a fresh future reset. Plan
+ * snapshots are provider/credential scoped and already carry their own freshness and full-window checks.
+ * The reactive quota gate's bounded fallback is deliberately not considered a window reset. */
+const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: number): number | undefined => {
+  const resets: number[] = []
+  const rateLimit = rateLimitOf(target, credentialID)
+  const providerReset = rateLimit
+    ? ModelRouteLimits.exhaustedWindowResetAt(rateLimit, now, QuotaSnapshot.DEFAULT_MAX_AGE_MS)
+    : undefined
+  if (providerReset !== undefined) resets.push(providerReset)
+
+  const planQuota = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
+  if (
+    planQuota &&
+    planQuota.target.providerID === target.providerID &&
+    QuotaSnapshot.isKnownFull(planQuota.snapshot, now) &&
+    planQuota.snapshot.observedAt <= now &&
+    planQuota.resetObservedAt !== undefined &&
+    planQuota.resetObservedAt <= now &&
+    now - planQuota.resetObservedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS &&
+    planQuota.actualResetAt !== undefined &&
+    planQuota.actualResetAt > now
+  )
+    resets.push(planQuota.actualResetAt)
+
+  return resets.length > 0 ? Math.max(...resets) : undefined
+}
 
 /** The longest rate-limit hold on a target across its target-level and per-credential entries,
  * for diagnostics (route_stats) that report per target rather than per serving credential (#870). */
@@ -1119,7 +1386,7 @@ export const tracedWeightOf = (
   let weight = afterScheduled
   for (const item of userOverrides("prefer", target, now, scope)) {
     if (item.weight !== undefined) weight = item.weight
-    else weight *= item.factor ?? PREFERRED_FACTOR
+    else weight *= item.factor ?? currentConstants().overrides.preferredFactor
   }
   const afterPrefer = weight
   if (scope.fixed !== true) {
@@ -1135,7 +1402,7 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID) ? DEMOTED_FACTOR : 1),
+    demotion: weight * (demoted(target, now, scope.credentialID) ? currentConstants().demotion.factor : 1),
     gate: null,
   }
 }
@@ -1230,8 +1497,16 @@ export const nextTarget = (
     schedules: [...(definition.schedules ?? []), ...rules],
   })
   /** The average weight multiplier of a nested group's leaves, judged with the schedules that reach
-   * into that group. The group's own weight stays in `weights`; a parent then scales the two. */
-  const factor = (nodeIndex: number, inherited: readonly WeightRule[], path: readonly string[]) => {
+   * into that group. The group's own weight stays in `weights`; a parent then scales the two.
+   * `layer` picks which step of the weight computation is averaged: the final effective weight
+   * (`demotion`, what ranking has always used) or the pre-demotion weight (`adjustment`, the key
+   * round-robin tiers are built from, #1122). */
+  const factor = (
+    nodeIndex: number,
+    inherited: readonly WeightRule[],
+    path: readonly string[],
+    layer: "adjustment" | "demotion" = "demotion",
+  ) => {
     const node = definition.nodes[nodeIndex]
     const nodePath = node?.routeID && !path.includes(node.routeID) ? [...path, node.routeID] : path
     const rules = [...inherited, ...(node?.schedules ?? [])]
@@ -1241,16 +1516,35 @@ export const nextTarget = (
       ? 1
       : eligible.reduce(
           (sum, index) =>
-            sum + weightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) }),
+            sum +
+            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[
+              layer
+            ],
           0,
         ) / eligible.length
   }
-  const label = (child: Node["children"][number]) =>
-    child.leaf !== undefined
-      ? `${definition.targets[child.leaf]?.providerID}/${definition.targets[child.leaf]?.id}`
-      : child.node !== undefined
-        ? `opencode-route/${definition.nodes[child.node]?.routeID ?? child.node}`
-        : "unknown"
+  /** Whether every leaf that could serve under a group right now is quota-demoted. A group with a
+   * single undemoted door is not demoted: its own walk reaches that door first (#1122). */
+  const allDemoted = (nodeIndex: number) => {
+    const eligible = openLeaves(nodeIndex)
+    return (
+      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index)))
+    )
+  }
+  const label = (child: Node["children"][number]) => {
+    if (child.leaf !== undefined)
+      return `${definition.targets[child.leaf]?.providerID}/${definition.targets[child.leaf]?.id}`
+    if (child.node === undefined) return "unknown"
+    const group = definition.nodes[child.node]
+    // A provider-route group is named by its reference as written in config: the
+    // provider route id plus the one model the group serves (`openai-plan/gpt-6.1-terra`).
+    if (group?.providerRoute !== undefined) {
+      const first = leaves(child.node)[0]
+      const model = first === undefined ? undefined : definition.targets[first]?.id
+      return model === undefined ? group.providerRoute : `${group.providerRoute}/${model}`
+    }
+    return `opencode-route/${group?.routeID ?? child.node}`
+  }
   const walk = (
     nodeIndex: number,
     inherited: readonly WeightRule[] = [],
@@ -1269,6 +1563,27 @@ export const nextTarget = (
           : child.node !== undefined && hasReady(child.node))
       return available ? [position] : []
     })
+    const excluded = node.children.flatMap((child, position) => {
+      // A provider-route group with no leaves — no member offers the model it was asked
+      // for — has no leaves to exclude one by one; name the group itself so a zero-ready
+      // group is never silent in the parent decision.
+      if (
+        child.node !== undefined &&
+        definition.nodes[child.node]?.providerRoute !== undefined &&
+        leaves(child.node).length === 0
+      )
+        return [{ candidate: label(child), reason: "no-ready-members" }]
+      const childLeaves = child.leaf !== undefined ? [child.leaf] : child.node !== undefined ? leaves(child.node) : []
+      return childLeaves.flatMap((index) => {
+        const gateClosed =
+          (child.gate !== undefined && !gateOpen(child.gate, now)) ||
+          (child.node !== undefined && gateClosedOnPath(child.node, index))
+        const unavailableReason =
+          unavailable?.get(index) ??
+          (tried.has(index) ? "already-tried" : gateClosed ? "window-gate-closed" : undefined)
+        return unavailableReason ? [{ candidate: label(node.children[position]), reason: unavailableReason }] : []
+      })
+    })
     if (positions.length === 0) {
       ModelRouteLog.record({
         kind: "decision",
@@ -1280,6 +1595,7 @@ export const nextTarget = (
           variant,
           candidates: [],
           reason: "no-candidates",
+          ...(excluded.length > 0 ? { detail: { excluded } } : {}),
         },
       })
       return undefined
@@ -1302,6 +1618,51 @@ export const nextTarget = (
       if (child.node !== undefined) return base * factor(child.node, rules, nodePath)
       return base
     })
+    /** Round-robin tiers (#1122): in a round-robin node a child's weight is its priority tier, not a
+     * share. The tier key is the pre-demotion weight — demotion's 0.01 factor would smear a demoted
+     * heavyweight into the middle tiers (100 x 0.01 ties the nominal 1s) — so a demoted child sorts
+     * below every non-demoted tier instead, keeping its weight order among the demoted, and still
+     * serves as last resort. A group is demoted only when every door under it is. Other modes never
+     * read this. */
+    const tiers =
+      node.selection === "round-robin"
+        ? node.children.map((child, position) => {
+            const base = node.weights[position] ?? 1
+            if (child.leaf !== undefined)
+              return {
+                weight: traces[position]?.adjustment ?? base,
+                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf)),
+              }
+            if (child.node !== undefined)
+              return {
+                weight: base * factor(child.node, rules, nodePath, "adjustment"),
+                demoted: allDemoted(child.node),
+              }
+            return { weight: base, demoted: false }
+          })
+        : undefined
+    /** Tier order over positions: non-demoted first, heavier tier first; the sort is stable, so a
+     * tier keeps its configured order. This is `rank` for round-robin nodes, in the plain walk and
+     * in the failover tail alike — a dispatch exhausts one tier before it touches the next. */
+    const byTier = (from: readonly number[]) =>
+      tiers === undefined
+        ? [...from]
+        : [...from].toSorted((left, right) => {
+            const a = tiers[left]
+            const b = tiers[right]
+            if (a.demoted !== b.demoted) return a.demoted ? 1 : -1
+            return b.weight - a.weight
+          })
+    /** The positions sharing the first position's tier: the only candidates a round-robin draw (or
+     * a sticky choice) may pick from while any of them is available. */
+    const topTier = (from: readonly number[]) => {
+      if (tiers === undefined || from.length === 0) return from
+      const head = tiers[byTier(from)[0]]
+      return from.filter((position) => {
+        const tier = tiers[position]
+        return tier.demoted === head.demoted && tier.weight === head.weight
+      })
+    }
     const selectionKey = `${node.routeID ?? definition.id}#${nodeIndex}`
     const priorSticky = sessionID ? sessionTarget(selectionKey, sessionID) : undefined
     // A session stays on the target it is being answered by while that target is ready, so a recovered
@@ -1318,43 +1679,45 @@ export const nextTarget = (
           })
     const rank = (from: readonly number[]) =>
       [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1))
-    const sorted = rank(positions)
+    const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
     if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
+      // Round-robin draws and sticks inside the top tier only (#1122). A sticky pick from a lower
+      // tier — made while the top tier was down — is honoured only while it sits in the active tier,
+      // so a recovered tier takes the session back instead of stranding it on the fallback. The
+      // draw's weights are the tier keys: equal inside a tier, so the rotation there stays even.
+      // Weighted draws keep the whole candidate set and the effective weights, exactly as before.
+      const pool = node.selection === "round-robin" ? topTier(positions) : positions
       const chosen =
-        priorSticky !== undefined && positions.includes(priorSticky)
+        priorSticky !== undefined && pool.includes(priorSticky)
           ? priorSticky
           : draw
             ? selectSessionTarget(
                 selectionKey,
                 sessionID,
                 node.selection,
-                positions,
-                node.children.map((_, position) => effective[position] ?? 1),
+                pool,
+                node.children.map((_, position) =>
+                  node.selection === "round-robin" ? (tiers?.[position]?.weight ?? 1) : (effective[position] ?? 1),
+                ),
                 random,
               )
             : undefined
-      if (chosen !== undefined) ordered = [chosen, ...rank(positions.filter((position) => position !== chosen))]
+      if (chosen !== undefined)
+        ordered = [
+          chosen,
+          ...(node.selection === "round-robin" ? byTier : rank)(
+            positions.filter((position) => position !== chosen),
+          ),
+        ]
       decisionReason =
-        priorSticky !== undefined && positions.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
+        priorSticky !== undefined && pool.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
     }
     const chosen = ordered[0]
-    const excluded = node.children.flatMap((child, position) => {
-      const childLeaves = child.leaf !== undefined ? [child.leaf] : child.node !== undefined ? leaves(child.node) : []
-      return childLeaves.flatMap((index) => {
-        const gateClosed =
-          (child.gate !== undefined && !gateOpen(child.gate, now)) ||
-          (child.node !== undefined && gateClosedOnPath(child.node, index))
-        const unavailableReason =
-          unavailable?.get(index) ??
-          (tried.has(index) ? "already-tried" : gateClosed ? "window-gate-closed" : undefined)
-        return unavailableReason ? [{ candidate: label(node.children[position]), reason: unavailableReason }] : []
-      })
-    })
     ModelRouteLog.record({
       kind: "decision",
       row: {
@@ -1370,6 +1733,18 @@ export const nextTarget = (
           weights: Object.fromEntries(
             positions.map((position) => [label(node.children[position]), effective[position]]),
           ),
+          // The tier each candidate sorted into, round-robin nodes only (#1122): the pre-demotion
+          // weight it tiers by, and whether demotion holds it below every live tier.
+          ...(tiers === undefined
+            ? {}
+            : {
+                tiers: Object.fromEntries(
+                  positions.map((position) => [
+                    label(node.children[position]),
+                    { weight: tiers[position].weight, demoted: tiers[position].demoted },
+                  ]),
+                ),
+              }),
           // Per-layer attribution for leaf candidates (#589); group candidates carry no
           // weightOf layers — their weight is their leaves' average, in `weights` above.
           layers: Object.fromEntries(
@@ -1460,13 +1835,116 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref) =>
   const current = key(target)
   const prior = continuity.get(id)
   if (prior?.origin === undefined || prior.origin === current) return remember(id, { current, away: 0 })
-  remember(id, { current, origin: prior.origin, away: Math.min(prior.away + 1, ORIGIN_HEDGE_REQUESTS) })
+  remember(id, {
+    current,
+    origin: prior.origin,
+    away: Math.min(prior.away + 1, currentConstants().continuity.hedgeRequests),
+  })
 }
 
 /** The origin a session should hedge back to: only just after it moved, and never once it has
  * settled on the new target. */
 export const hedgeHome = (routeID: string, sessionID: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= ORIGIN_HEDGE_REQUESTS) return undefined
+  if (state?.origin === undefined || state.away >= currentConstants().continuity.hedgeRequests) return undefined
   return state.origin
+}
+
+/** The rest of the machinery's constants — everything `Settings` above does not already
+ * hold — assembled here, after the mechanisms they parameterize, from the named constant at
+ * each one. The defaults ARE today's behavior; config (experimental.model_route_settings)
+ * or configureConstants() replaces a value only where it sets one. Deliberately absent, as
+ * invariants rather than knobs: the backoff exponent cap (30 — an overflow guard; 2^30 at a
+ * 1ms base already exceeds the 24h bench cap, so the cap always binds first), the health /
+ * session / continuity LRU bounds, the recent-failure ring (200) and quota-event history
+ * (50) caps, and the usage-accounting bucket widths. */
+export interface Constants {
+  readonly bench: {
+    readonly maxCooldownMs: number
+    readonly multiplier: number
+    readonly retryAfterMinMs: number
+    readonly cooldownCapMs: number
+    readonly quotaCooldownCapMs: number
+  }
+  readonly demotion: { readonly factor: number }
+  readonly quotaGate: { readonly maxMs: number; readonly fallbackMs: number; readonly feedTtlMs: number }
+  readonly escalation: { readonly outcomeWindow: number }
+  readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
+  readonly continuity: { readonly hedgeRequests: number }
+  readonly overrides: { readonly preferredFactor: number }
+}
+
+export const DEFAULT_CONSTANTS: Constants = {
+  bench: {
+    maxCooldownMs: MAX_COOLDOWN_MS,
+    // The `**` ladder in bench(): each consecutive failure multiplies the previous bench.
+    multiplier: 2,
+    // The floor in bench(): a stated retry-after is believed, but never as less than this.
+    retryAfterMinMs: 1_000,
+    // The caps policy() applies to a route health block's bench bases.
+    cooldownCapMs: 3_600_000,
+    quotaCooldownCapMs: 86_400_000,
+  },
+  demotion: { factor: DEMOTED_FACTOR },
+  quotaGate: {
+    maxMs: QUOTA_GATE_MAX_MS,
+    fallbackMs: QUOTA_GATE_FALLBACK_MS,
+    // shouldFeedQuota's default: how often quota snapshots are fed into the gate.
+    feedTtlMs: 60_000,
+  },
+  escalation: { outcomeWindow: OUTCOME_WINDOW },
+  network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },
+  continuity: { hedgeRequests: ORIGIN_HEDGE_REQUESTS },
+  overrides: { preferredFactor: PREFERRED_FACTOR },
+}
+
+type ConstantsPatch = Partial<{
+  bench: Partial<Constants["bench"]>
+  demotion: Partial<Constants["demotion"]>
+  quotaGate: Partial<Constants["quotaGate"]>
+  escalation: Partial<Constants["escalation"]>
+  network: Partial<Constants["network"]>
+  continuity: Partial<Constants["continuity"]>
+  overrides: Partial<Constants["overrides"]>
+}>
+
+let constants: Constants = DEFAULT_CONSTANTS
+
+const mergeConstants = (base: Constants, patch: ConstantsPatch | undefined): Constants =>
+  patch === undefined
+    ? base
+    : {
+        bench: { ...base.bench, ...patch.bench },
+        demotion: { ...base.demotion, ...patch.demotion },
+        quotaGate: { ...base.quotaGate, ...patch.quotaGate },
+        escalation: { ...base.escalation, ...patch.escalation },
+        network: { ...base.network, ...patch.network },
+        continuity: { ...base.continuity, ...patch.continuity },
+        overrides: { ...base.overrides, ...patch.overrides },
+      }
+
+/** Replaces machinery constants wholesale-group by group, the constants counterpart of
+ * configure(). Tests use it; production values arrive through config. */
+export const configureConstants = (next: ConstantsPatch) => {
+  constants = mergeConstants(constants, next)
+}
+
+/** The constants in force: the compiled defaults, then configureConstants(), then config
+ * (experimental.model_route_settings), in that order. The config groups are picked field by
+ * field where config's grouping differs from this one: demotion.after / demotion.windowMs
+ * and the escalation switch live in `Settings`, not here. */
+export const currentConstants = (): Constants => {
+  const config = readSettingsConfig?.()
+  if (!config) return constants
+  return mergeConstants(constants, {
+    ...(config.bench ? { bench: config.bench } : {}),
+    ...(config.demotion?.factor !== undefined ? { demotion: { factor: config.demotion.factor } } : {}),
+    ...(config.quotaGate ? { quotaGate: config.quotaGate } : {}),
+    ...(config.escalation?.outcomeWindow !== undefined
+      ? { escalation: { outcomeWindow: config.escalation.outcomeWindow } }
+      : {}),
+    ...(config.network ? { network: config.network } : {}),
+    ...(config.continuity ? { continuity: config.continuity } : {}),
+    ...(config.overrides ? { overrides: config.overrides } : {}),
+  })
 }

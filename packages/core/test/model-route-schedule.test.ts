@@ -180,3 +180,127 @@ describe("ModelRouteSchedule.active", () => {
     expect(ModelRouteSchedule.active(window, monday)).toBe(false)
   })
 })
+
+describe("ModelRouteSchedule date windows (#821)", () => {
+  // 2026-10-01 is a Thursday; 10:00 in Asia/Shanghai is 02:00 UTC.
+  const holiday = Date.UTC(2026, 9, 1, 2, 0)
+  const ordinaryThursday = Date.UTC(2026, 9, 8, 2, 0)
+  const peak = {
+    daysOfWeek: ["mon", "tue", "wed", "thu", "fri"],
+    start: "09:00",
+    end: "17:00",
+    timezone: "Asia/Shanghai",
+  }
+
+  test("parse canonicalises date entries sorted and deduped, collapsing one-day ranges", () => {
+    expect(ModelRouteSchedule.parse({ dates: ["2026-10-02", "2026-10-01", "2026-10-01"] })).toEqual({
+      dates: ["2026-10-01", "2026-10-02"],
+    })
+    expect(ModelRouteSchedule.parse({ excludeDates: ["2026-10-01/2026-10-01"] })).toEqual({
+      excludeDates: ["2026-10-01"],
+    })
+    expect(ModelRouteSchedule.parse({ excludeDates: ["2026-09-30/2026-10-02"] })).toEqual({
+      excludeDates: ["2026-09-30/2026-10-02"],
+    })
+    expect(ModelRouteSchedule.parse({ excludeWindows: ["cn-holidays", "cn-holidays"] })).toEqual({
+      excludeWindows: ["cn-holidays"],
+    })
+  })
+
+  test("parse rejects malformed dates, reversed ranges and empty lists whole", () => {
+    expect(ModelRouteSchedule.parse({ dates: [] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ excludeDates: [] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ excludeWindows: [] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ dates: ["2026-13-01"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ dates: ["2026-02-30"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ dates: ["2026-10-1"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ dates: ["Oct 1 2026"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ excludeDates: ["2026-10-02/2026-10-01"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ dates: ["2026-10-01", "bogus"] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ excludeWindows: ["bad name"] })).toBeUndefined()
+    expect(ModelRouteSchedule.isDateEntry("2026-09-30/2026-10-02")).toBe(true)
+    expect(ModelRouteSchedule.isDateEntry("2026-02-30")).toBe(false)
+  })
+
+  test("a weekday holiday in excludeDates suspends a peak window for the whole day", () => {
+    const window = ModelRouteSchedule.parse({ ...peak, excludeDates: ["2026-10-01"] })!
+    expect(ModelRouteSchedule.active(window, holiday)).toBe(false)
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 9, 1, 1, 0))).toBe(false) // 09:00 Shanghai
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 9, 1, 8, 59))).toBe(false) // 16:59 Shanghai
+    expect(ModelRouteSchedule.active(window, ordinaryThursday)).toBe(true)
+  })
+
+  test("an exclusion range crossing a month boundary suspends every day in it and no more", () => {
+    const window = ModelRouteSchedule.parse({ excludeDates: ["2026-09-30/2026-10-02"], timezone: "Asia/Shanghai" })!
+    const at = (month: number, day: number) => Date.UTC(2026, month, day, 2, 0) // 10:00 Shanghai; month is 0-based
+    expect(ModelRouteSchedule.active(window, at(8, 30))).toBe(false) // Sep 30
+    expect(ModelRouteSchedule.active(window, at(9, 1))).toBe(false) // Oct 1
+    expect(ModelRouteSchedule.active(window, at(9, 2))).toBe(false) // Oct 2
+    expect(ModelRouteSchedule.active(window, at(9, 3))).toBe(true) // Oct 3
+    expect(ModelRouteSchedule.active(window, at(8, 29))).toBe(true) // Sep 29
+  })
+
+  test("dates act as an active-on list, ANDed with the other fields", () => {
+    const window = ModelRouteSchedule.parse({ ...peak, dates: ["2026-10-01"] })!
+    expect(ModelRouteSchedule.active(window, holiday)).toBe(true)
+    expect(ModelRouteSchedule.active(window, ordinaryThursday)).toBe(false)
+  })
+
+  test("weekend and ordinary-weekday behaviour is unchanged by date fields", () => {
+    const saturday = Date.UTC(2026, 9, 3, 2, 0) // Sat 2026-10-03 10:00 Shanghai
+    const plain = ModelRouteSchedule.parse(peak)!
+    const dated = ModelRouteSchedule.parse({ ...peak, excludeDates: ["2026-10-01"] })!
+    expect(ModelRouteSchedule.active(plain, saturday)).toBe(false)
+    expect(ModelRouteSchedule.active(dated, saturday)).toBe(false)
+    expect(ModelRouteSchedule.active(dated, ordinaryThursday)).toBe(ModelRouteSchedule.active(plain, ordinaryThursday))
+  })
+
+  test("a wrapping window's exclusion applies to the day the window started on", () => {
+    const window = ModelRouteSchedule.parse({
+      start: "22:00",
+      end: "02:00",
+      timezone: "UTC",
+      excludeDates: ["2026-01-05"], // Monday
+    })!
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 0, 5, 23, 0))).toBe(false) // Mon 23:00
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 0, 6, 1, 0))).toBe(false) // Tue 01:00, started Mon
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 0, 6, 23, 0))).toBe(true) // Tue 23:00
+    expect(ModelRouteSchedule.active(window, Date.UTC(2026, 0, 7, 1, 0))).toBe(true) // Wed 01:00, started Tue
+  })
+
+  test("excludeWindows subtracts a named holiday calendar, via a map or resolved ahead of time", () => {
+    const holidays = ModelRouteSchedule.parse({ dates: ["2026-10-01"], timezone: "Asia/Shanghai" })!
+    const windows = new Map([["cn-holidays", holidays]])
+    const window = ModelRouteSchedule.parse({ ...peak, excludeWindows: ["cn-holidays"] })!
+    expect(ModelRouteSchedule.active(window, holiday, windows)).toBe(false)
+    expect(ModelRouteSchedule.active(window, ordinaryThursday, windows)).toBe(true)
+    const resolved = ModelRouteSchedule.resolveExclusions(window, windows)!
+    expect(resolved).toBeDefined()
+    expect(ModelRouteSchedule.active(resolved, holiday)).toBe(false)
+    expect(ModelRouteSchedule.active(resolved, ordinaryThursday)).toBe(true)
+  })
+
+  test("an unknown or cyclic excludeWindows reference drops the window instead of throwing", () => {
+    const window = ModelRouteSchedule.parse({ ...peak, excludeWindows: ["cn-holidays"] })!
+    expect(ModelRouteSchedule.active(window, ordinaryThursday, new Map())).toBe(false)
+    expect(ModelRouteSchedule.resolveExclusions(window, new Map())).toBeUndefined()
+    const a = ModelRouteSchedule.parse({ excludeWindows: ["b"] })!
+    const b = ModelRouteSchedule.parse({ excludeWindows: ["a"] })!
+    const cycle = new Map([
+      ["a", a],
+      ["b", b],
+    ])
+    expect(ModelRouteSchedule.active(a, ordinaryThursday, cycle)).toBe(false)
+    expect(ModelRouteSchedule.resolveExclusions(a, cycle, new Set(["a"]))).toBeUndefined()
+    const self = ModelRouteSchedule.parse({ excludeWindows: ["self"] })!
+    expect(ModelRouteSchedule.resolveExclusions(self, new Map([["self", self]]), new Set(["self"]))).toBeUndefined()
+  })
+
+  test("describe mentions dates and exclusions", () => {
+    const window = ModelRouteSchedule.parse({ ...peak, excludeDates: ["2026-10-01"], excludeWindows: ["cn-holidays"] })!
+    expect(ModelRouteSchedule.describe(window)).toContain("except 2026-10-01")
+    expect(ModelRouteSchedule.describe(window)).toContain("cn-holidays")
+    const dated = ModelRouteSchedule.parse({ dates: ["2026-10-01"] })!
+    expect(ModelRouteSchedule.describe(dated)).toContain("on 2026-10-01")
+  })
+})

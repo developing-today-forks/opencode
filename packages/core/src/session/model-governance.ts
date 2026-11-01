@@ -29,6 +29,11 @@ export type Definition = {
  * config agent plugin applies them: later documents override earlier fields.
  * Agents defined only by plugins carry no definition here and are treated as
  * unrestricted by the definition layer; session policy still governs them.
+ *
+ * Callers feed this directory-expanded entries (ConfigAgentDocuments, via
+ * GovernanceConfig and the SubagentDepth callers), so an agent defined only
+ * in a Markdown file under a config directory is visible here with the same
+ * fields the config agent plugin applies to the agent editor (#1107).
  */
 export function agentDefinitions(entries: readonly Entry[]): Map<string, Definition> {
   const definitions = new Map<string, Definition>()

@@ -42,11 +42,13 @@ model `opencode-route/<id>`. A category's model can be a pool, and a pool can li
 another pool as a target.
 
 - `selection`: `ordered` (default; the first ready target takes the traffic, and the
-  rest are failover, ranked by effective weight), `round-robin` (new sessions rotate
-  in proportion to weight), or `weighted` (each new session draws a target in
-  proportion to its weight). In every mode a session stays on its target while it
-  works; failover moves it.
-- `weights`: relative ratios per target, default 1.
+  rest are failover, ranked by effective weight), `round-robin` (weights are priority
+  tiers: new sessions rotate evenly inside the top tier, and the next tier is tried
+  only once every target above it has failed), or `weighted` (each new session draws
+  a target in proportion to its weight). In every mode a session stays on its target
+  while it works; failover moves it.
+- `weights`: per target, default 1 — ratios in `weighted` pools, priority tiers in
+  `round-robin` pools, failover rank in `ordered` pools.
 - `health`: `firstTokenTimeoutMs` (default 10000), `maxResponseTimeMs`,
   `minOutputTokensPerSecond`, `sampleWindow` (5), `slowThreshold` (3), `cooldownMs`
   (60000), `quotaCooldownMs` (900000). A target that fails goes on cooldown.

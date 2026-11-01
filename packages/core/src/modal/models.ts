@@ -4,6 +4,7 @@ import { Money } from "@opencode/schema/money"
 import { Option, Schema } from "effect"
 import { Model } from "../model.js"
 import { Provider } from "../provider.js"
+import { readBoundedResponseText } from "../tool/http-body.js"
 
 const providerID = Provider.ID.make("modal")
 
@@ -53,8 +54,16 @@ export async function get(baseURL: string, apiKey: string, existing: readonly Mo
 
 export type Snapshot = readonly RemoteModel[]
 
+// A real Modal model list is kilobytes; 4 MiB is generous headroom for
+// thousands of entries while bounding the memory a hostile or misbehaving
+// endpoint can make this automatic startup-path load buffer (cf. the
+// 64 KiB utility-title cap in #960 and the 16 MiB generated-client cap
+// in #1007).
+export const modelsMaxResponseBytes = 4 * 1024 * 1024
+
 export async function load(baseURL: string, apiKey: string): Promise<Snapshot> {
-  const response = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
+  const url = `${baseURL.replace(/\/+$/, "")}/models`
+  const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
@@ -62,9 +71,14 @@ export async function load(baseURL: string, apiKey: string): Promise<Snapshot> {
   })
   if (!response.ok) throw new Error(`Failed to fetch Modal models: ${response.status}`)
 
+  const text = await readBoundedResponseText(
+    response,
+    modelsMaxResponseBytes,
+    () => new Error(`Modal models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
+  )
   // Decode each item tolerantly so one malformed entry cannot discard the
   // whole inventory. A malformed envelope still fails the fetch.
-  return decodeResponse(await response.json()).data.flatMap((raw) => {
+  return decodeResponse(JSON.parse(text)).data.flatMap((raw) => {
     const model = Option.getOrUndefined(decodeModel(raw))
     return model ? [model] : []
   })

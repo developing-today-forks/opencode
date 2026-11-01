@@ -39,6 +39,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import type { ID, RuntimeInfo } from "./model.js"
 import { Provider } from "./provider.js"
 import { State } from "./state.js"
+import { ownOr } from "./util/record.js"
 
 type SDK = any
 type UserContent = Extract<LanguageModelV3Message, { role: "user" }>["content"]
@@ -744,7 +745,7 @@ function metadataProviderOptions(input: ProviderMetadata | undefined): SharedV3P
 }
 
 function streamLanguage(language: LanguageModelV3, options: LanguageModelV3CallOptions, http?: HttpMiddleware) {
-  const state: StreamState = { step: 0, toolNames: {}, open: {} }
+  const state: StreamState = { step: 0, toolNames: Object.create(null) as Record<string, string>, open: {} }
   return Stream.concat(
     Stream.make(LLMEvent.stepStart({ index: state.step })),
     Stream.unwrap(
@@ -828,13 +829,13 @@ function streamPartEvents(
       ])
     case "tool-input-delta":
       return Effect.succeed([
-        LLMEvent.toolInputDelta({ id: event.id, name: state.toolNames[event.id] ?? "unknown", text: event.delta }),
+        LLMEvent.toolInputDelta({ id: event.id, name: ownOr(state.toolNames, event.id, "unknown"), text: event.delta }),
       ])
     case "tool-input-end":
       return Effect.succeed([
         LLMEvent.toolInputEnd({
           id: event.id,
-          name: state.toolNames[event.id] ?? "unknown",
+          name: ownOr(state.toolNames, event.id, "unknown"),
           providerMetadata: providerMetadata(event.providerMetadata),
         }),
       ])

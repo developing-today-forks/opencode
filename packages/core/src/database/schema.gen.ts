@@ -180,6 +180,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`provider_id\` text NOT NULL,
           \`model_id\` text NOT NULL,
           \`variant\` text,
+          \`credential_id\` text,
           \`outcome\` text NOT NULL,
           \`error_tag\` text,
           \`error_code\` text,
@@ -229,7 +230,8 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`model_id\` text NOT NULL,
           \`kind\` text NOT NULL,
           \`reason\` text,
-          \`until\` integer
+          \`until\` integer,
+          \`credential_id\` text
         );
       `)
       yield* tx.run(`

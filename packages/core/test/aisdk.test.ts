@@ -896,6 +896,64 @@ it.effect("emits malformed AI SDK tool input without executing it", () =>
   }),
 )
 
+it.effect("names unrecorded prototype-named tool ids unknown on delta and end", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    const ids = ["constructor", "toString", "hasOwnProperty", "__proto__"]
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () =>
+          streamModel([
+            ...ids.flatMap(
+              (id): LanguageModelV3StreamPart[] => [
+                { type: "tool-input-delta", id, delta: "{}" },
+                { type: "tool-input-end", id },
+              ],
+            ),
+            { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage },
+          ]),
+      }
+    })
+
+    const resolved = yield* aisdk.model(model("test-ai-sdk"))
+    const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Lookup" })).pipe(
+      Effect.provide(client),
+    )
+
+    expect(response.events.filter(LLMEvent.is.toolInputDelta).map((e) => [e.id, e.name])).toEqual(
+      ids.map((id) => [id, "unknown"]),
+    )
+    expect(response.events.filter(LLMEvent.is.toolInputEnd).map((e) => [e.id, e.name])).toEqual(
+      ids.map((id) => [id, "unknown"]),
+    )
+  }),
+)
+
+it.effect("records a tool started under the id __proto__ under its real name", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {
+        languageModel: () =>
+          streamModel([
+            { type: "tool-input-start", id: "__proto__", toolName: "lookup" },
+            { type: "tool-input-delta", id: "__proto__", delta: "{}" },
+            { type: "tool-input-end", id: "__proto__" },
+            { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage },
+          ]),
+      }
+    })
+
+    const resolved = yield* aisdk.model(model("test-ai-sdk"))
+    const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Lookup" })).pipe(
+      Effect.provide(client),
+    )
+
+    expect(response.events.find(LLMEvent.is.toolInputDelta)).toMatchObject({ id: "__proto__", name: "lookup" })
+    expect(response.events.find(LLMEvent.is.toolInputEnd)).toMatchObject({ id: "__proto__", name: "lookup" })
+  }),
+)
+
 it.effect("keeps malformed provider-executed AI SDK input terminal", () =>
   Effect.gen(function* () {
     const aisdk = yield* AISDK.Service
