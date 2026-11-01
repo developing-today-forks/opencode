@@ -3,8 +3,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { writePluginConfig, writeTempFileExclusive as writePluginTempFileExclusive } from "../src/commands/handlers/plugin/add"
-import { removePluginConfig, writeTempFileExclusive as writeRemoveTempFileExclusive } from "../src/commands/handlers/plugin/remove"
+import { writePluginConfig, writePluginTempFileExclusive } from "../src/commands/handlers/plugin/add"
+import { removePluginConfig, writeRemoveTempFileExclusive } from "../src/commands/handlers/plugin/remove"
 
 async function mode(file: string) {
   return (await fs.stat(file)).mode & 0o777
