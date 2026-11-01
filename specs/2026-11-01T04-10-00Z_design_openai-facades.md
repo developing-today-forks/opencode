@@ -86,9 +86,11 @@ Request translation (both façades): OpenAI message/item arrays become the inter
 (`temperature`, `top_p`, `max_output_tokens`/`max_tokens`, `stop`, `tools`,
 `tool_choice`, `reasoning.effort`) map onto `GenerationOptions` exactly as
 `packages/core/src/session/model-request.ts` maps them for sessions, so a façade call
-and a session call with the same inputs produce the same provider request. Unknown
-fields are ignored, never forwarded blindly; provider-specific pass-through is only
-via the existing provider `options` in config, never per-request.
+and a session call with the same inputs produce the same provider request. On
+the translated path, unknown fields are ignored, never forwarded blindly;
+provider-specific pass-through is only via the existing provider `options` in
+config, never per-request. (The §3 native-shape fast path is the one exception:
+on a dialect match the whole payload is forwarded verbatim.)
 
 Response translation: internal LLM events become OpenAI shapes, including `usage`
 (input/output/total tokens, reasoning tokens where the provider reports them) on the
@@ -123,6 +125,41 @@ sibling of that precedent:
 3. Failover: on a retryable failure the resolver's next candidate is tried, as the
    route proxy walks its candidate order today; hedging/races keep session semantics
    (the façade does not invent a second policy).
+
+#### Native-shape pass-through fast path (Drew amendment, 2026-10-31 22:53 CDT)
+
+Where the caller's dialect already matches the dialect the resolved provider
+serves natively — chat-completions in → a provider that serves chat-completions,
+responses in → a provider that serves responses — the façade forwards the request
+payload **verbatim** instead of translating it into the internal `Message` list
+and back out. Translation engages only on dialect mismatch. Provider-specific
+extensions (extra parameters, reasoning fields, vendor options) therefore survive
+untouched; on the translated path they are dropped (§2), which is exactly the
+loss this fast path avoids. Implementation: detection + the chat fast path land
+in step 1 (#1147); the responses fast path lands in step 3 (#1149).
+
+- **Detection.** Native dialect is a per-provider capability taken from the
+  catalog/provider metadata the resolver already loads; a provider with no
+  declared native dialect is treated as a mismatch (translate — the safe
+  default). The match is judged against the *resolved concrete model*, after
+  route selection, per attempt: a failover candidate is judged on its own
+  dialect.
+- **Policy is unchanged.** Pass-through is about the payload, not the policy:
+  route selection, ordered/weighted resolution, disabled-provider skipping,
+  window gates, and quota demotion apply exactly as for translated calls, and
+  every passed-through attempt lands in `route_attempt` with usage accounting
+  (§7) — a passed-through call is never invisible. The server still constructs
+  the provider request's transport (endpoint, credentials from the credential
+  store); only the payload body is verbatim.
+- **Shape-rejection fallback.** If a supposedly-native provider rejects the
+  shape (a 400/422-class dialect error — not quota, not auth), the failure is
+  recorded in the ledger and the façade retries **once** through the translation
+  path against the same resolved model. Both tries appear as separate
+  `route_attempt` rows, so there is no silent double-billing: the failed attempt's
+  row carries its error, and the request is answered by the attempt that
+  succeeds. If the translated retry also fails, the error surfaces through the
+  §2 envelope and normal failover (step 3 above) proceeds. Quota/auth failures
+  never trigger this retry; they follow the ordinary demotion/failover path.
 
 ### 4. Responses statefulness — the item store
 
