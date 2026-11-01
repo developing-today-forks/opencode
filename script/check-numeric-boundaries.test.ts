@@ -62,6 +62,10 @@ describe("SCAN_ROOTS", () => {
     expect(SCAN_ROOTS).toContain("services/changelog/src")
     expect(SCAN_ROOTS).toContain("services/files/src")
     expect(SCAN_ROOTS).toContain("services/update/src")
+  })
+
+  test("includes plugin-github, the GitHub API client root added by #1318", () => {
+    expect(SCAN_ROOTS).toContain("packages/plugin-github/src")
     expect(SCAN_ROOTS).toEqual([
       "packages/core/src",
       "packages/ai/src",
@@ -73,6 +77,7 @@ describe("SCAN_ROOTS", () => {
       "services/changelog/src",
       "services/files/src",
       "services/update/src",
+      "packages/plugin-github/src",
     ])
   })
 })
