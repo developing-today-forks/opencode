@@ -227,10 +227,63 @@ files, and Console-managed policy.
 
 ### Model routes
 
-Define ordered provider/model pools under `experimental.model_routes`. Select a
-route like any other model using `opencode-route/<route-id>`. If a target fails
-before producing output, OpenCode tries the next healthy target. It never
+Define ordered provider/model pools under `experimental.routes.models`. Select
+a route like any other model using `opencode-route/<route-id>`. If a target
+fails before producing output, OpenCode tries the next healthy target. It never
 replays a turn after answer or tool output has started.
+
+The canonical shape is `experimental.routes`, which has seven keys:
+`routes.models` (the model routes), `routes.providers` (provider routes: named
+selections over concrete providers), `routes.windows` (named, reusable time
+windows), `routes.schedules` (time-bound weight changes), `routes.tuning`
+(scheduled review of routing history), `routes.log` (what the routing history
+records), and `routes.settings` (global defaults for the route machinery).
+
+```jsonc
+{
+  "experimental": {
+    "routes": {
+      "models": {
+        "cheap-fast": {
+          "targets": ["openai/gpt-6-luna", "github-copilot/gpt-6-luna"],
+        },
+      },
+      "providers": {
+        "openai-plan": {
+          "providers": ["openai", "openai.alternate"],
+          "selection": "ordered",
+        },
+      },
+      "windows": {
+        "weekday-peak": {
+          "daysOfWeek": ["mon", "tue", "wed", "thu", "fri"],
+          "start": "09:00",
+          "end": "17:00",
+          "timezone": "America/Chicago",
+        },
+      },
+      "schedules": [
+        { "id": "peak-lighten", "targets": ["deepseek/*"], "when": "weekday-peak", "factor": 0.5 },
+      ],
+      "tuning": { "enabled": true, "intervalMinutes": 15, "windowHours": 24 },
+      "log": { "captureErrorBodies": false },
+      "settings": { "demotion": { "after": 3 } },
+    },
+  },
+}
+```
+
+Each `routes` key also has a deprecated flat spelling directly under
+`experimental`, kept so existing config files keep working: `model_routes`
+(`routes.models`), `provider_routes` (`routes.providers`),
+`model_route_schedules` (`routes.schedules`), `model_route_windows`
+(`routes.windows`), `model_route_tuning` (`routes.tuning`), `model_route_log`
+(`routes.log`), and `model_route_settings` (`routes.settings`). The flat
+spellings normalize into the nested shape when the config loads. When both
+spellings name the same key, the nested value wins and the conflict is
+diagnosed, per key. Prefer the nested shape in new config; some detailed
+examples below still use the flat spellings, which load identically after
+normalization.
 
 ```jsonc
 {
@@ -367,8 +420,8 @@ configured weight or a `weight` that replaces it:
 During peak hours the `deepseek/*` target in `coding` carries 2 x 0.4 = 0.8
 while the Claude target carries its 1, so new weighted sessions prefer Claude;
 outside the window the 2:1 split returns. A schedule on a route reaches that
-route's targets, including ones nested below it; `model_route_schedules` in
-`experimental` applies to every route unless `routes` names some, and its
+route's targets, including ones nested below it; `routes.schedules`
+applies to every route unless `routes` names some, and its
 `targets`, `providers` and `models` matchers combine. Two schedules can overlap:
 every active `factor` multiplies in order, and an active `weight` replaces what
 came before it, so put the more specific rule later. A session that is already
@@ -413,7 +466,7 @@ includes the ones before it:
 A route with no `autonomy` keeps every rule on and offers the agent tools, as before
 levels existed. Each route takes only what its own level reaches. The scheduled
 review's skips and down-weights apply to `adaptive` and higher routes, and to `rules`
-routes when `model_route_tuning.enabled` is true. Time-of-day and error-text
+routes when `routes.tuning.enabled` is true (flat spelling: `model_route_tuning`). Time-of-day and error-text
 prediction apply to `predictive` and higher routes. A route with no `autonomy` takes
 all of it. The review runs when tuning is enabled or any route is `adaptive` or
 higher. Real failures always cool a target down, at every level, so a `fixed` route
@@ -555,7 +608,7 @@ compaction, so nothing is invisible. A request that never went out, because the
 chosen target could not be resolved, is recorded as `resolution-failure`. Both
 legs of a hedged attempt are marked `hedged`, which is how `route_stats` reports
 hedge accuracy: how often a target won the race it was drawn into. Provider error
-bodies are not kept unless `experimental.model_route_log.captureErrorBodies` is
+bodies are not kept unless `experimental.routes.log.captureErrorBodies` is
 `true`. When it is, the first 2 KB of each failed request's body is stored with
 bearer tokens, key-like fields and `sk-` style keys redacted, since a body can echo
 the request.
