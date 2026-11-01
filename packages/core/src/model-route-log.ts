@@ -391,6 +391,7 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
         modelID: RouteAttemptTable.model_id,
         quota: RouteAttemptTable.quota,
         time: RouteAttemptTable.time_ended,
+        credentialID: RouteAttemptTable.credential_id,
       })
       .from(RouteAttemptTable)
       .where(
@@ -403,7 +404,12 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       .all()
       .pipe(Effect.orElseSucceed(() => []))
     for (const row of snapshots) {
-      const id = `${row.providerID}/${row.modelID}`
+      // Key snapshots exactly like the health rows above (#1116): a snapshot stored on a
+      // credential's attempt belongs to that credential's window, never the whole target.
+      // Rows written before the credential_id column existed carry none and stay target-wide.
+      const id = row.credentialID
+        ? `${row.providerID}/${row.modelID}#${row.credentialID}`
+        : `${row.providerID}/${row.modelID}`
       const stored = (row.quota ?? {}) as Partial<Snapshot>
       const parsed =
         typeof stored !== "object" || stored === null
@@ -420,7 +426,14 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       const current = windows.get(id)
       if (!parsed) continue
       if (current) windows.set(id, { ...current, snapshot: parsed })
-      else windows.set(id, { providerID: row.providerID, modelID: row.modelID, until: 0, snapshot: parsed })
+      else
+        windows.set(id, {
+          providerID: row.providerID,
+          modelID: row.modelID,
+          until: 0,
+          snapshot: parsed,
+          ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+        })
     }
     restoreCooldowns?.([...latest.values()].filter((row) => row.until > now))
     restoreLimits?.(
