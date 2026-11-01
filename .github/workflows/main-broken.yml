@@ -264,8 +264,7 @@ jobs:
             # comments so a staged reconcile forwards the full chain.
             LOSER_BODY=$(gh issue view "$LOSER" --repo "$REPO" --json body --jq '.body // ""')
             LOSER_COMMENTS=$(gh issue view "$LOSER" --repo "$REPO" --json comments --jq '[.comments[].body // ""] | join("\n")')
-            LOSER_RUNS=$(printf '%s\n%s\n' "$LOSER_BODY" "$LOSER_COMMENTS" | grep -o 'https://github.com/[^ ]*/actions/runs/[0-9]*' | awk '!seen[$0]++' || true)
-            # RUN-LINKS-END
+            LOSER_RUNS=$(printf '%s\n%s\n' "$LOSER_BODY" "$LOSER_COMMENTS" | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+' | awk '!seen[$0]++' || true)
             if [ -z "$LOSER_RUNS" ]; then
               LOSER_RUNS="(run link not found in #$LOSER body or comments)"
             fi
@@ -283,6 +282,7 @@ jobs:
           - loser runs (from #$LOSER body and prior reconcile comments):
           $LOSER_RUNS
           - reconciling run: $RUN_URL" || true
+            # RUN-LINKS-END
           done
           if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
             echo "this run created loser #$CREATED -- its links were forwarded to # above"
