@@ -1,5 +1,6 @@
 import { defineMiddleware } from "astro:middleware"
 import { exactLocale, matchLocale } from "./i18n/locales"
+import { localeFromAcceptLanguage } from "./lib/accept-language"
 
 function docsAlias(pathname: string) {
   const hit = /^\/docs\/([^/]+)(\/.*)?$/.exec(pathname)
@@ -45,36 +46,6 @@ function localeFromCookie(header: string | null) {
     ?.slice("oc_locale=".length)
   if (!raw) return null
   return matchLocale(raw)
-}
-
-function localeFromAcceptLanguage(header: string | null) {
-  if (!header) return "root"
-
-  const items = header
-    .split(",")
-    .map((raw) => raw.trim())
-    .filter(Boolean)
-    .map((raw) => {
-      const parts = raw.split(";").map((x) => x.trim())
-      const lang = parts[0] ?? ""
-      const q = parts
-        .slice(1)
-        .find((x) => x.startsWith("q="))
-        ?.slice(2)
-      return {
-        lang,
-        q: q ? Number.parseFloat(q) : 1,
-      }
-    })
-    .sort((a, b) => b.q - a.q)
-
-  const locale = items
-    .map((item) => item.lang)
-    .filter((lang) => lang && lang !== "*")
-    .map((lang) => matchLocale(lang))
-    .find((lang) => lang)
-
-  return locale ?? "root"
 }
 
 export const onRequest = defineMiddleware((ctx, next) => {
