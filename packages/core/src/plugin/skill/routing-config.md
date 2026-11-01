@@ -86,7 +86,10 @@ model `opencode-route/<id>`.
   an epoch-millisecond time after which the target leaves the pool. A target can be
   another pool, written `"opencode-route/<id>"`.
 - `selection`: `ordered` (the default), `round-robin`, or `weighted`.
-- `weights`: relative ratios keyed by target. A target not listed weighs 1.
+- `weights`: keyed by target; a target not listed weighs 1. In a `weighted` pool a
+  weight is a relative ratio. In a `round-robin` pool it is a priority tier instead:
+  equal weights rotate evenly, and a lower tier is tried only once every target above
+  it has failed. In an `ordered` pool weights rank the failover order.
 - `autonomy`: `fixed`, `rules`, `adaptive`, `predictive`, or `agent`. Each level
   includes the ones before it. `agent` also exposes `route_stats`, `route_usage` and
   `route_adjust` to the model.

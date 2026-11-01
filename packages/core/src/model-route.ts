@@ -738,7 +738,9 @@ export const sessionTarget = (routeID: string, sessionID: string) => {
 }
 
 /** Chooses the session's target index. `ordered` always returns the first entry; round-robin
- * rotates by smooth weights; weighted draws by relative ratio. Only the outcome is sticky. */
+ * rotates by smooth weights over the candidates it is given — the walk passes only the active
+ * tier's candidates, so that rotation is the within-tier one (#1122); weighted draws by relative
+ * ratio. Only the outcome is sticky. */
 export const selectSessionTarget = (
   routeID: string,
   sessionID: string,
@@ -1315,8 +1317,16 @@ export const nextTarget = (
     schedules: [...(definition.schedules ?? []), ...rules],
   })
   /** The average weight multiplier of a nested group's leaves, judged with the schedules that reach
-   * into that group. The group's own weight stays in `weights`; a parent then scales the two. */
-  const factor = (nodeIndex: number, inherited: readonly WeightRule[], path: readonly string[]) => {
+   * into that group. The group's own weight stays in `weights`; a parent then scales the two.
+   * `layer` picks which step of the weight computation is averaged: the final effective weight
+   * (`demotion`, what ranking has always used) or the pre-demotion weight (`adjustment`, the key
+   * round-robin tiers are built from, #1122). */
+  const factor = (
+    nodeIndex: number,
+    inherited: readonly WeightRule[],
+    path: readonly string[],
+    layer: "adjustment" | "demotion" = "demotion",
+  ) => {
     const node = definition.nodes[nodeIndex]
     const nodePath = node?.routeID && !path.includes(node.routeID) ? [...path, node.routeID] : path
     const rules = [...inherited, ...(node?.schedules ?? [])]
@@ -1326,9 +1336,20 @@ export const nextTarget = (
       ? 1
       : eligible.reduce(
           (sum, index) =>
-            sum + weightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) }),
+            sum +
+            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[
+              layer
+            ],
           0,
         ) / eligible.length
+  }
+  /** Whether every leaf that could serve under a group right now is quota-demoted. A group with a
+   * single undemoted door is not demoted: its own walk reaches that door first (#1122). */
+  const allDemoted = (nodeIndex: number) => {
+    const eligible = openLeaves(nodeIndex)
+    return (
+      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index)))
+    )
   }
   const label = (child: Node["children"][number]) =>
     child.leaf !== undefined
@@ -1387,6 +1408,51 @@ export const nextTarget = (
       if (child.node !== undefined) return base * factor(child.node, rules, nodePath)
       return base
     })
+    /** Round-robin tiers (#1122): in a round-robin node a child's weight is its priority tier, not a
+     * share. The tier key is the pre-demotion weight — demotion's 0.01 factor would smear a demoted
+     * heavyweight into the middle tiers (100 x 0.01 ties the nominal 1s) — so a demoted child sorts
+     * below every non-demoted tier instead, keeping its weight order among the demoted, and still
+     * serves as last resort. A group is demoted only when every door under it is. Other modes never
+     * read this. */
+    const tiers =
+      node.selection === "round-robin"
+        ? node.children.map((child, position) => {
+            const base = node.weights[position] ?? 1
+            if (child.leaf !== undefined)
+              return {
+                weight: traces[position]?.adjustment ?? base,
+                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf)),
+              }
+            if (child.node !== undefined)
+              return {
+                weight: base * factor(child.node, rules, nodePath, "adjustment"),
+                demoted: allDemoted(child.node),
+              }
+            return { weight: base, demoted: false }
+          })
+        : undefined
+    /** Tier order over positions: non-demoted first, heavier tier first; the sort is stable, so a
+     * tier keeps its configured order. This is `rank` for round-robin nodes, in the plain walk and
+     * in the failover tail alike — a dispatch exhausts one tier before it touches the next. */
+    const byTier = (from: readonly number[]) =>
+      tiers === undefined
+        ? [...from]
+        : [...from].toSorted((left, right) => {
+            const a = tiers[left]
+            const b = tiers[right]
+            if (a.demoted !== b.demoted) return a.demoted ? 1 : -1
+            return b.weight - a.weight
+          })
+    /** The positions sharing the first position's tier: the only candidates a round-robin draw (or
+     * a sticky choice) may pick from while any of them is available. */
+    const topTier = (from: readonly number[]) => {
+      if (tiers === undefined || from.length === 0) return from
+      const head = tiers[byTier(from)[0]]
+      return from.filter((position) => {
+        const tier = tiers[position]
+        return tier.demoted === head.demoted && tier.weight === head.weight
+      })
+    }
     const selectionKey = `${node.routeID ?? definition.id}#${nodeIndex}`
     const priorSticky = sessionID ? sessionTarget(selectionKey, sessionID) : undefined
     // A session stays on the target it is being answered by while that target is ready, so a recovered
@@ -1403,29 +1469,43 @@ export const nextTarget = (
           })
     const rank = (from: readonly number[]) =>
       [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1))
-    const sorted = rank(positions)
+    const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
     if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
+      // Round-robin draws and sticks inside the top tier only (#1122). A sticky pick from a lower
+      // tier — made while the top tier was down — is honoured only while it sits in the active tier,
+      // so a recovered tier takes the session back instead of stranding it on the fallback. The
+      // draw's weights are the tier keys: equal inside a tier, so the rotation there stays even.
+      // Weighted draws keep the whole candidate set and the effective weights, exactly as before.
+      const pool = node.selection === "round-robin" ? topTier(positions) : positions
       const chosen =
-        priorSticky !== undefined && positions.includes(priorSticky)
+        priorSticky !== undefined && pool.includes(priorSticky)
           ? priorSticky
           : draw
             ? selectSessionTarget(
                 selectionKey,
                 sessionID,
                 node.selection,
-                positions,
-                node.children.map((_, position) => effective[position] ?? 1),
+                pool,
+                node.children.map((_, position) =>
+                  node.selection === "round-robin" ? (tiers?.[position]?.weight ?? 1) : (effective[position] ?? 1),
+                ),
                 random,
               )
             : undefined
-      if (chosen !== undefined) ordered = [chosen, ...rank(positions.filter((position) => position !== chosen))]
+      if (chosen !== undefined)
+        ordered = [
+          chosen,
+          ...(node.selection === "round-robin" ? byTier : rank)(
+            positions.filter((position) => position !== chosen),
+          ),
+        ]
       decisionReason =
-        priorSticky !== undefined && positions.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
+        priorSticky !== undefined && pool.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
     }
     const chosen = ordered[0]
     const excluded = node.children.flatMap((child, position) => {
@@ -1455,6 +1535,18 @@ export const nextTarget = (
           weights: Object.fromEntries(
             positions.map((position) => [label(node.children[position]), effective[position]]),
           ),
+          // The tier each candidate sorted into, round-robin nodes only (#1122): the pre-demotion
+          // weight it tiers by, and whether demotion holds it below every live tier.
+          ...(tiers === undefined
+            ? {}
+            : {
+                tiers: Object.fromEntries(
+                  positions.map((position) => [
+                    label(node.children[position]),
+                    { weight: tiers[position].weight, demoted: tiers[position].demoted },
+                  ]),
+                ),
+              }),
           // Per-layer attribution for leaf candidates (#589); group candidates carry no
           // weightOf layers — their weight is their leaves' average, in `weights` above.
           layers: Object.fromEntries(

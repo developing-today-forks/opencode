@@ -939,3 +939,144 @@ describe("ModelRoute per-target context limits", () => {
     expect(decoded?.targetLimits).toEqual([{ context: 100_000 }, {}])
   })
 })
+
+describe("ModelRoute round-robin tiers (#1122)", () => {
+  const policy = ModelRoute.policy()
+  const leaf = (model: string) => ModelRoute.ref({ providerID: "tiers-p", model })
+  const flat = (id: string, weights: number[], targets: ModelRoute.Target[]) =>
+    ({
+      id,
+      targets,
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights, children: targets.map((_, index) => ({ leaf: index })) },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const head = (route: ModelRoute.Definition, ready: ReadonlySet<number>, session: string) =>
+    ModelRoute.nextTarget(route, ready, new Set(), session, true)
+
+  test("a single tier rotates evenly across sessions, as plain round-robin always did", () => {
+    const route = flat("tier-single", [1, 1, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("the lower tier is never drawn while any top-tier member is ready", () => {
+    const route = flat("tier-two", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    // The session-less walk order is the tier order too: both weight-2 leaves before the weight-1.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    const walked = ModelRoute.orderTargets(route, all, "sx", true)
+    expect([...walked.slice(0, 2)].sort()).toEqual([0, 1])
+    expect(walked[2]).toBe(2)
+  })
+
+  test("the next tier engages once every member above it has failed or left", () => {
+    const route = flat("tier-fall", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    // Top tier unavailable: the weight-1 leaf serves.
+    expect(head(route, new Set([2]), "down")).toBe(2)
+    // Top tier tried within this dispatch: the walk falls through instead of retrying it.
+    expect(ModelRoute.nextTarget(route, new Set([0, 1, 2]), new Set([0, 1]), "walk", true)).toBe(2)
+  })
+
+  test("a session stuck to a lower tier returns to the top tier when it recovers", () => {
+    const route = flat("tier-sticky", [2, 1], [leaf("a"), leaf("b")])
+    expect(head(route, new Set([1]), "s1")).toBe(1)
+    // The top tier is back: the sticky pick in the lower tier no longer binds the session.
+    expect(head(route, new Set([0, 1]), "s1")).toBe(0)
+    expect(ModelRoute.sessionTarget("tier-sticky#0", "s1")).toBe(0)
+  })
+
+  test("rotation persists across dispatches inside the tier, wrapping instead of falling through", () => {
+    const route = flat("tier-cycle", [2, 2, 2, 1], [leaf("a"), leaf("b"), leaf("c"), leaf("d")])
+    const all = new Set([0, 1, 2, 3])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("an unset weight lands in the same tier as weight 1", () => {
+    // Only the first target lists a weight; the other two default to 1.
+    const route = flat("tier-default", [2], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    // The lone weight-2 target is the whole top tier, so every session starts there.
+    expect(head(route, all, "s1")).toBe(0)
+    expect(head(route, all, "s2")).toBe(0)
+    // With it gone, the two default-weight targets rotate evenly between themselves.
+    const rest = new Set([1, 2])
+    const heads = ["t1", "t2", "t3", "t4"].map((session) => head(route, rest, session))
+    expect(heads).toEqual([1, 2, 1, 2])
+  })
+
+  test("a quota-demoted leaf sorts below every live tier, whatever its weight, and still serves last", () => {
+    const heavy = leaf("heavy")
+    const route = flat("tier-demoted", [100, 2, 1], [heavy, leaf("mid"), leaf("low")])
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(heavy, policy, at, { quota: true })
+    expect(ModelRoute.demoted(heavy)).toBe(true)
+    const all = new Set([0, 1, 2])
+    // Weight order among the live tiers (2 before 1); the demoted 100 goes last — the old 0.01
+    // factor would have tied it with the weight-1 leaf in configured order, [1, 0, 2].
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 2, 0])
+    // Draws stay in the live tiers while any of them can serve...
+    expect(head(route, all, "d1")).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(2)
+    // ...and the demoted leaf is the last resort, not a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set([1, 2]), "d3", true)).toBe(0)
+  })
+
+  test("a nested route reference is a tier member with its group weight", () => {
+    const targets = [leaf("a"), leaf("b"), leaf("c")]
+    const build = (weights: number[]) =>
+      ({
+        id: "tier-nested",
+        targets,
+        targetVariants: [],
+        health: policy,
+        nodes: [
+          { selection: "round-robin" as const, weights, children: [{ node: 1 }, { leaf: 2 }] },
+          { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+        ],
+      }) as unknown as ModelRoute.Definition
+    const all = new Set([0, 1, 2])
+
+    // Group at weight 2 over the weight-1 leaf: sessions rotate inside the group, leaf 2 waits.
+    const grouped = build([2, 1])
+    const heads = ["g1", "g2", "g3", "g4"].map((session) => head(grouped, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    expect(ModelRoute.orderTargets(grouped, all, undefined, false)).toEqual([0, 1, 2])
+    expect(head(grouped, new Set([2]), "only")).toBe(2)
+
+    // Leaf at weight 2 over the weight-1 group: the leaf is the top tier now.
+    ModelRoute.resetSelection()
+    const leafFirst = build([1, 2])
+    expect(head(leafFirst, all, "top")).toBe(2)
+    expect(ModelRoute.orderTargets(leafFirst, all, undefined, false)).toEqual([2, 0, 1])
+  })
+
+  test("a group whose every door is demoted drops below the live tiers as one demoted member", () => {
+    const a = leaf("ga")
+    const b = leaf("gb")
+    const route = {
+      id: "tier-group-demoted",
+      targets: [a, b, leaf("gc")],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights: [2, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    } as unknown as ModelRoute.Definition
+    const now = Date.now()
+    for (const target of [a, b])
+      for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    const all = new Set([0, 1, 2])
+    // The weight-2 group is demoted as a unit: the weight-1 leaf leads, the group serves after.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([2, 0, 1])
+    expect(head(route, all, "gd")).toBe(2)
+  })
+})
