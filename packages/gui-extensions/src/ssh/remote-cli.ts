@@ -93,6 +93,8 @@ export function archiveUrl(target: string, version: string) {
 
 type Source = { type: "download"; url: string } | { type: "archive" } | { type: "installer"; binary?: string }
 
+const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+
 export function installScript(input: { version: string; directory?: string; source: Source }) {
   const version = requireVersion(input.version)
 
@@ -122,9 +124,18 @@ function stageBinary(source: Exclude<Source, { type: "installer" }>) {
 
   return `url=${quote(source.url)}
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --connect-timeout 15 --max-time 180 "$url" -o "$stage/archive.tgz"
+  curl -fsSL --connect-timeout 15 --max-time 180 --max-filesize ${MAX_ARCHIVE_BYTES} "$url" -o "$stage/archive.tgz"
 else
   wget -T 180 -O "$stage/archive.tgz" "$url"
+fi
+# Neither downloader bounds the staged file on every version: curl's
+# --max-filesize is ignored when the response size is unknown (curl < 8.4) and
+# wget has no portable maximum-file-size option, so check the completed file
+# before extraction on both branches.
+archive_size=$(wc -c < "$stage/archive.tgz" | tr -d '[:space:]')
+if [ "$archive_size" -gt ${MAX_ARCHIVE_BYTES} ]; then
+  printf 'archive exceeds ${MAX_ARCHIVE_BYTES} bytes\\n' >&2
+  exit 1
 fi
 tar -xzf "$stage/archive.tgz" -C "$stage"`
 }
