@@ -28,6 +28,7 @@ jobs:
   cleanup:
     name: Remove stale branches solely behind the default branch
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out with full history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
