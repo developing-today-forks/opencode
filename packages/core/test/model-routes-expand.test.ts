@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import {
+  configuredProviderRoutes,
   configuredWindows,
   expand,
   routeVariants,
@@ -855,5 +856,267 @@ describe("pinned variants on suffixed-catalog providers (#985)", () => {
     ])
     const { leaves } = expand("r", routes, defs)
     expect(leaves).toEqual([])
+  })
+})
+
+describe("provider routes", () => {
+  const main = Provider.ID.make("openai")
+  const alt = Provider.ID.make("openai.alternate")
+  const catalog = (entries: [Provider.ID, string[]][]) =>
+    new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
+      entries.map(
+        ([id, ids]) =>
+          [id, new Map(ids.map((model) => [model, Model.Info.default(id, Model.ID.make(model))] as const))] as const,
+      ),
+    )
+  const both = catalog([
+    [main, ["gpt-6.1-terra", "gpt-6.1-sol"]],
+    [alt, ["gpt-6.1-terra", "gpt-6.1-sol"]],
+  ])
+  const providerRoutes = (
+    id: string,
+    extra: Partial<ModelRoute.ProviderRoute> = {},
+  ): ReadonlyMap<string, ModelRoute.ProviderRoute> =>
+    new Map([
+      [id, { providers: ["openai.alternate", "openai"], selection: "ordered" as const, weights: {}, ...extra }],
+    ])
+  const definitionOf = (expanded: ReturnType<typeof expand>): ModelRoute.Definition =>
+    ({
+      id: "r",
+      targets: expanded.leaves.map((leaf) => leaf.ref),
+      targetVariants: expanded.leaves.map(() => ({})),
+      health: ModelRoute.policy(),
+      nodes: expanded.nodes,
+    }) as unknown as ModelRoute.Definition
+  const refs = (expanded: ReturnType<typeof expand>) =>
+    expanded.leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}`)
+
+  test("a provider route target expands to a marked group of the members' leaves for the model, in member order", () => {
+    const { leaves, nodes } = expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan"))
+    expect(refs({ leaves, nodes })).toEqual(["openai.alternate/gpt-6.1-terra", "openai/gpt-6.1-terra"])
+    expect(nodes).toHaveLength(2)
+    expect(nodes[0].children).toEqual([{ node: 1 }])
+    expect(nodes[1]).toMatchObject({ routeID: "openai-plan", providerRoute: "openai-plan", selection: "ordered" })
+    expect(nodes[1].children).toEqual([{ leaf: 0 }, { leaf: 1 }])
+    expect(nodes[1].weights).toEqual([1, 1])
+  })
+
+  test("the group carries the provider route's weights, and the parent weights the group by the target as written", () => {
+    const routes = route(["openai-plan/gpt-6.1-terra"], { weights: { "openai-plan/gpt-6.1-terra": 5 } })
+    const { nodes } = expand(
+      "r",
+      routes,
+      both,
+      new Map(),
+      providerRoutes("openai-plan", { weights: { "openai.alternate": 2, openai: 1 } }),
+    )
+    expect(nodes[0].weights).toEqual([5])
+    expect(nodes[1].weights).toEqual([2, 1])
+  })
+
+  test("a member that does not offer the model is skipped, and a model no member offers attaches nothing", () => {
+    const partial = catalog([
+      [main, ["gpt-6.1-terra"]],
+      [alt, ["gpt-6.1-terra", "gpt-6.1-sol"]],
+    ])
+    const sol = expand("r", route(["openai-plan/gpt-6.1-sol"]), partial, new Map(), providerRoutes("openai-plan"))
+    expect(refs(sol)).toEqual(["openai.alternate/gpt-6.1-sol"])
+    expect(sol.nodes[1].children).toEqual([{ leaf: 0 }])
+
+    const none = expand(
+      "r",
+      route(["openai-plan/gpt-6.1-luna", "openai.alternate/gpt-6.1-terra"]),
+      partial,
+      new Map(),
+      providerRoutes("openai-plan"),
+    )
+    expect(refs(none)).toEqual(["openai.alternate/gpt-6.1-terra"])
+    expect(none.nodes).toHaveLength(1)
+    expect(none.nodes[0].children).toEqual([{ leaf: 0 }])
+  })
+
+  test("a member that cannot produce the target's variant is skipped for that dispatch", () => {
+    const withVariants = (providerID: Provider.ID, id: string, variants: string[]) =>
+      [
+        id,
+        {
+          ...Model.Info.default(providerID, Model.ID.make(id)),
+          variants: variants.map((variant) => ({ id: Model.VariantID.make(variant) })),
+        },
+      ] as const
+    const definitionsWithVariants = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>([
+      [main, new Map([withVariants(main, "gpt-6.1-terra", [])])],
+      [alt, new Map([withVariants(alt, "gpt-6.1-terra", ["high"])])],
+    ])
+    const routes = new Map<string, ConfigModelRoutes.Route>([
+      [
+        "r",
+        {
+          targets: [{ model: { providerID: "openai-plan", model: "gpt-6.1-terra", variant: "high" } }],
+        } as unknown as ConfigModelRoutes.Route,
+      ],
+    ])
+    const { leaves, nodes } = expand("r", routes, definitionsWithVariants, new Map(), providerRoutes("openai-plan"))
+    expect(refs({ leaves, nodes })).toEqual(["openai.alternate/gpt-6.1-terra"])
+    expect(leaves[0].ref.variant).toBe(Model.VariantID.make("high"))
+    expect(nodes[1].children).toEqual([{ leaf: 0 }])
+  })
+
+  test("a glob model fans out into one provider route group per model, and a group never mixes models", () => {
+    const expanded = expand("r", route(["openai-plan/gpt-6.1-*"]), both, new Map(), providerRoutes("openai-plan"))
+    expect(refs(expanded)).toEqual([
+      "openai.alternate/gpt-6.1-terra",
+      "openai/gpt-6.1-terra",
+      "openai.alternate/gpt-6.1-sol",
+      "openai/gpt-6.1-sol",
+    ])
+    const groups = expanded.nodes.filter((node) => node.providerRoute === "openai-plan")
+    expect(groups).toHaveLength(2)
+    for (const group of groups) {
+      const models = group.children.map((child) => expanded.leaves[child.leaf!].ref.id)
+      expect(new Set(models).size).toBe(1)
+    }
+  })
+
+  test("a fixed route sees the provider route group as ordered with unit weights", () => {
+    const routes = route(["openai-plan/gpt-6.1-terra"], { autonomy: "fixed" })
+    const { nodes } = expand(
+      "r",
+      routes,
+      both,
+      new Map(),
+      providerRoutes("openai-plan", { selection: "round-robin", weights: { "openai.alternate": 2, openai: 1 } }),
+    )
+    expect(nodes[1].selection).toBe("ordered")
+    expect(nodes[1].weights).toEqual([1, 1])
+  })
+
+  test("a concrete provider wins over a provider route with the same id", () => {
+    const clash = providerRoutes("openai", { providers: ["openai.alternate"] })
+    const expanded = expand("r", route(["openai/gpt-6.1-terra"]), both, new Map(), clash)
+    expect(refs(expanded)).toEqual(["openai/gpt-6.1-terra"])
+    expect(expanded.nodes.some((node) => node.providerRoute !== undefined)).toBe(false)
+  })
+
+  test("ordered provider route: the first ready member serves, and failover falls through to the next", () => {
+    const definition = definitionOf(expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan")))
+    const all = new Set([0, 1])
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "s1", true)).toBe(0)
+    expect(ModelRoute.nextTarget(definition, new Set([1]), new Set(), "s2", true)).toBe(1)
+    expect(ModelRoute.orderTargets(definition, all, undefined, false)).toEqual([0, 1])
+  })
+
+  test("round-robin provider route rotates evenly across sessions", () => {
+    const definition = definitionOf(
+      expand("r", route(["plan-rr/gpt-6.1-terra"]), both, new Map(), providerRoutes("plan-rr", { selection: "round-robin" })),
+    )
+    const all = new Set([0, 1])
+    const heads = ["s1", "s2", "s3", "s4"].map((session) => ModelRoute.nextTarget(definition, all, new Set(), session, true))
+    expect(heads).toEqual([0, 1, 0, 1])
+  })
+
+  test("round-robin provider route tiers: the heavier member is the top tier until it cannot serve", () => {
+    const definition = definitionOf(
+      expand(
+        "r",
+        route(["plan-tier/gpt-6.1-terra"]),
+        both,
+        new Map(),
+        providerRoutes("plan-tier", { selection: "round-robin", weights: { "openai.alternate": 2, openai: 1 } }),
+      ),
+    )
+    const all = new Set([0, 1])
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "t1", true)).toBe(0)
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "t2", true)).toBe(0)
+    expect(ModelRoute.orderTargets(definition, all, undefined, false)).toEqual([0, 1])
+    expect(ModelRoute.nextTarget(definition, new Set([1]), new Set(), "t3", true)).toBe(1)
+  })
+
+  test("weighted provider route draws by member weights and sticks per session", () => {
+    const definition = definitionOf(
+      expand(
+        "r",
+        route(["plan-weighted/gpt-6.1-terra"]),
+        both,
+        new Map(),
+        providerRoutes("plan-weighted", { selection: "weighted", weights: { "openai.alternate": 3, openai: 1 } }),
+      ),
+    )
+    const all = new Set([0, 1])
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "w1", true, undefined, undefined, () => 0)).toBe(0)
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "w2", true, undefined, undefined, () => 0.99)).toBe(1)
+    expect(ModelRoute.nextTarget(definition, all, new Set(), "w1", true, undefined, undefined, () => 0.99)).toBe(0)
+  })
+})
+
+describe("configuredProviderRoutes", () => {
+  const entriesWith = (provider_routes: unknown) =>
+    [{ type: "document", info: { experimental: { provider_routes } } }] as unknown as Entry[]
+  const known = new Set(["openai", "openai.alternate", "anthropic"])
+  const noRoutes = new Map<string, ConfigModelRoutes.Route>()
+
+  test("a valid provider route is kept, with its defaults filled", () => {
+    const parsed = configuredProviderRoutes(
+      entriesWith({ "openai-plan": { providers: ["openai.alternate", "openai"] } }),
+      known,
+      noRoutes,
+    )
+    expect(parsed.get("openai-plan")).toEqual({
+      providers: ["openai.alternate", "openai"],
+      selection: "ordered",
+      weights: {},
+    })
+  })
+
+  test("an id naming a concrete provider, the routes provider, or a route is dropped with a warning", () => {
+    const routes = new Map<string, ConfigModelRoutes.Route>([
+      ["terra-plan", {} as unknown as ConfigModelRoutes.Route],
+    ])
+    let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+    const messages = warnings(() => {
+      parsed = configuredProviderRoutes(
+        entriesWith({
+          openai: { providers: ["openai.alternate"] },
+          "opencode-route": { providers: ["openai"] },
+          "terra-plan": { providers: ["openai"] },
+          "openai-plan": { providers: ["openai.alternate", "openai"] },
+        }),
+        known,
+        routes,
+      )
+    })
+    expect([...(parsed?.keys() ?? [])]).toEqual(["openai-plan"])
+    // Members resolve concrete-first too: openai-plan keeps its "openai" member even though a
+    // rejected provider route claimed that id.
+    expect(parsed?.get("openai-plan")?.providers).toEqual(["openai.alternate", "openai"])
+    expect(messages).toHaveLength(3)
+    expect(messages[0]).toContain('"openai"')
+    expect(messages[1]).toContain('"opencode-route"')
+    expect(messages[2]).toContain('"terra-plan"')
+  })
+
+  test("a member naming another provider route or the routes provider drops, duplicates drop, an unknown member stays with a warning", () => {
+    let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+    const messages = warnings(() => {
+      parsed = configuredProviderRoutes(
+        entriesWith({
+          "openai-plan": { providers: ["openai.alternate", "openai"] },
+          combo: { providers: ["openai-plan", "opencode-route", "openai", "openai", "mystery"] },
+        }),
+        known,
+        noRoutes,
+      )
+    })
+    expect(parsed?.get("combo")?.providers).toEqual(["openai", "mystery"])
+    expect(messages).toHaveLength(4)
+  })
+
+  test("a provider route whose members all drop is itself dropped", () => {
+    let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+    const messages = warnings(() => {
+      parsed = configuredProviderRoutes(entriesWith({ empty: { providers: ["opencode-route"] } }), known, noRoutes)
+    })
+    expect(parsed?.has("empty")).toBe(false)
+    expect(messages.length).toBeGreaterThan(0)
   })
 })

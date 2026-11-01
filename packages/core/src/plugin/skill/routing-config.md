@@ -106,6 +106,37 @@ Common changes:
 - A new pool: add a new key under `model_routes`. Then point a category at
   `opencode-route/<id>` in OpenChamber (Settings → Routing).
 
+## Provider routes: one pool of providers for every model
+
+- A provider route is a named selection over concrete providers, declared once
+  under `experimental.provider_routes` and then used like a provider in any pool:
+  `"<provider-route>/<model>"`. One definition serves every model the members offer - use
+  it when the same accounts should back several models (two subscriptions for one
+  provider's models, say), instead of repeating the pair in a pool per model.
+
+```jsonc
+"experimental": {
+  "provider_routes": {
+    "openai-plan": { "providers": ["openai.alternate", "openai"], "selection": "ordered" },
+  },
+},
+```
+
+- `providers` is the member list, in order. `selection` is `ordered` (the default),
+  `round-robin`, or `weighted` - the same modes pools use, tiered weights included.
+  `weights` keys by member provider id (an unset member weighs 1) and applies the
+  same way pool weights do.
+- A member serves a dispatch only when it offers the model and can produce the
+  target's variant - the same skip rule as a direct leaf. Health is per concrete
+  provider, model, and credential, so a benched or quota-demoted member falls
+  through inside the provider route's own selection; nothing is tracked per provider route.
+- Members must be concrete providers: provider routes do not nest. An id that
+  names a concrete provider, a pool, or `opencode-route` is dropped at load
+  with a warning - references always resolve to the concrete provider.
+- Decision records show the provider route as its own step (provider route id, chosen member),
+  and pools label the member group `"<provider-route>/<model>"`, so a walk stays
+  explainable.
+
 ## Time-of-day and temporary weights
 
 - Inside one pool, `schedules` is a list. Each entry has `targets` (optional,
