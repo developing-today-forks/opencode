@@ -411,7 +411,9 @@ export const make = Effect.gen(function* () {
             : providerFailure
               ? new AIError({ reason: new UnknownProviderError({ message: providerFailure.message }) })
               : unknownFinish
-        const failureError = llmFailure ? toSessionError(llmFailure) : undefined
+        const failureError = llmFailure
+          ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID })
+          : undefined
         const llmError = failureError && !recorded.providerFailed ? failureError : undefined
         // Usage and rate-limit state are recorded where the outcome is first known. The attempt
         // row itself is written via recordAttempt below, after the failover decision, so it
