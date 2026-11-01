@@ -940,6 +940,61 @@ describe("credential column restore (#1055)", () => {
   )
 })
 
+describe("credential attempt snapshot restore (#1116)", () => {
+  it.live("restores each credential's attempt snapshot onto its own window, never target-wide", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const snap = (remaining: string) => ({
+        limit: { tokens: "1000" },
+        remaining: { tokens: remaining },
+        reset: { tokens: "3600" },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 5_000,
+          time_ended: now - 4_000,
+          quota: snap("11"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-b",
+          time_started: now - 5_000,
+          time_ended: now - 3_000,
+          quota: snap("22"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          time_started: now - 5_000,
+          time_ended: now - 2_000,
+          quota: snap("33"),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "snapshots", model: "m" })
+      expect(ModelRoute.rateLimitOf(target, "cred-a")?.remaining).toEqual({ tokens: "11" })
+      expect(ModelRoute.rateLimitOf(target, "cred-b")?.remaining).toEqual({ tokens: "22" })
+      // The credential-less snapshot keeps the pre-column target-wide behavior.
+      expect(ModelRoute.rateLimitOf(target)?.remaining).toEqual({ tokens: "33" })
+    }),
+  )
+})
+
 describe("rate-limit hold release restore (#870)", () => {
   it.live("a cleared hold stays cleared after a restart", () =>
     Effect.gen(function* () {
