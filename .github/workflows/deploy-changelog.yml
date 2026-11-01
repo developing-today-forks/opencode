@@ -3,7 +3,7 @@ name: deploy-changelog
 on:
   push:
     branches:
-      - dev
+      - main
     paths:
       - services/changelog/**
       - .github/workflows/deploy-changelog.yml

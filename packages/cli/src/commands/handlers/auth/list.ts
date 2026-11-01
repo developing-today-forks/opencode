@@ -33,19 +33,41 @@ const list = Effect.fn("cli.auth.list")(function* (input) {
     )
     return
   }
-  const rows = integrations.flatMap((integration) =>
-    integration.connections.map((connection) => ({
+  const rows = integrations.flatMap((integration) => {
+    // Connections are ordered active-first, matching auth switch's "(active)" convention.
+    const active = integration.connections.find((connection) => connection.type === "credential")
+    return integration.connections.map((connection) => ({
       integration: integration.name,
       source: connection.type === "credential" ? connection.label : connection.name,
       type: connection.type === "credential" ? "stored" : "environment",
-    })),
-  )
+      detail:
+        connection.type === "credential" && connection === active ? openaiMethodDetail(integration.id, connection.methodID) : undefined,
+    }))
+  })
   if (rows.length === 0) {
     process.stdout.write("No authenticated integrations" + EOL)
     return
   }
   const width = Math.max(...rows.map((row) => row.integration.length)) + 2
   process.stdout.write(
-    rows.map((row) => row.integration.padEnd(width) + row.source.padEnd(28) + row.type).join(EOL) + EOL,
+    rows
+      .map((row) => row.integration.padEnd(width) + row.source.padEnd(28) + row.type + (row.detail ? ` ${row.detail}` : ""))
+      .join(EOL) + EOL,
   )
 })
+
+/**
+ * Backends each OpenAI credential method serves (#1119): naming the active method and its
+ * backend in `auth list` makes a credential-method mismatch visible before a call fails.
+ */
+const openaiMethodBackends: Record<string, string> = {
+  "chatgpt-token-sharing": "https://api.openai.com/v1",
+  "chatgpt-browser": "https://chatgpt.com/backend-api/codex",
+  "chatgpt-headless": "https://chatgpt.com/backend-api/codex",
+}
+
+function openaiMethodDetail(integrationID: string, methodID: string | undefined) {
+  if (integrationID !== "openai" || !methodID) return undefined
+  const backend = openaiMethodBackends[methodID]
+  return backend ? `active method ${methodID} (${backend})` : `active method ${methodID}`
+}
