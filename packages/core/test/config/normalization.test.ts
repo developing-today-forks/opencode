@@ -3,6 +3,7 @@ import { Arbitrary, Duration, Effect, Schema } from "effect"
 import { ConfigNormalize } from "@opencode/core/config/normalize"
 import { ModelRouteTuning } from "@opencode/core/model-route-tuning"
 import { Info } from "@opencode/schema/config"
+import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 
 const options = { errors: "all", onExcessProperty: "ignore" } as const
@@ -995,4 +996,107 @@ describe("provider routes and route settings survive normalization", () => {
     })
     expect(value.experimental?.model_route_settings?.bench?.multiplier).toBe(3)
   })
+})
+
+describe("per-field normalization survival guard (#1285)", () => {
+  // Minimal schema-valid value for every field, keyed by field name. The tests
+  // below enumerate the fields from the schema itself — these tables are NOT
+  // the enumeration. If a new schema field has no fixture here, the coverage
+  // tests fail by name, so a future field cannot silently go unguarded the way
+  // experimental.provider_routes (#1134) and experimental.model_route_settings
+  // (#1142) did before #1277.
+  const topLevelFixtures: Record<string, unknown> = {
+    $schema: "https://example.com/opencode-schema.json",
+    shell: "/bin/bash",
+    model: { providerID: "openai", model: "gpt-6-luna" },
+    default_agent: "build",
+    update: "notify",
+    share: "manual",
+    enterprise: { url: "https://example.com" },
+    username: "guard-user",
+    permissions: [{ action: "tool.use", resource: "*", effect: "allow" }],
+    policies: [{ action: "provider.use", resource: "*", effect: "deny" }],
+    agents: { reviewer: { system: "Review carefully" } },
+    snapshots: false,
+    watcher: { ignore: ["node_modules"] },
+    formatter: { prettier: { command: ["prettier", "--write"] } },
+    lsp: { typescript: { command: ["typescript-language-server", "--stdio"] } },
+    media: { image: { max_width: 800 } },
+    tool_output: { max_lines: 100, max_bytes: 1000 },
+    mcp: { servers: { svc: { type: "local", command: ["echo", "hi"] } } },
+    compaction: { auto: true, keep: { tokens: 1000 }, buffer: 500 },
+    skills: ["./skills/guard"],
+    commands: { review: { template: "Review this" } },
+    instructions: ["./guard-instructions.md"],
+    references: { docs: { path: "../docs" } },
+    websearch: { provider: "random" },
+    plugins: ["guard-plugin"],
+    worktree: { directory: "guard-worktrees" },
+    warming: { interval: "4 minutes", duration: "30 minutes" },
+    messaging: { presets: { greeting: "hello" } },
+    providers: { custom: { name: "Custom Provider" } },
+    aliases: { providers: { ds: "deepseek" } },
+    experimental: { portable_shell_scanner: true },
+  }
+
+  const experimentalFixtures: Record<string, unknown> = {
+    aliases: { providers: { ds: "deepseek" } },
+    portable_shell_scanner: true,
+    subagent_depth: 2,
+    shell_timeout: 300000,
+    policies: [{ action: "tool.use", resource: "shell:*", effect: "deny" }],
+    model_routes: { pool: { targets: ["openai/gpt-6-luna"] } },
+    provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"], selection: "ordered" } },
+    model_route_schedules: [{ when: { start: "01:00", end: "04:00" }, factor: 2 }],
+    model_route_windows: { peak: { start: "01:00", end: "04:00", timezone: "UTC" } },
+    model_route_tuning: { enabled: true, notes: ["match: text"] },
+    model_route_log: { captureErrorBodies: true },
+    model_route_settings: { bench: { multiplier: 3 } },
+  }
+
+  // Same comparison as the Arbitrary round-trip test above: the decoded
+  // normalized config must equal the decoded source, after the adjustments
+  // that encode intentional moves (experimental.policies -> policies,
+  // experimental.aliases -> aliases, empty compatibility containers, and
+  // malformed-note filtering). A field normalization silently drops fails
+  // this comparison, because the expected side still carries it.
+  function expectSurvives(source: Record<string, unknown>) {
+    const result = normalized(structuredClone(source))
+    expect(result.diagnostics).toEqual([])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded)).toEqual(
+      Schema.decodeUnknownSync(Info)(
+        withoutMalformedNotes(withoutEmptyCompatibilityContainers(structuredClone(source))),
+      ),
+    )
+  }
+
+  test("top-level fixtures cover exactly the Config.Info fields enumerated from the schema", () => {
+    expect(Object.keys(topLevelFixtures).sort()).toEqual(Object.keys(Info.fields).sort())
+  })
+
+  test("experimental fixtures cover exactly the ConfigExperimental.Info fields enumerated from the schema", () => {
+    expect(Object.keys(experimentalFixtures).sort()).toEqual(Object.keys(ConfigExperimental.Info.fields).sort())
+  })
+
+  for (const field of Object.keys(Info.fields)) {
+    test(`top-level field "${field}" survives normalization`, () => {
+      const fixture = topLevelFixtures[field]
+      if (fixture === undefined)
+        throw new Error(
+          `no fixture for Config.Info field "${field}" — add a minimal schema-valid fixture so this field is guarded`,
+        )
+      expectSurvives({ [field]: fixture })
+    })
+  }
+
+  for (const field of Object.keys(ConfigExperimental.Info.fields)) {
+    test(`experimental field "${field}" survives normalization at its documented destination`, () => {
+      const fixture = experimentalFixtures[field]
+      if (fixture === undefined)
+        throw new Error(
+          `no fixture for ConfigExperimental.Info field "${field}" — add a minimal schema-valid fixture so this field is guarded`,
+        )
+      expectSurvives({ experimental: { [field]: fixture } })
+    })
+  }
 })
