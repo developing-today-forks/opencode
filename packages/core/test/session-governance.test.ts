@@ -349,13 +349,13 @@ describe("Markdown-defined agents in governance (#1107)", () => {
       )
 
       const pinned = result.definitions.get("pinned")
-      expect(pinned?.model?.providerID).toBe("test")
-      expect(pinned?.model?.id).toBe("pinned")
+      expect(pinned?.model?.providerID).toBe(Provider.ID.make("test"))
+      expect(pinned?.model?.id).toBe(Model.ID.make("pinned"))
       expect(pinned?.excludedModels).toEqual(["test/denied"])
       expect(pinned?.maxDepth).toBe(1)
       // A model-less child of the Markdown agent runs its pinned default.
-      expect(result.checked?.providerID).toBe("test")
-      expect(result.checked?.id).toBe("pinned")
+      expect(result.checked?.providerID).toBe(Provider.ID.make("test"))
+      expect(result.checked?.id).toBe(Model.ID.make("pinned"))
       // The Markdown agent's own excluded_models bind its model choice.
       expect(result.denied).toBeInstanceOf(ModelGovernance.DeniedError)
       // And its max_depth binds launches below a session it runs.
