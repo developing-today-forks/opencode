@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test"
+import { describe, expect, mock, test, spyOn } from "bun:test"
 
 mock.module("@solidjs/router", () => ({ query: (load: () => unknown) => load }))
 
@@ -43,5 +43,69 @@ describe("model catalog pricing", () => {
       cacheRead: 0.26,
       cacheWrite: undefined,
     })
+  })
+})
+
+describe("model catalog fetch", () => {
+  // A fresh module instance per run (unique import query) so --rerun-each runs,
+  // which re-evaluate this file in the same process, never observe a previous
+  // run's module-level catalog cache.
+  test("fails softly on stalled and oversized bodies and accepts healthy sources", async () => {
+    const timeout = spyOn(AbortSignal, "timeout")
+    const fetcher = spyOn(globalThis, "fetch")
+    const { loadModelCatalog } = await import(`./model-catalog.ts?fetch=${Date.now()}-${Math.random()}`)
+    try {
+      let readStarted!: () => void
+      const bodyReadStarted = new Promise<void>((resolve) => {
+        readStarted = resolve
+      })
+      const controller = new AbortController()
+      timeout.mockReturnValue(controller.signal)
+      fetcher.mockImplementation(
+        Object.assign(
+          async () =>
+            new Response(
+              new ReadableStream(
+                {
+                  pull() {
+                    readStarted()
+                  },
+                },
+                { highWaterMark: 0 },
+              ),
+            ),
+          { preconnect: fetch.preconnect },
+        ),
+      )
+      const stalled = loadModelCatalog()
+      await bodyReadStarted
+      controller.abort()
+      expect((await stalled).models).toHaveLength(0)
+
+      timeout.mockRestore()
+      let pulls = 0
+      let cancelled = 0
+      fetcher.mockImplementation(Object.assign(async () => new Response(new ReadableStream({
+        pull(stream) {
+          pulls++
+          stream.enqueue(new Uint8Array(1024 * 1024))
+        },
+        cancel() { cancelled++ },
+      })), { preconnect: fetch.preconnect }))
+      expect((await loadModelCatalog()).models).toHaveLength(0)
+      expect(cancelled).toBe(3)
+      expect(pulls).toBeLessThan(120)
+
+      fetcher.mockImplementation(Object.assign(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.endsWith("catalog.json")) return Response.json({ models: { "lab/model": { id: "lab/model", name: "Model" } } })
+        if (url.endsWith("api.json")) return Response.json({})
+        return new Response('<script id="search-index">[]</script>')
+      }, { preconnect: fetch.preconnect }))
+      expect((await loadModelCatalog()).models.length).toBeGreaterThan(0)
+    } finally {
+      timeout.mockRestore()
+      fetcher.mockRestore()
+    }
   })
 })

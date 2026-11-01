@@ -4,6 +4,7 @@ import { Money } from "@opencode/schema/money"
 import { Option, Schema } from "effect"
 import { Model } from "../model.js"
 import { Provider } from "../provider.js"
+import { readBoundedResponseText } from "../tool/http-body.js"
 
 const RemoteModel = Schema.Struct({
   model_picker_enabled: Schema.Boolean,
@@ -78,15 +79,28 @@ export async function get(baseURL: string, headers: RequestInit["headers"], exis
 
 export type Snapshot = ReadonlyMap<string, UsableModel>
 
+// A real Copilot model list is kilobytes; 4 MiB is generous headroom for
+// thousands of entries while bounding the memory a hostile or misbehaving
+// endpoint can make this automatic startup-path load buffer (cf. the
+// 64 KiB utility-title cap in #960 and the 16 MiB generated-client cap
+// in #1007).
+export const modelsMaxResponseBytes = 4 * 1024 * 1024
+
 export async function load(baseURL: string, headers: RequestInit["headers"]): Promise<Snapshot> {
-  const response = await fetch(`${baseURL}/models`, {
+  const url = `${baseURL}/models`
+  const response = await fetch(url, {
     headers,
     signal: AbortSignal.timeout(5_000),
   })
   if (!response.ok) throw new Error(`Failed to fetch Copilot models: ${response.status}`)
 
+  const text = await readBoundedResponseText(
+    response,
+    modelsMaxResponseBytes,
+    () => new Error(`Copilot models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
+  )
   return new Map(
-    decodeResponse(await response.json()).data.flatMap((raw) => {
+    decodeResponse(JSON.parse(text)).data.flatMap((raw) => {
       const model = Option.getOrUndefined(decodeModel(raw))
       return model && usable(model) ? ([[model.id, model]] as const) : []
     }),

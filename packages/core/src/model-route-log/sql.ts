@@ -41,6 +41,10 @@ export const RouteAttemptTable = sqliteTable(
     provider_id: text().notNull(),
     model_id: text().notNull(),
     variant: text(),
+    /** The stored credential that served this attempt, when the call site knows it (#1106). Null for
+     * env-served requests and for attempts recorded before this column existed: unattributed usage
+     * that the quota gate must never assign to a credential. */
+    credential_id: text(),
     /** `success`, `failure`, `timeout`, `interrupted`, `hedged-out` or `resolution-failure`. */
     outcome: text().notNull(),
     error_tag: text(),
@@ -102,6 +106,7 @@ export const RouteHealthTable = sqliteTable(
     kind: text().notNull(),
     reason: text(),
     until: integer(),
+    credential_id: text(),
   },
   (table) => [index("route_health_target_time_idx").on(table.provider_id, table.model_id, table.time)],
 )

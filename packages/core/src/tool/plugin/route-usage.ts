@@ -92,7 +92,30 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
                 )) as ModelUsage.SessionTargetRow[]),
           )
         }
-        const targets = yield* ModelRouteLog.targetUsage(db, since)
+        const targetRows = yield* ModelRouteLog.targetUsage(db, since)
+        // targetUsage rows are split by serving credential (#1106); this report is per target,
+        // so fold each target's credential rows back into one. The folded rows' `sessions` is
+        // replaced below: per-credential distinct counts cannot be summed (one session can sit
+        // in several credential groups), so the report takes the exact target-level count.
+        const targetsByID = new Map<string, ModelUsage.TargetRow>()
+        for (const row of targetRows) {
+          const id = `${row.providerID}/${row.modelID}`
+          const existing = targetsByID.get(id)
+          targetsByID.set(id, {
+            ...(existing ? ModelUsage.sum([existing, row]) : ModelUsage.sum([row])),
+            providerID: row.providerID,
+            modelID: row.modelID,
+            sessions: row.sessions,
+            first: existing ? Math.min(existing.first, row.first) : row.first,
+            last: existing ? Math.max(existing.last, row.last) : row.last,
+          })
+        }
+        const targetSessionCounts = yield* ModelRouteLog.targetSessions(db, since)
+        for (const row of targetSessionCounts) {
+          const target = targetsByID.get(`${row.providerID}/${row.modelID}`)
+          if (target) targetsByID.set(`${row.providerID}/${row.modelID}`, { ...target, sessions: row.sessions })
+        }
+        const targets = [...targetsByID.values()]
         const days = yield* ModelRouteLog.dailyUsage(db, since)
         const turns = yield* ModelRouteLog.turnAttempts(db, since, input.session)
         const offers = (yield* ModelRouteLog.offerUsage(db, since, input.route)) as ModelUsage.OfferRow[]
@@ -145,20 +168,28 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
         (input.provider === undefined && input.model === undefined) ||
         session.targets.some((item) => matches(ModelUsage.splitTarget(item.target))),
     )
-    // Burn-rate samples (#568): one per listed session, plan window, and target on that window's
-    // provider — the session's measured share of the window, attributed to each model it used there.
-    // Session history does not record the effort (variant) per target, so these samples land in the
-    // effort-less buckets; effort-tagged callers get effort buckets from the same derivation.
+    // Burn-rate samples (#568): one per listed session, plan window, and model on that window's
+    // provider — the session's measured share of the window. A session that used the same model
+    // through several pools has one target row per pool, so models dedupe here: each (session,
+    // window, model) contributes its share exactly once (#1033). The sample names its plan window,
+    // so shares from distinct windows never average together downstream. Session history does not
+    // record the effort (variant) per target, so these samples land in the effort-less buckets;
+    // effort-tagged callers get effort buckets from the same derivation.
     const providerByPlan = new Map(windows.map(({ plan }) => [plan.id, plan.providerID]))
     const burnSamples: QuotaBurnRate.Sample[] = sessions.flatMap((session) =>
       session.windows.flatMap((share) => {
         const percent = share.percent
         if (percent === null) return []
         const providerID = providerByPlan.get(share.plan)
-        return session.targets.flatMap((target) => {
-          const { providerID: targetProvider, modelID } = ModelUsage.splitTarget(target.target)
-          return targetProvider === providerID ? [{ providerID: targetProvider, modelID, percent }] : []
-        })
+        if (providerID === undefined) return []
+        return [
+          ...new Set(
+            session.targets
+              .map((target) => ModelUsage.splitTarget(target.target))
+              .filter((target) => target.providerID === providerID)
+              .map((target) => target.modelID),
+          ),
+        ].map((modelID) => ({ providerID, modelID, plan: share.plan, window: share.window, percent }))
       }),
     )
     const burnRates = QuotaBurnRate.buckets(burnSamples)
@@ -238,7 +269,7 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>) => {
   }
   for (const burn of report.burnRates) {
     lines.push(
-      `burn rate ${burn.providerID}/${burn.modelID}${burn.effort === null ? "" : ` (${burn.effort})`}: ~${burn.percentPerSession}% of a window per session, from ${burn.sessions} listed sessions`,
+      `burn rate ${burn.providerID}/${burn.modelID}${burn.effort === null ? "" : ` (${burn.effort})`} in plan ${burn.plan} window ${burn.window}: ~${burn.percentPerSession}% per session, from ${burn.sessions} listed sessions`,
     )
   }
   for (const plan of report.plans) {

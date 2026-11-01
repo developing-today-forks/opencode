@@ -1213,9 +1213,18 @@ function normalizePromiseClientContent(content: string, groups: ReadonlyArray<Gr
   const sseReady = replaceOne(content, "let next: ReadableStreamReadResult<Uint8Array>", "let next")
   const binaryReady = usesBinary
     ? replaceOne(
-        replaceOne(sseReady, "readonly empty: boolean\n}", "readonly empty: boolean\n  readonly binary?: true\n}"),
-        "if (descriptor.empty) {",
-        "if (descriptor.binary) return new Uint8Array(await response.arrayBuffer()) as A\n    if (descriptor.empty) {",
+        replaceOne(
+          replaceOne(
+            replaceOne(sseReady, "readonly empty: boolean\n}", "readonly empty: boolean\n  readonly binary?: true\n}"),
+            "if (descriptor.empty) {",
+            "if (descriptor.binary) return (await binary(response)) as A\n    if (descriptor.empty) {",
+          ),
+          "export function make(options: ClientOptions) {",
+          `/** Files are user-sized, so the binary path allows a larger cap than a JSON body; it matches the app's media ingest limit. */\nconst maxBinaryBodyBytes = 256 * 1024 * 1024\n\nexport function make(options: ClientOptions) {`,
+        ),
+        "function isContentType(response: Response, expected: string) {",
+        'async function binary(response: Response): Promise<Uint8Array> {\n  const declared = Number(response.headers.get("content-length"))\n  if (Number.isFinite(declared) && declared > maxBinaryBodyBytes) {\n    try {\n      void response.body?.cancel()?.catch(() => {})\n    } catch {}\n    throw new ClientError("ResponseTooLarge")\n  }\n  if (response.body === null) {\n    const bytes = new Uint8Array(await response.arrayBuffer())\n    if (bytes.byteLength > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n    return bytes\n  }\n  const reader = response.body.getReader()\n  const chunks: Array<Uint8Array> = []\n  let bytes = 0\n  try {\n    while (true) {\n      const next = await reader.read()\n      if (next.done) break\n      bytes += next.value.byteLength\n      if (bytes > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n      chunks.push(next.value)\n    }\n  } catch (cause) {\n    if (cause instanceof ClientError) throw cause\n    throw new ClientError("Transport", { cause })\n  } finally {\n    try {\n      void reader.cancel().catch(() => {})\n    } catch {}\n    reader.releaseLock()\n  }\n  const merged = new Uint8Array(bytes)\n  let offset = 0\n  for (const chunk of chunks) {\n    merged.set(chunk, offset)\n    offset += chunk.byteLength\n  }\n  return merged\n}\n\n' +
+          "function isContentType(response: Response, expected: string) {",
       )
     : sseReady
   const binaryBodyReady = endpoints.some(isBinaryPayload)

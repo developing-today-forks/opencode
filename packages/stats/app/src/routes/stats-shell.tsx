@@ -22,15 +22,63 @@ const compactNumberFormatter = new Intl.NumberFormat("en", {
   roundingIncrement: 5,
 })
 
+const GITHUB_STARS_FETCH_TIMEOUT_MS = 10_000
+// The repo metadata document is ~7 KB (measured 2026-10-31); 1 MiB bounds it
+// with wide headroom.
+const GITHUB_STARS_MAX_BYTES = 1024 * 1024
+
+/** Stream a response body with a hard size cap and parse it as JSON. */
+async function readCappedJson(response: Response, signal: AbortSignal) {
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > GITHUB_STARS_MAX_BYTES) {
+    await response.body?.cancel().catch(() => undefined)
+    return undefined
+  }
+  if (!response.body) return undefined
+  const reader = response.body.getReader()
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
+  signal.addEventListener("abort", abort, { once: true })
+  try {
+    signal.throwIfAborted()
+    const chunks: Uint8Array[] = []
+    let size = 0
+    while (true) {
+      const result = await reader.read()
+      signal.throwIfAborted()
+      if (result.done) break
+      size += result.value.byteLength
+      if (size > GITHUB_STARS_MAX_BYTES) {
+        void reader.cancel().catch(() => undefined)
+        return undefined
+      }
+      chunks.push(result.value)
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown
+  } catch {
+    return undefined
+  } finally {
+    signal.removeEventListener("abort", abort)
+    reader.releaseLock()
+  }
+}
+
 export const getGitHubStars = query(async () => {
   "use server"
+  const signal = AbortSignal.timeout(GITHUB_STARS_FETCH_TIMEOUT_MS)
   return fetch(githubLink.apiHref, {
     headers: {
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
     },
+    signal,
   })
-    .then((response) => (response.ok ? response.json() : undefined))
+    .then((response) => (response.ok ? readCappedJson(response, signal) : undefined))
     .then((body: unknown) =>
       body && typeof body === "object" && "stargazers_count" in body && typeof body.stargazers_count === "number"
         ? compactNumberFormatter.format(body.stargazers_count)

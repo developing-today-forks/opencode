@@ -84,6 +84,25 @@ export function formNumberValue(text: string): number | undefined {
   return /^-?\d+(?:\.\d+)?$/.test(trimmed) ? Number(trimmed) : Number.NaN
 }
 
+/** Render a numeric value as plain-decimal text that formNumberValue accepts.
+ * String(value) uses exponent notation outside the plain-decimal range
+ * (String(1e-7) is "1e-7", String(1e21) is "1e+21"), so a numeric default
+ * pre-filled with String(field.default) could not be confirmed unchanged
+ * once #844 made typed answers parse with the strict grammar (#1065).
+ * Expand the exponent spelling into the equivalent plain-decimal text;
+ * the value itself is unchanged, and typed exponent spellings stay
+ * rejected because formNumberValue is untouched. */
+export function formNumberText(value: number): string {
+  const text = String(value)
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(text)
+  if (!match) return text
+  const digits = match[2] + (match[3] ?? "")
+  const point = match[2].length + Number(match[4])
+  if (point <= 0) return `${match[1]}0.${"0".repeat(-point)}${digits}`
+  if (point >= digits.length) return `${match[1]}${digits}${"0".repeat(point - digits.length)}`
+  return `${match[1]}${digits.slice(0, point)}.${digits.slice(point)}`
+}
+
 export function formValidateValue(field: FormAnswerField, value: FormValue | undefined): string | undefined {
   if (value === undefined) return field.required ? "Answer required" : undefined
   if (field.required && (value === "" || (Array.isArray(value) && value.length === 0)))
@@ -127,7 +146,8 @@ export function formValidateValue(field: FormAnswerField, value: FormValue | und
 export function formDisplayValue(field: FormAnswerField, value: FormValue | undefined, emptyMultiselect: string) {
   if (value === undefined) return ""
   const label = (item: string | number | boolean) =>
-    formRows(field).find((row) => row.value === item)?.label ?? String(item)
+    formRows(field).find((row) => row.value === item)?.label ??
+    (typeof item === "number" ? formNumberText(item) : String(item))
   if (Array.isArray(value)) return value.length === 0 ? emptyMultiselect : value.map(label).join(", ")
   return label(value)
 }

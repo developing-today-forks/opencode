@@ -25,6 +25,18 @@ export interface Window {
   readonly end?: string
   /** IANA timezone such as "America/Chicago"; absent means the host's local timezone. */
   readonly timezone?: string
+  /** Specific local calendar dates the window is active on: "YYYY-MM-DD" entries or inclusive
+   * "YYYY-MM-DD/YYYY-MM-DD" ranges, read in the window's timezone. Absent means every date. */
+  readonly dates?: readonly string[]
+  /** Local calendar dates (same entry shape as `dates`) on which the window is never active.
+   * Exclusions win over every other field. */
+  readonly excludeDates?: readonly string[]
+  /** Names of windows in experimental.model_route_windows; while any of them is active this
+   * window is not. Resolved by `resolveExclusions` at config load, or by `active`'s map argument. */
+  readonly excludeWindows?: readonly string[]
+  /** The `excludeWindows` references already resolved to window objects (set by
+   * `resolveExclusions`); `active` judges these when present instead of the names. */
+  readonly excludedWindows?: readonly Window[]
   /** First instant the window may be active, epoch milliseconds. */
   readonly from?: number
   /** Last instant the window may be active, epoch milliseconds; exclusive. */
@@ -74,6 +86,33 @@ const dayOfMonth = (value: unknown): number | undefined => {
   if (number === -1 || (number >= 1 && number <= 31)) return number
   return undefined
 }
+
+const DATE_ENTRY = /^(\d{4}-\d{2}-\d{2})(?:\/(\d{4}-\d{2}-\d{2}))?$/
+
+/** A real calendar date check: 2026-02-30 matches the shape but is not a date. */
+const isRealDate = (text: string): boolean => {
+  const [year, month, day] = text.split("-").map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+/** One `dates`/`excludeDates` entry canonicalised: a single "YYYY-MM-DD" day, or an inclusive
+ * "YYYY-MM-DD/YYYY-MM-DD" range. A one-day range collapses to the single day. */
+const dateEntry = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined
+  const match = DATE_ENTRY.exec(value.trim())
+  if (!match) return undefined
+  const start = match[1]
+  const end = match[2]
+  if (!isRealDate(start) || (end !== undefined && !isRealDate(end))) return undefined
+  if (end !== undefined && end < start) return undefined
+  return end === undefined || end === start ? start : `${start}/${end}`
+}
+
+export const isDateEntry = (value: unknown): value is string => dateEntry(value) !== undefined
+
+/** A window name, the same pattern the config schema uses for model_route_windows keys. */
+const WINDOW_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
 
 export const isDayOfWeek = (value: unknown): value is number | string => dayOfWeek(value) !== undefined
 export const isDayOfMonth = (value: unknown): value is number | string => dayOfMonth(value) !== undefined
@@ -202,6 +241,9 @@ export const parse = (value: unknown): Window | undefined => {
   const result: {
     daysOfWeek?: number[]
     daysOfMonth?: number[]
+    dates?: string[]
+    excludeDates?: string[]
+    excludeWindows?: string[]
     start?: string
     end?: string
     timezone?: string
@@ -233,6 +275,27 @@ export const parse = (value: unknown): Window | undefined => {
       return left - right
     })
     result.daysOfMonth = days
+  }
+
+  for (const name of ["dates", "excludeDates"] as const) {
+    const raw = field(value, name)
+    if (raw === undefined) continue
+    if (!Array.isArray(raw)) return undefined
+    const parsed = raw.map(dateEntry)
+    // Same rule as the day lists: an empty list, or any unreadable entry, rejects the window.
+    if (parsed.length === 0 || parsed.some((entry) => entry === undefined)) return undefined
+    // ISO dates sort chronologically as strings, so the canonical form is a plain sort.
+    result[name] = [...new Set(parsed as string[])].sort()
+  }
+
+  const rawExcludeWindows = field(value, "excludeWindows")
+  if (rawExcludeWindows !== undefined) {
+    if (!Array.isArray(rawExcludeWindows)) return undefined
+    const names = rawExcludeWindows.map((name) =>
+      typeof name === "string" && WINDOW_NAME.test(name.trim()) ? name.trim() : undefined,
+    )
+    if (names.length === 0 || names.some((name) => name === undefined)) return undefined
+    result.excludeWindows = [...new Set(names as string[])].sort()
   }
 
   const rawStart = field(value, "start")
@@ -275,10 +338,22 @@ export const parse = (value: unknown): Window | undefined => {
   return result
 }
 
+const dateKey = (parts: LocalParts) =>
+  `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.dayOfMonth).padStart(2, "0")}`
+
+/** ISO date strings compare chronologically, so a range check is a string comparison. */
+const dateEntryMatches = (entry: string, key: string) => {
+  const slash = entry.indexOf("/")
+  if (slash === -1) return entry === key
+  return key >= entry.slice(0, slash) && key <= entry.slice(slash + 1)
+}
+
 const dayMatches = (window: Window, parts: LocalParts) =>
   (!window.daysOfWeek?.length || window.daysOfWeek.includes(parts.dayOfWeek)) &&
   (!window.daysOfMonth?.length ||
-    window.daysOfMonth.some((day) => day === parts.dayOfMonth || (day === -1 && parts.dayOfMonth === daysInMonth(parts))))
+    window.daysOfMonth.some((day) => day === parts.dayOfMonth || (day === -1 && parts.dayOfMonth === daysInMonth(parts)))) &&
+  (!window.dates?.length || window.dates.some((entry) => dateEntryMatches(entry, dateKey(parts)))) &&
+  (!window.excludeDates?.length || !window.excludeDates.some((entry) => dateEntryMatches(entry, dateKey(parts))))
 
 const minuteMatches = (window: Window, minutes: number) => {
   const start = window.start === undefined ? undefined : minutesOf(window.start)
@@ -292,11 +367,63 @@ const minuteMatches = (window: Window, minutes: number) => {
   return minutes >= start || minutes < end
 }
 
-/** True while the wall clock in the window's timezone is inside it. */
-export const active = (window: Window, now = Date.now()): boolean => {
+/**
+ * Replaces a window's `excludeWindows` names with the windows they name, recursively, so the
+ * runtime can judge exclusions without a registry. Returns undefined when a name is unknown or
+ * the references cycle (a self-reference included): the window is dropped, the same fate as a
+ * schedule that names an unknown window, rather than applying without its exclusion.
+ * `seen` carries the names on the current resolution path (callers resolving a named window
+ * pass its own name so a self-reference is a cycle).
+ */
+export const resolveExclusions = (
+  window: Window,
+  windows: ReadonlyMap<string, Window>,
+  seen: ReadonlySet<string> = new Set(),
+): Window | undefined => {
+  if (!window.excludeWindows?.length) return window
+  const resolved: Window[] = [...(window.excludedWindows ?? [])]
+  for (const name of window.excludeWindows) {
+    if (seen.has(name)) return undefined
+    const referenced = windows.get(name)
+    if (!referenced) return undefined
+    const inner = resolveExclusions(referenced, windows, new Set(seen).add(name))
+    if (!inner) return undefined
+    resolved.push(inner)
+  }
+  return { ...window, excludedWindows: resolved }
+}
+
+/** The evaluation behind `active`: undefined means the window is dropped (an `excludeWindows`
+ * name that cannot be resolved, or a reference cycle), which `active` reports as inactive. */
+const evaluate = (
+  window: Window,
+  now: number,
+  windows: ReadonlyMap<string, Window> | undefined,
+  seenNames: ReadonlySet<string>,
+  seenWindows: ReadonlySet<Window>,
+): boolean | undefined => {
+  if (seenWindows.has(window)) return undefined
+  const path = new Set(seenWindows).add(window)
   if (window.from !== undefined && now < window.from) return false
   if (window.until !== undefined && now >= window.until) return false
-  const hasDays = Boolean(window.daysOfWeek?.length || window.daysOfMonth?.length)
+  // Exclusions win over everything else in the window.
+  if (window.excludedWindows !== undefined) {
+    for (const excluded of window.excludedWindows) {
+      const state = evaluate(excluded, now, windows, seenNames, path)
+      if (state === undefined) return undefined
+      if (state) return false
+    }
+  } else if (window.excludeWindows?.length) {
+    for (const name of window.excludeWindows) {
+      if (seenNames.has(name)) return undefined
+      const referenced = windows?.get(name)
+      if (!referenced) return undefined
+      const state = evaluate(referenced, now, windows, new Set(seenNames).add(name), path)
+      if (state === undefined) return undefined
+      if (state) return false
+    }
+  }
+  const hasDays = Boolean(window.daysOfWeek?.length || window.daysOfMonth?.length || window.dates?.length || window.excludeDates?.length)
   const hasTime = window.start !== undefined || window.end !== undefined
   if (!hasDays && !hasTime) return true
   const format = formatterFor(window.timezone)
@@ -306,10 +433,17 @@ export const active = (window: Window, now = Date.now()): boolean => {
   const wraps =
     window.start !== undefined && window.end !== undefined && minutesOf(window.start)! > minutesOf(window.end)!
   if (wraps && current.minutes < minutesOf(window.end)!)
-    // Before the end of a wrapping window means it began on the previous local day.
+    // Before the end of a wrapping window means it began on the previous local day: the date
+    // checks (dates/excludeDates included) judge that start day too.
     return dayMatches(window, previousDay(current))
   return dayMatches(window, current)
 }
+
+/** True while the wall clock in the window's timezone is inside it. A window whose
+ * `excludeWindows` names cannot be resolved from `windows` (or cycle) is inactive, never
+ * applied without its exclusion; windows resolved by `resolveExclusions` need no map. */
+export const active = (window: Window, now = Date.now(), windows?: ReadonlyMap<string, Window>): boolean =>
+  evaluate(window, now, windows, new Set(), new Set()) ?? false
 
 const dayList = (window: Window) =>
   window.daysOfWeek?.length ? window.daysOfWeek.map((day) => DAY_LABELS[day]).join(", ") : "every day"
@@ -337,5 +471,12 @@ export const describe = (window: Window): string => {
           window.until === undefined ? "always" : new Date(window.until).toISOString()
         }`
       : ""
-  return `${month ? `${when}; day ${month} of the month` : when}${zone}${bounds}`
+  const dates = window.dates?.length ? ` on ${window.dates.join(", ")}` : ""
+  const excludedDates = window.excludeDates?.length ? ` except ${window.excludeDates.join(", ")}` : ""
+  const excludedNames = window.excludeWindows?.length
+    ? ` except when ${window.excludeWindows.join(", ")} is active`
+    : window.excludedWindows?.length
+      ? ` except when an excluded window is active`
+      : ""
+  return `${month ? `${when}; day ${month} of the month` : when}${zone}${bounds}${dates}${excludedDates}${excludedNames}`
 }

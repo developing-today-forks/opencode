@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto"
 import { EOL } from "node:os"
-import { readFile, rename, writeFile } from "node:fs/promises"
+import path from "node:path"
+import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises"
 import { Effect } from "effect"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { Global } from "@opencode/util/global"
@@ -58,9 +60,18 @@ export async function removePluginConfig(configPath: string, spec: string) {
       },
     ),
   )
-  const temporary = configPath + ".tmp"
-  await writeFile(temporary, updated.endsWith("\n") ? updated : updated + "\n", { mode: 0o600 })
-  await rename(temporary, configPath)
+  // Match the sibling mcp add writer: resolve through any symlink first
+  // (dotfiles setups) so the rename lands on the real file instead of
+  // replacing the link, use a unique temp name per invocation so concurrent
+  // writers cannot consume each other's rename source, and never widen an
+  // existing config's permissions (a read-only 0400 config stays read-only).
+  const destination = await realpath(configPath).catch(() => configPath)
+  await mkdir(path.dirname(destination), { recursive: true })
+  const existing = await stat(destination).catch(() => undefined)
+  const mode = existing ? existing.mode & 0o600 : 0o600
+  const temporary = destination + ".tmp-" + process.pid + "-" + randomUUID()
+  await writeFile(temporary, updated.endsWith("\n") ? updated : updated + "\n", { mode })
+  await rename(temporary, destination)
   return true
 }
 

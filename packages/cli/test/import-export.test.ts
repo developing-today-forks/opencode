@@ -2,6 +2,9 @@ import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
+import { readBoundedResponseBody } from "../src/util/io"
 import { OPENCODE_VERSION } from "../src/version"
 
 const info = {
@@ -225,3 +228,58 @@ test("import reports an existing session without a stack trace", async () => {
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test("readBoundedResponseBody returns a body under the cap and cuts a chunked body over it", async () => {
+  const encoder = new TextEncoder()
+  const chunked = (chunks: string[]) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    )
+
+  await expect(readBoundedResponseBody(chunked(["hello ", "world"]), 1024)).resolves.toBe("hello world")
+  // A UTF-8 BOM is stripped, matching the previous response.text() behaviour.
+  await expect(readBoundedResponseBody(chunked(["\uFEFFhello"]), 1024)).resolves.toBe("hello")
+  await expect(readBoundedResponseBody(chunked(["12345", "67890"]), 8)).rejects.toThrow(
+    "Session data too large: response body exceeds the 8-byte limit",
+  )
+})
+
+test("import rejects a remote body whose declared content-length is over the cap without reading it", async () => {
+  // A raw HTTP stub, because Bun.serve rewrites content-length to the real
+  // body size: this declares far over the cap and never sends a body, so
+  // the import can only fail via the pre-read content-length check.
+  const maximumBytes = 256 * 1024 * 1024
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": String(maximumBytes + 1),
+    })
+    response.flushHeaders()
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const { port } = server.address() as AddressInfo
+
+  try {
+    const [stdout, stderr, exitCode] = await run([
+      "session",
+      "import",
+      `http://127.0.0.1:${port}/session.json`,
+      "--server",
+      `http://127.0.0.1:${port}`,
+    ])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Failed to read session data: Session data too large: response body exceeds the ${maximumBytes}-byte limit`,
+    )
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}, 15_000)

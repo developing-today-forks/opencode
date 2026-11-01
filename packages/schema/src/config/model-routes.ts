@@ -144,6 +144,8 @@ const DayOfMonth = Schema.Union([
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 31 })),
 ]).annotate({ description: "A day of the month, 1 to 31, or -1 for the last day of the month." })
 
+const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/))
+
 /** A recurring local-time window. Days and time bounds all have to match when set, so
  * `daysOfMonth: [1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month. */
 export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
@@ -155,6 +157,24 @@ export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
   daysOfMonth: Schema.Array(DayOfMonth)
     .annotate({
       description: "Days of the month the window is active on. Empty or unset means every day.",
+    })
+    .pipe(optional),
+  dates: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'Specific local calendar dates the window is active on, each "YYYY-MM-DD" or an inclusive range "YYYY-MM-DD/YYYY-MM-DD", read as calendar days in the window\'s timezone. Unset means every date. Use for one-off days a recurring day list cannot express, such as a holiday calendar defined once as a named window.',
+    })
+    .pipe(optional),
+  excludeDates: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'Local calendar dates the window is never active on, each "YYYY-MM-DD" or an inclusive range "YYYY-MM-DD/YYYY-MM-DD", in the window\'s timezone. Exclusions win over every other field — e.g. a weekday peak window with the provider\'s public holidays here stays off on those holidays.',
+    })
+    .pipe(optional),
+  excludeWindows: Schema.Array(WindowName)
+    .annotate({
+      description:
+        "Names of windows defined in experimental.model_route_windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion.",
     })
     .pipe(optional),
   start: Schema.String.annotate({
@@ -323,8 +343,6 @@ const RouteID = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]
 
 export const Info = Schema.Record(RouteID, Route).annotate({ identifier: "Config.ModelRoutes" })
 export type Info = typeof Info.Type
-
-const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/))
 
 /** Named, reusable time windows, defined once and referenced by schedules and target gates.
  * Windows belong to the meter, not the model: `deepseek-peak` is defined here a single time and

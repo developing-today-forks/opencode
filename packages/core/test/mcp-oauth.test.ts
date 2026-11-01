@@ -594,4 +594,118 @@ describe("MCP OAuth", () => {
       expect(credential.expires).toBeLessThanOrEqual(Date.now() + 3600 * 1000)
     })
   })
+
+  describe("configured discovery bounds", () => {
+    const configured = (auth_server_metadata_url: string): typeof ConfigMCP.Remote.Type =>
+      new ConfigMCP.Remote({
+        type: "remote",
+        url: "https://example.com/mcp",
+        oauth: { client_id: "client", auth_server_metadata_url },
+      })
+
+    const asError = (result: unknown): Error => {
+      if (!(result instanceof Error)) throw new Error(`Expected a failed discovery, got ${String(result)}`)
+      return result
+    }
+
+    test("discovers a small configured metadata document", async () => {
+      const server = Bun.serve({
+        port: 0,
+        fetch() {
+          return Response.json({
+            issuer: "https://issuer.example.com",
+            authorization_endpoint: "https://issuer.example.com/authorize",
+            token_endpoint: "https://issuer.example.com/token",
+            response_types_supported: ["code"],
+          })
+        },
+      })
+      try {
+        const discovery = await McpOAuth.configuredDiscovery({
+          config: configured(`${server.url.origin}/.well-known/oauth-authorization-server`),
+          fetchFn: fetch,
+        })
+        expect(discovery?.authorizationServerUrl).toBe("https://issuer.example.com")
+      } finally {
+        server.stop(true)
+      }
+    })
+
+    test("rejects an over-cap declared content length", async () => {
+      // No local server reliably preserves a mismatched content-length header through the real
+      // fetch stack, so pin the declared-length check above the small fixture without a socket:
+      // the capped reader refuses the body before consuming it.
+      const metadata = Response.json({
+        issuer: "https://issuer.example.com",
+        authorization_endpoint: "https://issuer.example.com/authorize",
+        token_endpoint: "https://issuer.example.com/token",
+        response_types_supported: ["code"],
+      })
+      const plain = new Response(metadata.body, {
+        status: metadata.status,
+        statusText: metadata.statusText,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(McpOAuth.CONFIGURED_DISCOVERY_MAX_BYTES * 4),
+        },
+      })
+      expect(plain.headers.get("content-length")).toBe(String(McpOAuth.CONFIGURED_DISCOVERY_MAX_BYTES * 4))
+      // Belt and suspenders: the socket stack may normalize a mismatched content-length, so assert
+      // the constructed header here to prove this case actually exercises the declared-length path.
+      const error = asError(
+        await McpOAuth.configuredDiscovery({
+          config: configured("https://issuer.example.com/.well-known/oauth-authorization-server"),
+          fetchFn: async () => plain,
+        }).catch((error: unknown) => error as Error),
+      )
+      expect(error).toBeInstanceOf(Error)
+      expect(error.message).toContain(`Response body exceeded ${McpOAuth.CONFIGURED_DISCOVERY_MAX_BYTES} bytes`)
+      expect(error.message).toContain("https://issuer.example.com")
+    })
+
+    test("rejects an over-cap streamed body", async () => {
+      const server = Bun.serve({
+        port: 0,
+        fetch() {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new Uint8Array(40 * 1024))
+                controller.enqueue(new Uint8Array(40 * 1024))
+              },
+            }),
+          )
+        },
+      })
+      try {
+        const url = `${server.url.origin}/metadata`
+        const error = asError(
+          await McpOAuth.configuredDiscovery({ config: configured(url), fetchFn: fetch }).catch(
+            (error: unknown) => error,
+          ),
+        )
+        expect(error.message).toContain(`Response body exceeded ${McpOAuth.CONFIGURED_DISCOVERY_MAX_BYTES} bytes`)
+        expect(error.message).toContain(server.url.origin)
+      } finally {
+        server.stop(true)
+      }
+    })
+
+    test("fails instead of hanging on a silent endpoint", async () => {
+      const server = Bun.serve({ port: 0, fetch: () => new Promise(() => {}) })
+      try {
+        const url = `${server.url.origin}/metadata`
+        const error = asError(
+          await McpOAuth.configuredDiscovery({ config: configured(url), fetchFn: fetch, timeoutMs: 50 }).catch(
+            (error: unknown) => error,
+          ),
+        )
+        expect(error.message).toContain(
+          `Timeout trying to load OAuth authorization server metadata from ${server.url.origin}`,
+        )
+      } finally {
+        server.stop(true)
+      }
+    })
+  })
 })

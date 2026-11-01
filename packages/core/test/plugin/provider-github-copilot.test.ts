@@ -18,6 +18,7 @@ import {
   deviceIntervalMs,
   discoverCopilotApiEndpoint,
   GithubCopilotPlugin,
+  oauthMaxResponseBytes,
   slowDownWaitMs,
   utilityTitle,
   utilityTitleMaxResponseBytes,
@@ -131,6 +132,55 @@ describe("GithubCopilotPlugin", () => {
         fetch: async () => new Response("nope", { status: 500 }),
       }).pipe(Effect.flip)
       expect(String(error)).toContain("500")
+    }),
+  )
+
+  it.live("fails plan endpoint discovery on a declared oversized response before reading it (#1026)", () =>
+    Effect.gen(function* () {
+      let bodyRead = false
+      const error = yield* discoverCopilotApiEndpoint({
+        token: "token",
+        app: App.make({ name: "test", version: "1.2.3", channel: "beta" }),
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("small body"))
+              },
+              pull(controller) {
+                bodyRead = true
+                controller.close()
+              },
+            }),
+            { headers: { "content-length": String(oauthMaxResponseBytes + 1) } },
+          ),
+      }).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
+      expect(bodyRead).toBe(false)
+    }),
+  )
+
+  it.live("fails plan endpoint discovery on a streamed oversized response with no declared length (#1026)", () =>
+    Effect.gen(function* () {
+      const chunkBytes = oauthMaxResponseBytes / 2
+      const totalChunks = 8
+      let pulled = 0
+      const error = yield* discoverCopilotApiEndpoint({
+        token: "token",
+        app: App.make({ name: "test", version: "1.2.3", channel: "beta" }),
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              pull(controller) {
+                if (pulled === totalChunks) return controller.close()
+                pulled++
+                controller.enqueue(new Uint8Array(chunkBytes))
+              },
+            }),
+          ),
+      }).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
+      expect(pulled).toBeLessThan(totalChunks)
     }),
   )
 

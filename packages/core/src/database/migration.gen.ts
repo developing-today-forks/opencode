@@ -58,6 +58,8 @@ import m55 from "./migration/20261016221426_messaging.js"
 import m56 from "./migration/20261025175023_session_subagent_policy.js"
 import m57 from "./migration/20261028203055_route_attempt_continuation.js"
 import m58 from "./migration/20261030055406_blushing_adam_destine.js"
+import m59 from "./migration/20261031054328_route_health_credential.js"
+import m60 from "./migration/20261031233710_route_attempt_credential.js"
 
 export const migrations = [
   m00,
@@ -119,4 +121,6 @@ export const migrations = [
   m56,
   m57,
   m58,
+  m59,
+  m60,
 ] satisfies DatabaseMigration.Migration[]

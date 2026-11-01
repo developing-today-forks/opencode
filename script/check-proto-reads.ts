@@ -11,6 +11,10 @@
  * the two sweep patterns pinned on #833 —
  *   P-A: an uppercase plain-object table read by a variable key
  *   P-C: a bracket read with a `??` fallback (the most dangerous shape)
+ *   P-D: a bracket read whose key is a computed expression (contains a
+ *        call) with a `??` fallback — P-C's bracket shape requires a plain
+ *        dotted key, so `values[key.trim()] ?? fallback` evaded both
+ *        patterns until #1086
  * — and requires every hit to be listed in
  * script/check-proto-reads.allowlist.txt with its disposition (guarded at
  * the site, safe by construction with the reason, or tracked by an issue).
@@ -27,7 +31,7 @@ import { join } from "node:path"
 export const SCAN_ROOT = "packages/core/src"
 export const ALLOWLIST_PATH = "script/check-proto-reads.allowlist.txt"
 
-export const PATTERNS: RegExp[] = [/\b[A-Z][A-Z_0-9]{2,}\[[a-zA-Z_]/, /\[[a-zA-Z_.]+\] \?\?/]
+export const PATTERNS: RegExp[] = [/\b[A-Z][A-Z_0-9]{2,}\[[a-zA-Z_]/, /\[[a-zA-Z_.]+\] \?\?/, /\[[^\]]*\([^\]]*\] \?\?/]
 
 export interface Hit {
   readonly file: string
@@ -47,25 +51,46 @@ export function scanSource(file: string, source: string): Hit[] {
   return hits
 }
 
-/** Parse the allowlist: `file :: exact trimmed line :: disposition` per line. */
-export function parseAllowlist(source: string): Map<string, string> {
-  const entries = new Map<string, string>()
+/**
+ * Parse the allowlist: `file :: exact trimmed line :: disposition` per line.
+ * Entries are occurrence-aware (#1086): the value is the list of dispositions
+ * for the key, so N identical lines in a file need N entries — one entry no
+ * longer silently covers a copy-pasted duplicate line.
+ */
+export function parseAllowlist(source: string): Map<string, string[]> {
+  const entries = new Map<string, string[]>()
   for (const raw of source.split("\n")) {
     const line = raw.trim()
     if (!line || line.startsWith("#")) continue
     const parts = line.split(" :: ")
     if (parts.length < 3) throw new Error(`Malformed allowlist line (want file :: line :: disposition): ${line}`)
-    entries.set(hitKey(parts[0], parts[1]), parts.slice(2).join(" :: "))
+    const key = hitKey(parts[0], parts[1])
+    entries.set(key, [...(entries.get(key) ?? []), parts.slice(2).join(" :: ")])
   }
   return entries
 }
 
-export const unlistedHits = (hits: Hit[], allowlist: Map<string, string>) =>
-  hits.filter((hit) => !allowlist.has(hitKey(hit.file, hit.text)))
+export const unlistedHits = (hits: Hit[], allowlist: Map<string, string[]>) => {
+  const seen = new Map<string, number>()
+  return hits.filter((hit) => {
+    const key = hitKey(hit.file, hit.text)
+    const occurrence = (seen.get(key) ?? 0) + 1
+    seen.set(key, occurrence)
+    return occurrence > (allowlist.get(key)?.length ?? 0)
+  })
+}
 
-export const staleEntries = (hits: Hit[], allowlist: Map<string, string>) => {
-  const keys = new Set(hits.map((hit) => hitKey(hit.file, hit.text)))
-  return [...allowlist.keys()].filter((key) => !keys.has(key))
+export const staleEntries = (hits: Hit[], allowlist: Map<string, string[]>) => {
+  const counts = new Map<string, number>()
+  for (const hit of hits) {
+    const key = hitKey(hit.file, hit.text)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const stale: string[] = []
+  for (const [key, dispositions] of allowlist) {
+    for (let excess = dispositions.length - (counts.get(key) ?? 0); excess > 0; excess--) stale.push(key)
+  }
+  return stale
 }
 
 function collect(root: string, dir: string, hits: Hit[]) {

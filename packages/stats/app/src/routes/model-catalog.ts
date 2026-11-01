@@ -1,4 +1,5 @@
 import { STEALTH_MODELS, statModel } from "@opencode/stats-core/domain/model-normalization"
+import { readCatalogResponse } from "@opencode/stats-core/domain/catalog-response"
 import { query } from "@solidjs/router"
 
 export const modelCatalogSourceUrl = "https://models.opencode.ai/catalog.json"
@@ -63,6 +64,7 @@ export type ModelCatalog = {
 }
 
 const catalogTtlMs = 5 * 60 * 1000
+const CATALOG_FETCH_TIMEOUT_MS = 30_000
 let cachedCatalog: { expiresAt: number; value: Promise<ModelCatalog> } | undefined
 
 // The catalog is about 11 MB of JSON to fetch and parse and rarely changes, so share it across requests.
@@ -349,14 +351,16 @@ function readCatalogLabDescriptions(...payloads: unknown[]) {
 }
 
 async function fetchCatalogPayload(url: string) {
-  return fetch(url)
-    .then((response): Promise<unknown> => (response.ok ? (response.json() as Promise<unknown>) : Promise.resolve()))
+  const signal = AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
+  return fetch(url, { signal })
+    .then(async (response): Promise<unknown> => (response.ok ? JSON.parse(await readCatalogResponse(response, signal)) : undefined))
     .catch(() => undefined)
 }
 
 async function fetchLabCatalogPayload(url: string) {
-  return fetch(url)
-    .then((response) => (response.ok ? response.text() : Promise.resolve("")))
+  const signal = AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
+  return fetch(url, { signal })
+    .then((response) => (response.ok ? readCatalogResponse(response, signal) : Promise.resolve("")))
     .then(readLabSearchIndex)
     .catch(() => undefined)
 }

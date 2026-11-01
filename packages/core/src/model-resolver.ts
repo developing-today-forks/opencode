@@ -17,6 +17,10 @@ import { ModelAlias } from "./model-alias.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
+import { ModelPlan } from "./model-plan.js"
+import { ModelUsage } from "./model-usage.js"
+import { QuotaSnapshot } from "./quota-snapshot.js"
+import { Global } from "@opencode/util/global"
 import { ownValue } from "./util/record.js"
 
 export class VariantUnavailableError extends Schema.TaggedError<VariantUnavailableError>()(
@@ -141,6 +145,11 @@ export interface Resolved {
   readonly transport?: Provider.Transport
   /** Milliseconds without streamed data before a WebSocket exchange fails; `false` disables the limit. */
   readonly chunkTimeout?: number | false
+  /** The stored credential that served this resolution, captured by load() from the connection it
+   * built the request from (#6): present on direct resolutions as well as routed ones, so attempt
+   * records attribute usage to the credential that actually served (#1106). Absent when an env
+   * connection served. For routed resolutions it matches `routing.credentialID`. */
+  readonly servingCredentialID?: Credential.ID
   /** Selection and health data for a configured OpenCode model route. */
   readonly routing?: {
     readonly routeID: ID
@@ -417,6 +426,74 @@ export const resolveModel = (
 
 export const hasPackage = (model: Info) => Boolean(model.package) || ModelRoute.definition(model) !== undefined
 
+const refreshQuotaGate = (
+  targets: readonly Model.Ref[],
+  credentialByProvider: Map<string, Credential.ID>,
+  dataDir: string | undefined,
+  now: number,
+) =>
+  Effect.gen(function* () {
+    if (!ModelRoute.shouldFeedQuota(now)) return
+    let plans: readonly ModelPlan.Plan[] = []
+    try {
+      plans = ModelPlan.readStore(dataDir).plans
+    } catch {
+      return
+    }
+    const targetProviders = new Set<string>(targets.map((target) => target.providerID))
+    const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID))
+    if (relevantPlans.length === 0) return
+
+    const windows = relevantPlans.flatMap((plan) =>
+      plan.quotas.filter((window) => window.windowHours !== undefined).map((window) => ({ plan, window })),
+    )
+    if (windows.length === 0) return
+
+    yield* ModelRouteLog.withDb((db) =>
+      Effect.gen(function* () {
+        const rowsByWindow = new Map<string, readonly (ModelUsage.TargetRow & { credentialID: string | null })[]>()
+        for (const { plan, window } of windows) {
+          if (window.windowHours === undefined) continue
+          const key = `${plan.id}:${window.name}`
+          if (rowsByWindow.has(key)) continue
+          rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, now - window.windowHours * 3_600_000))
+        }
+        for (const target of targets) {
+          const credentialID = credentialByProvider.get(target.providerID)
+          // Snapshots stay plan/provider-scoped, but the totals they are derived from are scoped
+          // to what they will gate (#1106): a credential's snapshot sums only that credential's
+          // rows, so one credential's usage can never mark another known-full. Unattributed rows
+          // (credentialID null: env-served, or recorded before the column existed) never feed a
+          // credential's totals; they feed only the provider scope, whose totals keep the
+          // provider-wide sum this gate always used.
+          const snapshots = QuotaSnapshot.deriveAll(
+            relevantPlans.filter((plan) => plan.providerID === target.providerID),
+            (plan, window) =>
+              ModelUsage.sum(
+                (rowsByWindow.get(`${plan.id}:${window.name}`) ?? []).filter(
+                  (row) =>
+                    row.providerID === plan.providerID &&
+                    (credentialID === undefined || row.credentialID === credentialID),
+                ),
+              ),
+            now,
+            { now },
+          )
+          if (snapshots.length === 0) continue
+          const fullSnapshot = snapshots
+            .filter((s) => QuotaSnapshot.isKnownFull(s, now))
+            .sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
+          const snapshot = fullSnapshot ?? snapshots[0]
+          if (credentialID) {
+            ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
+          } else {
+            ModelRoute.observeProviderQuota(target, snapshot, now)
+          }
+        }
+      }),
+    ).pipe(Effect.orDie)
+  })
+
 /** Resolves catalog selections into runtime models for the current Location. */
 export const layer = Layer.effect(
   Service,
@@ -427,6 +504,8 @@ export const layer = Layer.effect(
     const npm = yield* Npm.Service
     const aisdk = yield* AISDK.Service
     const config = yield* Effect.serviceOption(Config.Service)
+    const global = yield* Effect.serviceOption(Global.Service)
+    const dataDir = Option.match(global, { onNone: () => undefined, onSome: (g) => g.data })
     const load = Effect.fn("ModelResolver.resolveModel")(function* (
       selected: Info,
       variant?: VariantID,
@@ -469,6 +548,7 @@ export const layer = Layer.effect(
           compaction: runtimeInfo.settings?.compaction,
           transport: provider?.settings?.transport,
           chunkTimeout: Provider.timeout(provider?.settings?.chunkTimeout),
+          ...(connection?.type === "credential" ? { servingCredentialID: connection.id } : {}),
         } satisfies Resolved,
         // #6: the credential that actually served this load, captured from the same active
         // connection the request was built from. Callers must use this — never a snapshot of
@@ -504,6 +584,7 @@ export const layer = Layer.effect(
           )
           if (connection?.type === "credential") credentialByProvider.set(target.providerID, connection.id)
         }
+        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now)
         const makeResolved = (
           current: Resolved,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,

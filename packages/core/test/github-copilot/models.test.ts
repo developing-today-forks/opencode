@@ -200,3 +200,38 @@ test("does not roll calendar-invalid version dates over into release instants (#
     await server.stop(true)
   }
 })
+
+
+test("rejects an over-cap Copilot models body with a declared length (#1017)", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [], pad: "x".repeat(CopilotModels.modelsMaxResponseBytes) }),
+  })
+  try {
+    await expect(CopilotModels.load(server.url.origin, {})).rejects.toThrow(
+      `Copilot models response from ${server.url.origin}/models exceeded ${CopilotModels.modelsMaxResponseBytes} bytes`,
+    )
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test("rejects a streamed over-cap Copilot models body in flight (#1017)", async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(120)
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunk)
+    },
+  })
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(stream, { headers: { "content-type": "application/json" } }),
+  })
+  try {
+    await expect(CopilotModels.load(server.url.origin, {})).rejects.toThrow(
+      `Copilot models response from ${server.url.origin}/models exceeded ${CopilotModels.modelsMaxResponseBytes} bytes`,
+    )
+  } finally {
+    await server.stop(true)
+  }
+})

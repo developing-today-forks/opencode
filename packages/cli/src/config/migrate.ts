@@ -21,11 +21,21 @@ export const run = Effect.fn("cli.config.migrate")(function* (input: {
 }) {
   const fs = yield* FileSystem.FileSystem
   const persist = Effect.fnUntraced(function* (text: string, info: Info) {
-    const temp = `${input.file}.${process.pid}.${randomUUID()}.tmp`
+    // Match config.ts's write(): resolve through any symlink first (dotfiles
+    // setups) so the rename lands on the real file instead of replacing the
+    // link, and never widen an existing config's permissions (a read-only
+    // 0400 config stays read-only).
+    const destination = yield* fs.realPath(input.file).pipe(Effect.orElseSucceed(() => input.file))
+    const temp = `${destination}.${process.pid}.${randomUUID()}.tmp`
     const cause = yield* Effect.gen(function* () {
-      yield* fs.makeDirectory(path.dirname(input.file), { recursive: true })
-      yield* fs.writeFileString(temp, text, { mode: 0o600 })
-      yield* fs.rename(temp, input.file)
+      yield* fs.makeDirectory(path.dirname(destination), { recursive: true })
+      const existing = yield* fs.stat(destination).pipe(
+        Effect.map((info) => info.mode),
+        Effect.orElseSucceed(() => undefined),
+      )
+      const mode = existing !== undefined ? existing & 0o600 : 0o600
+      yield* fs.writeFileString(temp, text, { mode })
+      yield* fs.rename(temp, destination)
     }).pipe(
       Effect.as(undefined),
       Effect.catchCause((cause) => Effect.succeed(cause)),

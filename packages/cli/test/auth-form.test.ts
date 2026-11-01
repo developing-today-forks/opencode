@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { FormFields } from "@opencode/client"
+import { formNumberText } from "@opencode/tui/util/form"
 import { answerForm, validateText } from "../src/commands/handlers/auth/form"
 
 test("resolves hidden defaults without an interactive terminal", async () => {
@@ -36,6 +37,19 @@ test("validateText applies the strict decimal grammar to numeric answers (#844)"
   expect(validateText(rate, " ")).toBeUndefined()
   expect(validateText(rate, "0o17")).toBe("Expected a number")
   expect(validateText(rate, "1.5")).toBeUndefined()
+})
+
+test("renders exponent-notation defaults as plain-decimal text validateText accepts (#1065)", () => {
+  // The CLI auth form pre-fills a numeric default with formNumberText, the
+  // shared helper from the TUI form utils; the rendered text must pass the
+  // same validateText the prompt runs, while the raw exponent spelling
+  // a user might type stays rejected.
+  const rate = { type: "number", key: "rate", required: true } satisfies FormFields[number]
+  expect(formNumberText(1e-7)).toBe("0.0000001")
+  expect(formNumberText(1e21)).toBe("1000000000000000000000")
+  expect(validateText(rate, formNumberText(1e-7))).toBeUndefined()
+  expect(validateText(rate, formNumberText(1e21))).toBeUndefined()
+  expect(validateText(rate, "1e-7")).toBe("Expected a number")
 })
 
 test("parses typed answers and evaluates conditions in form order", async () => {

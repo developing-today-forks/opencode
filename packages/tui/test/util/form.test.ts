@@ -5,6 +5,7 @@ import {
   formDisplayValue,
   formInitialValues,
   formLabel,
+  formNumberText,
   formNumberValue,
   formRows,
   formSelected,
@@ -102,6 +103,26 @@ test("parses typed numeric answers with the strict decimal grammar (#844)", () =
   const optional = { key: "value", type: "number" } satisfies FormAnswerField
   expect(formValidateValue(optional, formNumberValue(""))).toBeUndefined()
   expect(formValidateValue(optional, formNumberValue("1.5"))).toBeUndefined()
+})
+
+test("renders numeric defaults in plain-decimal text the strict grammar accepts (#1065)", () => {
+  expect(formNumberText(1e-7)).toBe("0.0000001")
+  expect(formNumberText(1e21)).toBe("1000000000000000000000")
+  expect(formNumberText(-1.5e-7)).toBe("-0.00000015")
+  expect(formNumberText(42)).toBe("42")
+  expect(formNumberText(1.5)).toBe("1.5")
+  expect(formNumberText(0)).toBe("0")
+  // The pre-filled default confirms unchanged: rendering then parsing
+  // round-trips the original value and passes validation, in both the
+  // number and integer cases, while typed exponents stay rejected above.
+  const rate = { key: "value", type: "number", required: true } satisfies FormAnswerField
+  for (const value of [1e-7, 1e21, -2.5e21]) {
+    expect(formNumberValue(formNumberText(value))).toBe(value)
+    expect(formValidateValue(rate, formNumberValue(formNumberText(value)))).toBeUndefined()
+  }
+  const count = { key: "value", type: "integer", required: true } satisfies FormAnswerField
+  expect(formValidateValue(count, formNumberValue(formNumberText(1e21)))).toBeUndefined()
+  expect(formDisplayValue(rate, 1e-7, "")).toBe("0.0000001")
 })
 
 test("shares field classification, rows, selection, and display", () => {

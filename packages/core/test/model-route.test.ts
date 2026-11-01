@@ -224,6 +224,22 @@ describe("ModelRoute correlation and adjustments", () => {
     expect(ModelRoute.networkSuspect(40_000)).toBe(false)
   })
 
+  test("network-suspect undo also forgives the escalation count", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(model("openai", "a"), policy, 1_000, { network: true })
+    ModelRoute.failed(model("azure", "a"), policy, 2_000, { network: true })
+    ModelRoute.failed(model("anthropic", "a"), policy, 3_000, { network: true })
+    expect(ModelRoute.networkSuspect(3_000)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 3_000)).toBe(false)
+
+    // After the outage is forgiven, a later single genuine failure benches at the
+    // first-offence (1x) length, not doubled by the undone failure (#1034).
+    ModelRoute.failed(model("openai", "a"), policy, 40_000)
+    expect(ModelRoute.cooldownUntil(model("openai", "a"), 40_000)).toBe(100_000)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 99_999)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 100_000)).toBe(false)
+  })
+
   test("does not classify provider quota failures as a network outage", () => {
     ModelRoute.resetHealth()
     ModelRoute.failed(model("openai", "a"), policy, 1_000, { quota: true })
@@ -725,6 +741,27 @@ describe("ModelRoute scheduled weights", () => {
     expect(decoded?.nodes[0].schedules).toEqual([
       { window: always, match: { targets: ["p/a"] }, factor: 0.8 },
     ])
+    expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
+  })
+
+  test('a definition with date constraints survives the settings round trip', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const window = {
+      timezone: 'UTC',
+      dates: ['2026-12-25'],
+      excludeDates: ['2026-12-24'],
+      excludeWindows: ['holidays'],
+      excludedWindows: [{ dates: [today], timezone: 'UTC' }],
+    }
+    const built = definition([1, 1], [{ window, match: { targets: ['p/b'] }, factor: 10 }], [a, b])
+    const info = {
+      providerID: ModelRoute.PROVIDER_ID,
+      id: 'r',
+      settings: { [ModelRoute.SETTING]: built },
+    } as unknown as Parameters<typeof ModelRoute.definition>[0]
+    const decoded = ModelRoute.definition(info)
+    expect(decoded?.nodes[0].schedules).toEqual([{ window, match: { targets: ['p/b'] }, factor: 10 }])
+    // The resolved holiday exclusion is active today, so the rule stays out of force.
     expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
   })
 })

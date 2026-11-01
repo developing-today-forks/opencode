@@ -10,6 +10,7 @@ import {
 import type { Entry } from "@opencode/schema/config"
 import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteSchedule } from "@opencode/core/model-route-schedule"
 import { Provider } from "@opencode/core/provider"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 
@@ -436,6 +437,43 @@ describe("named windows", () => {
     expect(messages).toHaveLength(1)
     expect(messages[0]).toContain('"bad"')
     expect(messages[0]).toContain("model_route_windows")
+  })
+
+  test("configuredWindows resolves excludeWindows and drops an unknown or cyclic reference with a warning (#821)", () => {
+    const entries = [
+      {
+        type: "document",
+        info: {
+          experimental: {
+            model_route_windows: {
+              "cn-holidays": { dates: ["2026-10-01"], timezone: "Asia/Shanghai" },
+              peak: {
+                daysOfWeek: [1, 2, 3, 4, 5],
+                start: "09:00",
+                end: "17:00",
+                timezone: "Asia/Shanghai",
+                excludeWindows: ["cn-holidays"],
+              },
+              broken: { excludeWindows: ["nope"] },
+              selfish: { excludeWindows: ["selfish"] },
+            },
+          },
+        },
+      },
+    ] as unknown as Entry[]
+    let parsed: ReturnType<typeof configuredWindows> | undefined
+    const messages = warnings(() => {
+      parsed = configuredWindows(entries)
+    })
+    expect(parsed?.has("cn-holidays")).toBe(true)
+    expect(parsed?.has("broken")).toBe(false)
+    expect(parsed?.has("selfish")).toBe(false)
+    expect(messages).toHaveLength(2)
+    // The resolved peak window is inactive on the named holiday and active on an ordinary weekday,
+    // judged with no registry at evaluation time.
+    const peak = parsed?.get("peak")!
+    expect(ModelRouteSchedule.active(peak, Date.UTC(2026, 9, 1, 2, 0))).toBe(false) // Thu 2026-10-01 10:00 Shanghai
+    expect(ModelRouteSchedule.active(peak, Date.UTC(2026, 9, 8, 2, 0))).toBe(true) // Thu 2026-10-08 10:00 Shanghai
   })
 
   test("a route referenced twice by one parent keeps both group nodes, sharing leaf indexes", () => {

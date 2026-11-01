@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "19272635-2391-40b6-8db6-c6943d1b2d28",
-  "prevIds": ["2d44615a-d376-47d0-bd31-b05ed305aeb1"],
+  "id": "bb94a60a-f0d3-4a7e-a33e-0212a658dc3f",
+  "prevIds": ["f985ec5e-4a2f-4e0e-b701-d55b545f132f"],
   "ddl": [
     {
       "name": "account_state",
@@ -1186,6 +1186,16 @@
     },
     {
       "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "credential_id",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
@@ -1601,6 +1611,16 @@
       "default": null,
       "generated": null,
       "name": "until",
+      "entityType": "columns",
+      "table": "route_health"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "credential_id",
       "entityType": "columns",
       "table": "route_health"
     },

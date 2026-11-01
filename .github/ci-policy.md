@@ -79,7 +79,12 @@ concurrency:
 ```
 
 Publish/release workflows extend the `run_id` keying to tag pushes and
-manual dispatches, so a release is never cancelled mid-publish.
+manual dispatches, so a release is never cancelled mid-publish. A
+publish/release workflow whose ONLY trigger is manual dispatch is the
+exception: its dispatches share one group keyed by workflow + ref with
+cancel-in-progress: false and queue: max, so dispatches serialize --
+never-cancelled must not mean never-queued when concurrent runs would
+compute the same release (release-github-action, #1035).
 Issue/PR management is NOT event-triggered: `repo-sweeper.yml` runs
 every 15 minutes (`*/15 * * * *`, single live run, cancel-in-progress)
 and performs all management duties in one pass — contributor labels,

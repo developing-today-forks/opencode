@@ -250,19 +250,31 @@ const warnDroppedWindow = (name: string, site: string, reason: string) =>
 /** The named windows defined in config, parsed once so schedules and target gates can reference
  * them by name. An entry with an unreadable window is dropped rather than applied. */
 export function configuredWindows(entries: readonly Entry[]) {
-  const windows = new Map<string, ModelRouteSchedule.Window>()
+  const parsed = new Map<string, ModelRouteSchedule.Window>()
   entries
     .filter((entry): entry is Document => entry.type === "document")
     .forEach((entry) => {
       Object.entries(entry.info.experimental?.model_route_windows ?? {}).forEach(([name, window]) => {
-        const parsed = ModelRouteSchedule.parse(window)
-        if (parsed) {
-          windows.set(name, parsed)
+        const read = ModelRouteSchedule.parse(window)
+        if (read) {
+          parsed.set(name, read)
           return
         }
         warnDroppedWindow(name, "experimental.model_route_windows", "is defined but cannot be parsed")
       })
     })
+  // Second pass: resolve each window's excludeWindows against the full set (its own name is on
+  // the resolution path, so a self-reference is a cycle). An unknown name or a cycle drops the
+  // window with a warning, like an unparseable one — never apply it without its exclusion.
+  const windows = new Map<string, ModelRouteSchedule.Window>()
+  parsed.forEach((window, name) => {
+    const resolved = ModelRouteSchedule.resolveExclusions(window, parsed, new Set([name]))
+    if (resolved) {
+      windows.set(name, resolved)
+      return
+    }
+    warnDroppedWindow(name, "experimental.model_route_windows", "names an unknown or cyclic excludeWindows window")
+  })
   return windows
 }
 
@@ -273,7 +285,15 @@ const resolveWindow = (
   windows: ReadonlyMap<string, ModelRouteSchedule.Window>,
   site: string,
 ): ModelRouteSchedule.Window | undefined => {
-  if (typeof when !== "string") return ModelRouteSchedule.parse(when)
+  if (typeof when !== "string") {
+    const parsed = ModelRouteSchedule.parse(when)
+    if (!parsed) return undefined
+    if (!parsed.excludeWindows?.length) return parsed
+    const resolved = ModelRouteSchedule.resolveExclusions(parsed, windows)
+    if (!resolved)
+      warnDroppedWindow(parsed.excludeWindows.join(", "), site, "names an unknown or cyclic excludeWindows window")
+    return resolved
+  }
   const window = windows.get(when)
   if (!window) warnDroppedWindow(when, site, "is not a defined window")
   return window

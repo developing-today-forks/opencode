@@ -235,3 +235,142 @@ describe("ModelRoute quota-failure gate (#984)", () => {
     expect(ModelRoute.activeAdjustments(100_000)).toHaveLength(0)
   })
 })
+
+describe("ModelRoute proactive provider quota gate (#984)", () => {
+  const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
+
+  test("known-full arms the skip and skipped() honours it", () => {
+    ModelRoute.resetHealth()
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    expect(ModelRoute.skipped(plain, 10_000)).toBe(true)
+    expect(ModelRoute.skipped(plain, 99_999)).toBe(true)
+    expect(ModelRoute.skipped(plain, 100_000)).toBe(false)
+
+    const kinds = events.flatMap((event) => (event.kind === "health" ? [event.row.kind] : []))
+    expect(kinds).toContain("quota-gated")
+  })
+
+  test("a passed reset re-admits and a fresher good read clears the skip", () => {
+    ModelRoute.resetHealth()
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(true)
+
+    // Fresher below-100% snapshot re-admits immediately
+    ModelRoute.observeProviderQuota(
+      plain,
+      snap({ percent: 40, remaining: 60, observedAt: 20_000, resetAt: 100_000 }),
+      20_000,
+    )
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(false)
+    const kinds = events.flatMap((event) => (event.kind === "health" ? [event.row.kind] : []))
+    expect(kinds).toContain("quota-readmitted")
+
+    // Out-of-order older reading does not rewind
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 30_000, resetAt: 100_000 }), 30_000)
+    expect(ModelRoute.skipped(plain, 30_000)).toBe(true)
+    ModelRoute.observeProviderQuota(
+      plain,
+      snap({ percent: 40, remaining: 60, observedAt: 25_000, resetAt: 100_000 }),
+      30_000,
+    )
+    expect(ModelRoute.skipped(plain, 30_000)).toBe(true)
+  })
+
+  test("an unknown or stale snapshot never arms, and never clears a known gate", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(plain, snap({ percent: null, remaining: null, observedAt: 10_000 }), 10_000)
+    expect(ModelRoute.skipped(plain, 10_000)).toBe(false)
+
+    ModelRoute.observeProviderQuota(plain, snap({ stale: true, observedAt: 10_000 }), 10_000)
+    expect(ModelRoute.skipped(plain, 10_000)).toBe(false)
+
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    expect(ModelRoute.skipped(plain, 10_000)).toBe(true)
+
+    // Stale snapshot never clears the gate
+    ModelRoute.observeProviderQuota(plain, snap({ stale: true, observedAt: 20_000 }), 20_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(true)
+  })
+
+  test("reset capping matches observeQuotaFailure: fallback for null reset and capped at 30 days", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: null }), 10_000)
+    const activeFallback = ModelRoute.activeAdjustments(10_000)
+    expect(activeFallback[0]?.until).toBe(10_000 + 30 * 60_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 10_000 + 90 * 86_400_000 }), 10_000)
+    const activeCapped = ModelRoute.activeAdjustments(10_000)
+    expect(activeCapped[0]?.until).toBe(10_000 + 30 * 86_400_000)
+  })
+})
+
+describe("ModelRoute health credential column (#1055)", () => {
+  const healthRows = (events: ModelRouteLog.Event[]) =>
+    events.flatMap((event) => (event.kind === "health" ? [event.row] : []))
+
+  test("credential-scoped rows carry the credential column", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+
+    ModelRoute.failed(target, policy, 10_000, { quota: true }, "cred-lab")
+    ModelRoute.observeCredentialQuota(target, "cred-lab", snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    const spent = { at: 10_000, remaining: { requests: "0" }, reset: { requests: "45s" } }
+    ModelRoute.observeRateLimit(target, spent, 10_000, "cred-lab")
+    ModelRoute.clearRateLimit(target, "cred-lab", 10_000)
+
+    const rows = healthRows(events)
+    // bench cooldown-start, quota-gated, rate-limit-window, rate-limit release.
+    expect(rows).toHaveLength(4)
+    for (const row of rows) expect(row.credential_id).toBe("cred-lab")
+    expect(rows.map((row) => row.kind).sort()).toEqual(
+      ["cooldown-start", "quota-gated", "rate-limit-window", "rate-limit-window"].sort(),
+    )
+  })
+
+  test("credential gate expiry and re-admission carry the credential column", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+
+    ModelRoute.observeCredentialQuota(target, "cred-lab", snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    // A fresher good read re-admits before the reset.
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-lab",
+      snap({ percent: 40, remaining: 60, observedAt: 20_000 }),
+      20_000,
+    )
+
+    const rows = healthRows(events)
+    expect(rows.map((row) => row.kind)).toEqual(["quota-gated", "quota-readmitted"])
+    for (const row of rows) expect(row.credential_id).toBe("cred-lab")
+  })
+
+  test("target-scoped and provider-quota rows leave the credential column empty", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    const plain = ModelRoute.ref({ providerID: "no-cred-pass", model: "claude-sonnet-5" })
+
+    ModelRoute.failed(target, policy, 10_000, { quota: true })
+    ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 100_000 }), 10_000)
+    // Passing the reset re-admits the provider.
+    ModelRoute.observeProviderQuota(
+      plain,
+      snap({ percent: 40, remaining: 60, observedAt: 20_000, resetAt: 100_000 }),
+      20_000,
+    )
+
+    const rows = healthRows(events)
+    expect(rows.map((row) => row.kind)).toEqual(["cooldown-start", "quota-gated", "quota-readmitted"])
+    for (const row of rows) expect(row.credential_id).toBeUndefined()
+    // The provider-quota rows name the provider in the reason: a distinct dimension that
+    // must never be read back as a credential.
+    expect(rows[1]?.reason).toContain("provider:no-cred-pass")
+  })
+})

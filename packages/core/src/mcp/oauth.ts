@@ -23,6 +23,20 @@ import { Credential } from "../credential.js"
 import { OauthCallbackPage } from "../oauth/page.js"
 import type { Integration } from "../integration.js"
 import { ErrorSummary } from "../util/error-summary.js"
+import { readBoundedResponseText } from "../tool/http-body.js"
+
+/**
+ * Timeout in milliseconds for fetching configured OAuth authorization server metadata.
+ * Sized in line with sibling provider fetches to prevent silent endpoints from hanging connect/authorize.
+ */
+export const CONFIGURED_DISCOVERY_TIMEOUT_MS = 5_000
+
+/**
+ * Maximum response body size in bytes for configured OAuth authorization server metadata.
+ * RFC 8414 authorization server and OpenID Connect discovery metadata documents are typically
+ * a few kilobytes; 64 KiB allows ample headroom while bounding memory usage against malicious endpoints.
+ */
+export const CONFIGURED_DISCOVERY_MAX_BYTES = 64 * 1024
 
 /** Client ID Metadata Document: servers that support CIMD accept this URL as the client_id without registration. */
 export const CLIENT_METADATA_URL = "https://opencode.ai/oauth/opencode/client.json"
@@ -107,12 +121,32 @@ export const loggedFetch = (fields: { readonly server: string; readonly director
 export const configuredDiscovery = async (input: {
   readonly config: typeof ConfigMCP.Remote.Type
   readonly fetchFn: FetchLike
+  readonly timeoutMs?: number
+  readonly maxBytes?: number
 }): Promise<OAuthDiscoveryState | undefined> => {
   const url = input.config.oauth ? input.config.oauth.auth_server_metadata_url : undefined
   if (!url) return undefined
-  const response = await input.fetchFn(url, { headers: { accept: "application/json" } })
-  if (!response.ok) throw new Error(`HTTP ${response.status} trying to load OAuth authorization server metadata`)
-  const body = await response.json()
+  const origin = URL.canParse(url) ? new URL(url).origin : url
+  const timeoutMs = input.timeoutMs ?? CONFIGURED_DISCOVERY_TIMEOUT_MS
+  const maxBytes = input.maxBytes ?? CONFIGURED_DISCOVERY_MAX_BYTES
+  const signal = AbortSignal.timeout(timeoutMs)
+  const onTimeout = (error: unknown) => {
+    if (signal.aborted || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")))
+      throw new Error(`Timeout trying to load OAuth authorization server metadata from ${origin}`, { cause: error })
+    throw error
+  }
+  const response = await input.fetchFn(url, { headers: { accept: "application/json" }, signal }).catch(onTimeout)
+  if (!response.ok)
+    throw new Error(`HTTP ${response.status} trying to load OAuth authorization server metadata from ${origin}`)
+  const text = await readBoundedResponseText(
+    response,
+    maxBytes,
+    () =>
+      new Error(
+        `Response body exceeded ${maxBytes} bytes trying to load OAuth authorization server metadata from ${origin}`,
+      ),
+  ).catch(onTimeout)
+  const body = JSON.parse(text)
   const metadata = OAuthMetadataSchema.safeParse(body).data ?? OpenIdProviderDiscoveryMetadataSchema.parse(body)
   return {
     authorizationServerUrl: metadata.issuer,

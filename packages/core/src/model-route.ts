@@ -48,12 +48,30 @@ const ScheduleMatch = Schema.Struct({
   routes: Schema.Array(Schema.String).pipe(optional),
 })
 
-const ScheduleWindow = Schema.Struct({
+export interface ScheduleWindow {
+  readonly daysOfWeek?: readonly number[]
+  readonly daysOfMonth?: readonly number[]
+  readonly start?: string
+  readonly end?: string
+  readonly timezone?: string
+  readonly dates?: readonly string[]
+  readonly excludeDates?: readonly string[]
+  readonly excludeWindows?: readonly string[]
+  readonly excludedWindows?: readonly ScheduleWindow[]
+  readonly from?: number
+  readonly until?: number
+}
+
+const ScheduleWindow: Schema.Codec<ScheduleWindow, ScheduleWindow, never, never> = Schema.Struct({
   daysOfWeek: Schema.Array(Schema.Finite).pipe(optional),
   daysOfMonth: Schema.Array(Schema.Finite).pipe(optional),
   start: Schema.String.pipe(optional),
   end: Schema.String.pipe(optional),
   timezone: Schema.String.pipe(optional),
+  dates: Schema.Array(Schema.String).pipe(optional),
+  excludeDates: Schema.Array(Schema.String).pipe(optional),
+  excludeWindows: Schema.Array(Schema.String).pipe(optional),
+  excludedWindows: Schema.Array(Schema.suspend(() => ScheduleWindow)).pipe(optional),
   from: Schema.Finite.pipe(optional),
   until: Schema.Finite.pipe(optional),
 })
@@ -69,7 +87,6 @@ const WeightRule = Schema.Struct({
 })
 
 export type WeightRule = typeof WeightRule.Type
-export type ScheduleWindow = typeof ScheduleWindow.Type
 
 /** An eligibility gate on a child position, resolved at config load from a named window in
  * experimental.model_route_windows. The child is a candidate only while the window is active, or
@@ -260,10 +277,19 @@ const logHealth = (
     | "quota-readmitted",
   reason: string,
   until?: number,
+  credentialID?: string,
 ) =>
   ModelRouteLog.record({
     kind: "health",
-    row: { time: Date.now(), provider_id: target.providerID, model_id: target.id, kind, reason, until },
+    row: {
+      time: Date.now(),
+      provider_id: target.providerID,
+      model_id: target.id,
+      kind,
+      reason,
+      until,
+      ...(credentialID ? { credential_id: credentialID } : {}),
+    },
   })
 
 const recover = (
@@ -277,7 +303,7 @@ const recover = (
   state.samples = []
   // Credential expirations are tagged so restart replay ends that credential's restored
   // cooldown, never the target's (#870).
-  logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired")
+  logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired", undefined, credentialID)
 }
 
 // A provider-wide fault looks different from a model-specific one. When several models of the same
@@ -358,6 +384,7 @@ const bench = (
       credentialID ? ` credential:${credentialID}` : ""
     }`,
     state.cooldownUntil,
+    credentialID,
   )
 }
 
@@ -381,11 +408,16 @@ export const failed = (
   if (hint?.network && networkSuspect(now)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
     // shared the same local outage, so treating each provider as independently unhealthy is wrong.
+    // The escalation count is undone with the cooldown: a forgiven failure must not double the
+    // target's next bench (#1034).
     for (const failure of recentFailures) {
       const prior = health.get(failure.target) ?? credentialHealth.get(failure.target)
-      if (prior && prior.cooldownUntil > now) {
-        prior.cooldownUntil = 0
-        prior.samples = []
+      if (prior) {
+        if (prior.cooldownUntil > now) {
+          prior.cooldownUntil = 0
+          prior.samples = []
+        }
+        prior.consecutiveFailures = 0
       }
     }
     logHealth(target, "network-suspect", "transport failures across unrelated providers; target cooldowns cleared")
@@ -507,8 +539,57 @@ export const observeCredentialQuota = (
   const full = QuotaSnapshot.isKnownFull(snapshot, now)
   credentialQuota.set(credentialID, { snapshot, target, gated: full })
   if (full && !previous?.gated)
-    logHealth(target, "quota-gated", `credential:${credentialID} quota-known-full`, snapshot.resetAt ?? undefined)
-  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`)
+    logHealth(
+      target,
+      "quota-gated",
+      `credential:${credentialID} quota-known-full`,
+      snapshot.resetAt ?? undefined,
+      credentialID,
+    )
+  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+}
+
+const providerQuota = new Map<string, { snapshot: QuotaSnapshot.Snapshot; target: Model.Ref; gated: boolean }>()
+
+/** Feeds one provider's latest quota snapshot into the gate (for credential-less providers). */
+export const observeProviderQuota = (
+  target: Model.Ref,
+  snapshot: QuotaSnapshot.Snapshot,
+  now = Date.now(),
+) => {
+  const previous = providerQuota.get(target.providerID)
+  if (previous && !QuotaSnapshot.known(snapshot)) return
+  if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
+  const full = QuotaSnapshot.isKnownFull(snapshot, now)
+  providerQuota.set(target.providerID, { snapshot, target, gated: full })
+  if (full) {
+    const until = Math.min(snapshot.resetAt ?? now + QUOTA_GATE_FALLBACK_MS, now + QUOTA_GATE_MAX_MS)
+    addAdjustment({
+      id: `quota:${target.providerID}`,
+      match: `${target.providerID}/`,
+      action: "skip",
+      until,
+      note: "quota exhausted (proactive snapshot); held until the stated reset",
+    })
+    if (!previous?.gated)
+      logHealth(target, "quota-gated", `provider:${target.providerID} quota-known-full`, snapshot.resetAt ?? undefined)
+  }
+  if (!full && previous?.gated) {
+    removeAdjustment(`quota:${target.providerID}`)
+    logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
+  }
+}
+
+let lastQuotaFeedAt = 0
+
+export const resetQuotaFeed = () => {
+  lastQuotaFeedAt = 0
+}
+
+export const shouldFeedQuota = (now = Date.now(), ttlMs = 60_000) => {
+  if (now - lastQuotaFeedAt < ttlMs) return false
+  lastQuotaFeedAt = now
+  return true
 }
 
 /** The longest a single exhaustion reading may hold a gate: a stated reset further out than
@@ -578,7 +659,7 @@ export const credentialQuotaBlocked = (
   }
   if (state.gated) {
     state.gated = false
-    logHealth(state.target, "quota-readmitted", `credential:${credentialID}`)
+    logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
   }
   return undefined
 }
@@ -624,9 +705,11 @@ export const resetHealth = () => {
   health.clear()
   credentialHealth.clear()
   credentialQuota.clear()
+  providerQuota.clear()
   quotaEvents.clear()
   continuity.clear()
   recentFailures.length = 0
+  lastQuotaFeedAt = 0
 }
 
 /** Per-route selection state: rotation counters for round-robin, sticky session choices, both
@@ -847,6 +930,7 @@ export const observeRateLimit = (
       "rate-limit-window",
       credentialID ? `provider-reported credential:${credentialID}` : "provider-reported",
       until,
+      credentialID,
     )
 }
 
@@ -864,6 +948,7 @@ export const clearRateLimit = (target: Model.Ref, credentialID?: string, now = D
       "rate-limit-window",
       credentialID ? `provider-released credential:${credentialID}` : "provider-released",
       0,
+      credentialID,
     )
 }
 

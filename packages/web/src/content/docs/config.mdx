@@ -716,9 +716,35 @@ Every field is optional:
 
 - `daysOfWeek` - weekday names (`"mon"`, `"monday"`, and so on) or numbers from 0 (Sunday) to 6 (Saturday). Omit the field to mean every day. An empty array is not the same as omitting it: an empty array makes the whole window invalid, so any schedule or gate that uses it is dropped.
 - `daysOfMonth` - days from 1 to 31, or `-1` for the last day of the month. Omit the field to mean every day; an empty array invalidates the window, as above. When both day fields are set, both have to match, so `daysOfMonth: [1, 2, 3, 4, 5, 6, 7]` with `daysOfWeek: ["mon"]` is the first Monday of the month.
+- `dates` - specific local calendar dates the window is active on: `"YYYY-MM-DD"` entries or inclusive `"YYYY-MM-DD/YYYY-MM-DD"` ranges, read in the window's timezone. Omit the field to mean every date; an unreadable entry invalidates the window, as above. When combined with the day fields, every set field has to match.
+- `excludeDates` - dates (same entry shape as `dates`) on which the window is never active. Exclusions win over every other field.
+- `excludeWindows` - names of other windows from `model_route_windows`; while any named window is active, this window is not. An unknown name or a cyclic reference drops the window instead of applying it unexcluded - check window names carefully; configuration emits a warning for unknown or cyclic references.
 - `start` and `end` - the daily bounds as `"HH:mm"` local time. `end` is exclusive. Unset means the start or end of the day, and a `start` later than the `end` runs past midnight into the following morning.
 - `timezone` - an IANA timezone such as `"America/Chicago"`. Unset means the host's local timezone.
 - `from` and `until` - epoch milliseconds before or after which the window never applies.
+
+A dates-only window makes a reusable holiday calendar: no day or time fields, just `dates`. Reference it from a peak window with `excludeWindows` so the peak rule suspends on holidays - each window is still judged in its own timezone:
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "experimental": {
+    "model_route_windows": {
+      "cn-holidays": {
+        "dates": ["2026-10-01/2026-10-07"],
+        "timezone": "Asia/Shanghai"
+      },
+      "deepseek-peak": {
+        "daysOfWeek": ["mon", "tue", "wed", "thu", "fri"],
+        "start": "06:00",
+        "end": "10:00",
+        "timezone": "UTC",
+        "excludeWindows": ["cn-holidays"]
+      }
+    }
+  }
+}
+```
 
 A target can gate its eligibility on a window with its `window` option, either as a window name or as an object with `invert`:
 

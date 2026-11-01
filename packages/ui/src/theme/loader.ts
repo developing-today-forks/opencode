@@ -79,6 +79,54 @@ html[data-theme="${themeId}"] {
 `
 }
 
+/**
+ * Size cap for a theme loaded from a URL. Bundled themes are a few KB of
+ * token JSON (the largest, oc-2, is ~24 KB); 1 MiB leaves generous headroom
+ * while keeping a huge or hostile response from buffering unbounded into
+ * the renderer (#1061). This mirrors core's `readBoundedResponseText`
+ * (`packages/core/src/tool/http-body.ts`), which ui cannot import under
+ * the repo's dependency layering.
+ */
+export const themeMaxResponseBytes = 1024 * 1024
+
+const readBoundedThemeText = async (response: Response, url: string): Promise<string> => {
+  const tooLarge = () => new Error(`Theme response from ${url} exceeded ${themeMaxResponseBytes} bytes`)
+  const contentLength = response.headers.get("content-length")
+  const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+  const declaredSize =
+    parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
+  if (declaredSize !== undefined && declaredSize > themeMaxResponseBytes) {
+    await response.body?.cancel().catch(() => undefined)
+    throw tooLarge()
+  }
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > themeMaxResponseBytes) throw tooLarge()
+    return text
+  }
+  const reader = response.body.getReader()
+  const chunks: Array<Uint8Array> = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value || value.byteLength === 0) continue
+    if (size + value.byteLength > themeMaxResponseBytes) {
+      await reader.cancel().catch(() => undefined)
+      throw tooLarge()
+    }
+    chunks.push(value)
+    size += value.byteLength
+  }
+  const body = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(body)
+}
+
 export async function loadThemeFromUrl(url: string): Promise<DesktopTheme> {
   const response = await fetch(url)
 
@@ -86,7 +134,7 @@ export async function loadThemeFromUrl(url: string): Promise<DesktopTheme> {
     throw new Error(`Failed to load theme from ${url}: ${response.statusText}`)
   }
 
-  return response.json()
+  return JSON.parse(await readBoundedThemeText(response, url))
 }
 
 export function getActiveTheme(): DesktopTheme | null {

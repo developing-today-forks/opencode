@@ -39,6 +39,7 @@ import { errorMessage } from "../util/error"
 import {
   formInitialValues,
   formLabel,
+  formNumberText,
   formNumberValue,
   formRows,
   formSelected,
@@ -1101,7 +1102,12 @@ function textAnswer(
   dialog: ReturnType<typeof useDialog>,
   title: string,
   field: Extract<FormAnswerField, { type: "string" | "number" | "integer" }>,
-  initial = field.default === undefined ? undefined : String(field.default),
+  initial =
+    field.default === undefined
+      ? undefined
+      : typeof field.default === "number"
+        ? formNumberText(field.default)
+        : String(field.default),
 ): Promise<FormValue | undefined | typeof CANCELLED> {
   return new Promise<FormValue | undefined | typeof CANCELLED>((resolve) => {
     dialog.replace(

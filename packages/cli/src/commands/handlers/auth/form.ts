@@ -1,7 +1,7 @@
 import { confirm, log, multiselect, password, select, text, type Option } from "@clack/prompts"
 import { Effect, Schema } from "effect"
 import { Form } from "@opencode/schema/form"
-import { formNumberValue, formValidateValue } from "@opencode/tui/util/form"
+import { formNumberText, formNumberValue, formValidateValue } from "@opencode/tui/util/form"
 import type { FormAnswer, FormField, FormFields } from "@opencode/client"
 import { openUrl, prompt, requireInteractive } from "../../../ui/prompt"
 
@@ -140,7 +140,12 @@ const answerField = Effect.fn("cli.auth.form.field")(function* (field: FormField
     text({
       message,
       placeholder: field.type === "string" ? field.placeholder : undefined,
-      initialValue: field.default === undefined ? undefined : String(field.default),
+      initialValue:
+        field.default === undefined
+          ? undefined
+          : typeof field.default === "number"
+            ? formNumberText(field.default)
+            : String(field.default),
       validate: (input) => validateText(field, input),
     }),
   )

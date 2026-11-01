@@ -69,7 +69,7 @@ export const Plugin = define({
       Effect.forkScoped({ startImmediately: true }),
     )
     yield* ctx.event.subscribe().pipe(
-      Stream.filter((event) => reloadsSections(event, ["agents", "permissions"])),
+      Stream.filter((event) => reloadsSections(event, ["agents", "permissions", "default_agent"])),
       Stream.runForEach(notify),
       Effect.forkScoped({ startImmediately: true }),
     )

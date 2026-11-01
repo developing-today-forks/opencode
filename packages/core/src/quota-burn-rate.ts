@@ -9,6 +9,8 @@ export * as QuotaBurnRate from "./quota-burn-rate.js"
  *
  * A sample is one session's measured share of one window, in percent: callers derive it from
  * `ModelUsage.sessionReports` window shares (used / limit for the plan window the session drew on).
+ * The sample names that plan window, so shares from distinct windows (different limits and
+ * denominators) never average together: buckets group per window, and estimates are scoped to one.
  * Samples whose session ran at a known effort carry it; samples without one land in the effort-less
  * bucket for their provider/model, which is also the fallback every effort bucket draws on while its
  * own history is thin.
@@ -25,6 +27,10 @@ export interface Sample {
   readonly modelID: string
   /** The effort (route variant) the session ran at, when the history records one. */
   readonly effort?: string
+  /** The plan whose window the share was measured against (the `ModelPlan` plan id). */
+  readonly plan: string
+  /** The quota window the share was measured against (the window name within the plan). */
+  readonly window: string
   /** Percent of the window this session consumed: 0 or more, in the same units as `ModelUsage.percentOf`. */
   readonly percent: number
 }
@@ -57,6 +63,10 @@ export interface Estimate {
   readonly providerID: string
   readonly modelID: string
   readonly effort: string | null
+  /** The plan window this estimate describes: the bucket's own for "bucket"/"model", the query's for priors. */
+  readonly plan: string
+  /** The quota window (name within the plan) this estimate describes. */
+  readonly window: string
   /** Estimated percent of the window one session at this bucket costs, rounded to 0.1 like `percentOf`. */
   readonly percentPerSession: number
   /** How many samples back the figure: the bucket's own for "bucket", the model's for "model", 0 for a prior. */
@@ -68,6 +78,9 @@ export interface Query {
   readonly providerID: string
   readonly modelID: string
   readonly effort?: string
+  /** Estimates are scoped to one plan window: samples from other windows never average in. */
+  readonly plan: string
+  readonly window: string
 }
 
 const round = (value: number) => Math.round(value * 10) / 10
@@ -75,16 +88,33 @@ const round = (value: number) => Math.round(value * 10) / 10
 const mean = (samples: readonly Sample[]) =>
   samples.length === 0 ? null : round(samples.reduce((total, sample) => total + sample.percent, 0) / samples.length)
 
-const keyOf = (providerID: string, modelID: string, effort: string | null) =>
-  [providerID, modelID, effort ?? ""].join("\u0000")
+const keyOf = (providerID: string, modelID: string, effort: string | null, plan: string, window: string) =>
+  [providerID, modelID, effort ?? "", plan, window].join("\u0000")
 
 /** Every bucket the samples form, with its measured mean — including thin buckets `estimate` would not trust yet. */
 export const buckets = (samples: readonly Sample[]): Estimate[] => {
-  const grouped = new Map<string, { providerID: string; modelID: string; effort: string | null; rows: Sample[] }>()
+  const grouped = new Map<
+    string,
+    {
+      providerID: string
+      modelID: string
+      effort: string | null
+      plan: string
+      window: string
+      rows: Sample[]
+    }
+  >()
   for (const sample of samples) {
     const effort = sample.effort ?? null
-    const key = keyOf(sample.providerID, sample.modelID, effort)
-    const group = grouped.get(key) ?? { providerID: sample.providerID, modelID: sample.modelID, effort, rows: [] }
+    const key = keyOf(sample.providerID, sample.modelID, effort, sample.plan, sample.window)
+    const group = grouped.get(key) ?? {
+      providerID: sample.providerID,
+      modelID: sample.modelID,
+      effort,
+      plan: sample.plan,
+      window: sample.window,
+      rows: [],
+    }
     group.rows.push(sample)
     grouped.set(key, group)
   }
@@ -93,6 +123,8 @@ export const buckets = (samples: readonly Sample[]): Estimate[] => {
       providerID: group.providerID,
       modelID: group.modelID,
       effort: group.effort,
+      plan: group.plan,
+      window: group.window,
       percentPerSession: mean(group.rows) ?? 0,
       sessions: group.rows.length,
       source: "bucket" as Source,
@@ -101,31 +133,43 @@ export const buckets = (samples: readonly Sample[]): Estimate[] => {
       (a, b) =>
         a.providerID.localeCompare(b.providerID) ||
         a.modelID.localeCompare(b.modelID) ||
-        (a.effort ?? "").localeCompare(b.effort ?? ""),
+        (a.effort ?? "").localeCompare(b.effort ?? "") ||
+        a.plan.localeCompare(b.plan) ||
+        a.window.localeCompare(b.window),
     )
 }
 
 /**
- * The estimate for one provider/model/effort: the bucket's own mean once it has `minSamples`, else the
- * provider/model mean across efforts, else the effort prior, else the default prior.
+ * The estimate for one provider/model/effort in one plan window: the bucket's own mean once it has
+ * `minSamples`, else the window's provider/model mean across efforts, else the effort prior, else the
+ * default prior. Samples from other plan windows never average in.
  */
 export const estimate = (samples: readonly Sample[], query: Query, options: Options = {}): Estimate => {
   const minSamples = options.minSamples ?? DEFAULT_MIN_SAMPLES
   const effort = query.effort ?? null
-  const base = { providerID: query.providerID, modelID: query.modelID, effort }
+  const base = { providerID: query.providerID, modelID: query.modelID, effort, plan: query.plan, window: query.window }
+  const scoped = samples.filter(
+    (sample) =>
+      sample.providerID === query.providerID &&
+      sample.modelID === query.modelID &&
+      sample.plan === query.plan &&
+      sample.window === query.window,
+  )
 
   if (effort !== null) {
-    const own = samples.filter(
-      (sample) => sample.providerID === query.providerID && sample.modelID === query.modelID && sample.effort === effort,
-    )
+    const own = scoped.filter((sample) => sample.effort === effort)
     if (own.length >= minSamples) {
       return { ...base, percentPerSession: mean(own) ?? 0, sessions: own.length, source: "bucket" }
     }
   }
 
-  const model = samples.filter((sample) => sample.providerID === query.providerID && sample.modelID === query.modelID)
-  if (model.length >= minSamples) {
-    return { ...base, percentPerSession: mean(model) ?? 0, sessions: model.length, source: effort === null ? "bucket" : "model" }
+  if (scoped.length >= minSamples) {
+    return {
+      ...base,
+      percentPerSession: mean(scoped) ?? 0,
+      sessions: scoped.length,
+      source: effort === null ? "bucket" : "model",
+    }
   }
 
   const priors = { ...DEFAULT_PRIORS, ...options.priors }

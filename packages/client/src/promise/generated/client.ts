@@ -335,6 +335,9 @@ const maxSseEventBytes = 16 * 1024 * 1024
 
 const maxJsonBodyBytes = 16 * 1024 * 1024
 
+/** Files are user-sized, so the binary path allows a larger cap than a JSON body; it matches the app's media ingest limit. */
+const maxBinaryBodyBytes = 256 * 1024 * 1024
+
 export function make(options: ClientOptions) {
   const fetch = options.fetch ?? globalThis.fetch
 
@@ -388,7 +391,7 @@ export function make(options: ClientOptions) {
   const request = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {
     const response = await execute(descriptor, requestOptions)
     if (response.status !== descriptor.successStatus) return responseError(response, descriptor)
-    if (descriptor.binary) return new Uint8Array(await response.arrayBuffer()) as A
+    if (descriptor.binary) return (await binary(response)) as A
     if (descriptor.empty) {
       try {
         await response.body?.cancel()
@@ -2681,6 +2684,48 @@ function declared(body: DeclaredErrorBody) {
   const error = Object.assign(new Error(body.message ?? body.data?.message), body)
   if (body._tag) error.name = body._tag
   return error
+}
+
+async function binary(response: Response): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > maxBinaryBodyBytes) {
+    try {
+      void response.body?.cancel()?.catch(() => {})
+    } catch {}
+    throw new ClientError("ResponseTooLarge")
+  }
+  if (response.body === null) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")
+    return bytes
+  }
+  const reader = response.body.getReader()
+  const chunks: Array<Uint8Array> = []
+  let bytes = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      bytes += next.value.byteLength
+      if (bytes > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")
+      chunks.push(next.value)
+    }
+  } catch (cause) {
+    if (cause instanceof ClientError) throw cause
+    throw new ClientError("Transport", { cause })
+  } finally {
+    try {
+      void reader.cancel().catch(() => {})
+    } catch {}
+    reader.releaseLock()
+  }
+  const merged = new Uint8Array(bytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
 }
 
 function isContentType(response: Response, expected: string) {

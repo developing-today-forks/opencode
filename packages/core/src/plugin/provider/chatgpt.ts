@@ -15,6 +15,7 @@ import { Model } from "../../model.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
+import { readBoundedResponseText } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
 import { eachInstance } from "./instance.js"
@@ -502,12 +503,22 @@ export function verifyIDToken(
   })
 }
 
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
 function request<A>(url: string, init: RequestInit) {
   return Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return response.json() as Promise<A>
+      return JSON.parse(
+        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+      ) as A
     },
     catch: (cause) => cause,
   })

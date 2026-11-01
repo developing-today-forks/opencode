@@ -3,7 +3,7 @@ import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../version"
 import { Hash } from "@opencode/util/hash"
 import { Service } from "@opencode/client/effect/service"
 import { Effect, FileSystem, Option, Schema } from "effect"
-import { randomBytes } from "crypto"
+import { randomBytes, randomUUID } from "crypto"
 import path from "path"
 import { selfCommand } from "../util/process"
 import { RemoteTunnel } from "./remote-tunnel"
@@ -168,10 +168,21 @@ function route() {
 
 const write = Effect.fn("cli.service-config.write")(function* (value: Info) {
   const { fs, configFile } = yield* paths
-  const temp = configFile + ".tmp"
-  yield* fs.makeDirectory(path.dirname(configFile), { recursive: true })
-  yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
-  yield* fs.rename(temp, configFile)
+  // Match the sibling config writers (mcp/plugin add): resolve through any
+  // symlink first (dotfiles setups) so the rename lands on the real file instead
+  // of replacing the link, use a unique temp name per invocation so concurrent
+  // writers cannot consume each other's rename source, and never widen an
+  // existing config's permissions (a read-only 0400 config stays read-only).
+  const destination = yield* fs.realPath(configFile).pipe(Effect.orElseSucceed(() => configFile))
+  yield* fs.makeDirectory(path.dirname(destination), { recursive: true })
+  const existing = yield* fs.stat(destination).pipe(
+    Effect.map((info) => info.mode),
+    Effect.orElseSucceed(() => undefined),
+  )
+  const mode = existing !== undefined ? existing & 0o600 : 0o600
+  const temp = destination + ".tmp-" + process.pid + "-" + randomUUID()
+  yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode })
+  yield* fs.rename(temp, destination)
 })
 
 export const password = Effect.fn("cli.service-config.password")(function* (value?: string) {

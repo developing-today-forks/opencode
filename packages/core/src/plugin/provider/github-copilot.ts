@@ -446,6 +446,14 @@ export function copilotEndpointDiscoveryNeeded(metadata?: Readonly<Record<string
   return true
 }
 
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
 // The same /copilot_internal/user lookup authorize() performs, reused at load
 // time for credentials (such as v1 migrations) that never stored endpoints.api.
 export function discoverCopilotApiEndpoint(input: { token: string; app: App.Info; fetch?: Fetch }) {
@@ -462,7 +470,9 @@ export function discoverCopilotApiEndpoint(input: { token: string; app: App.Info
         },
       })
       if (!response.ok) throw new Error(`Copilot user lookup failed: ${response.status}`)
-      return response.json()
+      return JSON.parse(
+        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+      )
     },
     catch: (cause) => cause,
   }).pipe(
@@ -484,7 +494,9 @@ function request(url: string, init: RequestInit) {
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return response.json()
+      return JSON.parse(
+        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+      )
     },
     catch: (cause) => cause,
   })

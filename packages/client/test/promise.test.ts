@@ -436,6 +436,45 @@ test("file.read returns binary content from the public HTTP contract", async () 
   )
 })
 
+test("file.read rejects a binary body whose declared length is above the size limit", async () => {
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(new Uint8Array([104, 105]), {
+        headers: { "content-length": String(256 * 1024 * 1024 + 1) },
+      }),
+  })
+
+  await expect(client.file.read({ path: "big.bin", location: { directory: "/tmp/project" } })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
+})
+
+test("file.read rejects a binary body that streams past the size limit", async () => {
+  // Reusing one chunk keeps the test's own footprint small; the client still counts every byte it receives.
+  const chunk = new Uint8Array(1024 * 1024)
+  let sent = 0
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent > 256 * 1024 * 1024) return controller.close()
+            sent += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+        }),
+      ),
+  })
+
+  await expect(client.file.read({ path: "big.bin", location: { directory: "/tmp/project" } })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
+})
+
 test("all worktree operations require a project ID", async () => {
   const requests: Request[] = []
   const client = OpenCode.make({

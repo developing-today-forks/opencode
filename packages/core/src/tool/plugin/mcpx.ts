@@ -21,9 +21,10 @@ import {
   stepTurnTtl,
 } from "./mcpx-projection.js"
 export * as McpxProjection from "./mcpx-projection.js"
-import { DaemonHTTPError, DaemonUnreachableError, ensureScriptReady, failureOf } from "./mcpx-secrets.js"
+import { DaemonHTTPError, DaemonTimeoutError, DaemonUnreachableError, ensureScriptReady, failureOf } from "./mcpx-secrets.js"
 export * as McpxSecrets from "./mcpx-secrets.js"
 import { CodeModeRules } from "../../codemode/rules.js"
+import { readBoundedResponseText } from "../http-body.js"
 
 export const name = "mcpx"
 
@@ -203,17 +204,68 @@ const cliOutput = (args: string[], env?: Record<string, string | undefined>) =>
     catch: (error: any) => new ToolFailure({ message: error.message, error }),
   })
 
+/**
+ * How long one daemon request may go unanswered before it fails with
+ * DaemonTimeoutError (#1023). The daemon is a local process: a call it accepts
+ * but never answers is wedged, and hanging on it hangs the tool call (and
+ * the session turn waiting on it) forever instead of degrading to the CLI
+ * fallback. The bound is generous next to local round-trips so long tool
+ * executions still complete; callers with their own deadline (the
+ * ensureDaemon health poll) pass a shorter timeoutMs.
+ */
+export const daemonRequestTimeoutMs = 120_000
+
+/**
+ * Cap on a daemon response body (#1023): the same 16 MiB the CLI fallback
+ * in this file allows via runCli's maxBuffer. Success bodies are read
+ * through readBoundedResponseText, so an over-cap body fails naming the
+ * path and the cap instead of buffering whole.
+ */
+export const daemonResponseMaxBytes = 16 * 1024 * 1024
+
+/**
+ * Cap on how much of an error body DaemonHTTPError carries. Error bodies
+ * are diagnostics, not payloads, and the whole body used to be embedded
+ * verbatim in the exception message; past this cap the message says the
+ * body was truncated instead.
+ */
+export const daemonErrorBodyMaxBytes = 16 * 1024
+
+/** How long an ensureDaemon health probe may go unanswered (see daemonRequestTimeoutMs). */
+const daemonHealthTimeoutMs = 1_000
+
 // No answer at all is DaemonUnreachableError; a non-2xx answer is DaemonHTTPError. Only the first lets mcpx_exec fall
-// back to the CLI, because only then did the daemon not receive the request.
-const send = async (request: () => Promise<Response>): Promise<any> => {
+// back to the CLI, because only then did the daemon not receive the request. A timeout is neither: the request may
+// already be executing, so it surfaces as DaemonTimeoutError and is never replayed through the CLI.
+const send = async (request: () => Promise<Response>, path: string, timeoutMs: number): Promise<any> => {
   let res: Response
   try {
     res = await request()
   } catch (error) {
+    // The only abort source on these fetches is the timeout signal, whose
+    // rejection is named TimeoutError (AbortError in older runtimes).
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+      throw new DaemonTimeoutError(`mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`)
     throw new DaemonUnreachableError(error instanceof Error ? error.message : String(error))
   }
-  if (!res.ok) throw new DaemonHTTPError(res.status, await res.text())
-  return await res.json()
+  if (!res.ok) {
+    const text = await readBoundedResponseText(
+      res,
+      daemonErrorBodyMaxBytes,
+      () => new Error(`mcpx daemon error body for ${path} exceeded ${daemonErrorBodyMaxBytes} bytes`),
+    ).catch(() => `[mcpx daemon error body for ${path} exceeded ${daemonErrorBodyMaxBytes} bytes and was truncated]`)
+    throw new DaemonHTTPError(res.status, text)
+  }
+  const text = await readBoundedResponseText(
+    res,
+    daemonResponseMaxBytes,
+    () => new Error(`mcpx daemon response for ${path} exceeded ${daemonResponseMaxBytes} bytes`),
+  ).catch((error) => {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+      throw new DaemonTimeoutError(`mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`)
+    throw error
+  })
+  return JSON.parse(text)
 }
 
 export const callDaemon = async (
@@ -221,6 +273,7 @@ export const callDaemon = async (
   method = "GET",
   body?: any,
   headers?: Record<string, string>,
+  timeoutMs = daemonRequestTimeoutMs,
 ): Promise<any> => {
   const endpoint = process.env.MCPX_DAEMON_ENDPOINT || process.env.MCPX_ENDPOINT
   const socket = findDaemonSocket()
@@ -228,14 +281,15 @@ export const callDaemon = async (
     method,
     headers: { "Content-Type": "application/json", ...headers },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(timeoutMs),
   }
 
   if (endpoint && endpoint.startsWith("http")) {
-    return send(() => fetch(`${endpoint.replace(/\/+$/, "")}${path}`, init))
+    return send(() => fetch(`${endpoint.replace(/\/+$/, "")}${path}`, init), path, timeoutMs)
   }
 
   if (socket) {
-    return send(() => (fetch as any)(`http://localhost${path}`, { ...init, unix: socket }))
+    return send(() => (fetch as any)(`http://localhost${path}`, { ...init, unix: socket }), path, timeoutMs)
   }
 
   throw new DaemonUnreachableError("No mcpx daemon reachable")
@@ -258,7 +312,7 @@ export const resetDaemonEnsured = (): void => {
 export const ensureDaemon = async (): Promise<void> => {
   if (daemonEnsured) return
   try {
-    const health = await callDaemon("/v1/health")
+    const health = await callDaemon("/v1/health", "GET", undefined, undefined, daemonHealthTimeoutMs)
     if (health?.status === "ok") {
       // Daemon is standing; trigger seamless hot reload so any updated config or binary is active
       try {
@@ -308,7 +362,7 @@ export const ensureDaemon = async (): Promise<void> => {
     while (Date.now() < deadline && !spawnFailed) {
       await new Promise((r) => setTimeout(r, 100))
       try {
-        const health = await callDaemon("/v1/health")
+        const health = await callDaemon("/v1/health", "GET", undefined, undefined, Math.max(1, deadline - Date.now()))
         if (health?.status === "ok") {
           daemonEnsured = true
           return

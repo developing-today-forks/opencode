@@ -184,7 +184,7 @@ describe("ConfigModelRoutes field descriptions", () => {
           "quotaCooldownMs",
         ],
       ],
-      [ConfigModelRoutes.Window, ["daysOfWeek", "daysOfMonth", "start", "end", "timezone", "from", "until"]],
+      [ConfigModelRoutes.Window, ["daysOfWeek", "daysOfMonth", "dates", "excludeDates", "excludeWindows", "start", "end", "timezone", "from", "until"]],
       [ConfigModelRoutes.Schedule, ["id", "targets", "factor", "weight", "note"]],
       [ConfigModelRoutes.GlobalSchedule, ["providers", "models", "targets", "routes", "factor", "weight"]],
       [ConfigModelRoutes.Route, ["budgets", "hedgeAfterMs", "attempts", "autonomy", "selection", "weights", "schedules", "limit"]],
