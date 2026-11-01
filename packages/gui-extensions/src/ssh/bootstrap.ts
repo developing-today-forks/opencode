@@ -72,29 +72,35 @@ export const ARCHIVE_DOWNLOAD_TIMEOUT = "180 seconds"
  * without one is bounded in flight as its chunks arrive, failing with
  * SshFailure("install", ...) instead of buffering past the cap.
  */
-export function collectArchive(response: HttpClientResponse.HttpClientResponse, maximumBytes = MAX_ARCHIVE_BYTES) {
+export function collectArchive(response: HttpClientResponse.HttpClientResponse) {
   return Effect.gen(function* () {
-    const tooLarge = () => new SshFailure("install", `archive exceeds ${maximumBytes} bytes`)
+    const tooLarge = () => new SshFailure("install", `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`)
     const contentLength = response.headers["content-length"]
     const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+
     const declaredSize =
       parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
-    if (declaredSize !== undefined && declaredSize > maximumBytes) return yield* Effect.fail(tooLarge())
+
+    if (declaredSize !== undefined && declaredSize > MAX_ARCHIVE_BYTES) return yield* Effect.fail(tooLarge())
     const chunks: Array<Uint8Array> = []
     let size = 0
     yield* Stream.runForEach(response.stream, (chunk) => {
       if (chunk.byteLength === 0) return Effect.void
-      if (size + chunk.byteLength > maximumBytes) return Effect.fail(tooLarge())
+
+      if (size + chunk.byteLength > MAX_ARCHIVE_BYTES) return Effect.fail(tooLarge())
       chunks.push(chunk)
       size += chunk.byteLength
+
       return Effect.void
     })
     const archive = new Uint8Array(size)
     let offset = 0
+
     for (const chunk of chunks) {
       archive.set(chunk, offset)
       offset += chunk.byteLength
     }
+
     return archive
   })
 }
@@ -170,6 +176,7 @@ export const bootstrap = Effect.fn("Ssh.bootstrap")(function* (input: {
         Effect.fnUntraced(function* (error) {
           yield* input.stage("uploading")
           const http = yield* HttpClient.HttpClient
+
           const response = yield* http
             .get(url)
             .pipe(Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT), Effect.mapError(SshFailure.from))
@@ -181,6 +188,7 @@ export const bootstrap = Effect.fn("Ssh.bootstrap")(function* (input: {
                 JSON.stringify({ version, target, url, status: response.status }),
               ),
             )
+
           const archive = yield* collectArchive(response).pipe(
             Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT),
             Effect.mapError(SshFailure.from),

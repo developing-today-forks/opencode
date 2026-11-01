@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
-import { binaryPath, collectArchive, parseRegistration, startScript } from "./bootstrap"
+import { binaryPath, collectArchive, MAX_ARCHIVE_BYTES, parseRegistration, startScript } from "./bootstrap"
 import { RemoteCli } from "./remote-cli"
 
 test("ignores stopped services and registrations that do not match the healthy endpoint", () => {
@@ -95,18 +95,29 @@ function streamOf(...chunks: Array<Uint8Array>) {
 }
 
 test("collectArchive returns a body under the cap", async () => {
-  const archive = await Effect.runPromise(collectArchive(archiveResponse(streamOf(new Uint8Array([97, 98, 99]))), 10))
+  const archive = await Effect.runPromise(collectArchive(archiveResponse(streamOf(new Uint8Array([97, 98, 99])))))
   expect(Array.from(archive)).toEqual([97, 98, 99])
 })
 
 test("collectArchive rejects a declared content-length above the cap before reading the body", async () => {
-  const response = archiveResponse(streamOf(new Uint8Array([97])), { "content-length": "11" })
-  await expect(Effect.runPromise(collectArchive(response, 10))).rejects.toThrow("archive exceeds 10 bytes")
+  const response = archiveResponse(streamOf(new Uint8Array([97])), {
+    "content-length": String(MAX_ARCHIVE_BYTES + 1),
+  })
+
+  await expect(Effect.runPromise(collectArchive(response))).rejects.toThrow(
+    `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`,
+  )
 })
 
 test("collectArchive bounds a streamed body in flight when no content-length is declared", async () => {
-  const response = archiveResponse(streamOf(new Uint8Array(8), new Uint8Array(8)))
-  await expect(Effect.runPromise(collectArchive(response, 10))).rejects.toThrow("archive exceeds 10 bytes")
+  // One shared chunk enqueued repeatedly: the logical body exceeds the cap
+  // without allocating a second copy of it.
+  const chunk = new Uint8Array(8 * 1024 * 1024)
+  const repeats = MAX_ARCHIVE_BYTES / chunk.byteLength + 1
+  const response = archiveResponse(streamOf(...Array.from({ length: repeats }, () => chunk)))
+  await expect(Effect.runPromise(collectArchive(response))).rejects.toThrow(
+    `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`,
+  )
 })
 
 test("rejects unsafe versions and platforms in remote installation paths", () => {
