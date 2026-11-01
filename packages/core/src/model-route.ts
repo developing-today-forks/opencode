@@ -548,6 +548,7 @@ export interface SettingsConfig {
     readonly maxMs?: number
     readonly fallbackMs?: number
     readonly feedTtlMs?: number
+    readonly balanceDeadThreshold?: number
   }
   readonly escalation?: {
     readonly enabled?: boolean
@@ -640,6 +641,8 @@ type QuotaGateState = {
   snapshot: QuotaSnapshot.Snapshot
   target: Model.Ref
   gated: boolean
+  /** Balance gates need a fresh increase; wall-clock reset/fallback times are not recovery signals. */
+  balanceHold?: { readonly benchedBalance: number | null }
   actualResetAt?: number
   resetObservedAt?: number
 }
@@ -655,11 +658,20 @@ const observeCredentialQuotaState = (
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
+  if (previous?.balanceHold) {
+    const increased =
+      snapshot.balance === true &&
+      snapshot.expired !== true &&
+      snapshot.remaining !== null &&
+      (previous.balanceHold.benchedBalance === null || snapshot.remaining > previous.balanceHold.benchedBalance)
+    if (!increased) return
+  }
   // Out-of-order delivery must not rewind the gate: an observation older than the retained
   // one carries no new information, even when it is still fresh — a below-limit reading
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const balanceHold = snapshot.balance === true && full ? { benchedBalance: snapshot.remaining } : undefined
   const actualResetAt = resetAtTrusted
     ? snapshot.resetAt ?? undefined
     : previous?.actualResetAt !== undefined && previous.actualResetAt > now
@@ -670,6 +682,7 @@ const observeCredentialQuotaState = (
     snapshot,
     target,
     gated: full,
+    ...(balanceHold ? { balanceHold } : {}),
     ...(actualResetAt !== undefined ? { actualResetAt } : {}),
     ...(resetObservedAt !== undefined ? { resetObservedAt } : {}),
   })
@@ -701,31 +714,42 @@ export const observeProviderQuota = (
 ) => {
   const previous = providerQuota.get(target.providerID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
+  if (previous?.balanceHold) {
+    const increased =
+      snapshot.balance === true &&
+      snapshot.expired !== true &&
+      snapshot.remaining !== null &&
+      (previous.balanceHold.benchedBalance === null || snapshot.remaining > previous.balanceHold.benchedBalance)
+    if (!increased) return
+  }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const balanceHold = snapshot.balance === true && full ? { benchedBalance: snapshot.remaining } : undefined
   providerQuota.set(target.providerID, {
     snapshot,
     target,
     gated: full,
+    ...(balanceHold ? { balanceHold } : {}),
     ...(snapshot.resetAt !== null ? { actualResetAt: snapshot.resetAt } : {}),
     resetObservedAt: snapshot.observedAt,
   })
   if (full) {
     const gate = currentConstants().quotaGate
-    const until = Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
+    const until =
+      snapshot.balance === true ? undefined : Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
     addAdjustment({
       id: `quota:${target.providerID}`,
       match: `${target.providerID}/`,
       action: "skip",
-      until,
+      ...(until !== undefined ? { until } : {}),
       note: "quota exhausted (proactive snapshot); held until the stated reset",
     })
     if (!previous?.gated)
       logHealth(target, "quota-gated", `provider:${target.providerID} quota-known-full`, snapshot.resetAt ?? undefined)
   }
-  if (!full && previous?.gated) {
+  if (!full) {
     removeAdjustment(`quota:${target.providerID}`)
-    logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
+    if (previous?.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
   }
 }
 
@@ -766,6 +790,25 @@ export const observeQuotaFailure = (
   now = Date.now(),
 ) => {
   const gate = currentConstants().quotaGate
+  const previous = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
+  if (previous?.snapshot.balance === true) {
+    const snapshot = { ...previous.snapshot, percent: null, resetAt: null, observedAt: now, stale: false }
+    const balanceHold = { benchedBalance: previous.snapshot.remaining }
+    if (credentialID) {
+      credentialQuota.set(credentialID, { snapshot, target, gated: true, balanceHold })
+      logHealth(target, "quota-gated", `credential:${credentialID} balance-insufficient`, undefined, credentialID)
+      return
+    }
+    providerQuota.set(target.providerID, { snapshot, target, gated: true, balanceHold })
+    addAdjustment({
+      id: `quota:${target.providerID}`,
+      match: `${target.providerID}/`,
+      action: "skip",
+      note: "balance exhausted (attempt-reported); held until a fresh balance increase",
+    })
+    logHealth(target, "quota-gated", `provider:${target.providerID} balance-insufficient`)
+    return
+  }
   const until = Math.min(resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
   if (credentialID) {
     observeCredentialQuotaState(
@@ -804,7 +847,8 @@ export const credentialQuotaBlocked = (
 ): { readonly until: number | null } | undefined => {
   const state = credentialQuota.get(credentialID)
   if (!state) return undefined
-  if (QuotaSnapshot.isKnownFull(state.snapshot, now)) {
+  if (state.balanceHold) return { until: null }
+  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)) {
     state.gated = true
     return { until: state.snapshot.resetAt }
   }
@@ -1132,7 +1176,8 @@ const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: 
   if (
     planQuota &&
     planQuota.target.providerID === target.providerID &&
-    QuotaSnapshot.isKnownFull(planQuota.snapshot, now) &&
+    planQuota.snapshot.balance !== true &&
+    QuotaSnapshot.isKnownFull(planQuota.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold) &&
     planQuota.snapshot.observedAt <= now &&
     planQuota.resetObservedAt !== undefined &&
     planQuota.resetObservedAt <= now &&
@@ -1857,7 +1902,12 @@ export interface Constants {
     readonly quotaCooldownCapMs: number
   }
   readonly demotion: { readonly factor: number }
-  readonly quotaGate: { readonly maxMs: number; readonly fallbackMs: number; readonly feedTtlMs: number }
+  readonly quotaGate: {
+    readonly maxMs: number
+    readonly fallbackMs: number
+    readonly feedTtlMs: number
+    readonly balanceDeadThreshold: number
+  }
   readonly escalation: { readonly outcomeWindow: number }
   readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
   readonly continuity: { readonly hedgeRequests: number }
@@ -1881,6 +1931,7 @@ export const DEFAULT_CONSTANTS: Constants = {
     fallbackMs: QUOTA_GATE_FALLBACK_MS,
     // shouldFeedQuota's default: how often quota snapshots are fed into the gate.
     feedTtlMs: 60_000,
+    balanceDeadThreshold: QuotaSnapshot.DEFAULT_BALANCE_DEAD_THRESHOLD,
   },
   escalation: { outcomeWindow: OUTCOME_WINDOW },
   network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },

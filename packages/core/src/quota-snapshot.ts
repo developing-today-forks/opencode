@@ -12,8 +12,8 @@ import type { ModelPlan } from "./model-plan.js"
  * path reads snapshots yet.
  *
  * The staleness contract is defined here once: one configured max age (a per-plan override is allowed)
- * decides `stale` for every consumer. A snapshot whose `percent` is null or that is stale is *unknown* —
- * never headroom and never a wall; what a consumer does with unknown is its own configured fallback.
+ * decides `stale` for every consumer. A snapshot with neither a percent nor a usable balance, or one that is
+ * stale, is *unknown* — never headroom and never a wall; what a consumer does with unknown is its own fallback.
  */
 
 export interface Snapshot {
@@ -28,6 +28,10 @@ export interface Snapshot {
   /** When the underlying usage data was current (epoch ms). */
   readonly observedAt: number
   readonly stale: boolean
+  /** A credit balance is a point-in-time amount, not a resetting usage window. */
+  readonly balance?: boolean
+  /** The grant is explicitly expired or its expiry is in the past. */
+  readonly expired?: boolean
 }
 
 export interface Options {
@@ -37,10 +41,13 @@ export interface Options {
   readonly maxAgeMs?: number
   /** Per-plan max-age overrides, keyed by plan id — the one definition above, overridden per plan. */
   readonly perPlanMaxAgeMs?: Readonly<Record<string, number>>
+  /** A credit balance at or below this amount is considered exhausted. Defaults to ten cents. */
+  readonly balanceDeadThreshold?: number
 }
 
 /** The default staleness max age: one hour, the fleet's placement-read discipline (#587 open question). */
 export const DEFAULT_MAX_AGE_MS = 3_600_000
+export const DEFAULT_BALANCE_DEAD_THRESHOLD = 0.1
 
 export interface Input {
   readonly plan: ModelPlan.Plan
@@ -81,6 +88,17 @@ export const derive = (input: Input, options: Options): Snapshot => {
   // Without `windowHours` the totals cannot be attributed to this window (#550), so a percent computed
   // from them would not be a reading of the window: report unknown instead of that number.
   const windowed = input.window.windowHours !== undefined
+  const balance = input.plan.coverage === "credits" && input.window.unit === "usd"
+  const expiresAt =
+    input.plan.expiresOn === undefined ? undefined : ModelRouteLimits.parseAbsoluteTime(input.plan.expiresOn)
+  const expired = input.plan.status === "expired" || (expiresAt !== undefined && expiresAt <= options.now)
+  const remaining = balance ? report.remaining : windowed ? report.remaining : null
+  const threshold = options.balanceDeadThreshold ?? DEFAULT_BALANCE_DEAD_THRESHOLD
+  const deadBalance =
+    balance &&
+    (expired ||
+      (remaining !== null &&
+        remaining <= threshold + Number.EPSILON * Math.max(1, Math.abs(remaining), Math.abs(threshold))))
   // Own-property resolution only: a plain lookup reads through the prototype chain, so a plan
   // named e.g. "constructor" would inherit the Object function as its max age instead of falling
   // through to the configured/default max age, and would never go stale (#824).
@@ -91,11 +109,12 @@ export const derive = (input: Input, options: Options): Snapshot => {
     planID: input.plan.id,
     window: input.window.name,
     providerID: input.plan.providerID,
-    percent: windowed ? report.percent : null,
-    remaining: windowed ? report.remaining : null,
+    percent: deadBalance ? 100 : windowed ? report.percent : null,
+    remaining,
     resetAt: resetAtOf(input.window, options.now),
     observedAt: input.observedAt,
     stale: options.now - input.observedAt > maxAge,
+    ...(balance ? { balance: true, expired } : {}),
   }
 }
 
@@ -110,19 +129,28 @@ export const deriveAll = (
     plan.quotas.map((window) => derive({ plan, window, totals: totals(plan, window), observedAt }, options)),
   )
 
-/** Whether a snapshot carries a usable reading: a known percent that is still fresh. */
-export const known = (snapshot: Snapshot): boolean => snapshot.percent !== null && !snapshot.stale
+/** Whether a snapshot carries a usable, fresh percent or balance reading. */
+export const known = (snapshot: Snapshot): boolean =>
+  !snapshot.stale &&
+  (snapshot.percent !== null ||
+    (snapshot.balance === true && (snapshot.remaining !== null || snapshot.expired === true)))
 
 /**
- * Whether a snapshot is a known-full reading at `now` (#6 gate): a fresh percent at or over the
- * limit whose reset is still ahead. A null reset stays full until a fresher snapshot reads below
- * the limit — the clock alone cannot re-admit what it never dated. A reset that has passed
- * re-admits on its own: eligibility is recomputed from the latest snapshot at every check, so a
- * known-full reading is never a wall past its own reset. Unknown or stale snapshots are never
- * full: per the contract above they are neither headroom nor a wall.
+ * Whether a snapshot is a known-full reading at `now` (#6 gate): a fresh window percent at or over
+ * its limit whose reset is still ahead, or a dead/expired credit balance. A null window reset stays
+ * full until a fresher snapshot reads below the limit; balance gates instead require a fresh increase.
+ * Unknown or stale snapshots are never full: per the contract above they are neither headroom nor a wall.
  */
-export const isKnownFull = (snapshot: Snapshot, now: number): boolean =>
+export const isKnownFull = (
+  snapshot: Snapshot,
+  now: number,
+  balanceDeadThreshold = DEFAULT_BALANCE_DEAD_THRESHOLD,
+): boolean =>
   known(snapshot) &&
-  snapshot.percent !== null &&
-  snapshot.percent >= 100 &&
-  (snapshot.resetAt === null || snapshot.resetAt > now)
+  (snapshot.balance === true
+    ? snapshot.expired === true ||
+      (snapshot.remaining !== null &&
+        snapshot.remaining <=
+          balanceDeadThreshold +
+            Number.EPSILON * Math.max(1, Math.abs(snapshot.remaining), Math.abs(balanceDeadThreshold)))
+    : snapshot.percent !== null && snapshot.percent >= 100 && (snapshot.resetAt === null || snapshot.resetAt > now))

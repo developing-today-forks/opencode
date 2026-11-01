@@ -75,6 +75,50 @@ describe("QuotaSnapshot", () => {
     expect(snapshot.remaining).toBeNull()
   })
 
+  test("a credits USD balance is known-full at ten cents and keeps its amount without a window", () => {
+    const creditPlan = { ...plan, coverage: "credits" } as ModelPlan.Plan
+    const balanceWindow = { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow
+    const snapshot = QuotaSnapshot.derive(
+      { plan: creditPlan, window: balanceWindow, totals: totals({ costUsd: 1.9 }), observedAt: now },
+      { now },
+    )
+
+    expect(snapshot).toMatchObject({ balance: true, expired: false, percent: 100 })
+    expect(snapshot.remaining).toBeCloseTo(0.1)
+    expect(QuotaSnapshot.isKnownFull(snapshot, now)).toBe(true)
+  })
+
+  test("the balance-dead threshold is configurable", () => {
+    const snapshot = QuotaSnapshot.derive(
+      {
+        plan: { ...plan, coverage: "credits" } as ModelPlan.Plan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 1.8 }),
+        observedAt: now,
+      },
+      { now, balanceDeadThreshold: 0.25 },
+    )
+
+    expect(snapshot.remaining).toBeCloseTo(0.2)
+    expect(QuotaSnapshot.isKnownFull(snapshot, now, 0.25)).toBe(true)
+  })
+
+  test("an expired credit grant is known-full even with a positive balance", () => {
+    const creditPlan = {
+      ...plan,
+      coverage: "credits",
+      expiresOn: "2026-10-27T11:59:00.000Z",
+    } as ModelPlan.Plan
+    const balanceWindow = { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow
+    const snapshot = QuotaSnapshot.derive(
+      { plan: creditPlan, window: balanceWindow, totals: totals(), observedAt: now },
+      { now },
+    )
+
+    expect(snapshot).toMatchObject({ balance: true, expired: true, percent: 100, remaining: 2 })
+    expect(QuotaSnapshot.isKnownFull(snapshot, now)).toBe(true)
+  })
+
   test("an observation older than the configured max age is stale; a fresh one is not", () => {
     const input = { plan, window, totals: totals({ requests: 50 }) }
     const fresh = QuotaSnapshot.derive({ ...input, observedAt: now - 30 * 60_000 }, { now, maxAgeMs: 3_600_000 })

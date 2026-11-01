@@ -451,7 +451,9 @@ const refreshQuotaGate = (
     if (relevantPlans.length === 0) return
 
     const windows = relevantPlans.flatMap((plan) =>
-      plan.quotas.filter((window) => window.windowHours !== undefined).map((window) => ({ plan, window })),
+      plan.quotas
+        .filter((window) => window.windowHours !== undefined || (plan.coverage === "credits" && window.unit === "usd"))
+        .map((window) => ({ plan, window })),
     )
     if (windows.length === 0) return
 
@@ -459,10 +461,15 @@ const refreshQuotaGate = (
       Effect.gen(function* () {
         const rowsByWindow = new Map<string, readonly (ModelUsage.TargetRow & { credentialID: string | null })[]>()
         for (const { plan, window } of windows) {
-          if (window.windowHours === undefined) continue
           const key = `${plan.id}:${window.name}`
           if (rowsByWindow.has(key)) continue
-          rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, now - window.windowHours * 3_600_000))
+          rowsByWindow.set(
+            key,
+            yield* ModelRouteLog.targetUsage(
+              db,
+              window.windowHours === undefined ? 0 : now - window.windowHours * 3_600_000,
+            ),
+          )
         }
         for (const target of targets) {
           const credentialID = credentialByProvider.get(target.providerID)
@@ -483,13 +490,15 @@ const refreshQuotaGate = (
                 ),
               ),
             now,
-            { now },
+            { now, balanceDeadThreshold: ModelRoute.currentConstants().quotaGate.balanceDeadThreshold },
           )
           if (snapshots.length === 0) continue
           const fullSnapshot = snapshots
-            .filter((s) => QuotaSnapshot.isKnownFull(s, now))
+            .filter((s) =>
+              QuotaSnapshot.isKnownFull(s, now, ModelRoute.currentConstants().quotaGate.balanceDeadThreshold),
+            )
             .sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
-          const snapshot = fullSnapshot ?? snapshots[0]
+          const snapshot = fullSnapshot ?? snapshots.find((s) => s.balance) ?? snapshots[0]
           if (credentialID) {
             ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
           } else {

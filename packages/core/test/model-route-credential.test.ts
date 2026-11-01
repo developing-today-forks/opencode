@@ -226,6 +226,24 @@ describe("ModelRoute quota-failure gate (#984)", () => {
     expect(ModelRoute.credentialQuotaBlocked("cred-lab", 10_000)).toEqual({ until: 10_000 + 30 * 86_400_000 })
   })
 
+  test("a credit-balance failure has no timer readmission and releases only after a fresh increase", () => {
+    const balance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeCredentialQuota(target, "cred-balance", balance, 10_000)
+    ModelRoute.observeQuotaFailure(target, "cred-balance", undefined, 10_000)
+
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 10_000 + 86_400_000)).toEqual({ until: null })
+    ModelRoute.observeCredentialQuota(target, "cred-balance", { ...balance, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 20_000)).toEqual({ until: null })
+
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-balance",
+      { ...balance, remaining: 1.01, observedAt: 30_000 },
+      30_000,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", 30_000)).toBeUndefined()
+  })
+
   test("a credential-less exhaustion skips the provider until the reset, then lapses", () => {
     const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
     ModelRoute.observeQuotaFailure(plain, undefined, 100_000, 10_000)
@@ -308,6 +326,26 @@ describe("ModelRoute proactive provider quota gate (#984)", () => {
     ModelRoute.observeProviderQuota(plain, snap({ observedAt: 10_000, resetAt: 10_000 + 90 * 86_400_000 }), 10_000)
     const activeCapped = ModelRoute.activeAdjustments(10_000)
     expect(activeCapped[0]?.until).toBe(10_000 + 30 * 86_400_000)
+  })
+
+  test("a balance-shaped provider gate has no expiry and clears only on increased balance", () => {
+    ModelRoute.resetHealth()
+    const balance = snap({ percent: null, remaining: 1, resetAt: null, balance: true, expired: false })
+    ModelRoute.observeProviderQuota(plain, balance, 10_000)
+    ModelRoute.observeQuotaFailure(plain, undefined, undefined, 10_000)
+
+    expect(ModelRoute.skipped(plain, 10_000 + 86_400_000)).toBe(true)
+    expect(ModelRoute.activeAdjustments(10_000 + 86_400_000)[0]?.until).toBeUndefined()
+
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1.01, observedAt: 20_000 }, 20_000)
+    expect(ModelRoute.skipped(plain, 20_000)).toBe(false)
+
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([
+      { id: "quota:cline-pass", match: "cline-pass/", action: "skip", note: "restored balance gate" },
+    ])
+    ModelRoute.observeProviderQuota(plain, { ...balance, remaining: 1.01, observedAt: 30_000 }, 30_000)
+    expect(ModelRoute.skipped(plain, 30_000)).toBe(false)
   })
 })
 

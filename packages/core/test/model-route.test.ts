@@ -1321,7 +1321,12 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
         quotaCooldownCapMs: 86_400_000,
       },
       demotion: { factor: 0.01 },
-      quotaGate: { maxMs: 30 * 86_400_000, fallbackMs: 30 * 60_000, feedTtlMs: 60_000 },
+      quotaGate: {
+        maxMs: 30 * 86_400_000,
+        fallbackMs: 30 * 60_000,
+        feedTtlMs: 60_000,
+        balanceDeadThreshold: 0.1,
+      },
       escalation: { outcomeWindow: 5 },
       network: { windowMs: 30_000, providers: 3, providerModels: 2 },
       continuity: { hedgeRequests: 2 },
