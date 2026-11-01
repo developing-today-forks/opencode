@@ -151,6 +151,35 @@ in step 1 (#1147); the responses fast path lands in step 3 (#1149).
   (§7) — a passed-through call is never invisible. The server still constructs
   the provider request's transport (endpoint, credentials from the credential
   store); only the payload body is verbatim.
+- **The `model` field is never forwarded verbatim.** `model` is a
+  façade-local selector (a route name such as `opencode-route/terra-plan`,
+  or a caller-facing ref such as `openai/gpt-5`), not the upstream's model
+  ID, and endpoint/credential resolution does not rewrite the body. Before
+  forwarding, the façade replaces `model` with the resolved concrete
+  model's upstream ID — the same `resolved.modelID ?? resolved.id` the
+  resolver initializes models with (`packages/core/src/model-resolver.ts`)
+  and the chat protocol sends as `request.model.id`
+  (`packages/ai/src/protocols/openai-chat.ts`). The rewrite is per attempt:
+  a failover candidate receives its own upstream ID, never the original
+  selector or the previous candidate's ID. Every other field stays
+  verbatim; `model` is the single named exception.
+- **Chained Responses requests leave the fast path.** A
+  `previous_response_id` minted by the façade identifies a row in the §4
+  store, not a response the upstream knows: the prior turn may have been
+  served through translation, or by a different provider than the one
+  selected for this attempt. The façade therefore records provenance on
+  each store row (serving provider + native/translated origin). Native
+  forwarding of `previous_response_id` is allowed only when the referenced
+  response was itself served natively by the same resolved provider;
+  every other chained request is resolved locally first, per §4 — the
+  referenced row's cumulative items are reconstructed as the input and
+  the façade-owned ID is stripped — and only then, with the chain already
+  materialized in the payload, may the (now self-contained) request take
+  the fast path. If a forwarded upstream-owned ID still returns 404
+  `response_not_found`, the façade falls back to the same local
+  reconstruction and retries **once** when it holds the row (both attempts
+  ledgered, as in the shape-rejection fallback); with no local row, the
+  404 surfaces per §4's expired-chain behaviour.
 - **Shape-rejection fallback.** If a supposedly-native provider rejects the
   shape (a 400/422-class dialect error — not quota, not auth), the failure is
   recorded in the ledger and the façade retries **once** through the translation
