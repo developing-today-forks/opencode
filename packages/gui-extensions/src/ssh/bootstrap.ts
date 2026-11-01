@@ -1,4 +1,4 @@
-import { Duration, Effect, Option, Schema, Stream } from "effect"
+import { Effect, Option, Schema, Stream } from "effect"
 import { HttpClient, type HttpClientResponse } from "effect/http"
 import { parseTarget, quote, runSsh, sshArgs, SshFailure } from "./command"
 import { RemoteCli } from "./remote-cli"
@@ -107,17 +107,13 @@ export function collectArchive(response: HttpClientResponse.HttpClientResponse) 
 
 /**
  * Fallback archive download under ONE overall deadline: the request phase
- * and the body phase share `timeout`, so a slow response cannot earn the
- * body a second full budget (the previous per-phase timeouts composed to
- * roughly 2x the stated bound). A non-2xx status fails before the body is
- * read: 404 means the requested version was never published.
+ * and the body phase share ARCHIVE_DOWNLOAD_TIMEOUT, so a slow response
+ * cannot earn the body a second full budget (the previous per-phase
+ * timeouts composed to roughly 2x the stated bound). A non-2xx status
+ * fails before the body is read: 404 means the requested version was
+ * never published.
  */
-export function downloadArchive(input: {
-  url: string
-  version: string
-  target: string | undefined
-  timeout?: Duration.Input
-}) {
+export function downloadArchive(input: { url: string; version: string; target: string | undefined }) {
   return Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
     const response = yield* http.get(input.url)
@@ -131,7 +127,7 @@ export function downloadArchive(input: {
       )
 
     return yield* collectArchive(response)
-  }).pipe(Effect.timeout(input.timeout ?? ARCHIVE_DOWNLOAD_TIMEOUT), Effect.mapError(SshFailure.from))
+  }).pipe(Effect.timeout(ARCHIVE_DOWNLOAD_TIMEOUT), Effect.mapError(SshFailure.from))
 }
 
 export function binaryPath(version: string) {
