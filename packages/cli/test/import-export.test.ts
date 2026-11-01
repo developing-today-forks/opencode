@@ -5,7 +5,13 @@ import path from "node:path"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { readBoundedResponseBody } from "../src/util/io"
-import { fetchRemote } from "../src/commands/handlers/session/import"
+import {
+  fetchRemote,
+  fetchServerLocation,
+  postSessionImport,
+  MAX_SESSION_INFO_BYTES,
+} from "../src/commands/handlers/session/import"
+import { OpenCode } from "@opencode/client"
 import { OPENCODE_VERSION } from "../src/version"
 
 const info = {
@@ -347,5 +353,114 @@ test("import rejects a remote body whose declared content-length is over the cap
   } finally {
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}, 15_000)
+
+test("postSessionImport reads a healthy Session.Info response under the cap", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: info }),
+  })
+  try {
+    const { response, text } = await postSessionImport(server.url.toString(), {}, "{}", 5_000)
+    expect(response.status).toBe(200)
+    expect(text).toBe(JSON.stringify({ data: info }))
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("postSessionImport cuts a header stall at the deadline", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 150)).rejects.toThrow(
+      "Timed out after 150ms importing the session via /api/experimental/session/import",
+    )
+  } finally {
+    server.stop(true)
+  }
+}, 15_000)
+
+test("postSessionImport cuts a slow-dripping response body at the deadline", async () => {
+  // The deadline is threaded into the bounded body read, so a body that
+  // never finishes is cut by the same deadline as the headers phase.
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("x"))
+            await Bun.sleep(50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 150)).rejects.toThrow(
+      "Timed out after 150ms importing the session via /api/experimental/session/import",
+    )
+  } finally {
+    server.stop(true)
+  }
+}, 15_000)
+
+test("postSessionImport rejects a Session.Info body over the 1 MiB cap", async () => {
+  const chunk = new Uint8Array(600 * 1024).fill(120)
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(chunk)
+            controller.enqueue(chunk)
+            controller.close()
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 5_000)).rejects.toThrow(
+      `Session data too large: response body exceeds the ${MAX_SESSION_INFO_BYTES}-byte limit`,
+    )
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("fetchServerLocation resolves a healthy location and cuts a stalled one at the deadline", async () => {
+  const healthy = Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({
+        directory: "/project",
+        project: { id: "global", directory: "/project", canonical: "/project" },
+      }),
+  })
+  try {
+    const location = await fetchServerLocation(OpenCode.make({ baseUrl: healthy.url.toString() }), "/project", 5_000)
+    expect(location.directory).toBe("/project")
+  } finally {
+    healthy.stop(true)
+  }
+
+  const stalled = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(
+      fetchServerLocation(OpenCode.make({ baseUrl: stalled.url.toString() }), "/project", 150),
+    ).rejects.toThrow("Timed out after 150ms waiting for the server location at /api/location")
+  } finally {
+    stalled.stop(true)
   }
 }, 15_000)
