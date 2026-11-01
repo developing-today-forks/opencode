@@ -385,7 +385,7 @@ describe("ChatGPTPlugin", () => {
       const cause = new AIError({
         reason: classifyProviderFailure({ message: "Missing scopes: api.responses.write", rawBody: body, status: 401 }),
       })
-      const error = toSessionError(cause)
+      const error = toSessionError(cause, { credentialMethodID: "chatgpt-token-sharing" })
       expect(error.type).toBe("provider.auth")
       expect(error.message).toContain("Credential-method mismatch")
       expect(error.message).toContain("chatgpt-token-sharing")
@@ -402,6 +402,13 @@ describe("ChatGPTPlugin", () => {
         decision: { retry: true, delay: 1000 },
       })
       expect(retryEvent.decision).toEqual({ retry: false })
+
+      // The same scopes-401 is NOT rewritten when the serving credential's method is
+      // unknown or is a different method: the mismatch claim would be a guess.
+      const ungated = toSessionError(cause)
+      expect(ungated.message).not.toContain("Credential-method mismatch")
+      const otherMethod = toSessionError(cause, { credentialMethodID: "chatgpt-headless" })
+      expect(otherMethod.message).not.toContain("Credential-method mismatch")
 
       // A 401 that is not a scopes mismatch keeps its original message.
       const otherBody = JSON.stringify({ error: { message: "Incorrect API key provided" } })

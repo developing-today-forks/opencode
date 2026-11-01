@@ -150,6 +150,12 @@ export interface Resolved {
    * records attribute usage to the credential that actually served (#1106). Absent when an env
    * connection served. For routed resolutions it matches `routing.credentialID`. */
   readonly servingCredentialID?: Credential.ID
+  /** The integration method that minted the serving credential (#1119), captured from the same
+   * active connection as `servingCredentialID`. Error classification uses it to gate
+   * method-specific diagnoses on the method that actually served, instead of guessing
+   * the method from an error body. Absent when an env connection served or the
+   * credential carries no method (key credentials). */
+  readonly servingMethodID?: Integration.MethodID
   /** Selection and health data for a configured OpenCode model route. */
   readonly routing?: {
     readonly routeID: ID
@@ -549,6 +555,9 @@ export const layer = Layer.effect(
           transport: provider?.settings?.transport,
           chunkTimeout: Provider.timeout(provider?.settings?.chunkTimeout),
           ...(connection?.type === "credential" ? { servingCredentialID: connection.id } : {}),
+          ...(connection?.type === "credential" && connection.methodID !== undefined
+            ? { servingMethodID: connection.methodID }
+            : {}),
         } satisfies Resolved,
         // #6: the credential that actually served this load, captured from the same active
         // connection the request was built from. Callers must use this — never a snapshot of
