@@ -27,6 +27,11 @@ import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionStore } from "@opencode/core/session/store"
 import { ModelGovernance } from "@opencode/core/session/model-governance"
+import { GovernanceConfig } from "@opencode/core/session/governance-config"
+import { Global } from "@opencode/util/global"
+import { buildLocationServiceMap } from "@opencode/core/location-services"
+import { tempGlobalLayer } from "./fixture/global"
+import { offlineModels } from "./fixture/models"
 import { EventTable } from "@opencode/core/event/sql"
 import { eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -287,6 +292,51 @@ describe("Session model governance", () => {
 })
 
 describe("Markdown-defined agents in governance (#1107)", () => {
+  test(
+    "GovernanceConfig.load expands Markdown agents through the production location graph",
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "opencode-governance-graph-"))
+      try {
+        await mkdir(path.join(root, ".opencode", "agents"), { recursive: true })
+        await writeFile(path.join(root, "opencode.json"), "{}")
+        await writeFile(
+          path.join(root, ".opencode", "agents", "pinned.md"),
+          ["---", "model: test/pinned", "excluded_models:", "  - test/denied", "max_depth: 1", "---", "Pinned agent."].join(
+            "\n",
+          ),
+        )
+        const ref = Location.Ref.make({ directory: AbsolutePath.make(root) })
+        // The seam Codex flagged on PR #1165: FSUtil must be an exposed root of
+        // the production Instance graph, or GovernanceConfig.load finds no FS in
+        // the location context and Markdown agents stay ungoverned in production
+        // even though test graphs that add FSUtil.node pass.
+        const result = await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const locations = yield* LocationServiceMap.Service
+              // Production session paths only ever read an already-initialized
+              // location; boot this one the same way before loading.
+              yield* locations.contextEffect(ref)
+              return yield* GovernanceConfig.load(locations, ref)
+            }).pipe(
+              Effect.provide(
+                buildLocationServiceMap([Global.node.replace(tempGlobalLayer), offlineModels]),
+              ),
+            ),
+          ),
+        )
+        const pinned = ModelGovernance.agentDefinitions(result.entries).get("pinned")
+        expect(pinned?.model?.providerID).toBe(Provider.ID.make("test"))
+        expect(pinned?.model?.id).toBe(Model.ID.make("pinned"))
+        expect(pinned?.excludedModels).toEqual(["test/denied"])
+        expect(pinned?.maxDepth).toBe(1)
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
+
   test("a Markdown-defined agent is governed through directory expansion", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "opencode-governance-"))
     try {
