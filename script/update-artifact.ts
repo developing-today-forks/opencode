@@ -78,8 +78,9 @@ export namespace UpdateArtifact {
   }
 
   export async function upload(input: { version: string; files: string[]; dryRun?: boolean }, options: Options = {}) {
+    const r2Credentials = input.dryRun ? undefined : await credentials(options)
     const { PutObjectCommand, S3Client } = await import("@aws-sdk/client-s3")
-    const client = input.dryRun ? undefined : new S3Client(await credentials(options))
+    const client = r2Credentials ? new S3Client(r2Credentials) : undefined
     const prefix = `bin/${input.version}/`
     const base = `https://opencode.ai/files/bin/${encodeURIComponent(input.version)}/`
     try {
