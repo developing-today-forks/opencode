@@ -637,16 +637,68 @@ const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
 // (#587); this is only the gate state consumers read. An unknown or stale observation never
 // replaces a known one, so a gated credential is re-admitted only by its reset passing or by a
 // fresher known snapshot below the limit — never by losing the signal.
+/** One balance bench: the balance it was benched at, and the grant that balance belongs
+ * to. Amounts are only comparable within one grant -- a funded replacement grant is
+ * different money, so it releases the hold by existing rather than by exceeding the dead
+ * grant's leftover (#1014). Holds restored from records written before grant identity was
+ * tracked carry no grant and adopt the first live snapshot's. */
+type BalanceHold = {
+  readonly benchedBalance: number | null
+  readonly grant?: string
+}
+
+/** A balance snapshot's backing grant (plan + window): the identity balances compare within. */
+const grantIdentity = (snapshot: QuotaSnapshot.Snapshot) => `${snapshot.planID}\n${snapshot.window}`
+
+/** Whether a live balance snapshot releases a hold: a different grant's live balance is a
+ * funded replacement and releases outright; the same grant (or a hold with no recorded
+ * grant) needs a strict increase over the benched balance. Non-balance, expired, and
+ * amount-less snapshots never release a hold. */
+const releasesHold = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot): boolean => {
+  if (snapshot.balance !== true || snapshot.expired === true || snapshot.remaining === null) return false
+  if (hold.grant !== undefined && grantIdentity(snapshot) !== hold.grant) return true
+  return hold.benchedBalance === null || snapshot.remaining > hold.benchedBalance
+}
+
 type QuotaGateState = {
   snapshot: QuotaSnapshot.Snapshot
   target: Model.Ref
   gated: boolean
   /** Balance gates need a fresh increase; wall-clock reset/fallback times are not recovery signals. */
-  balanceHold?: { readonly benchedBalance: number | null }
+  balanceHold?: BalanceHold
   actualResetAt?: number
   resetObservedAt?: number
 }
 const credentialQuota = new Map<string, QuotaGateState>()
+
+/** The durable record id for one credential's balance baseline (#1014): like the provider
+ * path's `quota:<provider>` adjustment, but keyed to the credential, so a restart re-arms
+ * the credential's own hold instead of losing it. Its `match` names the credential -- never
+ * a provider/model ref -- so selection never skips on it; the gate itself lives in
+ * credentialQuota above and this record is only its persistence. */
+const credentialBaselineID = (credentialID: string) => `quota-credential:${credentialID}`
+
+const persistCredentialBalanceHold = (credentialID: string, hold: BalanceHold) =>
+  addAdjustment({
+    id: credentialBaselineID(credentialID),
+    match: `credential:${credentialID}`,
+    action: "skip",
+    balanceBaseline: hold.benchedBalance,
+    ...(hold.grant !== undefined ? { balanceGrant: hold.grant } : {}),
+    credentialID,
+    note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
+  })
+
+const restoredCredentialHold = (credentialID: string): BalanceHold | undefined => {
+  const item = adjustments.find(
+    (entry) => entry.id === credentialBaselineID(credentialID) && entry.balanceBaseline !== undefined,
+  )
+  if (!item) return undefined
+  return {
+    benchedBalance: item.balanceBaseline ?? null,
+    ...(item.balanceGrant !== undefined ? { grant: item.balanceGrant } : {}),
+  }
+}
 
 /** Feeds one credential's latest quota snapshot into the gate. */
 const observeCredentialQuotaState = (
@@ -658,20 +710,30 @@ const observeCredentialQuotaState = (
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
-  if (previous?.balanceHold) {
-    const increased =
-      snapshot.balance === true &&
-      snapshot.expired !== true &&
-      snapshot.remaining !== null &&
-      (previous.balanceHold.benchedBalance === null || snapshot.remaining > previous.balanceHold.benchedBalance)
-    if (!increased) return
+  // A balance hold restored from its durable baseline after a restart has no in-memory
+  // state: the persisted baseline re-arms the hold, like the provider path (#1014).
+  const restored = previous ? undefined : restoredCredentialHold(credentialID)
+  const hold = previous?.balanceHold ?? restored
+  if (hold && !releasesHold(hold, snapshot)) {
+    if (!previous)
+      credentialQuota.set(credentialID, {
+        snapshot,
+        target,
+        gated: true,
+        balanceHold: hold,
+        resetObservedAt: snapshot.observedAt,
+      })
+    return
   }
   // Out-of-order delivery must not rewind the gate: an observation older than the retained
   // one carries no new information, even when it is still fresh — a below-limit reading
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
-  const balanceHold = snapshot.balance === true && full ? { benchedBalance: snapshot.remaining } : undefined
+  const balanceHold =
+    snapshot.balance === true && full
+      ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
+      : undefined
   const actualResetAt = resetAtTrusted
     ? snapshot.resetAt ?? undefined
     : previous?.actualResetAt !== undefined && previous.actualResetAt > now
@@ -686,6 +748,10 @@ const observeCredentialQuotaState = (
     ...(actualResetAt !== undefined ? { actualResetAt } : {}),
     ...(resetObservedAt !== undefined ? { resetObservedAt } : {}),
   })
+  // Keep the durable baseline in step with the in-memory hold (#1014): written when a hold
+  // arms, cleared when one releases, so a restart restores exactly the hold that was live.
+  if (balanceHold) persistCredentialBalanceHold(credentialID, balanceHold)
+  else if (hold) removeAdjustment(credentialBaselineID(credentialID))
   if (full && !previous?.gated)
     logHealth(
       target,
@@ -730,20 +796,21 @@ export const observeProviderQuota = (
   // A balance skip restored from its adjustment record after a restart has no in-memory
   // state: its persisted baseline re-arms the hold, so the first above-threshold snapshot
   // cannot clear the skip when the balance never actually increased.
-  const restoredBaseline = previous
+  const restoredItem = previous
     ? undefined
     : adjustments.find(
         (item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined,
-      )?.balanceBaseline
-  const hold =
-    previous?.balanceHold ?? (restoredBaseline !== undefined ? { benchedBalance: restoredBaseline } : undefined)
+      )
+  const hold: BalanceHold | undefined =
+    previous?.balanceHold ??
+    (restoredItem
+      ? {
+          benchedBalance: restoredItem.balanceBaseline ?? null,
+          ...(restoredItem.balanceGrant !== undefined ? { grant: restoredItem.balanceGrant } : {}),
+        }
+      : undefined)
   if (hold) {
-    const increased =
-      snapshot.balance === true &&
-      snapshot.expired !== true &&
-      snapshot.remaining !== null &&
-      (hold.benchedBalance === null || snapshot.remaining > hold.benchedBalance)
-    if (!increased) {
+    if (!releasesHold(hold, snapshot)) {
       if (!previous)
         providerQuota.set(target.providerID, {
           snapshot,
@@ -757,7 +824,10 @@ export const observeProviderQuota = (
   }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
-  const balanceHold = snapshot.balance === true && full ? { benchedBalance: snapshot.remaining } : undefined
+  const balanceHold =
+    snapshot.balance === true && full
+      ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
+      : undefined
   providerQuota.set(target.providerID, {
     snapshot,
     target,
@@ -775,7 +845,9 @@ export const observeProviderQuota = (
       match: `${target.providerID}/`,
       action: "skip",
       ...(until !== undefined ? { until } : {}),
-      ...(snapshot.balance === true ? { balanceBaseline: snapshot.remaining } : {}),
+      ...(snapshot.balance === true
+        ? { balanceBaseline: snapshot.remaining, balanceGrant: grantIdentity(snapshot) }
+        : {}),
       note: "quota exhausted (proactive snapshot); held until the stated reset",
     })
     if (!previous?.gated)
@@ -822,14 +894,24 @@ export const observeQuotaFailure = (
   credentialID: string | undefined,
   resetAt: number | undefined,
   now = Date.now(),
+  /** What the attempt actually reported: "balance-exhaustion" (a QuotaExceeded tag, or an
+   * insufficient-credits answer) may install an increase-only balance hold; a plain
+   * "rate-limit" (HTTP 429) keeps the timed recovery below even when the pool's last
+   * snapshot was balance-shaped (#1014). Callers that predate classification omit it and
+   * keep the historical balance-exhaustion reading. */
+  classification: "balance-exhaustion" | "rate-limit" = "balance-exhaustion",
 ) => {
   const gate = currentConstants().quotaGate
   const previous = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
-  if (previous?.snapshot.balance === true) {
+  if (classification !== "rate-limit" && previous?.snapshot.balance === true) {
     const snapshot = { ...previous.snapshot, percent: null, resetAt: null, observedAt: now, stale: false }
-    const balanceHold = { benchedBalance: previous.snapshot.remaining }
+    const balanceHold: BalanceHold = {
+      benchedBalance: previous.snapshot.remaining,
+      grant: grantIdentity(previous.snapshot),
+    }
     if (credentialID) {
       credentialQuota.set(credentialID, { snapshot, target, gated: true, balanceHold })
+      persistCredentialBalanceHold(credentialID, balanceHold)
       logHealth(target, "quota-gated", `credential:${credentialID} balance-insufficient`, undefined, credentialID)
       return
     }
@@ -839,6 +921,7 @@ export const observeQuotaFailure = (
       match: `${target.providerID}/`,
       action: "skip",
       balanceBaseline: previous.snapshot.remaining,
+      balanceGrant: grantIdentity(previous.snapshot),
       note: "balance exhausted (attempt-reported); held until a fresh balance increase",
     })
     logHealth(target, "quota-gated", `provider:${target.providerID} balance-insufficient`)
@@ -1290,6 +1373,13 @@ export interface Adjustment {
    * requiring a fresh balance *increase* after one — without it the first above-threshold
    * snapshot would clear the skip even when the balance never moved. */
   readonly balanceBaseline?: number | null
+  /** The grant (plan + window) `balanceBaseline` belongs to: baselines compare only within
+   * one grant, so a funded replacement grant is not blocked by the dead grant's leftover. */
+  readonly balanceGrant?: string
+  /** Set on a credential's durable balance-baseline record (`quota-credential:<id>`): the
+   * credential the baseline belongs to. Such records persist a credential gate across
+   * restarts; they are never selection skips (their `match` names the credential). */
+  readonly credentialID?: string
   /** Set on learned adjustments: the least autonomy a route needs before this one applies to it. Unset
    * means an operator or agent instruction, which applies wherever a route uses rules. */
   readonly requires?: ModelRouteAutonomy.Level
