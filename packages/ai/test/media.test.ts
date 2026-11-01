@@ -228,19 +228,33 @@ describe("Media", () => {
   it.effect("rejects url downloads over the size cap, declared or streamed", () =>
     Effect.gen(function* () {
       const asset = Media.url("https://cdn.example.test/huge.png")
+      // The declared-size rejection must abort the response, not leave it downloading:
+      // the stub body's cancel callback records whether the reader was cancelled.
+      let declaredCancelled = false
       const declared = yield* asset.bytes().pipe(
         Effect.flip,
         Effect.provide(
           dynamicResponse((input) =>
             Effect.succeed(
-              input.respond("small", {
-                headers: { "content-length": String(Media.MAX_DOWNLOAD_BYTES + 1) },
-              }),
+              input.respond(
+                new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(new TextEncoder().encode("small"))
+                  },
+                  cancel() {
+                    declaredCancelled = true
+                  },
+                }),
+                {
+                  headers: { "content-length": String(Media.MAX_DOWNLOAD_BYTES + 1) },
+                },
+              ),
             ),
           ),
         ),
       )
       expect(declared).toBeInstanceOf(AIError)
+      expect(declaredCancelled).toBe(true)
       expect(declared.reason._tag).toBe("InvalidProviderOutput")
       expect(declared.message).toContain("too large")
 

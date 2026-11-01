@@ -270,7 +270,14 @@ const download = Effect.fn("Media.download")(function* (
   const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
   const declaredSize =
     parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
-  if (declaredSize !== undefined && declaredSize > MAX_DOWNLOAD_BYTES) return yield* tooLarge
+  if (declaredSize !== undefined && declaredSize > MAX_DOWNLOAD_BYTES) {
+    // The request executor is unscoped, so returning here would leave the oversized
+    // response downloading in the background. Acquiring the stream's pull registers a
+    // scope finalizer that cancels the underlying reader; closing the scope without
+    // reading therefore aborts the body before the error is returned.
+    yield* Stream.toPull(response.stream).pipe(Effect.scoped, Effect.ignore)
+    return yield* tooLarge
+  }
   let body = Buffer.allocUnsafe(Math.min(MAX_DOWNLOAD_BYTES, declaredSize || 64 * 1024))
   let size = 0
   yield* Stream.runForEach(response.stream, (chunk) =>
