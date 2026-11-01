@@ -10,8 +10,25 @@ type Artifact = {
   metadata: Record<string, unknown>
 }
 
+const REQUEST_TIMEOUTS = {
+  oidcToken: 10_000,
+  publish: 30_000,
+  cloudflareTokenVerify: 10_000,
+}
+
+type RequestTimeouts = {
+  oidcToken: number
+  publish: number
+  cloudflareTokenVerify: number
+}
+
+type Options = {
+  fetchImpl?: typeof fetch
+  timeouts?: Partial<RequestTimeouts>
+}
+
 export namespace UpdateArtifact {
-  export async function publish(artifact: Artifact) {
+  export async function publish(artifact: Artifact, options: Options = {}) {
     if (process.env.GITHUB_ACTIONS !== "true") {
       console.log("skipped update artifact publication outside GitHub Actions")
       return
@@ -22,36 +39,47 @@ export namespace UpdateArtifact {
 
     const url = new URL(requestURL)
     url.searchParams.set("audience", "https://update.opencode.ai")
-    const tokenResponse = await fetch(url, { headers: { Authorization: `Bearer ${requestToken}` } })
-    if (!tokenResponse.ok) throw new Error(`Failed to request GitHub OIDC token: ${tokenResponse.status}`)
-    const token: unknown = await tokenResponse.json()
+    const fetchImpl = options.fetchImpl ?? fetch
+    const timeouts = { ...REQUEST_TIMEOUTS, ...options.timeouts }
+    const token: unknown = await withDeadline("GitHub OIDC token request", timeouts.oidcToken, async (signal) => {
+      const tokenResponse = await fetchImpl(url, {
+        headers: { Authorization: `Bearer ${requestToken}` },
+        signal,
+      })
+      if (!tokenResponse.ok) throw new Error(`Failed to request GitHub OIDC token: ${tokenResponse.status}`)
+      return readResponseJson(tokenResponse, signal)
+    })
     if (!isRecord(token) || typeof token.value !== "string")
       throw new Error("GitHub OIDC response did not include a token")
 
     for (const attempt of [0, 1, 2]) {
-      const response = await fetch("https://opencode.ai/update/api/publish", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token.value}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(artifact),
+      const outcome = await withDeadline("Update artifact publish request", timeouts.publish, async (signal) => {
+        const response = await fetchImpl("https://opencode.ai/update/api/publish", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token.value}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(artifact),
+          signal,
+        })
+        if (response.ok) return { retry: false }
+        // D1 can commit the upsert and still time out. Replaying the same artifact is safe.
+        if (response.status >= 500 && attempt < 2) {
+          await readResponseBody(response, signal)
+          return { retry: true, status: response.status }
+        }
+        throw new Error(`Failed to publish update artifact: ${response.status} ${await readResponseText(response, signal)}`)
       })
-      if (response.ok) return
-      // D1 can commit the upsert and still time out. Replaying the same artifact is safe.
-      if (response.status >= 500 && attempt < 2) {
-        await response.arrayBuffer()
-        console.warn(`Update artifact publication returned ${response.status}; retrying`)
-        await Bun.sleep((attempt + 1) * 1_000)
-        continue
-      }
-      throw new Error(`Failed to publish update artifact: ${response.status} ${await response.text()}`)
+      if (!outcome.retry) return
+      console.warn(`Update artifact publication returned ${outcome.status}; retrying`)
+      await Bun.sleep((attempt + 1) * 1_000)
     }
   }
 
-  export async function upload(input: { version: string; files: string[]; dryRun?: boolean }) {
+  export async function upload(input: { version: string; files: string[]; dryRun?: boolean }, options: Options = {}) {
     const { PutObjectCommand, S3Client } = await import("@aws-sdk/client-s3")
-    const client = input.dryRun ? undefined : new S3Client(await credentials())
+    const client = input.dryRun ? undefined : new S3Client(await credentials(options))
     const prefix = `bin/${input.version}/`
     const base = `https://opencode.ai/files/bin/${encodeURIComponent(input.version)}/`
     try {
@@ -92,17 +120,23 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input)
 }
 
-async function credentials() {
+async function credentials(options: Options) {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID
   const token = process.env.CLOUDFLARE_API_TOKEN
   if (!account || !token) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required")
+  const fetchImpl = options.fetchImpl ?? fetch
+  const timeouts = { ...REQUEST_TIMEOUTS, ...options.timeouts }
   // R2 uses the token ID as its access key and SHA-256(token) as its secret.
   for (const scope of [`accounts/${account}`, "user"]) {
-    const response = await fetch(`https://api.cloudflare.com/client/v4/${scope}/tokens/verify`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const data: unknown = await withDeadline("Cloudflare token verification", timeouts.cloudflareTokenVerify, async (signal) => {
+      const response = await fetchImpl(`https://api.cloudflare.com/client/v4/${scope}/tokens/verify`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      })
+      if (!response.ok) return undefined
+      return readResponseJson(response, signal)
     })
-    if (!response.ok) continue
-    const data: unknown = await response.json()
+    if (data === undefined) continue
     if (!isRecord(data) || data.success !== true || !isRecord(data.result) || typeof data.result.id !== "string")
       continue
     return {
@@ -115,4 +149,55 @@ async function credentials() {
     }
   }
   throw new Error("Cloudflare token verification failed")
+}
+
+async function withDeadline<T>(operation: string, timeoutMs: number, run: (signal: AbortSignal) => Promise<T>) {
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    const result = await run(signal)
+    signal.throwIfAborted()
+    return result
+  } catch (error) {
+    if (signal.aborted) throw new Error(`${operation} timed out after ${timeoutMs}ms`, { cause: error })
+    throw error
+  }
+}
+
+async function readResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  return JSON.parse(new TextDecoder().decode(await readResponseBody(response, signal)))
+}
+
+async function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+  return new TextDecoder().decode(await readResponseBody(response, signal))
+}
+
+async function readResponseBody(response: Response, signal: AbortSignal): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array()
+  const reader = response.body.getReader()
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
+  signal.addEventListener("abort", abort, { once: true })
+  if (signal.aborted) abort()
+  try {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      size += result.value.byteLength
+      chunks.push(result.value)
+    }
+    // Cancelling a stalled stream may settle its pending read as done; the
+    // signal still owns the body read and must reject before partial data is used.
+    signal.throwIfAborted()
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return bytes
+  } finally {
+    signal.removeEventListener("abort", abort)
+    reader.releaseLock()
+  }
 }
