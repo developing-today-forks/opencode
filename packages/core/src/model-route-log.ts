@@ -737,6 +737,7 @@ export const decisionRows = (db: Database.Interface["db"], since: number, routeI
     .select({
       routeID: RouteDecisionTable.route_id,
       sessionID: RouteDecisionTable.session_id,
+      selection: RouteDecisionTable.selection,
       candidates: RouteDecisionTable.candidates,
       chosen: RouteDecisionTable.chosen,
       reason: RouteDecisionTable.reason,

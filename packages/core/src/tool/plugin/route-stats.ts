@@ -165,7 +165,7 @@ const describeMember = (member: ModelRouteReview.Member) => {
   parts.push(`offered ${member.offered}, chosen ${member.chosen}`)
   if (member.takeRate !== null)
     parts.push(
-      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, weight promised ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
+      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, expected ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
     )
   if (member.weightLayers)
     parts.push(

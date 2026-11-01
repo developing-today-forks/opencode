@@ -179,10 +179,17 @@ attempts in 7 days and no category uses it. Retire only after the user confirms.
 ### 3.4 Underused members
 
 Only in `weighted` and `round-robin` pools, compare `takeRate` with `expectedShare`
-over at least 30 draws:
+over at least 30 draws. `expectedShare` follows the pool's own mode: in a `weighted`
+pool it is the member's proportional share of the weights; in a `round-robin` pool
+weights are priority tiers, so the top tier present in a draw splits the expectation
+evenly and every lower tier expects 0 — a lower-tier member that wins nothing is
+serving as failover, exactly as configured, not underused.
 
 - Underused: `takeRate` below half of `expectedShare`, and exclusions on fewer than
-  20% of its offers. Raise its weight by 1.5 to 2 times, or add a time-bound schedule.
+  20% of its offers. In a `weighted` pool, raise its weight by 1.5 to 2 times, or add
+  a time-bound schedule. In a `round-robin` pool only a member of the active tier can
+  be underused this way; the fix is a tier change — raise its weight into (or above)
+  the top tier — not a proportional bump, which leaves it in its tier.
 - Mostly excluded: a health or budget problem, not a weight problem. Read its errors,
   cooldown and budget.
 

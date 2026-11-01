@@ -97,7 +97,8 @@ model `opencode-route/<id>`.
 
 Common changes:
 
-- Change a member's share: edit its `weights` entry. Ordered pools rank failover by
+- Change a member's share or tier: edit its `weights` entry — a share in a `weighted`
+  pool, a priority tier in a `round-robin` pool. Ordered pools rank failover by
   weight too, so a weight change there also changes the order.
 - Add a member: append it to `targets`, and give it a `weights` entry if it should
   not weigh 1.
