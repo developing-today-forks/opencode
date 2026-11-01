@@ -333,4 +333,15 @@ describe("MessagingTools", () => {
       }
     }),
   )
+
+  it.effect("rejects invalid log context at the tool boundary like the contract", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(MessagingTools.SessionsInput)
+      expect(decode({ context: 0 })).toMatchObject({ context: 0 })
+      expect(decode({ context: 10 })).toMatchObject({ context: 10 })
+      expect(() => decode({ context: -1 })).toThrow()
+      expect(() => decode({ context: 1.5 })).toThrow()
+      expect(() => decode({ context: NaN })).toThrow()
+    }),
+  )
 })
