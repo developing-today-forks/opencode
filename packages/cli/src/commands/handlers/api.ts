@@ -15,6 +15,58 @@ type OpenApi = {
   paths?: Record<string, Record<string, Operation>>
 }
 
+// The /openapi.json lookup is a small metadata GET: it should complete in
+// seconds even against a remote --server, so it gets the CLI's small-payload
+// deadline (the stats command's 30 s AbortSignal.timeout precedent). Without
+// it a server that accepts the connection and then stalls hangs the CLI
+// forever with no diagnostic (#1144).
+export const OPENAPI_FETCH_TIMEOUT_MS = 30_000
+
+// The main request can drive legitimately long-running operations, so its
+// deadline is generous — the session-import deadline (600 s, PR #1121) sized
+// for slow-but-real work rather than the small-payload precedents. It exists
+// to cut header stalls and slow drips, which never finish at any speed, and
+// one deadline covers both the fetch and the response.text() body read.
+export const API_REQUEST_TIMEOUT_MS = 600_000
+
+export async function fetchOpenApi(endpoint: Endpoint, timeoutMs = OPENAPI_FETCH_TIMEOUT_MS) {
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    const response = await fetch(new URL("/openapi.json", endpoint.url), {
+      headers: Service.headers(endpoint),
+      signal,
+    })
+    if (!response.ok) throw new Error(`Failed to load OpenAPI document: HTTP ${response.status}`)
+    return (await response.json()) as OpenApi
+  } catch (cause) {
+    if (signal.aborted) throw new Error(`Timed out after ${timeoutMs}ms loading OpenAPI document`)
+    throw cause
+  }
+}
+
+export async function fetchApi(
+  endpoint: Endpoint,
+  request: { method: string; path: string },
+  headers: Headers,
+  body: string | undefined,
+  timeoutMs = API_REQUEST_TIMEOUT_MS,
+) {
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    const response = await fetch(new URL(request.path, endpoint.url), {
+      method: request.method,
+      headers,
+      body,
+      signal,
+    })
+    const output = await response.text()
+    return { response, output }
+  } catch (cause) {
+    if (signal.aborted) throw new Error(`Timed out after ${timeoutMs}ms waiting for ${request.method} ${request.path}`)
+    throw cause
+  }
+}
+
 export default Runtime.handler(
   Commands.commands.api,
   Effect.fn("cli.api")(function* (input) {
@@ -35,14 +87,7 @@ export default Runtime.handler(
     const body = Option.getOrUndefined(input.data)
     if (body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json")
 
-    const response = yield* Effect.tryPromise(() =>
-      fetch(new URL(request.path, endpoint.url), {
-        method: request.method,
-        headers,
-        body,
-      }),
-    )
-    const output = yield* Effect.promise(() => response.text())
+    const { response, output } = yield* Effect.tryPromise(() => fetchApi(endpoint, request, headers, body))
     if (output) process.stdout.write(output + (output.endsWith(EOL) ? "" : EOL))
     if (!response.ok) {
       process.stderr.write(`HTTP ${response.status} ${response.statusText}${EOL}`)
@@ -70,11 +115,7 @@ function resolveRequest(endpoint: Endpoint, input: readonly string[], params: Re
   const raw = rawRequest(input)
   if (raw) return Effect.succeed(raw)
   if (input.length !== 1) return Effect.fail(new Error("Expected an operation name or an HTTP method and path"))
-  return Effect.tryPromise(async () => {
-    const response = await fetch(new URL("/openapi.json", endpoint.url), { headers: Service.headers(endpoint) })
-    if (!response.ok) throw new Error(`Failed to load OpenAPI document: HTTP ${response.status}`)
-    return resolveOperation((await response.json()) as OpenApi, input[0], params)
-  })
+  return Effect.tryPromise(async () => resolveOperation(await fetchOpenApi(endpoint), input[0], params))
 }
 
 function interpolate(path: string, params: Record<string, string>) {
