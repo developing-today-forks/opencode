@@ -5,6 +5,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "./database/database.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { KVTable } from "./kv/sql.js"
+import { pageLimit } from "./util/number.js"
 
 export type Value = Schema.Json
 
@@ -58,7 +59,7 @@ const layer = Layer.effect(
         yield* db.delete(KVTable).where(eq(KVTable.key, key)).run().pipe(Effect.orDie)
       }),
       scan: Effect.fn("KV.scan")(function* (options) {
-        const limit = Number.isNaN(options.limit) ? 100 : Math.min(Math.max(Math.floor(options.limit ?? 100), 1), 1000)
+        const limit = pageLimit(options.limit, { default: 100, max: 1000 })
         const end = prefixEnd(options.prefix)
         const rows = yield* db
           .select({ key: KVTable.key, value: KVTable.value })
