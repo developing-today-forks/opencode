@@ -13,6 +13,9 @@ export async function sendEmail(input: { to: string; subject: string; body: stri
     accessKeyId: Resource.AWS_SES_ACCESS_KEY_ID.value,
     secretAccessKey: Resource.AWS_SES_SECRET_ACCESS_KEY.value,
     region: "us-east-1",
+    // aws4fetch retries (5xx/429) wait out their backoff without observing the
+    // abort signal, so a retrying call could run ~30s past the 5s bound above.
+    retries: 0,
   })
   const res = await client.fetch("https://email.us-east-1.amazonaws.com/v2/email/outbound-emails", {
     signal: AbortSignal.timeout(SEND_EMAIL_TIMEOUT_MS),
