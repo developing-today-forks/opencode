@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
-import { Effect } from "effect"
+import { Effect, FileSystem } from "effect"
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, readlink, readdir, stat, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
@@ -57,6 +57,62 @@ describe("writeShellConfig", () => {
     expect(await readFile(file, "utf8")).toBe("new\n")
     expect(await readFile(sibling, "utf8")).toBe("keep me\n")
     expect((await readdir(directory.path)).sort()).toEqual([".bashrc", ".bashrc.tmp"])
+  })
+
+  test("chowns the temp file to the target's uid/gid before renaming it over the target", async () => {
+    await using directory = await tmpdir()
+    const file = path.join(directory.path, ".bashrc")
+    await writeFile(file, "old\n")
+    const target = await stat(file)
+    const node = await Effect.runPromise(FileSystem.FileSystem.pipe(Effect.provide(NodeFileSystem.layer)))
+    const calls: string[] = []
+    const fs = new Proxy(node, {
+      get(target_, property, receiver) {
+        if (property === "chown")
+          return (temp: string, uid: number, gid: number) => {
+            calls.push(`chown:${temp}:${uid}:${gid}`)
+            return node.chown(temp, uid, gid)
+          }
+        if (property === "rename")
+          return (from: string, to: string) => {
+            calls.push(`rename:${from}:${to}`)
+            return node.rename(from, to)
+          }
+        // oxlint-disable-next-line no-restricted-globals -- Proxy forwarding requires receiver-aware property access.
+        return Reflect.get(target_, property, receiver)
+      },
+    })
+
+    await Effect.runPromise(writeShellConfig(file, "new\n").pipe(Effect.provideService(FileSystem.FileSystem, fs)))
+
+    expect(calls).toHaveLength(2)
+    const temp = calls[1].slice("rename:".length, calls[1].length - file.length - 1)
+    expect(temp.startsWith(`${file}.tmp-`)).toBe(true)
+    expect(calls[1]).toBe(`rename:${temp}:${file}`)
+    expect(calls[0]).toBe(`chown:${temp}:${target.uid}:${target.gid}`)
+    expect(await readFile(file, "utf8")).toBe("new\n")
+    expect(await readdir(directory.path)).toEqual([".bashrc"])
+  })
+
+  test("fails without replacing the target when the chown fails", async () => {
+    await using directory = await tmpdir()
+    const file = path.join(directory.path, ".bashrc")
+    await writeFile(file, "old\n")
+    const node = await Effect.runPromise(FileSystem.FileSystem.pipe(Effect.provide(NodeFileSystem.layer)))
+    const fs = new Proxy(node, {
+      get(target_, property, receiver) {
+        if (property === "chown") return () => Effect.die(new Error("chown denied"))
+        // oxlint-disable-next-line no-restricted-globals -- Proxy forwarding requires receiver-aware property access.
+        return Reflect.get(target_, property, receiver)
+      },
+    })
+
+    await expect(
+      Effect.runPromise(writeShellConfig(file, "new\n").pipe(Effect.provideService(FileSystem.FileSystem, fs))),
+    ).rejects.toThrow()
+
+    expect(await readFile(file, "utf8")).toBe("old\n")
+    expect(await readdir(directory.path)).toEqual([".bashrc"])
   })
 
   test("writes through a symlink to its target and keeps the target's mode", async () => {
