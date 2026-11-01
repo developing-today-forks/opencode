@@ -149,11 +149,14 @@ const layer = Layer.effect(
                 version === undefined
                   ? undefined
                   : yield* fs.readFileStringSafe(versionFile).pipe(Effect.orElseSucceed(() => undefined))
+              let incomplete = false
               if (version === undefined || current === version) {
-                yield* Effect.forEach(files, (file) => download(file.url, file.destination), {
+                const downloaded = yield* Effect.forEach(files, (file) => download(file.url, file.destination), {
                   concurrency: fileConcurrency,
-                  discard: true,
                 })
+                // Match the versioned branch's gate: a skill whose files did not
+                // all download is not published as pulled (#1125).
+                if (!downloaded.every(Boolean)) incomplete = true
               } else {
                 const token = crypto.randomUUID()
                 const staging = `${root}.tmp-${token}`
@@ -193,7 +196,7 @@ const layer = Layer.effect(
               const exists =
                 (yield* fs.exists(path.join(root, "SKILL.md")).pipe(Effect.orDie)) ||
                 (yield* fs.exists(path.join(root, `${skill.name}.md`)).pipe(Effect.orDie))
-              return exists ? [AbsolutePath.make(root)] : []
+              return exists && !incomplete ? [AbsolutePath.make(root)] : []
             }),
           { concurrency: skillConcurrency },
         ).pipe(Effect.map((directories) => directories.flat()))

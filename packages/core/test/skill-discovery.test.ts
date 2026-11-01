@@ -109,6 +109,34 @@ describe("SkillDiscovery.pull", () => {
   )
 
   it.live(
+    "does not publish an unversioned skill when a listed file fails to download",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const result = yield* catalog.pull([{ name: "deploy", files: ["SKILL.md", "missing.md"] }], {
+        "/catalog/deploy/SKILL.md": "# Deploy",
+      })
+      expect(result.directories).toEqual([])
+      expect(result.requests).toContain(`${catalog.base}deploy/SKILL.md`)
+      expect(result.requests).toContain(`${catalog.base}deploy/missing.md`)
+    }),
+  )
+
+  it.live(
+    "does not publish a same-version skill when a newly listed file fails to download",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const first = yield* catalog.pull([{ name: "deploy", version: "1", files: ["SKILL.md"] }], {
+        "/catalog/deploy/SKILL.md": "# Deploy",
+      })
+      expect(first.directories).toHaveLength(1)
+      const second = yield* catalog.pull([{ name: "deploy", version: "1", files: ["SKILL.md", "missing.md"] }], {
+        "/catalog/deploy/SKILL.md": "# Deploy",
+      })
+      expect(second.directories).toEqual([])
+    }),
+  )
+
+  it.live(
     "refreshes cached files when the version changes",
     Effect.gen(function* () {
       const catalog = yield* fixture
