@@ -1759,6 +1759,51 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.live("admits exactly one half-open probe when a quota window reset learned after the bench passes (#1123)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], ordered)
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // A quota bench planted with no known reset runs on the generic ladder.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+        // The provider's window reset (5h wall in the incident) is learned after the bench,
+        // from the quota feed, and it passes while the bench still has most of a day to run.
+        const resetAt = Date.now() + 250
+        ModelRoute.observeProviderQuota(
+          targetA,
+          {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: Date.now(),
+            stale: false,
+          },
+          Date.now(),
+        )
+        yield* Effect.sleep("400 millis")
+        // Rollover admits pa again — as the single probe.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        // While that probe is outstanding no second attempt is admitted to pa.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+        // The probe succeeds: pa is fully unbenched, long before the ladder would have expired.
+        ModelRoute.completed(targetA, ModelRoute.policy(), {
+          firstTokenMs: 100,
+          responseMs: 500,
+          tokensPerSecond: 30,
+        })
+        expect(ModelRoute.cooldownUntil(targetA)).toBe(0)
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+      }),
+    )
+  })
+
   it.effect("passes over a target whose provider reports a spent rate-limit window", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
