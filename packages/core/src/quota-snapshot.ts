@@ -88,7 +88,12 @@ export const derive = (input: Input, options: Options): Snapshot => {
   // Without `windowHours` the totals cannot be attributed to this window (#550), so a percent computed
   // from them would not be a reading of the window: report unknown instead of that number.
   const windowed = input.window.windowHours !== undefined
-  const balance = input.plan.coverage === "credits" && input.window.unit === "usd"
+  // Only a non-windowed credits/usd quota is a point-in-time balance: a windowed one is a
+  // resetting usage window whose remaining derives from rolling usage, so treating it as a
+  // balance would let elapsed time masquerade as a balance increase (and would hold it
+  // without a timed expiry past its stated reset).
+  const balance =
+    input.plan.coverage === "credits" && input.window.unit === "usd" && input.window.windowHours === undefined
   const expiresAt =
     input.plan.expiresOn === undefined ? undefined : ModelRouteLimits.parseAbsoluteTime(input.plan.expiresOn)
   const expired = input.plan.status === "expired" || (expiresAt !== undefined && expiresAt <= options.now)
@@ -116,6 +121,40 @@ export const derive = (input: Input, options: Options): Snapshot => {
     stale: options.now - input.observedAt > maxAge,
     ...(balance ? { balance: true, expired } : {}),
   }
+}
+
+/**
+ * The earliest usage instant that counts against a plan window's grant: the rolling window's
+ * start for a windowed quota, and the grant's own start (the plan record's creation) for a
+ * non-windowed credit balance — spending before the grant existed is not consumption of it.
+ * Anything else is accounted from the beginning of the route history.
+ */
+export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, now: number): number => {
+  if (window.windowHours !== undefined) return now - window.windowHours * 3_600_000
+  if (plan.coverage === "credits" && window.unit === "usd")
+    return ModelRouteLimits.parseAbsoluteTime(plan.createdAt) ?? 0
+  return 0
+}
+
+/**
+ * The one snapshot of a provider's set that gates a target: a known-full snapshot wins
+ * (latest reset first), then a balance snapshot, then the first. An expired credit grant
+ * never wins over a live snapshot of the same provider — the plan store retains expired
+ * grants as history, and letting one gate would make a funded replacement unable to
+ * re-admit the provider. Only when every snapshot is an expired balance does the expired
+ * one still gate: there is no live grant to prefer.
+ */
+export const gatingSnapshot = (
+  snapshots: readonly Snapshot[],
+  now: number,
+  balanceDeadThreshold = DEFAULT_BALANCE_DEAD_THRESHOLD,
+): Snapshot | undefined => {
+  const live = snapshots.filter((snapshot) => !(snapshot.balance === true && snapshot.expired === true))
+  const pool = live.length > 0 ? live : snapshots
+  const full = pool
+    .filter((snapshot) => isKnownFull(snapshot, now, balanceDeadThreshold))
+    .sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
+  return full ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
 }
 
 /** One snapshot per quota window of every plan, in plan then window order. */

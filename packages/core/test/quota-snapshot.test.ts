@@ -307,3 +307,62 @@ describe("QuotaSnapshot", () => {
     })
   })
 })
+
+describe("QuotaSnapshot balance classification and gating selection (#1014 fix pass)", () => {
+  const creditPlan = { ...plan, coverage: "credits" } as ModelPlan.Plan
+
+  test("a windowed credits USD quota is a resetting window, not a balance", () => {
+    const windowed = { name: "credits", unit: "usd", limit: 2, windowHours: 5 } as ModelPlan.QuotaWindow
+    const snapshot = QuotaSnapshot.derive(
+      { plan: creditPlan, window: windowed, totals: totals({ costUsd: 1 }), observedAt: now },
+      { now },
+    )
+    expect(snapshot.balance).toBeUndefined()
+    expect(snapshot.percent).toBe(50)
+    expect(snapshot.remaining).toBe(1)
+    expect(QuotaSnapshot.isKnownFull(snapshot, now)).toBe(false)
+
+    const full = QuotaSnapshot.derive(
+      { plan: creditPlan, window: windowed, totals: totals({ costUsd: 2 }), observedAt: now },
+      { now },
+    )
+    expect(full.balance).toBeUndefined()
+    expect(full.percent).toBe(100)
+  })
+
+  test("usageSince scopes a non-windowed credit balance to its grant start", () => {
+    const balanceWindow = { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow
+    // The fixture plan was created 2026-10-01: pre-grant spending is not the grant's.
+    expect(QuotaSnapshot.usageSince(creditPlan, balanceWindow, now)).toBe(Date.parse(plan.createdAt))
+    const windowed = { ...window, windowHours: 5 } as ModelPlan.QuotaWindow
+    expect(QuotaSnapshot.usageSince(plan, windowed, now)).toBe(now - 5 * 3_600_000)
+    const plain = { name: "monthly", unit: "requests", limit: 100 } as ModelPlan.QuotaWindow
+    expect(QuotaSnapshot.usageSince(plan, plain, now)).toBe(0)
+  })
+
+  test("gatingSnapshot never lets an expired grant win over a live balance", () => {
+    const expired = QuotaSnapshot.derive(
+      {
+        plan: { ...creditPlan, id: "old-grant", expiresOn: "2026-10-20T00:00:00.000Z" } as ModelPlan.Plan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals(),
+        observedAt: now,
+      },
+      { now },
+    )
+    const live = QuotaSnapshot.derive(
+      {
+        plan: { ...creditPlan, id: "new-grant" } as ModelPlan.Plan,
+        window: { name: "credits", unit: "usd", limit: 5 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 1 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(expired.expired).toBe(true)
+    expect(QuotaSnapshot.isKnownFull(expired, now)).toBe(true)
+    expect(QuotaSnapshot.gatingSnapshot([expired, live], now)?.planID).toBe("new-grant")
+    // With no live grant, the expired one still gates.
+    expect(QuotaSnapshot.gatingSnapshot([expired], now)?.planID).toBe("old-grant")
+  })
+})

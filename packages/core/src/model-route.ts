@@ -704,6 +704,19 @@ export const observeCredentialQuota = (
   now = Date.now(),
 ) => observeCredentialQuotaState(target, credentialID, snapshot, now, true)
 
+/** Credentials of one provider currently held by the quota gate (a balance hold or a gated
+ * known-full snapshot). The gate feed uses this to keep refreshing held credentials after
+ * failover activates a sibling: without a fresh observation a held credential's balance
+ * increase can never reach the release check, so the hold would never clear. */
+export const heldCredentialIDs = (providerID: string): string[] => {
+  const held: string[] = []
+  for (const [credentialID, state] of credentialQuota) {
+    if (state.target.providerID !== providerID) continue
+    if (state.balanceHold !== undefined || state.gated) held.push(credentialID)
+  }
+  return held
+}
+
 const providerQuota = new Map<string, QuotaGateState>()
 
 /** Feeds one provider's latest quota snapshot into the gate (for credential-less providers). */
@@ -714,13 +727,33 @@ export const observeProviderQuota = (
 ) => {
   const previous = providerQuota.get(target.providerID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
-  if (previous?.balanceHold) {
+  // A balance skip restored from its adjustment record after a restart has no in-memory
+  // state: its persisted baseline re-arms the hold, so the first above-threshold snapshot
+  // cannot clear the skip when the balance never actually increased.
+  const restoredBaseline = previous
+    ? undefined
+    : adjustments.find(
+        (item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined,
+      )?.balanceBaseline
+  const hold =
+    previous?.balanceHold ?? (restoredBaseline !== undefined ? { benchedBalance: restoredBaseline } : undefined)
+  if (hold) {
     const increased =
       snapshot.balance === true &&
       snapshot.expired !== true &&
       snapshot.remaining !== null &&
-      (previous.balanceHold.benchedBalance === null || snapshot.remaining > previous.balanceHold.benchedBalance)
-    if (!increased) return
+      (hold.benchedBalance === null || snapshot.remaining > hold.benchedBalance)
+    if (!increased) {
+      if (!previous)
+        providerQuota.set(target.providerID, {
+          snapshot,
+          target,
+          gated: true,
+          balanceHold: hold,
+          resetObservedAt: snapshot.observedAt,
+        })
+      return
+    }
   }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
@@ -742,6 +775,7 @@ export const observeProviderQuota = (
       match: `${target.providerID}/`,
       action: "skip",
       ...(until !== undefined ? { until } : {}),
+      ...(snapshot.balance === true ? { balanceBaseline: snapshot.remaining } : {}),
       note: "quota exhausted (proactive snapshot); held until the stated reset",
     })
     if (!previous?.gated)
@@ -804,6 +838,7 @@ export const observeQuotaFailure = (
       id: `quota:${target.providerID}`,
       match: `${target.providerID}/`,
       action: "skip",
+      balanceBaseline: previous.snapshot.remaining,
       note: "balance exhausted (attempt-reported); held until a fresh balance increase",
     })
     logHealth(target, "quota-gated", `provider:${target.providerID} balance-insufficient`)
@@ -1250,6 +1285,11 @@ export interface Adjustment {
   /** When the adjustment lapses, epoch milliseconds; unset means only the schedule ends it. */
   readonly until?: number
   readonly note?: string
+  /** Set on a balance quota skip: the balance the pool was benched at. The skip survives a
+   * restart through the adjustment record, and this baseline is what lets the gate keep
+   * requiring a fresh balance *increase* after one — without it the first above-threshold
+   * snapshot would clear the skip even when the balance never moved. */
+  readonly balanceBaseline?: number | null
   /** Set on learned adjustments: the least autonomy a route needs before this one applies to it. Unset
    * means an operator or agent instruction, which applies wherever a route uses rules. */
   readonly requires?: ModelRouteAutonomy.Level
