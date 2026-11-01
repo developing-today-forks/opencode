@@ -1,7 +1,20 @@
 ---
 export const prerender = false
 
-const response = await fetch("https://raw.githubusercontent.com/anomalyco/opencode/dev/install")
+// Deadline for the upstream install-script fetch (#1246). The signal
+// stays attached while the body streams back, so the bound covers both
+// time-to-headers and the body transfer: a pre-headers stall rejects
+// and settles as the 503 below, and a slow-dripping body aborts the
+// stream instead of hanging the public install route indefinitely.
+// The install script is small, so 30s is generous for a healthy
+// transfer. Sibling precedent for a named-constant fetch deadline:
+// packages/console/app/src/lib/inference-proxy.ts.
+const INSTALL_FETCH_TIMEOUT_MS = 30_000
+
+const response = await fetch("https://raw.githubusercontent.com/anomalyco/opencode/dev/install", {
+  signal: AbortSignal.timeout(INSTALL_FETCH_TIMEOUT_MS),
+}).catch(() => undefined)
+if (!response) return new Response("The install script is temporarily unavailable.", { status: 503 })
 const headers = new Headers(response.headers)
 headers.set("Cache-Control", "no-store")
 

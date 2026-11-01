@@ -57,6 +57,13 @@ export async function resolveConfigPath(directory: string) {
   return candidates[0]
 }
 
+// The temp file must be created exclusively: a pre-existing file at the temp
+// path is never truncated or consumed as the rename source, it fails the
+// write instead (EEXIST) and is left byte-for-byte intact.
+export async function writeTempFileExclusive(temporary: string, content: string, mode: number) {
+  await writeFile(temporary, content, { mode, flag: "wx" })
+}
+
 export async function writeMcpConfig(configPath: string, name: string, server: unknown) {
   const text = await readFile(configPath, "utf8").catch((error) => {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return "{}"
@@ -80,6 +87,6 @@ export async function writeMcpConfig(configPath: string, name: string, server: u
   const existing = await stat(destination).catch(() => undefined)
   const mode = existing ? existing.mode & 0o600 : 0o600
   const temporary = destination + ".tmp-" + process.pid + "-" + randomUUID()
-  await writeFile(temporary, applyEdits(text, edits), { mode })
+  await writeTempFileExclusive(temporary, applyEdits(text, edits), mode)
   await rename(temporary, destination)
 }

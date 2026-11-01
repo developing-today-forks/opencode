@@ -1738,6 +1738,27 @@ export const nextTarget = (
           : child.node !== undefined && hasReady(child.node))
       return available ? [position] : []
     })
+    const excluded = node.children.flatMap((child, position) => {
+      // A provider-route group with no leaves — no member offers the model it was asked
+      // for — has no leaves to exclude one by one; name the group itself so a zero-ready
+      // group is never silent in the parent decision.
+      if (
+        child.node !== undefined &&
+        definition.nodes[child.node]?.providerRoute !== undefined &&
+        leaves(child.node).length === 0
+      )
+        return [{ candidate: label(child), reason: "no-ready-members" }]
+      const childLeaves = child.leaf !== undefined ? [child.leaf] : child.node !== undefined ? leaves(child.node) : []
+      return childLeaves.flatMap((index) => {
+        const gateClosed =
+          (child.gate !== undefined && !gateOpen(child.gate, now)) ||
+          (child.node !== undefined && gateClosedOnPath(child.node, index))
+        const unavailableReason =
+          unavailable?.get(index) ??
+          (tried.has(index) ? "already-tried" : gateClosed ? "window-gate-closed" : undefined)
+        return unavailableReason ? [{ candidate: label(node.children[position]), reason: unavailableReason }] : []
+      })
+    })
     if (positions.length === 0) {
       ModelRouteLog.record({
         kind: "decision",
@@ -1749,6 +1770,7 @@ export const nextTarget = (
           variant,
           candidates: [],
           reason: "no-candidates",
+          ...(excluded.length > 0 ? { detail: { excluded } } : {}),
         },
       })
       return undefined
@@ -1871,18 +1893,6 @@ export const nextTarget = (
         priorSticky !== undefined && pool.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
     }
     const chosen = ordered[0]
-    const excluded = node.children.flatMap((child, position) => {
-      const childLeaves = child.leaf !== undefined ? [child.leaf] : child.node !== undefined ? leaves(child.node) : []
-      return childLeaves.flatMap((index) => {
-        const gateClosed =
-          (child.gate !== undefined && !gateOpen(child.gate, now)) ||
-          (child.node !== undefined && gateClosedOnPath(child.node, index))
-        const unavailableReason =
-          unavailable?.get(index) ??
-          (tried.has(index) ? "already-tried" : gateClosed ? "window-gate-closed" : undefined)
-        return unavailableReason ? [{ candidate: label(node.children[position]), reason: unavailableReason }] : []
-      })
-    })
     ModelRouteLog.record({
       kind: "decision",
       row: {

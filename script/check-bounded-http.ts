@@ -11,7 +11,8 @@
  * reader (`readBoundedResponseText` / `readExcerptResponseText` from
  * `@opencode/util/http-body`, or `collectBoundedResponseBody` from
  * packages/core/src/tool/http-body.ts for Effect HttpClient sites).
- * This gate scans every `src` tree under packages/ (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
+ * This gate scans every `src` tree under packages/ and services/
+ * (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
  * patterns —
  *   P-A: a `fetch(` call site. The pattern is deliberately line-shaped:
  *        a call whose options carry a signal still matches, exactly as
@@ -39,11 +40,18 @@
  * Comment-only lines are skipped: a comment mentioning `fetch(` is
  * documentation, not a call site.
  *
+ * Scope note (#1256): the root `script/` tree itself is out of scope.
+ * Those are operator-run local/CI tooling scripts, not deployed
+ * production code handling untrusted upstreams on a request path;
+ * several are this gate's own checker and tests, whose pattern
+ * literals would self-match. Production trees (packages/, services/)
+ * are the contract surface.
+ *
  * Usage:
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
  */
 import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative, sep } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
   "packages/ai/src",
@@ -80,6 +88,10 @@ export const SCAN_ROOTS: string[] = [
   "packages/ui/src",
   "packages/util/src",
   "packages/web/src",
+  "services/changelog/src",
+  "services/files/src",
+  "services/update/src",
+  "services/www/src",
 ]
 
 export const ALLOWLIST_PATH = "script/check-bounded-http.allowlist.txt"
@@ -162,12 +174,12 @@ export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx", ".astro"]
 
 export const isScannedFile = (name: string) => SCANNED_EXTENSIONS.some((ext) => name.endsWith(ext))
 
-function collect(root: string, dir: string, hits: Hit[]) {
+export function collect(root: string, dir: string, hits: Hit[]) {
   for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collect(root, path, hits)
     else if (isScannedFile(entry.name))
-      hits.push(...scanSource(path.slice(root.length + 1), readFileSync(path, "utf8")))
+      hits.push(...scanSource(relative(root, path).split(sep).join("/"), readFileSync(path, "utf8")))
   }
 }
 

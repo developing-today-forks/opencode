@@ -29,6 +29,7 @@
  "check:doc-env-vars": "bun script/check-doc-env-vars.ts",
     "check:proto-reads": "bun script/check-proto-reads.ts",
     "check:bounded-http": "bun script/check-bounded-http.ts",
+    "check:numeric-boundaries": "bun script/check-numeric-boundaries.ts",
     "typecheck:profile": "bun script/profile-typecheck.ts",
     "typecheck:profile:packages": "bun script/profile-typecheck-packages.ts",
     "upgrade-opentui": "bun run script/upgrade-opentui.ts",
