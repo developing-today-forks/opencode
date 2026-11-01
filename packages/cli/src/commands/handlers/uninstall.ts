@@ -1,7 +1,7 @@
 import { confirm, intro, log, outro, spinner } from "@clack/prompts"
 import { Service } from "@opencode/client/effect/service"
 import { Global } from "@opencode/util/global"
-import { Effect, FileSystem, Schedule } from "effect"
+import { Effect, FileSystem, Option, Schedule } from "effect"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
 import { Commands } from "../commands"
@@ -156,13 +156,17 @@ export const writeShellConfig = Effect.fnUntraced(function* (file: string, conte
   const fs = yield* FileSystem.FileSystem
   // Shell rc files are commonly symlinks into a dotfiles repo: write a temp file
   // beside the resolved target and rename over the target, so the link itself
-  // survives and the write is never partial. Keep the target's mode - the other
-  // CLI writers hardcode 0o600, which would tighten a hand-maintained rc file.
+  // survives and the write is never partial. Keep the target's mode and
+  // ownership - the other CLI writers hardcode 0o600, which would tighten a
+  // hand-maintained rc file.
   const target = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file))
-  const mode = yield* fs.stat(target).pipe(
-    Effect.map((info) => info.mode),
-    Effect.orElseSucceed(() => undefined),
-  )
+  // One stat carries mode and ownership: the temp file renamed over the target
+  // must take both, or a privileged (sudo/root) uninstall would leave the
+  // user's rc file owned by the invoking user (#1290).
+  const info = yield* fs.stat(target).pipe(Effect.orElseSucceed(() => undefined))
+  const mode = info?.mode
+  const uid = info ? Option.getOrUndefined(info.uid) : undefined
+  const gid = info ? Option.getOrUndefined(info.gid) : undefined
   // The temp file lives in the user's own directory, where a fixed name like
   // `.bashrc.tmp` is not reserved: create a uniquely named file exclusively
   // (`wx` fails if the name is somehow taken) beside the target, and clean up
@@ -178,6 +182,10 @@ export const writeShellConfig = Effect.fnUntraced(function* (file: string, conte
       }),
     )
     if (mode !== undefined) yield* fs.chmod(temp, mode)
+    // Chown before the rename, inside the guarded write: if ownership cannot
+    // be preserved the write fails here and the target is left untouched
+    // (the onError below removes only this invocation's temp file).
+    if (uid !== undefined && gid !== undefined) yield* fs.chown(temp, uid, gid)
     yield* fs.rename(temp, target)
   })
   yield* write.pipe(Effect.onError(() => fs.remove(temp, { force: true }).pipe(Effect.ignore)))
