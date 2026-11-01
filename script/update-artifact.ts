@@ -28,6 +28,7 @@ type Options = {
 }
 
 export namespace UpdateArtifact {
+  /** Publishes an artifact using deadline-bound OIDC and update service requests. */
   export async function publish(artifact: Artifact, options: Options = {}) {
     if (process.env.GITHUB_ACTIONS !== "true") {
       console.log("skipped update artifact publication outside GitHub Actions")
@@ -77,6 +78,7 @@ export namespace UpdateArtifact {
     }
   }
 
+  /** Uploads release files to R2 after verifying the Cloudflare token. */
   export async function upload(input: { version: string; files: string[]; dryRun?: boolean }, options: Options = {}) {
     const r2Credentials = input.dryRun ? undefined : await credentials(options)
     const { PutObjectCommand, S3Client } = await import("@aws-sdk/client-s3")
@@ -121,6 +123,7 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input)
 }
 
+/** Verifies the Cloudflare token and derives the R2 client credentials. */
 async function credentials(options: Options) {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID
   const token = process.env.CLOUDFLARE_API_TOKEN
@@ -152,6 +155,7 @@ async function credentials(options: Options) {
   throw new Error("Cloudflare token verification failed")
 }
 
+/** Runs a request and its body reads under one named timeout. */
 async function withDeadline<T>(operation: string, timeoutMs: number, run: (signal: AbortSignal) => Promise<T>) {
   const signal = AbortSignal.timeout(timeoutMs)
   try {
@@ -172,6 +176,7 @@ async function readResponseText(response: Response, signal: AbortSignal): Promis
   return new TextDecoder().decode(await readResponseBody(response, signal))
 }
 
+/** Reads a response body until it completes or its request deadline aborts. */
 async function readResponseBody(response: Response, signal: AbortSignal): Promise<Uint8Array> {
   if (!response.body) return new Uint8Array()
   const reader = response.body.getReader()

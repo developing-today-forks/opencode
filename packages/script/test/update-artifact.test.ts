@@ -17,10 +17,13 @@ const timeouts = {
 
 function stalledBody() {
   return new ReadableStream<Uint8Array>({
-    start() {},
+    start() {
+      // Keep the stream open until production code cancels it on timeout.
+    },
   })
 }
 
+/** Applies environment values for a test and restores the previous values afterward. */
 async function withEnv(values: Record<string, string | undefined>, run: () => Promise<void>) {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]))
   for (const [key, value] of Object.entries(values)) {
