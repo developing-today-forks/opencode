@@ -5,6 +5,10 @@ import { timingSafeEqual } from "node:crypto"
 
 const DISCORD_ALERT_ROLE_ID = "1520924666359713863"
 
+// Mirrors packages/function/src/discord.ts DISCORD_TIMEOUT_MS (#1114): a
+// stalled Discord endpoint must not hang Honeycomb alert delivery.
+export const DISCORD_TIMEOUT_MS = 5_000
+
 const basePayload = z.object({
   name: z.string().optional(),
   status: z.string().optional(),
@@ -71,6 +75,7 @@ const postDiscordMessage = async (payload: z.infer<typeof honeycombWebhookPayloa
       allowed_mentions: { roles: [DISCORD_ALERT_ROLE_ID] },
       flags: 4,
     }),
+    signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
   })
 }
 
@@ -96,8 +101,10 @@ export async function POST(input: APIEvent) {
     return Response.json({ message: "ignored" }, { status: 200 })
   }
 
-  const response = await postDiscordMessage(parsed.data)
-  if (!response.ok) {
+  // A failed or timed-out Discord POST settles as the same 502 as a
+  // non-OK Discord response instead of throwing out of the handler.
+  const response = await postDiscordMessage(parsed.data).catch(() => undefined)
+  if (!response?.ok) {
     return Response.json({ message: "discord webhook failed" }, { status: 502 })
   }
 
