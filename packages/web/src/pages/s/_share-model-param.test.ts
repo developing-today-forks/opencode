@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { shareModelParam } from "./share-model-param"
+import { shareModelParam } from "./_share-model-param"
 
 describe("shareModelParam", () => {
   test.each([

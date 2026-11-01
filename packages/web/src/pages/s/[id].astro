@@ -4,7 +4,7 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro"
 import type { Session } from "opencode/session/index"
 import config from "../../../config.mjs"
 import Share from "../../components/Share.tsx"
-import { shareModelParam } from "./share-model-param"
+import { shareModelParam } from "./_share-model-param"
 
 const apiUrl = import.meta.env.VITE_API_URL || ""
 const ta = Astro.locals.t as ((key: string) => string) & {
