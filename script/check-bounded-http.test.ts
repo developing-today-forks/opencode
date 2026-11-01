@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-bounded-http"
+import { SCAN_ROOTS, isScannedFile, parseAllowlist, scanSource, staleEntries, unlistedHits } from "./check-bounded-http"
 
 describe("scanSource", () => {
   test("flags the P-A fetch shape, with or without a signal", () => {
@@ -53,6 +53,29 @@ describe("scanSource", () => {
       ["// never call fetch(url) without a signal", "* response.text() buffers the body", "const x = 1"].join("\n"),
     )
     expect(hits).toEqual([])
+  })
+})
+
+describe("services scan roots (#1256)", () => {
+  test("SCAN_ROOTS covers every services/*/src tree", () => {
+    expect(SCAN_ROOTS).toContain("services/changelog/src")
+    expect(SCAN_ROOTS).toContain("services/files/src")
+    expect(SCAN_ROOTS).toContain("services/update/src")
+    expect(SCAN_ROOTS).toContain("services/www/src")
+  })
+
+  test("a services/ fixture hit fails the gate until dispositioned", () => {
+    const hits = scanSource(
+      "services/www/src/pages/install.astro",
+      'const response = await fetch("https://example.com/install")',
+    )
+    expect(hits).toHaveLength(1)
+    expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    const allowlist = parseAllowlist(
+      'services/www/src/pages/install.astro :: const response = await fetch("https://example.com/install") :: tracked by #1246\n',
+    )
+    expect(unlistedHits(hits, allowlist)).toEqual([])
+    expect(staleEntries(hits, allowlist)).toEqual([])
   })
 })
 
