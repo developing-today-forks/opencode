@@ -618,7 +618,7 @@ The canonical shape is `experimental.routes`. This family has seven keys:
       "schedules": [
         {
           "id": "deepseek-peak-lighten",
-          "targets": ["deepseek/*"],
+          "targets": ["openai/gpt-6-luna"],
           "when": "deepseek-peak",
           "factor": 0.5
         }
@@ -652,7 +652,7 @@ Each `routes` key also has a deprecated flat spelling directly under `experiment
 - `model_route_log` - deprecated spelling of `routes.log`.
 - `model_route_settings` - deprecated spelling of `routes.settings`.
 
-The flat spellings normalize into the nested shape when the config loads. When both spellings name the same key, the nested value wins and the conflict is diagnosed, per key - so `routes.windows` overrides `model_route_windows`, while a flat key with no nested counterpart still folds in. Prefer the nested shape in new config.
+The flat spellings normalize into the nested shape when the config loads. When both spellings name the same key, the nested value wins and the conflict is diagnosed, per key - so `routes.windows` overrides `model_route_windows`, while a flat key with no nested counterpart still folds in. Prefer the nested shape in new config. The detailed flat-key examples below are complete, independent configurations: normalization selects each nested field as a whole rather than merging its entries, so combining an example with the nested config above can omit routes or schedules and produce conflict diagnostics.
 
 #### Targets
 
@@ -928,8 +928,8 @@ Use `routes.settings` for global defaults for the route machinery itself: the be
 }
 ```
 
-- `bench` - the bench ladder: how a failure benches a target (or one of its credentials), and how far the bench can run. A stated retry-after is believed as-is within these bounds; every other failure class doubles its bench per consecutive failure, and the count resets only on a success. Keys: `maxCooldownMs`, `multiplier`, `retryAfterMinMs`, `cooldownCapMs`, `quotaCooldownCapMs`.
-- `demotion` - quota-error demotion: a target that keeps answering "out of quota" drops to the end of every order instead of being retried first on each new session. Keys: `after`, `windowMs`, `factor`.
+- `bench` - the bench ladder: how a failure benches a target (or one of its credentials), and how far the bench can run. A stated retry-after is believed as-is within these bounds; every other failure class uses the configured `multiplier` per consecutive failure, which defaults to `2` (`multiplier: 1` keeps the bench at its base), and the count resets only on a success. Keys: `maxCooldownMs`, `multiplier`, `retryAfterMinMs`, `cooldownCapMs`, `quotaCooldownCapMs`.
+- `demotion` - quota-error demotion: a target that keeps answering "out of quota" has its effective weight reduced by `factor`. Weighted selection can still choose it, ordered selection ranks it by its reduced weight, and round-robin uses it only after non-demoted targets. Keys: `after`, `windowMs`, `factor`.
 - `quotaGate` - how long an exhaustion reading (a quota snapshot, or one attempt's exhaustion answer) holds a target, credential, or provider out of routes. Keys: `maxMs`, `fallbackMs`, `feedTtlMs`, `balanceDeadThreshold`.
 - `escalation` - when a route races its next target because the current one keeps giving up. Keys: `enabled`, `afterGiveUps`, `outcomeWindow`.
 - `network` - telling a provider-wide fault from a local network fault: when several models of one provider are cooling, the provider itself is demoted to last resort; when several unrelated providers fail at once, the fault is more likely the local network, so none is punished. Keys: `windowMs`, `providers`, `providerModels`.
