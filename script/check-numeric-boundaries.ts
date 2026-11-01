@@ -11,7 +11,8 @@
  * site invents its own answer. The blessed direction is the #993
  * primitives (pageLimit and friends) or an explicit local disposition.
  * This gate scans packages/core/src, packages/ai/src and
- * packages/cli/src (all three from day one) with the sweep patterns —
+ * packages/cli/src (all three from day one) and packages/server/src
+ * (added by #1294, the network-boundary package) with the sweep patterns —
  *   P-A: a `Number(` call. The pattern is deliberately line-shaped and
  *        word-bounded: `Number.isFinite(` / `Number.isNaN(` are
  *        internal arithmetic predicates, not conversions, and do not
@@ -40,7 +41,7 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
-export const SCAN_ROOTS: string[] = ["packages/core/src", "packages/ai/src", "packages/cli/src"]
+export const SCAN_ROOTS: string[] = ["packages/core/src", "packages/ai/src", "packages/cli/src", "packages/server/src"]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"
 
