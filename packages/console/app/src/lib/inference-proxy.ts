@@ -1,5 +1,12 @@
 import { Resource } from "@opencode/console-resource"
 
+// Time-to-response-headers bound, in the sibling style (stats-proxy.ts
+// STATS_FETCH_TIMEOUT_MS, routes/s/[id].ts PROXY_TIMEOUT_MS). This is NOT a
+// total deadline: the timer is cleared as soon as the upstream fetch settles,
+// so a streaming response that has started is never cut off by it, while a
+// backend that stalls before headers settles as the 503 below.
+export const INFERENCE_HEADERS_TIMEOUT_MS = 8_000
+
 const paths: Record<string, string | undefined> = {
   "POST /zen/v1/chat/completions": "/openai/v1/chat/completions",
   "POST /zen/v1/responses": "/openai/v1/responses",
@@ -47,9 +54,12 @@ export async function proxyInference(request: Request) {
   const requestID = request.headers.get("x-opencode-request-id") ?? request.headers.get("x-opencode-request")
   if (requestID) forwarded.headers.set("x-opencode-request-id", requestID)
 
+  const controller = new AbortController()
+  const headersTimer = setTimeout(() => controller.abort(), INFERENCE_HEADERS_TIMEOUT_MS)
   const response = await (Resource.INFERENCE as { fetch: typeof fetch })
-    .fetch(forwarded, { redirect: "manual" })
+    .fetch(forwarded, { redirect: "manual", signal: controller.signal })
     .catch(() => undefined)
+    .finally(() => clearTimeout(headersTimer))
   if (!response)
     return Response.json(
       { error: { type: "api_error", message: "Inference routing is unavailable. Please retry later." } },

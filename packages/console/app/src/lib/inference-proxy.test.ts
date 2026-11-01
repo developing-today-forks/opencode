@@ -1,0 +1,125 @@
+import { describe, expect, mock, test } from "bun:test"
+
+// Mock the Resource module outright (the stats-proxy.test.ts pattern): the
+// INFERENCE binding is a service-binding fetch, stubbed per test below.
+let inferenceImpl: (request: Request, init?: RequestInit) => Promise<Response> = async () =>
+  new Response(null, { status: 200 })
+
+mock.module("@opencode/console-resource", () => ({
+  Resource: {
+    ConsoleMigration: { inferenceUrl: "https://inference.example.test" },
+    INFERENCE: {
+      fetch: (request: Request, init?: RequestInit) => inferenceImpl(request, init),
+    },
+  },
+}))
+
+const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS } = await import("./inference-proxy")
+
+function request() {
+  return new Request("https://opencode.ai/zen/v1/models", {
+    headers: { authorization: "Bearer test-key" },
+  })
+}
+
+async function readBody(response: Response) {
+  if (!response.body) return ""
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  while (true) {
+    const result = await reader.read()
+    if (result.done) break
+    chunks.push(result.value)
+  }
+  const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.byteLength, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
+}
+
+describe("proxyInference headers deadline", () => {
+  test(
+    "settles as 503 when the upstream stalls before response headers",
+    async () => {
+      let seenSignal: AbortSignal | null | undefined
+      inferenceImpl = async (_request, init) => {
+        seenSignal = init?.signal
+        return new Promise<Response>((_resolve, reject) => {
+          const aborted = () => reject(new DOMException("aborted", "AbortError"))
+          if (init?.signal?.aborted) return aborted()
+          init?.signal?.addEventListener("abort", aborted)
+        })
+      }
+      const started = Date.now()
+      const response = await proxyInference(request())
+      const elapsed = Date.now() - started
+      expect(response.status).toBe(503)
+      expect(seenSignal).toBeInstanceOf(AbortSignal)
+      expect(seenSignal?.aborted).toBe(true)
+      expect(elapsed).toBeGreaterThanOrEqual(INFERENCE_HEADERS_TIMEOUT_MS - 250)
+      expect(elapsed).toBeLessThan(INFERENCE_HEADERS_TIMEOUT_MS + 5_000)
+      expect(await readBody(response)).toContain("Inference routing is unavailable")
+    },
+    INFERENCE_HEADERS_TIMEOUT_MS + 10_000,
+  )
+
+  test("settles as 503 when the upstream fetch rejects", async () => {
+    inferenceImpl = async () => {
+      throw new Error("upstream down")
+    }
+    const response = await proxyInference(request())
+    expect(response.status).toBe(503)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+  })
+
+  test("proxies a healthy upstream response unchanged", async () => {
+    inferenceImpl = async () =>
+      new Response(`{"ok":true}`, { status: 200, headers: { "content-type": "application/json" } })
+    const response = await proxyInference(request())
+    expect(response.status).toBe(200)
+    expect(await readBody(response)).toBe(`{"ok":true}`)
+  })
+
+  test("keeps the 404 to 400 rewrite for a healthy upstream", async () => {
+    inferenceImpl = async () => new Response("no such model", { status: 404 })
+    const response = await proxyInference(request())
+    expect(response.status).toBe(400)
+    expect(await readBody(response)).toBe("no such model")
+  })
+
+  test(
+    "does not cut a streaming body that starts before the deadline",
+    async () => {
+      let delivered = false
+      inferenceImpl = async () =>
+        new Response(
+          new ReadableStream({
+            pull(stream) {
+              if (delivered) return
+              delivered = true
+              stream.enqueue(new TextEncoder().encode("first-"))
+              return new Promise<void>((resolve) =>
+                setTimeout(() => {
+                  stream.enqueue(new TextEncoder().encode("second"))
+                  stream.close()
+                  resolve()
+                }, INFERENCE_HEADERS_TIMEOUT_MS + 500),
+              )
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      const started = Date.now()
+      const response = await proxyInference(request())
+      expect(response.status).toBe(200)
+      // Headers arrived immediately; the body finishes past the headers
+      // deadline and must still arrive whole.
+      expect(await readBody(response)).toBe("first-second")
+      expect(Date.now() - started).toBeGreaterThanOrEqual(INFERENCE_HEADERS_TIMEOUT_MS)
+    },
+    INFERENCE_HEADERS_TIMEOUT_MS + 10_000,
+  )
+})
