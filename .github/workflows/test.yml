@@ -214,7 +214,7 @@ jobs:
         # converted through the #993 primitives or listed with a
         # disposition in the allowlist, or the bare-conversion class
         # regrows one call at a time (#995, design #992).
-        if: runner.os == Linux
+        if: runner.os == 'Linux'
         run: bun run check:numeric-boundaries
 
       - name: Configure git identity
