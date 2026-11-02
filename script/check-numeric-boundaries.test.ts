@@ -48,36 +48,46 @@ describe("scanSource", () => {
 })
 
 describe("SCAN_ROOTS", () => {
-  test("includes the server package, the network-boundary root added by #1294", () => {
-    expect(SCAN_ROOTS).toContain("packages/server/src")
-  })
-
-  test("includes the console and function packages, the network-boundary roots added by #1302", () => {
-    expect(SCAN_ROOTS).toContain("packages/console/app/src")
-    expect(SCAN_ROOTS).toContain("packages/console/function/src")
-    expect(SCAN_ROOTS).toContain("packages/function/src")
-  })
-
-  test("includes the services workers, the public Cloudflare worker roots added by #1308", () => {
-    expect(SCAN_ROOTS).toContain("services/changelog/src")
-    expect(SCAN_ROOTS).toContain("services/files/src")
-    expect(SCAN_ROOTS).toContain("services/update/src")
-  })
-
-  test("includes plugin-github, the GitHub API client root added by #1318", () => {
-    expect(SCAN_ROOTS).toContain("packages/plugin-github/src")
+  test("includes every production packages/*/src and services/*/src tree", () => {
     expect(SCAN_ROOTS).toEqual([
-      "packages/core/src",
       "packages/ai/src",
+      "packages/app/src",
+      "packages/client/src",
       "packages/cli/src",
-      "packages/server/src",
+      "packages/codemode/src",
       "packages/console/app/src",
       "packages/console/function/src",
+      "packages/core/src",
+      "packages/desktop/src",
       "packages/function/src",
+      "packages/gui-extensions/src",
+      "packages/http-recorder/src",
+      "packages/httpapi-codegen/src",
+      "packages/latex/src",
+      "packages/merman/src",
+      "packages/plugin/src",
+      "packages/plugin-browser/src",
+      "packages/plugin-github/src",
+      "packages/posts/src",
+      "packages/protocol/src",
+      "packages/schema/src",
+      "packages/script/src",
+      "packages/sdk/src",
+      "packages/server/src",
+      "packages/session-ui/src",
+      "packages/simulation/src",
+      "packages/stats/app/src",
+      "packages/stats/core/src",
+      "packages/stats/server/src",
+      "packages/theme/src",
+      "packages/tui/src",
+      "packages/ui/src",
+      "packages/util/src",
+      "packages/web/src",
       "services/changelog/src",
       "services/files/src",
       "services/update/src",
-      "packages/plugin-github/src",
+      "services/www/src",
     ])
   })
 })
