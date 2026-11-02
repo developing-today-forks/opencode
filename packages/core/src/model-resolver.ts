@@ -856,7 +856,7 @@ export const layer = Layer.effect(
             load(source, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
           )
           if (Result.isFailure(resolved)) {
-            ModelRoute.failed(target, definition.health, now)
+            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory)
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.

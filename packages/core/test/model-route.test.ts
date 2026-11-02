@@ -1789,6 +1789,32 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("health recording keeps the judging Location's outcome window and bench ladder (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3 } }), "/loc/b")
+    try {
+      // Six give-ups recorded for A: A's window (10) keeps all six, so A's
+      // afterGiveUps (6) can actually trigger; the default window (5) would
+      // have truncated the history before the threshold could accumulate.
+      ModelRoute.resetHealth()
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 1_000_000 + index, undefined, undefined, "/loc/a")
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+      // Bench ladder: B's multiplier (3) doubles — triples — the second bench.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 180_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

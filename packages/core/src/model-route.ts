@@ -287,8 +287,8 @@ const OUTCOME_WINDOW = 5
 
 const key = (target: Model.Ref) => `${target.providerID}/${target.id}`
 
-const pushOutcome = (outcomes: boolean[], answered: boolean) =>
-  [...outcomes, answered].slice(-currentConstants().escalation.outcomeWindow)
+const pushOutcome = (outcomes: boolean[], answered: boolean, location?: string) =>
+  [...outcomes, answered].slice(-currentConstants(location).escalation.outcomeWindow)
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -409,12 +409,13 @@ const bench = (
   hint?: FailureHint,
   credentialID?: string,
   quotaResetAt?: number,
+  location?: string,
 ) => {
   state.samples = []
-  state.outcomes = pushOutcome(state.outcomes, false)
+  state.outcomes = pushOutcome(state.outcomes, false, location)
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
-  const ladder = currentConstants().bench
+  const ladder = currentConstants(location).bench
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
@@ -628,9 +629,10 @@ export const failed = (
   now = Date.now(),
   hint?: FailureHint,
   credentialID?: string,
+  location?: string,
 ) => {
   // Quota, rate-limit and provider HTTP errors are not evidence of an internet outage.
-  if (hint?.quota) recordQuota(target, now, credentialID)
+  if (hint?.quota) recordQuota(target, now, credentialID, location)
   if (hint?.network)
     recentFailures.push({
       provider: target.providerID,
@@ -639,7 +641,7 @@ export const failed = (
     })
   while (
     recentFailures.length > 200 ||
-    (recentFailures[0] && now - recentFailures[0].time > currentConstants().network.windowMs)
+    (recentFailures[0] && now - recentFailures[0].time > currentConstants(location).network.windowMs)
   )
     recentFailures.shift()
   if (hint?.network && networkSuspect(now)) {
@@ -674,6 +676,7 @@ export const failed = (
       hint,
       credentialID,
       hint?.quota ? quotaResetAt(target, credentialID, now) : undefined,
+      location,
     )
     return
   }
@@ -685,6 +688,7 @@ export const failed = (
     hint,
     undefined,
     hint?.quota ? quotaResetAt(target, undefined, now) : undefined,
+    location,
   )
 }
 
@@ -860,9 +864,9 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= quota.demoteAfter
 }
 
-const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
+const recordQuota = (target: Model.Ref, now: number, credentialID?: string, location?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings().quota.windowMs)
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings(location).quota.windowMs)
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -1334,17 +1338,18 @@ export const completed = (
   sample: { readonly firstTokenMs: number; readonly responseMs: number; readonly tokensPerSecond: number },
   now = Date.now(),
   credentialID?: string,
+  location?: string,
 ) => {
   // A success clears the serving credential's failure count and bench (#6); the target-level
   // accounting below is unchanged, since the target did serve the request.
   if (credentialID) {
     const credentialState = credentialEntry(target, credentialID)
-    credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
+    credentialState.outcomes = pushOutcome(credentialState.outcomes, true, location)
     credentialState.consecutiveFailures = 0
     endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
-  state.outcomes = pushOutcome(state.outcomes, true)
+  state.outcomes = pushOutcome(state.outcomes, true, location)
   state.consecutiveFailures = 0
   endBench(target, state, now)
   if (state.cooldownUntil > now) return

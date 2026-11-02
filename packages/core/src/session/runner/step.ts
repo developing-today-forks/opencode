@@ -297,7 +297,8 @@ export const make = Effect.gen(function* () {
               providerFailure = event
               return
             }
-            if (!event.classification) ModelRoute.failed(input.model.routing.target, input.model.routing.policy)
+            if (!event.classification)
+              ModelRoute.failed(input.model.routing.target, input.model.routing.policy, undefined, undefined, undefined, locationDirectory)
           }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
@@ -581,6 +582,7 @@ export const make = Effect.gen(function* () {
             Date.now(),
             failureHint(llmFailure),
             input.model.routing.credentialID,
+            locationDirectory,
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
@@ -704,6 +706,7 @@ export const make = Effect.gen(function* () {
             },
             Date.now(),
             input.model.routing.credentialID,
+            locationDirectory,
           )
           if (input.sessionID)
             ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target)
