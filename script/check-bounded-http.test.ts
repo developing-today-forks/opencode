@@ -108,6 +108,47 @@ describe("services scan roots (#1256)", () => {
   })
 })
 
+describe("script scan roots (#1394)", () => {
+  test("SCAN_ROOTS covers the root, package, and service script trees", () => {
+    expect(SCAN_ROOTS).toContain("script")
+    expect(SCAN_ROOTS).toContain("packages/ai/script")
+    expect(SCAN_ROOTS).toContain("packages/cli/script")
+    expect(SCAN_ROOTS).toContain("packages/core/script")
+    expect(SCAN_ROOTS).toContain("packages/desktop/scripts")
+    expect(SCAN_ROOTS).toContain("packages/sdk/script")
+    expect(SCAN_ROOTS).toContain("packages/util/script")
+    expect(SCAN_ROOTS).toContain("services/www/script")
+  })
+
+  test("collect walks a script tree on disk and reports hits under their repo-relative path", () => {
+    const root = mkdtempSync(join(tmpdir(), "bounded-http-script-collect-"))
+    try {
+      const dir = join(root, "packages/cli/script")
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, "tool.ts"), 'const response = await fetch("https://example.com/tool")\n')
+      writeFileSync(join(dir, "notes.md"), 'const ignored = await fetch("https://example.com/ignored")\n')
+      const hits: Hit[] = []
+      collect(root, join(root, "packages/cli/script"), hits)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].file).toBe("packages/cli/script/tool.ts")
+      expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a script-tree fixture hit fails the gate until dispositioned", () => {
+    const hits = scanSource("script/tool.ts", 'const response = await fetch("https://example.com/tool")')
+    expect(hits).toHaveLength(1)
+    expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    const allowlist = parseAllowlist(
+      'script/tool.ts :: const response = await fetch("https://example.com/tool") :: tracked by #1394\n',
+    )
+    expect(unlistedHits(hits, allowlist)).toEqual([])
+    expect(staleEntries(hits, allowlist)).toEqual([])
+  })
+})
+
 describe("isScannedFile", () => {
   test("includes Astro sources (executable frontmatter) and TS/TSX, excludes docs/data", () => {
     expect(isScannedFile("page.astro")).toBe(true)
@@ -150,6 +191,15 @@ describe("allowlist accounting", () => {
       "f.ts :: const a = await fetch(url) :: bounded at the site\nf.ts :: const a = await fetch(url) :: entered twice\n",
     )
     expect(staleEntries(hits, twoEntries)).toEqual(["f.ts :: const a = await fetch(url)"])
+  })
+
+  test("a hit line containing the separator round-trips (#1394)", () => {
+    const separatorHits = scanSource("f.ts", "const a = await fetch(url) :: trailing note")
+    const separatorAllowlist = parseAllowlist(
+      "f.ts :: const a = await fetch(url) :: trailing note :: bounded at the site\n",
+    )
+    expect(unlistedHits(separatorHits, separatorAllowlist)).toEqual([])
+    expect(staleEntries(separatorHits, separatorAllowlist)).toEqual([])
   })
 
   test("a malformed allowlist line throws", () => {
