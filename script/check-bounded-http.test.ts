@@ -8,8 +8,10 @@ import {
   isScannedFile,
   parseAllowlist,
   scanSource,
+  scriptTreesOnDisk,
   staleEntries,
   unlistedHits,
+  unscannedScriptTrees,
   type Hit,
 } from "./check-bounded-http"
 
@@ -146,6 +148,56 @@ describe("script scan roots (#1394)", () => {
     )
     expect(unlistedHits(hits, allowlist)).toEqual([])
     expect(staleEntries(hits, allowlist)).toEqual([])
+  })
+})
+
+describe("nested script trees (#1425)", () => {
+  test("SCAN_ROOTS covers the nested console/app and plugins/figma script trees", () => {
+    expect(SCAN_ROOTS).toContain("packages/console/app/script")
+    expect(SCAN_ROOTS).toContain("packages/plugins/figma/script")
+  })
+
+  test("scriptTreesOnDisk finds package script trees at any depth and ignores non-package folders", () => {
+    const root = mkdtempSync(join(tmpdir(), "bounded-http-trees-"))
+    try {
+      const tree = (rel: string, pkgAt: "parent" | "self" | "none") => {
+        mkdirSync(join(root, rel), { recursive: true })
+        if (pkgAt === "parent") writeFileSync(join(root, rel, "..", "package.json"), "{}\n")
+        if (pkgAt === "self") writeFileSync(join(root, rel, "package.json"), "{}\n")
+      }
+      tree("packages/ai/script", "parent")
+      tree("packages/console/app/script", "parent")
+      tree("packages/plugins/figma/script", "parent")
+      tree("packages/containers/script", "self")
+      tree("packages/desktop/scripts", "parent")
+      tree("services/www/script", "parent")
+      // Not package script trees: the packages/script package itself and
+      // a skill asset folder with no package.json at either level.
+      mkdirSync(join(root, "packages/script/src"), { recursive: true })
+      writeFileSync(join(root, "packages/script/package.json"), "{}\n")
+      tree("packages/plugins/figma/skills/figma-generate-library/scripts", "none")
+      expect(scriptTreesOnDisk(root)).toEqual([
+        "packages/ai/script",
+        "packages/console/app/script",
+        "packages/containers/script",
+        "packages/desktop/scripts",
+        "packages/plugins/figma/script",
+        "services/www/script",
+      ])
+      expect(unscannedScriptTrees(root, ["packages/ai/script"])).toEqual([
+        "packages/console/app/script",
+        "packages/containers/script",
+        "packages/desktop/scripts",
+        "packages/plugins/figma/script",
+        "services/www/script",
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("no script tree on disk in this repo is unscanned", () => {
+    expect(unscannedScriptTrees(join(import.meta.dir, ".."))).toEqual([])
   })
 })
 
