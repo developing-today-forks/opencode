@@ -157,7 +157,9 @@ export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, 
 /**
  * The one snapshot of a provider's set that gates a target: a known-full snapshot wins
  * (a known-dead balance first — it releases only on a balance increase, never on a
- * timer — otherwise latest reset first), then a balance snapshot, then the first.
+ * timer — otherwise latest reset first), then a known balance snapshot, then the
+ * latest-observed known snapshot, then (only when nothing is known) a balance
+ * snapshot or the first.
  * An expired credit grant
  * never wins over a live snapshot of the same provider — the plan store retains expired
  * grants as history, and letting one gate would make a funded replacement unable to
@@ -185,7 +187,19 @@ export const gatingSnapshot = (
   // would re-admit the credential at reset with the balance still exhausted.
   const deadBalance = full.find((snapshot) => snapshot.balance === true)
   const latestFull = full.sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
-  return deadBalance ?? latestFull ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
+  // The fallback must be evidence-based (#1341): an unknown snapshot selected
+  // here is discarded by the gate's known() guard, so returning the first
+  // snapshot when a later window carries the known reading strands an armed
+  // gate on the unknown reading forever — the gate can never clear. Prefer
+  // known evidence (a known balance first, as before; otherwise the
+  // latest-observed known snapshot); the historical order applies only when
+  // nothing in the pool is known.
+  const knownPool = pool.filter((snapshot) => known(snapshot))
+  const knownBalance = knownPool.find((snapshot) => snapshot.balance === true)
+  const latestKnown = knownPool.sort((a, b) => b.observedAt - a.observedAt)[0]
+  return (
+    deadBalance ?? latestFull ?? knownBalance ?? latestKnown ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
+  )
 }
 
 /** One snapshot per quota window of every plan, in plan then window order. */

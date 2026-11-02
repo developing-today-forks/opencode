@@ -1,7 +1,7 @@
 import { net, protocol } from "electron"
-import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { documentPolicyHeader, jsCallStacksDocumentPolicy } from "./headers"
+import { resolveRendererPath } from "./renderer-path"
 import { extensionHost, rendererHost, rendererProtocol } from "./scheme"
 
 export type ProtocolReport = (level: "warning" | "error", message: string, data: Record<string, unknown>) => void
@@ -85,14 +85,21 @@ async function serve(request: Request, rendererRoot: string) {
     return new Response("Not found", { status: 404 })
   }
 
-  const file = path.resolve(rendererRoot, `.${decodeURIComponent(url.pathname)}`)
-  const rel = path.relative(rendererRoot, file)
+  const resolved = resolveRendererPath(rendererRoot, url.pathname)
 
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    report("warning", "rejected path", { url: request.url, file })
+  if (resolved.kind === "malformed") {
+    report("warning", "rejected path", { url: request.url, error: resolved.error })
 
-    return new Response("Not found", { status: 404 })
+    return resolved.response
   }
+
+  if (resolved.kind === "rejected") {
+    report("warning", "rejected path", { url: request.url, file: resolved.file })
+
+    return resolved.response
+  }
+
+  const file = resolved.file
 
   try {
     const range = request.headers.get("range")
