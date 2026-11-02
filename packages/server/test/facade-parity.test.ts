@@ -314,6 +314,57 @@ it.live("attestation case over HTTP: shell/bash tools reach generation verbatim"
   }),
 )
 
+it.live("responses streaming: full §5 grammar over HTTP, completed output persists for chaining (#1442/#1149)", () =>
+  Effect.gen(function* () {
+    mode = "ok"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/responses", {
+      model: "workhorse",
+      input: "Say hi",
+      stream: true,
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    const parsed = text
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>)
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const completed = parsed.at(-1)?.response as {
+      id: string
+      status: string
+      output: Array<{ type: string; content: Array<{ text: string }> }>
+      usage: unknown
+    }
+    expect(completed.status).toBe("completed")
+    expect(completed.output).toHaveLength(1)
+    expect(completed.output[0]?.content[0]?.text).toBe("Hello world")
+    expect(completed.usage).toEqual({ input_tokens: 5, output_tokens: 2, total_tokens: 7 })
+    // The completed id chains: the persisted items are the items the
+    // completed event reported, so a follow-up resolves (not a 404)
+    // and generation sees the stored history ahead of the new input.
+    const follow = yield* post(handler, "http://opencode.local/v1/responses", {
+      model: "workhorse",
+      input: "follow up",
+      previous_response_id: completed.id,
+    })
+    expect(follow.status).toBe(200)
+    const input = captured.at(-1)
+    expect(JSON.stringify(input?.messages)).toContain("Hello world")
+    expect(JSON.stringify(input?.messages)).toContain("follow up")
+  }),
+)
+
 it.live("unknown previous_response_id: 404 with code response_not_found", () =>
   Effect.gen(function* () {
     mode = "ok"

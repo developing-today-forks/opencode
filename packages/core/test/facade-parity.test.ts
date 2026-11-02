@@ -157,19 +157,24 @@ const facadeChatFrames = (events: ReadonlyArray<LLMEvent>, model = "workhorse") 
   return chatFramesOf(frames)
 }
 
-/** Façade responses stream: the event-type sequence plus the terminal
- * response.completed payload essentials. */
+/** Façade responses stream: the event-type sequence, the sequence
+ * numbers, the terminal response.completed payload essentials, and
+ * the translator output items the #1149 store persists. */
 const facadeResponsesStream = (events: ReadonlyArray<LLMEvent>) => {
   const translator = new ResponsesStreamTranslator({ id: "resp_facade", created: 1700000000, model: "muse-spark-1.3" })
   const frames = [translator.start(), ...events.flatMap((event) => translator.push(event))]
-  const types: string[] = []
-  let completed: Record<string, unknown> | undefined
-  for (const frame of frames) {
-    const data = JSON.parse(frame.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>
-    types.push(String(data.type))
-    if (data.type === "response.completed") completed = data.response as Record<string, unknown>
-  }
-  return { types, completed }
+  const parsed = frames.flatMap((frame) =>
+    frame
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>),
+  )
+  const types = parsed.map((data) => String(data.type))
+  const seqs = parsed.map((data) => data.sequence_number)
+  const completed = parsed.find((data) => data.type === "response.completed")?.response as
+    | Record<string, unknown>
+    | undefined
+  return { types, seqs, completed, parsed, items: translator.outputItems() }
 }
 
 const CREATED = 1700000000
@@ -661,11 +666,16 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     ])
   })
 
-  test("responses streaming (passthrough): response.completed carries no output on the façade — real gap", () => {
+  test("responses streaming (passthrough): façade emits the full §5 grammar, completed carries the output — #1442 closed", () => {
     // Door recording: the passthrough relays the upstream grammar —
     // the fixture's sequence is text deltas, output_item.added,
     // function_call_arguments deltas, response.completed whose
-    // response carries the full output (2 items) and usage.
+    // response carries the full output (2 items) and usage. The stub
+    // fixture is an abbreviated mid-grammar capture: it omits the
+    // lifecycle frames (created / in_progress / per-item added+done,
+    // *.done) and sequence numbers that real upstream streams — and
+    // design §5 — carry. Before #1442 the façade matched the stub by
+    // ALSO omitting them and, worse, sent output: [] on completed.
     const doorTypes = [
       "response.output_text.delta",
       "response.output_text.delta",
@@ -683,34 +693,100 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
       LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 11, outputTokens: 6, totalTokens: 17 } }),
     ]
     const facade = facadeResponsesStream(events)
-    // The façade prepends response.created (its stream always opens
-    // with it — the door fixture is a mid-grammar stub capture, and
-    // real upstream streams open with response.created too).
-    expect(facade.types).toEqual(["response.created", ...doorTypes])
-    // Usage and status on the terminal event are parity...
+    // The full §5 sequence, in order.
+    expect(facade.types).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    // Every door-recorded event still occurs, in the recorded order
+    // (a subsequence of the façade sequence).
+    let at = 0
+    for (const type of facade.types) if (type === doorTypes[at]) at++
+    expect(at).toBe(doorTypes.length)
+    // Monotonic sequence numbers on every event, from 0.
+    expect(facade.seqs).toEqual(facade.types.map((_, index) => index))
+    // The terminal event carries usage, status, and the FULL output —
+    // both items, matching the door completed payload (modulo the
+    // façade item ids, which embed the response id).
     expect(facade.completed?.status).toBe("completed")
     expect(facade.completed?.usage).toEqual({ input_tokens: 11, output_tokens: 6, total_tokens: 17 })
-    // ...but the completed response's output is EMPTY on the façade,
-    // where the door's completed event carries both output items.
-    // Clients that read the final response object (the standard
-    // Responses pattern) lose the answer's items. Also missing vs
-    // design §5: response.in_progress, response.output_item.done,
-    // response.output_text.done, sequence numbers.
-    expect(facade.completed?.output).toEqual([])
-    // classification: real-gap — filed as #1442;
-    // blocks Wave C repointing for responses-streaming callers.
+    expect(facade.completed?.output).toEqual([
+      {
+        type: "message",
+        id: "msg_resp_facade",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Hello stream", annotations: [] }],
+      },
+      {
+        type: "function_call",
+        id: "fc_call_9",
+        call_id: "call_9",
+        name: "get_weather",
+        arguments: '{"city":"Osseo"}',
+        status: "completed",
+      },
+    ])
+    // #1149 agreement: the item store persists exactly these items.
+    expect(facade.items).toEqual(facade.completed?.output as Array<Record<string, unknown>>)
+    // classification: the §5 streaming diff recorded here is CLOSED
+    // by #1442. The only remaining delta vs the door recording is the
+    // stub fixture's own abbreviation (no lifecycle frames / sequence
+    // numbers in the capture) — acceptable-by-design, since §5 and
+    // real upstream streams carry them.
   })
 
-  test("responses streaming: reasoning event name deviates from design §5", () => {
-    // Design §5 names response.reasoning_summary_text.delta; the
-    // façade emits response.reasoning_text.delta. No door fixture
-    // exercises reasoning deltas (the muse stub has none), so this
-    // is recorded against the spec, not a door recording.
+  test("responses streaming: reasoning events use the §5 name — #1442 closed", () => {
+    // Design §5 names response.reasoning_summary_text.delta. Before
+    // #1442 the façade emitted response.reasoning_text.delta and no
+    // reasoning item lifecycle at all. No door fixture exercises
+    // reasoning deltas (the muse stub has none), so this is recorded
+    // against the spec, not a door recording.
     const translator = new ResponsesStreamTranslator({ id: "resp_x", created: CREATED, model: "m" })
-    const frames = translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "thinking" }))
-    expect(frames[0]).toContain("response.reasoning_text.delta")
-    // classification: real-gap (vs spec §5) — filed with the
-    // responses-streaming issue #1442.
+    const raw = [
+      translator.start(),
+      ...translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "thinking" })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "stop" } })),
+    ]
+    const parsed = raw.flatMap((frame) =>
+      frame
+        .split("\n\n")
+        .filter(Boolean)
+        .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>),
+    )
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(raw.join("")).not.toContain("response.reasoning_text.delta")
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const delta = parsed.find((data) => data.type === "response.reasoning_summary_text.delta")
+    expect(delta).toMatchObject({ item_id: "rs_resp_x", output_index: 0, summary_index: 0, delta: "thinking" })
+    // Reasoning surfaces as a reasoning item on the completed
+    // response — never flattened into visible text (§5 fidelity).
+    const completed = parsed.find((data) => data.type === "response.completed")?.response as Record<string, unknown>
+    expect(completed.output).toEqual([
+      { type: "reasoning", id: "rs_resp_x", status: "completed", summary: [{ type: "summary_text", text: "thinking" }] },
+    ])
+    expect(translator.outputItems()).toEqual(completed.output as Array<Record<string, unknown>>)
+    // classification: the §5 reasoning-name diff recorded here is
+    // CLOSED by #1442.
   })
 
   test("quota failure: door passes the upstream 429 through verbatim; façade answers 429 too (#1441)", () => {
@@ -886,7 +962,7 @@ export const VERDICTS = {
     verdict: "FAIL",
     diffs: [
       "ATTESTATION: door answers shell/bash requests with a 200 (alias + CLI fallback); façade preserves names and surfaces the 403 as a provider failure — outcome differs (design §9.1 rule; Wave C gate for #1155, filed as #1443)",
-      "responses streaming: response.completed carries empty output; §5 grammar events missing; reasoning event name deviates from §5 — #1442",
+      "responses streaming: §5 grammar closed by #1442 — façade emits response.in_progress, per-item added/done + matching *.done events and monotonic sequence_numbers, reasoning uses response.reasoning_summary_text.delta, and response.completed carries the full output (door stub fixture is an abbreviated mid-grammar capture)",
       "tool-only chat answers: content null (façade) vs \"\" (door)",
       "responses non-streaming: façade adds created_at/annotations/status/default fields (additive)",
       "chat streaming: façade adds role:\"assistant\" to the first chunk",

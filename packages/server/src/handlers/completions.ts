@@ -222,8 +222,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               ...meta,
               previousResponseId: parsed.value.previousResponseId,
             })
-            const failedFrame = (message: string, quota = false) =>
-              `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: meta.id, object: "response", created_at: meta.created, model: meta.model, status: "failed", output: [], error: { message, ...(quota ? { code: "rate_limit_exceeded" } : {}) } } })}\n\n`
             const frames = generate
               .stream(generateInput)
               .pipe(
@@ -237,7 +235,17 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
                     : Effect.void,
                 ),
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                Stream.catchCause((cause) => Stream.make(failedFrame(streamErrorMessage(cause), streamIsQuota(cause)))),
+                // The translator failure frame continues the stream
+                // sequence numbers (#1442) instead of restarting them;
+                // a quota failure carries the #1441 rate-limit code.
+                Stream.catchCause((cause) =>
+                  Stream.make(
+                    translator.failureFrame(
+                      streamErrorMessage(cause),
+                      streamIsQuota(cause) ? "rate_limit_exceeded" : undefined,
+                    ),
+                  ),
+                ),
                 Stream.provide(services),
               )
             const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
