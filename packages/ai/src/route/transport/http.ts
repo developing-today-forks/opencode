@@ -41,6 +41,10 @@ const applyQuery = (url: string, query: Record<string, string> | undefined) => {
 
 const bodyWithOverlay = <Body>(body: Body, request: LLMRequest, encodeBody: (body: Body) => string) =>
   Effect.gen(function* () {
+    // A verbatim pre-encoded body (the façade pass-through, #1146) is sent byte-for-byte: it is
+    // never re-encoded and never overlaid. `jsonBody` stays the parsed body the caller compiled
+    // alongside it, which endpoint rendering and channel setup read.
+    if (request.http?.rawBody !== undefined) return { jsonBody: body, bodyText: request.http.rawBody }
     if (request.http?.body === undefined) return { jsonBody: body, bodyText: encodeBody(body) }
     if (ProviderShared.isRecord(body)) {
       const overlaid = mergeJsonRecords(body, request.http.body) ?? {}
