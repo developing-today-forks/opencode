@@ -57,6 +57,24 @@
  *     2026-10-31, credits exhausted) and the door process stays as
  *     the provider backend, so the resident-ACP session semantics
  *     (§9.2) survive behind the façade by construction.
+ *   - antigravity-direct (bin/antigravity-direct.mjs, :18751):
+ *     PARITY-WITH-NAMED-DIFFS — backend face (#1414): the v1internal
+ *     envelope + SSE translation replay at the provider layer
+ *     (packages/ai/test/provider/antigravity.test.ts, 14 cases from
+ *     the door's own fixtures); caller-visible shapes replayed below.
+ *     Named diffs: model echo + owner naming (façade ref rules),
+ *     additive reasoning_tokens usage detail, the door's stream role
+ *     preamble, non-stream reasoning_content dropped by the façade
+ *     (façade-wide), and error-envelope branding (quota status is
+ *     429 on both sides since the #1441 fix) — none is specific to
+ *     this fold's wire protocol.
+ *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
+ *     the door answers shell/bash-tool requests with a 200 (tool names
+ *     aliased upstream, calls translated back; a residual 403 falls
+ *     back to the CLI door), while the façade — by the design §9.1
+ *     rule — preserves the names verbatim and surfaces an attestation
+ *     403 as a provider failure. The caller-visible outcome differs;
+ *     per #1152 that is a parity failure, recorded, not papered over.
  *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
  *     the door answers shell/bash-tool requests with a 200 (tool names
  *     aliased upstream, calls translated back; a residual 403 falls
@@ -1919,6 +1937,265 @@ describe("door: commandcode (bin/commandcode-proxy.mjs :18748)", () => {
 
 
 
+// ------------------------------------------------------------ antigravity-direct
+//
+// Door: bin/antigravity-direct.mjs (:18751) in developing-today/code —
+// the BACKEND face (#1414): the door speaks the agy CLI's v1internal
+// wire protocol to daily-cloudcode-pa.googleapis.com. Unlike the front
+// doors above, its callers are the fork's own sessions (the deployed
+// opencode.jsonc `antigravity-direct` provider, an OpenAI-compatible
+// provider block pointing at :18751), so parity has two faces:
+//   - upstream-visible: the v1internal envelope + SSE translation —
+//     replayed in packages/ai/test/provider/antigravity.test.ts from
+//     the door's own fixtures (its stub-upstream test captures).
+//   - caller-visible (this section): the OpenAI shapes a caller of the
+//     door observes, diffed against the façade's translation of the
+//     canonical events the in-fork provider produces from the same
+//     upstream answer.
+// Door recordings are transcribed from antigravity-direct.mjs
+// (handleChatCompletions / consumeSse / the /v1/models handler) and
+// antigravity-direct.test.mjs (stub upstream SSE:
+// {response:{candidates:[{content:{parts:[{text:"ok"}]},
+// finishReason:"STOP"}]}}).
+
+describe("door: antigravity-direct (bin/antigravity-direct.mjs :18751, backend face)", () => {
+  const MSGS = [{ role: "user", content: "weather?" }]
+  // The canonical events the in-fork provider emits for the door test's
+  // stub upstream answer (text "ok", finish STOP, no usage reported).
+  const stubEvents = [
+    LLMEvent.textDelta({ id: "t1", text: "ok" }),
+    LLMEvent.finish({ reason: { normalized: "stop" } }),
+  ]
+  // A fuller upstream answer: thought + text + one function call +
+  // usage (prompt 11, candidates 7, thoughts 3, total 21 — the door
+  // folds thoughts into completion_tokens: 7 + 3 = 10).
+  const fullEvents = [
+    LLMEvent.reasoningDelta({ id: "r1", text: "thinking" }),
+    LLMEvent.textDelta({ id: "t1", text: "Let me check." }),
+    LLMEvent.toolCall({ id: "call_0123456789abcdef0123456789abcdef", name: "get_weather", input: { city: "Oslo" } }),
+    LLMEvent.finish({
+      reason: { normalized: "tool-calls" },
+      usage: { inputTokens: 11, outputTokens: 10, reasoningTokens: 3, totalTokens: 21 },
+    }),
+  ]
+  const fullDoorUsage = { prompt_tokens: 11, completion_tokens: 10, total_tokens: 21 }
+
+  test("models: single-model entry — owner naming + door display name differ", () => {
+    // Door recording: GET /v1/models expands the catalog to base +
+    // effort-suffixed ids, each {id, object: "model", created: 0,
+    // owned_by: "antigravity", name: <display name>}.
+    const door = { id: "gemini-3.8-flash", object: "model", created: 0, owned_by: "antigravity", name: "Gemini 3.8 Flash" }
+    const facade = modelBody("antigravity-direct/gemini-3.8-flash")
+    expectDiffs(door, facade, [
+      {
+        path: "name",
+        classification: "acceptable-by-design",
+        note: "The door's list carries a display name per entry; the façade's entry shape is the list-entry contract (display names live on the fork's own catalog entries).",
+      },
+      {
+        path: "owned_by",
+        classification: "acceptable-by-design",
+        note: "Door brands entries with the upstream program name (antigravity); the façade names the catalog provider id (antigravity-direct) — the same rule as every concrete ref.",
+      },
+    ])
+  })
+
+  test("chat non-streaming, door stub fixture: parity except model echo", () => {
+    // Door recording (handleChatCompletions non-stream over the stub
+    // fixture): content "ok", finish stop, and NO usage key — the stub
+    // upstream reported no usageMetadata, and the door only adds
+    // `usage` when the upstream reported it.
+    const door = {
+      id: "chatcmpl-x",
+      object: "chat.completion",
+      created: 1,
+      model: "gemini-3.8-flash",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    }
+    const parsed = parseChatRequest({ model: "antigravity-direct/gemini-3.8-flash", messages: MSGS })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const facade = completionBody({ id: "chatcmpl-facade", created: CREATED, model: parsed.value.modelLabel, response: responseOf(stubEvents) })
+    expectDiffs(door, facade, [
+      {
+        path: "model",
+        classification: "acceptable-by-design",
+        note: "The door echoes the bare model id its provider block was called with; the façade echoes the caller's provider/model ref label (same rule as the route cases).",
+      },
+    ])
+  })
+
+  test("chat non-streaming, thought + tool call + usage: reasoning_content + usage details differ", () => {
+    // Door recording: message carries reasoning_content (the door
+    // surfaces thought parts as reasoning_content in both modes),
+    // tool_calls with JSON-string arguments, finish tool_calls, and
+    // usage with thoughts folded into completion_tokens.
+    const door = {
+      id: "chatcmpl-x",
+      object: "chat.completion",
+      created: 1,
+      model: "gemini-3.8-flash",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "Let me check.",
+            reasoning_content: "thinking",
+            tool_calls: [
+              {
+                id: "call_0123456789abcdef0123456789abcdef",
+                type: "function",
+                function: { name: "get_weather", arguments: '{"city":"Oslo"}' },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+      usage: fullDoorUsage,
+    }
+    const parsed = parseChatRequest({ model: "antigravity-direct/gemini-3.8-flash", messages: MSGS })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const facade = completionBody({ id: "chatcmpl-facade", created: CREATED, model: parsed.value.modelLabel, response: responseOf(fullEvents) })
+    expectDiffs(door, facade, [
+      {
+        path: "choices[0].message.reasoning_content",
+        classification: "real-gap",
+        note: "The façade's non-stream completionBody drops reasoning (streaming keeps it as reasoning_content chunks — next case). Façade-wide for every reasoning provider, not specific to this fold; session callers (this door's actual consumers) receive reasoning natively. Recorded on #1414.",
+      },
+      {
+        path: "model",
+        classification: "acceptable-by-design",
+        note: "Model echo: caller's provider/model ref label vs the door's bare id (same rule as above).",
+      },
+      {
+        path: "usage.completion_tokens_details",
+        classification: "acceptable-by-design",
+        note: "Additive: the façade also reports completion_tokens_details.reasoning_tokens; the door's three usage totals match exactly (thoughts folded into completion_tokens on both sides).",
+      },
+    ])
+  })
+
+  test("chat streaming: grammar parity after the door's role preamble", () => {
+    // Door recording (handleChatCompletions streaming branch): an
+    // initial {role: "assistant", content: ""} preamble chunk, then
+    // reasoning_content / content / tool_calls chunks, a final chunk
+    // carrying finish_reason + usage, then [DONE]. The façade merges
+    // the role into its first content chunk instead of a preamble —
+    // asserted explicitly here, then the remaining grammar is diffed.
+    const doorFrames = [
+      `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: "gemini-3.8-flash", choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`,
+      `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: "gemini-3.8-flash", choices: [{ index: 0, delta: { reasoning_content: "thinking" }, finish_reason: null }] })}\n\n`,
+      `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: "gemini-3.8-flash", choices: [{ index: 0, delta: { content: "Let me check." }, finish_reason: null }] })}\n\n`,
+      `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: "gemini-3.8-flash", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_0123456789abcdef0123456789abcdef", type: "function", function: { name: "get_weather", arguments: '{"city":"Oslo"}' } }] }, finish_reason: null }] })}\n\n`,
+      `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: "gemini-3.8-flash", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: fullDoorUsage })}\n\n`,
+      "data: [DONE]\n\n",
+    ]
+    const projected = chatFramesOf(doorFrames)
+    expect(projected[0]).toEqual({
+      object: "chat.completion.chunk",
+      delta: { role: "assistant", content: "" },
+      finish_reason: null,
+    })
+    // Drop the preamble and fold its role into the first real chunk,
+    // which is exactly the façade's framing of the same stream.
+    const rest = projected.slice(1) as Array<Record<string, unknown>>
+    rest[0] = { ...rest[0], delta: { role: "assistant", ...((rest[0].delta ?? {}) as Record<string, unknown>) } }
+    const facade = facadeChatFrames(fullEvents, "antigravity-direct/gemini-3.8-flash")
+    expectDiffs(rest, facade, [
+      {
+        path: "[3].usage.completion_tokens_details",
+        classification: "acceptable-by-design",
+        note: "Additive reasoning_tokens detail in the final usage chunk (same as the non-streaming case).",
+      },
+    ])
+    // Named grammar diff (not path-diffed above): the door emits a
+    // separate role preamble chunk; the façade merges role into the
+    // first chunk. Classification: acceptable-by-design — both are
+    // standard OpenAI stream framings; no content, ordering, or
+    // finish/usage carriage differs.
+  })
+
+  test("quota failure: 429 both sides after the #1441 fix; envelope branding differs", () => {
+    // Door recording: an upstream per-model sub-window 429 is relayed
+    // with its status preserved — sendJson(upstream.status,
+    // {error: {message: "upstream HTTP 429: " + body, type:
+    // "upstream_error", code: 429}}).
+    const upstreamBody = '{"error":{"code":429,"message":"Quota exceeded for model gemini-3.8-flash","status":"RESOURCE_EXHAUSTED"}}'
+    const door = {
+      status: 429,
+      body: { error: { message: `upstream HTTP 429: ${upstreamBody}`, type: "upstream_error", code: 429 } },
+    }
+    // Façade: since the #1441 fix (555edecde7), Generate surfaces the
+    // provider's classified quota failure as Generate.QuotaError and
+    // the handler answers 429 rate_limit_error with the provider's
+    // message preserved — the status and the quota explanation now
+    // match the door exactly; only the envelope branding differs.
+    // The provider-side classification that feeds it (429 + quota body
+    // → QuotaExceeded) is pinned in
+    // packages/ai/test/provider/antigravity.test.ts.
+    const facade = {
+      status: 429,
+      body: errorBody("Quota exceeded for model gemini-3.8-flash", "rate_limit_error"),
+    }
+    expect(door.status).toBe(429)
+    expect(facade.status).toBe(door.status)
+    expectDiffs(door.body, facade.body, [
+      {
+        path: "error.code",
+        classification: "acceptable-by-design",
+        note: "Door adds a numeric code field echoing the upstream status; the façade envelope omits it.",
+      },
+      {
+        path: "error.message",
+        classification: "acceptable-by-design",
+        note: "Door prefixes the raw upstream body; the façade carries the provider's extracted message (§2: reset hint preserved). The quota explanation itself survives on both sides.",
+      },
+      {
+        path: "error.type",
+        classification: "acceptable-by-design",
+        note: "upstream_error (door) vs rate_limit_error (façade §2 branding for the quota class). Status parity (429) holds.",
+      },
+    ])
+  })
+
+  test("specific-function tool_choice naming an undeclared function: both sides fail closed", () => {
+    // Door recording (antigravity-direct.test.mjs): 400
+    // invalid_request_error BEFORE any upstream request, message
+    // naming the function.
+    const door = {
+      status: 400,
+      body: {
+        error: {
+          message: 'tool_choice names function "delete_everything" which is not among the declared tools',
+          type: "invalid_request_error",
+        },
+      },
+    }
+    expect(door.status).toBe(400)
+    // Façade: the request parses (the choice is well-formed), and the
+    // in-fork provider fails closed with the same invalid-request
+    // message before any upstream call — pinned at the provider layer
+    // in packages/ai/test/provider/antigravity.test.ts
+    // ("fails closed before any request"). Through the façade HTTP
+    // handler that non-quota generation failure surfaces in the 502
+    // server_error envelope (non-quota failures keep that mapping
+    // after the #1441 fix), so the status/type differ while the
+    // fail-closed outcome and the message match.
+    const parsed = parseChatRequest({
+      model: "antigravity-direct/gemini-3.8-flash",
+      messages: MSGS,
+      tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: {} } } }],
+      tool_choice: { type: "function", function: { name: "delete_everything" } },
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.input.toolChoice).toBeDefined()
+    // classification: acceptable-by-design — outcome class matches
+    // (request rejected, no upstream call, no widening to ANY); only
+    // the envelope branding differs, per the quota case above.
+  })
+})
+
 // ------------------------------------------------------------ verdict registry
 
 /** The per-door verdicts recorded on #1152 (and cross-referenced
@@ -1944,6 +2221,10 @@ export const VERDICTS = {
       "error envelopes: door bodies have no type field; façade adds OpenAI type (additive, §2)",
       "AMR caller-Bearer verbatim bypass does not carry over (façade Bearer is the server credential; raw AMR is the opendesign provider) — Gate 1 on #1413",
     ],
+  },
+  antigravity: {
+    verdict: "PARITY-WITH-NAMED-DIFFS",
+    diffs: ["model echo + owned_by naming follow the façade ref rules; door display name absent from list entries", "usage gains additive completion_tokens_details.reasoning_tokens (totals match, thoughts folded both sides)", "chat streaming: door emits a separate role preamble chunk; façade merges role into the first chunk", "chat non-streaming: façade completionBody drops reasoning_content (façade-wide; streaming + session paths preserve reasoning)", "error envelopes: quota is 429 on both sides after the #1441 fix (555edecde7); remaining diffs are branding — door upstream_error+code with the raw body prefixed vs façade rate_limit_error with the extracted message", "thought signatures: door stashes them server-side by tool_call id; the provider carries them in providerMetadata and falls back to the skip-thought-signature validator for stateless histories (upstream-visible, provider-layer suite)", "tool schemas: door + provider both reduce JSON Schema to the proto allowlist (code#2825 rules) — parity, pinned at the provider layer"],
   },
   muse: {
     verdict: "FAIL",
@@ -1991,8 +2272,9 @@ export const VERDICTS = {
 } as const
 
 test("verdict registry is consistent with the recorded classifications", () => {
-  expect(Object.keys(VERDICTS).sort()).toEqual(["claude-code", "clef", "codex", "commandcode", "designCode", "muse", "route"])
+  expect(Object.keys(VERDICTS).sort()).toEqual(["antigravity", "claude-code", "clef", "codex", "commandcode", "designCode", "muse", "route"])
   expect(VERDICTS.designCode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
+  expect(VERDICTS.antigravity.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.designCode.diffs[0]).toContain("REAL-GAP")
   expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.commandcode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")

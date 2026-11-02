@@ -1,6 +1,7 @@
 export * as Alibaba from "./alibaba.js"
 export * as Anthropic from "./anthropic.js"
 export * as AnthropicCompatible from "./anthropic-compatible.js"
+export * as Antigravity from "./antigravity.js"
 export * as AmazonBedrock from "./amazon-bedrock.js"
 export * as AmazonBedrockMantle from "./amazon-bedrock-mantle.js"
 export * as AssemblyAI from "./assemblyai.js"
