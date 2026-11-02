@@ -378,12 +378,13 @@ const warnDroppedProviderRoute = (id: string, reason: string) =>
  * routes that are configured, in the runtime's shape. An id that names a concrete provider, the
  * routes provider, or a configured route is dropped with a warning: the id shares the provider
  * namespace at a route's reference site, so a concrete provider always wins the reference, and
- * a route's name would make decision records ambiguous. Members resolve concrete-first, like
- * targets: a member that names a concrete provider is a member, and only a member naming no
- * concrete provider can be a nesting attempt - another provider route (or the routes
- * provider) named as a member is dropped with a warning, since provider routes do not
- * nest. A member that names no known provider is kept, with a warning: it contributes no
- * leaves, like a target naming an unknown provider. */
+ * a route's name would make decision records ambiguous. Members are validated independently
+ * of the caller's known-provider set (#1420): a member that is "*" (the door-set wildcard),
+ * the routes provider, or another declared provider route is dropped with a warning, since
+ * provider routes do not nest and a wildcard would dispatch outside the declared membership.
+ * A remaining member that names a concrete provider is a member. A member that names no
+ * known provider and cannot act as a pattern at expansion is kept, with a warning: it
+ * contributes no leaves, like a target naming an unknown provider. */
 export function configuredProviderRoutes(
   entries: readonly Entry[],
   knownProviders: ReadonlySet<string>,
@@ -409,12 +410,16 @@ export function configuredProviderRoutes(
     }
     const members: string[] = []
     for (const member of provider.providers) {
-      // A member resolves concrete-first, like a target: a known provider is a member even
-      // when a (rejected) provider route shares its id. Only a member that names no concrete
-      // provider can be a nesting attempt - another provider route, or the routes provider.
-      if (!knownProviders.has(member) && (member === ModelRoute.PROVIDER_ID || declared.has(member))) {
+      // Membership is validated before the known-provider test (#1420): "*", the routes
+      // provider, and another declared provider route are dropped regardless of which
+      // caller supplied the known set, so both call paths validate the same config.
+      if (member === "*" || member === ModelRoute.PROVIDER_ID || declared.has(member)) {
+        const reason =
+          member === "*"
+            ? "is a wildcard, not a concrete provider"
+            : "is not a concrete provider (provider routes do not nest)"
         console.warn(
-          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is not a concrete provider (provider routes do not nest); the member is dropped`,
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} ${reason}; the member is dropped`,
         )
         continue
       }
