@@ -128,9 +128,27 @@ export const derive = (input: Input, options: Options): Snapshot => {
  * start for a windowed quota, and the grant's own start (the plan record's creation) for a
  * non-windowed credit balance — spending before the grant existed is not consumption of it.
  * Anything else is accounted from the beginning of the route history.
+ *
+ * A windowed quota whose reset is derivable (a `daily HH:MM UTC` rule or an explicit
+ * `resetAt`) is a fixed-period window, not a rolling one (#1342): usage counts from the
+ * current period's start — the most recent reset instant — so the previous period's
+ * usage cannot re-gate the provider just after a reset. The period start is the next
+ * reset minus the window's length, or the recorded reset itself when it is already in
+ * the past; it never starts before the rolling lookback and never after `now`.
+ * A `rolling` rule is the exception: it stays rolling even when a next reset is
+ * recorded on the window — that `resetAt` is a recorded fact, not a period boundary,
+ * and period-aligning it would discard usage that still belongs to the rolling
+ * window (PR #1352 Codex finding).
  */
 export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, now: number): number => {
-  if (window.windowHours !== undefined) return now - window.windowHours * 3_600_000
+  if (window.windowHours !== undefined) {
+    const rolling = now - window.windowHours * 3_600_000
+    if (window.resetRule === "rolling") return rolling
+    const reset = resetAtOf(window, now)
+    if (reset === null) return rolling
+    const periodStart = reset <= now ? reset : reset - window.windowHours * 3_600_000
+    return Math.max(rolling, Math.min(periodStart, now))
+  }
   if (plan.coverage === "credits" && window.unit === "usd")
     return ModelRouteLimits.parseAbsoluteTime(plan.createdAt) ?? 0
   return 0
