@@ -180,9 +180,10 @@ export type Catalog = ReadonlyMap<string, ReadonlyMap<string, CatalogModel>>
  * The target SET mirrors the runtime too (#530): a target whose `until` has
  * passed is dropped, a target naming a `*` pattern expands to every matching
  * catalog model via the shared `ModelRouteExpansion.matchingModels` the
- * plugin runs, a door-set target (provider `*`, #637) expands over every
- * catalog door via the shared `matchingProviders` minus its exclusions, and
- * catalog models that are disabled are dropped. Per leaf,
+ * plugin runs, a provider-route target expands over its configured concrete
+ * members, a door-set target (provider `*`, #637) expands over every catalog
+ * door via the shared `matchingProviders` minus its exclusions, and catalog
+ * models that are disabled are dropped. Per leaf,
  * the effective variant is filtered the way the plugin expansion filters it
  * before the resolver runs: a pinned or requested variant runs at the
  * target's remap of it when the leaf offers the remapped variant, else at
@@ -210,7 +211,9 @@ function routeTargets(
 ): Model.Ref[] {
   if (seen.has(routeID)) return []
   seen.add(routeID)
-  const routes = Config.latest(entries, "experimental")?.routes?.models
+  const configuredRoutes = Config.latest(entries, "experimental")?.routes
+  const routes = configuredRoutes?.models
+  const providerRoutes = configuredRoutes?.providers
   // Own-property lookup: a route named after an Object.prototype member
   // (e.g. "constructor") must read as an unknown route, not the inherited
   // member (#831).
@@ -242,9 +245,18 @@ function routeTargets(
     const models = catalog?.get(selection.providerID)
     // The variant a known catalog leaf actually runs, or undefined when the
     // leaf is dropped (disabled, or its fixed variant is not offered).
-    const leaf = (providerID: string, id: string, model: CatalogModel): Model.Ref[] => {
+    const leaf = (
+      providerID: string,
+      id: string,
+      model: CatalogModel,
+      doorModels?: ReadonlyMap<string, CatalogModel>,
+    ): Model.Ref[] => {
       if (!model.enabled) return []
       const offers = (variant: string) => model.variants.some((item) => item.id === variant)
+      // Runtime producibility (#985): a variant also runs when the door's catalog
+      // exposes it as a suffixed model id (`${id}-${variant}`), as proxy catalogs
+      // enumerate effort levels that way and carry no variant list for them.
+      const producible = (variant: string) => offers(variant) || (doorModels?.has(`${id}-${variant}`) ?? false)
       // A pinned or route-requested variant resolves through the target's remap
       // table exactly as the plugin expansion resolves it (#869): the remapped
       // variant when the leaf offers it, else the variant itself when offered,
@@ -255,9 +267,9 @@ function routeTargets(
       if (wanted !== undefined) {
         const remapped = ownVariant(object?.variants, wanted)
         const variant =
-          remapped !== undefined && offers(remapped)
+          remapped !== undefined && producible(remapped)
             ? Model.VariantID.make(remapped)
-            : offers(wanted)
+            : producible(wanted)
               ? wanted
               : undefined
         return variant === undefined
@@ -276,6 +288,32 @@ function routeTargets(
         },
       ]
     }
+    // Provider routes share the target's provider namespace with concrete providers:
+    // a catalog provider always wins, just as it does during runtime expansion.
+    if (catalog !== undefined && !catalog.has(selection.providerID)) {
+      const providerRoute =
+        providerRoutes && Object.hasOwn(providerRoutes, selection.providerID)
+          ? providerRoutes[selection.providerID]
+          : undefined
+      if (providerRoute !== undefined) {
+        // The runtime drops a provider route whose id names a configured model
+        // route (configuredProviderRoutes in model-routes.ts): the declaration is
+        // ignored, so the target is dropped with it instead of being expanded
+        // over members runtime would never reach.
+        if (routes && Object.hasOwn(routes, selection.providerID)) return []
+        return providerRoute.providers.flatMap((providerID) => {
+          const memberModels = catalog.get(providerID)
+          if (memberModels === undefined) return []
+          if (!selection.model.includes("*")) {
+            const known = memberModels.get(selection.model)
+            return known === undefined ? [] : leaf(providerID, selection.model, known, memberModels)
+          }
+          return ModelRouteExpansion.matchingModels(selection.model, memberModels).flatMap(([id, model]) =>
+            leaf(providerID, id, model, memberModels),
+          )
+        })
+      }
+    }
     // A door-set target (`*/model`, #637) is judged over every catalog door
     // except its exclusions, via the same shared helper the plugin expands
     // with; without a catalog it is judged literally, as patterns are.
@@ -284,17 +322,17 @@ function routeTargets(
       return ModelRouteExpansion.matchingProviders(catalog, object?.exclude ?? [], "opencode-route").flatMap(
         ([providerID, doorModels]) =>
           ModelRouteExpansion.matchingModels(selection.model, doorModels).flatMap(([id, model]) =>
-            leaf(providerID, id, model),
+            leaf(providerID, id, model, doorModels),
           ),
       )
     }
     if (!selection.model.includes("*")) {
       const known = models?.get(selection.model)
-      return known === undefined ? [literal] : leaf(selection.providerID, selection.model, known)
+      return known === undefined ? [literal] : leaf(selection.providerID, selection.model, known, models)
     }
     if (models === undefined) return [literal]
     return ModelRouteExpansion.matchingModels(selection.model, models).flatMap(([id, model]) =>
-      leaf(selection.providerID, id, model),
+      leaf(selection.providerID, id, model, models),
     )
   })
 }
