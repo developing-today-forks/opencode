@@ -210,6 +210,26 @@ describe("V1Migration.transformSession", () => {
     })
   })
 
+  test("skips malformed data URLs with a warning and keeps migrating the session", () => {
+    const message = user("msg_000000000050aaaaaaaaaaaaaa")
+    const next = user("msg_000000000051aaaaaaaaaaaaaa", {}, 20)
+    const result = transform(
+      [message, next],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, { type: "file", mime: "text/plain", url: "data:text/plain,100% coverage" }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aGk=" }),
+        part("prt_4", next.id, { type: "text", text: "next message" }),
+      ],
+    )
+
+    expect(result.messages.map((row) => row.data.text)).toEqual(["prompt", "next message"])
+    expect(result.messages[0].data.files).toEqual([{ data: "aGk=", mime: "text/plain", source: { type: "inline" } }])
+    expect(result.warnings).toEqual([
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_2" },
+    ])
+  })
+
   test("maps attachment-only source variants and uses resource URIs as unavailable labels", () => {
     const message = user("msg_000000000049aaaaaaaaaaaaaa")
     const result = transform(
