@@ -271,7 +271,17 @@ export const completionBody = (args: {
 
 export const modelsBody = () => ({
   object: "list",
-  data: ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+  data: [
+    ...ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+    // The systemone family's Clef models (#1410): the door's static
+    // floor, advertised so a caller browsing /v1/models finds the
+    // models POST /v1/systemone serves. The door additionally serves
+    // the live catalog subset (e.g. @cf/cloudflare/clef-omni); those
+    // resolve through modelBody's provider/model pass-through and the
+    // systemone grammar check, not this static list.
+    { id: "@cf/cloudflare/clef", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+    { id: "@cf/cloudflare/clef-flash", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+  ],
 })
 
 /**
@@ -303,7 +313,8 @@ export const errorBody = (message: string, type: string, code?: string) => ({
   error: { message, type, ...(code ? { code } : {}) },
 })
 
-export const errorFrame = (message: string) => `data: ${JSON.stringify(errorBody(message, "server_error"))}\n\n`
+export const errorFrame = (message: string, type = "server_error") =>
+  `data: ${JSON.stringify(errorBody(message, type))}\n\n`
 
 /**
  * Stateful OpenAI SSE translator: internal LLM events in, `data:` frames
@@ -539,6 +550,10 @@ const responsesItemsToMessages = (
   const messages: Array<Message | Message.Input> = []
   const toolNames = new Map<string, string>()
   for (const item of items) {
+    // Reasoning items are provider-internal echoes (and, since #1442, part
+    // of a streamed response's stored output): accepted and skipped, as in
+    // normalizeResponsesItem, never rendered as messages.
+    if (item.type === "reasoning") continue
     if (item.type === "function_call") {
       if (typeof item.call_id !== "string" || typeof item.name !== "string")
         return "function_call items must carry call_id and name"
@@ -723,6 +738,14 @@ export const responsesBody = (args: {
   readonly previousResponseId?: string
 }) => {
   const output: Array<Record<string, unknown>> = []
+  const reasoning = args.response.reasoning
+  if (reasoning)
+    output.push({
+      type: "reasoning",
+      id: `rs_${args.id}`,
+      status: "completed",
+      summary: [{ type: "summary_text", text: reasoning }],
+    })
   const text = args.response.text
   if (text)
     output.push({
@@ -759,13 +782,46 @@ export const responsesBody = (args: {
 const responsesFrame = (type: string, data: Record<string, unknown>) =>
   `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
 
+interface ResponsesToolSlot {
+  readonly callId: string
+  readonly index: number
+  readonly name: string
+  args: string
+  argsDone: boolean
+  done: boolean
+}
+
 /**
  * Stateful Responses SSE translator: internal LLM events in, typed
- * Responses frames out (`response.output_text.delta`,
- * `response.function_call_arguments.delta`, …). `start()` emits
- * `response.created`; the finish event emits `response.completed`
- * carrying the full response object. The Responses dialect has no
- * [DONE] sentinel — the stream simply ends after `response.completed`.
+ * Responses frames out, following the design spec section 5 grammar
+ * (#1146 spec, #1442): `response.created` -> `response.in_progress` ->
+ * per output item `response.output_item.added`, the content deltas
+ * (`response.output_text.delta` /
+ * `response.reasoning_summary_text.delta` /
+ * `response.function_call_arguments.delta` as applicable), the matching
+ * `*.done` events and `response.output_item.done` -> finally
+ * `response.completed` carrying the full response object — the
+ * accumulated output items (the same items `outputItems()` reports for
+ * the #1149 item store) and usage. Every event carries a monotonic
+ * `sequence_number`, starting at 0 for `response.created`. The
+ * Responses dialect has no [DONE] sentinel — the stream simply ends
+ * after `response.completed`.
+ *
+ * Fidelity rules (spec section 5): reasoning surfaces as a reasoning
+ * item, never flattened into visible text; tool calls surface as
+ * function_call items with arguments assembled from the provider
+ * deltas, never executed; a provider failure terminates the stream
+ * with `response.failed`, never a clean completion over partial
+ * output.
+ *
+ * Aggregation: as in `responsesBody`, all text fragments form ONE
+ * message item and all reasoning fragments ONE reasoning item (their
+ * authoritative per-fragment `*-end` texts replace that fragment's
+ * accumulated deltas), while each tool call is its own item. Text and
+ * reasoning items are therefore closed (their `*.done` /
+ * `response.output_item.done` frames) at the finish event, in
+ * output_index order; a tool item is closed at its `tool-input-end` /
+ * `tool-call`, or at finish when the provider sent neither.
  */
 export class ResponsesStreamTranslator {
   failed = false
@@ -773,11 +829,19 @@ export class ResponsesStreamTranslator {
   completed = false
   /** Usage from the finish event, when the provider reported it. */
   usage: Usage | undefined
+  private seq = 0
+  private nextIndex = 0
   private textStarted = false
   private textIndex = 0
-  private nextIndex = 0
-  private text = ""
-  private readonly toolSlots = new Map<string, { index: number; name: string; args: string }>()
+  private textDone = false
+  private readonly textFragments = new Map<string, string>()
+  private readonly textOrder: string[] = []
+  private reasoningStarted = false
+  private reasoningIndex = 0
+  private reasoningDone = false
+  private readonly reasoningFragments = new Map<string, string>()
+  private readonly reasoningOrder: string[] = []
+  private readonly toolSlots = new Map<string, ResponsesToolSlot>()
 
   constructor(
     private readonly meta: {
@@ -787,6 +851,10 @@ export class ResponsesStreamTranslator {
       readonly previousResponseId?: string
     },
   ) {}
+
+  private frame(type: string, data: Record<string, unknown>): string {
+    return responsesFrame(type, { sequence_number: this.seq++, ...data })
+  }
 
   private base(status: string) {
     return {
@@ -800,77 +868,257 @@ export class ResponsesStreamTranslator {
     }
   }
 
+  private static appendFragment(map: Map<string, string>, order: string[], id: string, text: string) {
+    if (!map.has(id)) order.push(id)
+    map.set(id, (map.get(id) ?? "") + text)
+  }
+
+  private static setFragment(map: Map<string, string>, order: string[], id: string, text: string) {
+    if (!map.has(id)) order.push(id)
+    map.set(id, text)
+  }
+
+  private static fragmentText(map: Map<string, string>, order: string[]): string {
+    return order.map((id) => map.get(id) ?? "").join("")
+  }
+
+  private get text(): string {
+    return ResponsesStreamTranslator.fragmentText(this.textFragments, this.textOrder)
+  }
+
+  private get reasoning(): string {
+    return ResponsesStreamTranslator.fragmentText(this.reasoningFragments, this.reasoningOrder)
+  }
+
+  private messageItem(status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "message",
+      id: `msg_${this.meta.id}`,
+      role: "assistant",
+      status,
+      content: [{ type: "output_text", text: status === "completed" ? this.text : "", annotations: [] }],
+    }
+  }
+
+  private reasoningItem(status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "reasoning",
+      id: `rs_${this.meta.id}`,
+      status,
+      summary:
+        status === "completed" && this.reasoning ? [{ type: "summary_text", text: this.reasoning }] : [],
+    }
+  }
+
+  private functionCallItem(slot: ResponsesToolSlot, status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "function_call",
+      id: `fc_${slot.callId}`,
+      call_id: slot.callId,
+      name: slot.name,
+      arguments: status === "completed" ? slot.args || "{}" : "",
+      status,
+    }
+  }
+
   /**
    * The completed response's output items, in the same wire shape
    * `responsesBody` renders for a non-streamed response — what the item
-   * store persists so a streamed response can be chained from (#1149).
+   * store persists so a streamed response can be chained from (#1149),
+   * and exactly what the `response.completed` event carries (#1442).
    */
   outputItems(): Array<Record<string, unknown>> {
-    const output: Array<Record<string, unknown>> = []
-    if (this.text)
-      output.push({
-        type: "message",
-        id: `msg_${this.meta.id}`,
-        role: "assistant",
-        status: "completed",
-        content: [{ type: "output_text", text: this.text, annotations: [] }],
-      })
-    for (const [id, slot] of [...this.toolSlots.entries()].sort((a, b) => a[1].index - b[1].index))
-      output.push({
-        type: "function_call",
-        id: `fc_${id}`,
-        call_id: id,
-        name: slot.name,
-        arguments: slot.args || "{}",
-        status: "completed",
-      })
-    return output
+    const items: Array<{ index: number; item: Record<string, unknown> }> = []
+    if (this.reasoningStarted) items.push({ index: this.reasoningIndex, item: this.reasoningItem("completed") })
+    if (this.textStarted) items.push({ index: this.textIndex, item: this.messageItem("completed") })
+    for (const slot of this.toolSlots.values())
+      items.push({ index: slot.index, item: this.functionCallItem(slot, "completed") })
+    return items
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => entry.item)
   }
 
   start(): string {
-    return responsesFrame("response.created", { response: this.base("in_progress") })
+    return (
+      this.frame("response.created", { response: this.base("in_progress") }) +
+      this.frame("response.in_progress", { response: this.base("in_progress") })
+    )
+  }
+
+  /** The terminal failure frame (spec section 5): sequence-numbered like every other event. */
+  failureFrame(message: string, code?: string): string {
+    this.failed = true
+    return this.frame("response.failed", {
+      response: { ...this.base("failed"), error: { message, ...(code ? { code } : {}) } },
+    })
+  }
+
+  private ensureTextItem(): string[] {
+    if (this.textStarted) return []
+    this.textStarted = true
+    this.textIndex = this.nextIndex++
+    return [
+      this.frame("response.output_item.added", {
+        output_index: this.textIndex,
+        item: this.messageItem("in_progress"),
+      }),
+    ]
+  }
+
+  private ensureReasoningItem(): string[] {
+    if (this.reasoningStarted) return []
+    this.reasoningStarted = true
+    this.reasoningIndex = this.nextIndex++
+    return [
+      this.frame("response.output_item.added", {
+        output_index: this.reasoningIndex,
+        item: this.reasoningItem("in_progress"),
+      }),
+    ]
+  }
+
+  private closeTextItem(): string[] {
+    if (!this.textStarted || this.textDone) return []
+    this.textDone = true
+    return [
+      this.frame("response.output_text.done", {
+        item_id: `msg_${this.meta.id}`,
+        output_index: this.textIndex,
+        content_index: 0,
+        text: this.text,
+      }),
+      this.frame("response.output_item.done", {
+        output_index: this.textIndex,
+        item: this.messageItem("completed"),
+      }),
+    ]
+  }
+
+  private closeReasoningItem(): string[] {
+    if (!this.reasoningStarted || this.reasoningDone) return []
+    this.reasoningDone = true
+    return [
+      this.frame("response.reasoning_summary_text.done", {
+        item_id: `rs_${this.meta.id}`,
+        output_index: this.reasoningIndex,
+        summary_index: 0,
+        text: this.reasoning,
+      }),
+      this.frame("response.output_item.done", {
+        output_index: this.reasoningIndex,
+        item: this.reasoningItem("completed"),
+      }),
+    ]
+  }
+
+  private closeToolItem(slot: ResponsesToolSlot): string[] {
+    if (slot.done) return []
+    slot.done = true
+    const frames: string[] = []
+    if (!slot.argsDone) {
+      slot.argsDone = true
+      frames.push(
+        this.frame("response.function_call_arguments.done", {
+          item_id: `fc_${slot.callId}`,
+          output_index: slot.index,
+          arguments: slot.args || "{}",
+        }),
+      )
+    }
+    frames.push(
+      this.frame("response.output_item.done", {
+        output_index: slot.index,
+        item: this.functionCallItem(slot, "completed"),
+      }),
+    )
+    return frames
+  }
+
+  /** Close every still-open item, in output_index order, before a terminal event. */
+  private closeOpenItems(): string[] {
+    const closers: Array<{ index: number; close: () => string[] }> = []
+    if (this.reasoningStarted && !this.reasoningDone)
+      closers.push({ index: this.reasoningIndex, close: () => this.closeReasoningItem() })
+    if (this.textStarted && !this.textDone)
+      closers.push({ index: this.textIndex, close: () => this.closeTextItem() })
+    for (const slot of this.toolSlots.values())
+      if (!slot.done) closers.push({ index: slot.index, close: () => this.closeToolItem(slot) })
+    return closers
+      .sort((a, b) => a.index - b.index)
+      .flatMap((entry) => entry.close())
   }
 
   push(event: LLMEvent): string[] {
     switch (event.type) {
+      case "text-start":
+        return this.ensureTextItem()
       case "text-delta": {
-        if (!this.textStarted) {
-          this.textStarted = true
-          this.textIndex = this.nextIndex++
-        }
-        this.text += event.text
-        return [
-          responsesFrame("response.output_text.delta", {
+        const frames = this.ensureTextItem()
+        ResponsesStreamTranslator.appendFragment(this.textFragments, this.textOrder, String(event.id), event.text)
+        frames.push(
+          this.frame("response.output_text.delta", {
             item_id: `msg_${this.meta.id}`,
             output_index: this.textIndex,
             content_index: 0,
             delta: event.text,
           }),
-        ]
+        )
+        return frames
       }
-      case "reasoning-delta":
-        return [
-          responsesFrame("response.reasoning_text.delta", {
+      case "text-end": {
+        // The end event's authoritative text replaces this fragment's
+        // accumulated deltas. The aggregated message item stays open
+        // until finish (a later fragment may still follow); its done
+        // events are emitted there with the final text.
+        if (event.text !== undefined)
+          ResponsesStreamTranslator.setFragment(this.textFragments, this.textOrder, String(event.id), event.text)
+        return []
+      }
+      case "reasoning-start":
+        return this.ensureReasoningItem()
+      case "reasoning-delta": {
+        const frames = this.ensureReasoningItem()
+        ResponsesStreamTranslator.appendFragment(
+          this.reasoningFragments,
+          this.reasoningOrder,
+          String(event.id),
+          event.text,
+        )
+        frames.push(
+          this.frame("response.reasoning_summary_text.delta", {
             item_id: `rs_${this.meta.id}`,
-            output_index: this.textIndex,
-            content_index: 0,
+            output_index: this.reasoningIndex,
+            summary_index: 0,
             delta: event.text,
           }),
-        ]
+        )
+        return frames
+      }
+      case "reasoning-end": {
+        if (event.text !== undefined)
+          ResponsesStreamTranslator.setFragment(
+            this.reasoningFragments,
+            this.reasoningOrder,
+            String(event.id),
+            event.text,
+          )
+        return []
+      }
       case "tool-input-start": {
-        const slot = { index: this.nextIndex++, name: event.name, args: "" }
-        this.toolSlots.set(String(event.id), slot)
+        if (this.toolSlots.has(String(event.id))) return []
+        const slot: ResponsesToolSlot = {
+          callId: String(event.id),
+          index: this.nextIndex++,
+          name: event.name,
+          args: "",
+          argsDone: false,
+          done: false,
+        }
+        this.toolSlots.set(slot.callId, slot)
         return [
-          responsesFrame("response.output_item.added", {
+          this.frame("response.output_item.added", {
             output_index: slot.index,
-            item: {
-              type: "function_call",
-              id: `fc_${String(event.id)}`,
-              call_id: String(event.id),
-              name: event.name,
-              arguments: "",
-              status: "in_progress",
-            },
+            item: this.functionCallItem(slot, "in_progress"),
           }),
         ]
       }
@@ -879,45 +1127,67 @@ export class ResponsesStreamTranslator {
         if (!slot) return []
         slot.args += event.text
         return [
-          responsesFrame("response.function_call_arguments.delta", {
-            item_id: `fc_${String(event.id)}`,
+          this.frame("response.function_call_arguments.delta", {
+            item_id: `fc_${slot.callId}`,
             output_index: slot.index,
             delta: event.text,
           }),
         ]
       }
+      case "tool-input-end": {
+        const slot = this.toolSlots.get(String(event.id))
+        return slot ? this.closeToolItem(slot) : []
+      }
       case "tool-call": {
-        if (this.toolSlots.has(String(event.id))) return []
-        const slot = { index: this.nextIndex++, name: event.name, args: JSON.stringify(event.input ?? {}) }
-        this.toolSlots.set(String(event.id), slot)
-        return [
-          responsesFrame("response.output_item.added", {
+        const existing = this.toolSlots.get(String(event.id))
+        if (existing) {
+          if (existing.done) return []
+          if (!existing.args) existing.args = JSON.stringify(event.input ?? {})
+          return this.closeToolItem(existing)
+        }
+        const slot: ResponsesToolSlot = {
+          callId: String(event.id),
+          index: this.nextIndex++,
+          name: event.name,
+          args: JSON.stringify(event.input ?? {}),
+          argsDone: false,
+          done: false,
+        }
+        this.toolSlots.set(slot.callId, slot)
+        const frames = [
+          this.frame("response.output_item.added", {
             output_index: slot.index,
-            item: {
-              type: "function_call",
-              id: `fc_${String(event.id)}`,
-              call_id: String(event.id),
-              name: event.name,
-              arguments: slot.args,
-              status: "in_progress",
-            },
+            item: this.functionCallItem(slot, "in_progress"),
           }),
         ]
+        if (slot.args)
+          frames.push(
+            this.frame("response.function_call_arguments.delta", {
+              item_id: `fc_${slot.callId}`,
+              output_index: slot.index,
+              delta: slot.args,
+            }),
+          )
+        frames.push(...this.closeToolItem(slot))
+        return frames
       }
-      case "finish":
+      case "finish": {
         this.completed = true
         this.usage = event.usage
-        return [
-          responsesFrame("response.completed", {
+        const frames = this.closeOpenItems()
+        frames.push(
+          this.frame("response.completed", {
             response: {
               ...this.base("completed"),
+              output: this.outputItems(),
               ...(event.usage ? { usage: responsesUsageBody(event.usage) } : {}),
             },
           }),
-        ]
+        )
+        return frames
+      }
       case "provider-error":
-        this.failed = true
-        return [responsesFrame("response.failed", { response: { ...this.base("failed"), error: { message: event.message } } })]
+        return [this.failureFrame(event.message)]
       default:
         return []
     }
@@ -1248,8 +1518,8 @@ export const PING_FRAME = messagesFrame("ping", {})
  */
 export const messagesErrorBody = (message: string, type: string) => ({ type: "error", error: { type, message } })
 
-export const messagesErrorFrame = (message: string) =>
-  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, "api_error"))}\n\n`
+export const messagesErrorFrame = (message: string, type = "api_error") =>
+  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, type))}\n\n`
 
 interface MessagesBlockSlot {
   readonly index: number

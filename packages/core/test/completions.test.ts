@@ -3,7 +3,7 @@ import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
+import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, errorFrame, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -353,6 +353,172 @@ describe("responses door translation", () => {
     expect(body.usage.total_tokens).toBe(10)
   })
 
+  // Parse every SSE frame a translator emitted (start() returns the
+  // created + in_progress frames in one string).
+  const parseFrames = (frames: ReadonlyArray<string>) =>
+    frames.flatMap((frame) =>
+      frame
+        .split("\n\n")
+        .filter(Boolean)
+        .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>),
+    )
+
+  test("responses stream translator emits the full §5 sequence with monotonic sequence numbers (§1442)", () => {
+    const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
+    const parsed = parseFrames([
+      translator.start(),
+      ...translator.push(LLMEvent.textDelta({ id: "block_1", text: "Hel" })),
+      ...translator.push(LLMEvent.textDelta({ id: "block_1", text: "lo" })),
+      ...translator.push(LLMEvent.toolInputStart({ id: "call_1", name: "lookup" })),
+      ...translator.push(LLMEvent.toolInputDelta({ id: "call_1", name: "lookup", text: '{"city":' })),
+      ...translator.push(LLMEvent.toolInputDelta({ id: "call_1", name: "lookup", text: '"Austin"}' })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 5, outputTokens: 2 } })),
+    ])
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const done = parsed.find((data) => data.type === "response.output_text.done")
+    expect(done).toMatchObject({ item_id: "msg_resp_s", output_index: 0, content_index: 0, text: "Hello" })
+    const completed = parsed.at(-1)?.response as Record<string, unknown>
+    expect(completed.status).toBe("completed")
+    expect(completed.usage).toEqual({ input_tokens: 5, output_tokens: 2, total_tokens: 7 })
+    // The completed event carries the full accumulated output, and it
+    // is exactly what the #1149 item store persists via outputItems().
+    expect(completed.output).toEqual([
+      {
+        type: "message",
+        id: "msg_resp_s",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Hello", annotations: [] }],
+      },
+      {
+        type: "function_call",
+        id: "fc_call_1",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: '{"city":"Austin"}',
+        status: "completed",
+      },
+    ])
+    expect(translator.outputItems()).toEqual(completed.output as Array<Record<string, unknown>>)
+  })
+
+  test("responses stream translator closes an atomic tool-call item with its done events", () => {
+    const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
+    const parsed = parseFrames([
+      translator.start(),
+      ...translator.push(LLMEvent.toolCall({ id: "call_1", name: "lookup", input: { city: "Austin" } })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "tool-calls" } })),
+    ])
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    const completed = parsed.at(-1)?.response as Record<string, unknown>
+    expect(completed.output).toEqual([
+      {
+        type: "function_call",
+        id: "fc_call_1",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: '{"city":"Austin"}',
+        status: "completed",
+      },
+    ])
+    expect(translator.outputItems()).toEqual(completed.output as Array<Record<string, unknown>>)
+  })
+
+  test("responses stream translator emits reasoning as a reasoning item with §5 event names", () => {
+    const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
+    const raw = [
+      translator.start(),
+      ...translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "think" })),
+      ...translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "ing" })),
+      ...translator.push(LLMEvent.textDelta({ id: "block_1", text: "Answer" })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 3, outputTokens: 4 } })),
+    ]
+    expect(raw.join("")).not.toContain("response.reasoning_text.delta")
+    const parsed = parseFrames(raw)
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.delta",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.output_item.done",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const completed = parsed.at(-1)?.response as Record<string, unknown>
+    expect(completed.output).toEqual([
+      { type: "reasoning", id: "rs_resp_s", status: "completed", summary: [{ type: "summary_text", text: "thinking" }] },
+      {
+        type: "message",
+        id: "msg_resp_s",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Answer", annotations: [] }],
+      },
+    ])
+    expect(translator.outputItems()).toEqual(completed.output as Array<Record<string, unknown>>)
+  })
+
+  test("responses body surfaces reasoning as a reasoning item, matching the stream shape", () => {
+    const response = LLMResponse.fromEvents([
+      LLMEvent.reasoningDelta({ id: "r1", text: "thinking" }),
+      LLMEvent.textDelta({ id: "t1", text: "Hello!" }),
+      LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 4, outputTokens: 6 } }),
+    ])
+    if (!response) throw new Error("expected a completed response")
+    const body = responsesBody({ id: "resp_fixed", created: 1700000000, model: "m", response }) as any
+    expect(body.output[0]).toEqual({
+      type: "reasoning",
+      id: "rs_resp_fixed",
+      status: "completed",
+      summary: [{ type: "summary_text", text: "thinking" }],
+    })
+    expect(body.output[1].content[0].text).toBe("Hello!")
+  })
+
+  test("chainResponsesInput skips stored reasoning items from a streamed response", () => {
+    const parsed = parseResponsesRequest({
+      model: "workhorse",
+      input: "follow up",
+      previous_response_id: "resp_1",
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const chained = chainResponsesInput(parsed.value, [
+      { type: "reasoning", id: "rs_resp_1", status: "completed", summary: [{ type: "summary_text", text: "thinking" }] },
+      { type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] },
+    ])
+    if (!chained.ok) throw new Error(chained.error)
+    expect(chained.input.messages.map((m) => m.role)).toEqual(["assistant", "user"])
+  })
+
   test("responses stream translator emits typed events ending in response.completed", () => {
     const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
     const frames = [
@@ -503,6 +669,19 @@ describe("messages door translation", () => {
     const frame = messagesErrorFrame("boom")
     expect(frame).toContain("event: error")
     expect(frame).toContain('"type":"error","error":{"type":"api_error","message":"boom"}')
+  })
+
+  test("error frames default to the generic types and carry rate_limit_error for the quota class (#1441)", () => {
+    expect(errorFrame("boom")).toContain('"type":"server_error"')
+    expect(errorFrame("quota exhausted; resets at 2026-11-03T04:00:00Z", "rate_limit_error")).toContain(
+      '"type":"rate_limit_error"',
+    )
+    expect(errorFrame("quota exhausted; resets at 2026-11-03T04:00:00Z", "rate_limit_error")).toContain(
+      "resets at 2026-11-03T04:00:00Z",
+    )
+    expect(messagesErrorFrame("boom", "rate_limit_error")).toContain(
+      '"type":"error","error":{"type":"rate_limit_error","message":"boom"}',
+    )
   })
 
   test("messages stream translator emits the Anthropic event grammar in order", () => {

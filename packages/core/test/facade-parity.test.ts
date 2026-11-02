@@ -42,6 +42,9 @@
  *     generate-persona-route.test.ts); named diffs below, including
  *     one real-gap: persona routes are not advertised in the façade's
  *     /v1/models list (ADVERTISED_MODELS is the six tier routes).
+ *   - clef (bin/clef-proxy.mjs, :18742) — systemone family (#1410):
+ *     PARITY-WITH-NAMED-DIFFS (both acceptable-by-design; see the
+ *     clef describe block)
  *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
  *     the door answers shell/bash-tool requests with a 200 (tool names
  *     aliased upstream, calls translated back; a residual 403 falls
@@ -72,6 +75,13 @@ import {
   parseResponsesRequest,
   responsesBody,
 } from "@opencode/core/completions"
+import {
+  answersBody,
+  errorBody as systemOneErrorBody,
+  parseSystemOneRequest,
+  resolveModel,
+  upstreamFailureBody,
+} from "@opencode/core/systemone"
 
 // ------------------------------------------------------------ diff engine
 
@@ -165,19 +175,24 @@ const facadeChatFrames = (events: ReadonlyArray<LLMEvent>, model = "workhorse") 
   return chatFramesOf(frames)
 }
 
-/** Façade responses stream: the event-type sequence plus the terminal
- * response.completed payload essentials. */
+/** Façade responses stream: the event-type sequence, the sequence
+ * numbers, the terminal response.completed payload essentials, and
+ * the translator output items the #1149 store persists. */
 const facadeResponsesStream = (events: ReadonlyArray<LLMEvent>) => {
   const translator = new ResponsesStreamTranslator({ id: "resp_facade", created: 1700000000, model: "muse-spark-1.3" })
   const frames = [translator.start(), ...events.flatMap((event) => translator.push(event))]
-  const types: string[] = []
-  let completed: Record<string, unknown> | undefined
-  for (const frame of frames) {
-    const data = JSON.parse(frame.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>
-    types.push(String(data.type))
-    if (data.type === "response.completed") completed = data.response as Record<string, unknown>
-  }
-  return { types, completed }
+  const parsed = frames.flatMap((frame) =>
+    frame
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>),
+  )
+  const types = parsed.map((data) => String(data.type))
+  const seqs = parsed.map((data) => data.sequence_number)
+  const completed = parsed.find((data) => data.type === "response.completed")?.response as
+    | Record<string, unknown>
+    | undefined
+  return { types, seqs, completed, parsed, items: translator.outputItems() }
 }
 
 const CREATED = 1700000000
@@ -214,7 +229,17 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
         owned_by: "opencode-route",
       })),
     }
-    expectDiffs(door, modelsBody(), [])
+    // Since #1410 the façade's shared list also carries the
+    // systemone family's Clef floor (a façade-only superset, like the
+    // embeddings entries the handler adds): the route set itself is
+    // unchanged, the list is longer by exactly those entries.
+    expectDiffs(door, modelsBody(), [
+      {
+        path: "data.length",
+        classification: "acceptable-by-design",
+        note: "façade-only superset: the systemone Clef models (#1410) share the /v1/models list",
+      },
+    ])
     expect(modelBody("workhorse")).toEqual(door.data[0])
   })
 
@@ -304,7 +329,7 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
     // §2); route-proxy callers gain /v1/responses by repointing.
   })
 
-  test("quota failure: exhausted candidates — 502 both sides, envelope type/message differ", () => {
+  test("quota failure: exhausted candidates — door 502, façade 429 per design §2 (#1441)", () => {
     // Door recording: the single candidate leaf answers 429 with body
     // {"error":{"message":"quota"}} and `Retry-After: 30` (test leaf,
     // mode "rate"). classifyHttp wraps it as LeafError
@@ -313,23 +338,31 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
     // message). The Retry-After header is NOT forwarded to the client
     // — the reset hint survives only inside the ledger's quota JSON
     // and, when the upstream body carries it, inside the message.
+    // The DOOR side stays exactly as recorded: the route proxy itself
+    // returns 502 on quota exhaustion.
     const door = {
       status: 502,
       body: { error: { message: 'leaf HTTP 429: {"error":{"message":"quota"}}', type: "proxy_error" } },
     }
-    // Façade: the handler maps a generation failure to 502 with
-    // Completions.errorBody(message, "server_error") — the provider's
-    // message (and any reset hint inside it) is preserved verbatim.
+    // Façade (#1441): a quota-classified generation failure is a
+    // distinguishable Generate.QuotaError and the handler maps it to
+    // 429 with Completions.errorBody(message, "rate_limit_error") —
+    // the provider's message (and any reset hint inside it) is
+    // preserved verbatim. This is a spec-conformant divergence from
+    // the route-proxy door: design §2 promises 429 for quota /
+    // rate-limit failures, so the façade follows the spec, not the
+    // door's accidental 502.
     const facade = {
-      status: 502,
-      body: errorBody('leaf HTTP 429: {"error":{"message":"quota"}}', "server_error"),
+      status: 429,
+      body: errorBody('leaf HTTP 429: {"error":{"message":"quota"}}', "rate_limit_error"),
     }
-    expect(facade.status).toBe(door.status)
+    expect(door.status).toBe(502)
+    expect(facade.status).toBe(429)
     expectDiffs(door.body, facade.body, [
       {
         path: "error.type",
         classification: "acceptable-by-design",
-        note: "Door brands errors proxy_error; the façade uses the OpenAI-standard server_error. Status (502) and message carriage match; neither side forwards a Retry-After header.",
+        note: "Door brands its 502 as proxy_error; the façade answers the design §2 quota shape — 429 rate_limit_error — with the same message carriage. Neither side forwards a Retry-After header; the hint rides in the message.",
       },
     ])
   })
@@ -479,7 +512,7 @@ describe("door: codex (bin/codex-proxy.mjs :18744)", () => {
       {
         path: "error.message",
         classification: "real-gap",
-        note: "Message framing differs (door prefixes 'Codex execution failed: '; façade passes the provider message through). Neither side produces the design §2 quota shape (429 + reset hint) for codex traffic today — filed as #1441.",
+        note: "Message framing differs (door prefixes 'Codex execution failed: '; façade passes the provider message through). This fixture is an unclassified CLI execution failure — no quota/rate-limit signal (no 429, no quota tag) reaches the façade, so the §2 502 mapping is correct here; a quota-classified failure answers 429 instead (#1441, pinned in the muse quota case and the server suite).",
       },
       {
         path: "error.type",
@@ -661,11 +694,16 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     ])
   })
 
-  test("responses streaming (passthrough): response.completed carries no output on the façade — real gap", () => {
+  test("responses streaming (passthrough): façade emits the full §5 grammar, completed carries the output — #1442 closed", () => {
     // Door recording: the passthrough relays the upstream grammar —
     // the fixture's sequence is text deltas, output_item.added,
     // function_call_arguments deltas, response.completed whose
-    // response carries the full output (2 items) and usage.
+    // response carries the full output (2 items) and usage. The stub
+    // fixture is an abbreviated mid-grammar capture: it omits the
+    // lifecycle frames (created / in_progress / per-item added+done,
+    // *.done) and sequence numbers that real upstream streams — and
+    // design §5 — carry. Before #1442 the façade matched the stub by
+    // ALSO omitting them and, worse, sent output: [] on completed.
     const doorTypes = [
       "response.output_text.delta",
       "response.output_text.delta",
@@ -683,37 +721,103 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
       LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 11, outputTokens: 6, totalTokens: 17 } }),
     ]
     const facade = facadeResponsesStream(events)
-    // The façade prepends response.created (its stream always opens
-    // with it — the door fixture is a mid-grammar stub capture, and
-    // real upstream streams open with response.created too).
-    expect(facade.types).toEqual(["response.created", ...doorTypes])
-    // Usage and status on the terminal event are parity...
+    // The full §5 sequence, in order.
+    expect(facade.types).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    // Every door-recorded event still occurs, in the recorded order
+    // (a subsequence of the façade sequence).
+    let at = 0
+    for (const type of facade.types) if (type === doorTypes[at]) at++
+    expect(at).toBe(doorTypes.length)
+    // Monotonic sequence numbers on every event, from 0.
+    expect(facade.seqs).toEqual(facade.types.map((_, index) => index))
+    // The terminal event carries usage, status, and the FULL output —
+    // both items, matching the door completed payload (modulo the
+    // façade item ids, which embed the response id).
     expect(facade.completed?.status).toBe("completed")
     expect(facade.completed?.usage).toEqual({ input_tokens: 11, output_tokens: 6, total_tokens: 17 })
-    // ...but the completed response's output is EMPTY on the façade,
-    // where the door's completed event carries both output items.
-    // Clients that read the final response object (the standard
-    // Responses pattern) lose the answer's items. Also missing vs
-    // design §5: response.in_progress, response.output_item.done,
-    // response.output_text.done, sequence numbers.
-    expect(facade.completed?.output).toEqual([])
-    // classification: real-gap — filed as #1442;
-    // blocks Wave C repointing for responses-streaming callers.
+    expect(facade.completed?.output).toEqual([
+      {
+        type: "message",
+        id: "msg_resp_facade",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Hello stream", annotations: [] }],
+      },
+      {
+        type: "function_call",
+        id: "fc_call_9",
+        call_id: "call_9",
+        name: "get_weather",
+        arguments: '{"city":"Osseo"}',
+        status: "completed",
+      },
+    ])
+    // #1149 agreement: the item store persists exactly these items.
+    expect(facade.items).toEqual(facade.completed?.output as Array<Record<string, unknown>>)
+    // classification: the §5 streaming diff recorded here is CLOSED
+    // by #1442. The only remaining delta vs the door recording is the
+    // stub fixture's own abbreviation (no lifecycle frames / sequence
+    // numbers in the capture) — acceptable-by-design, since §5 and
+    // real upstream streams carry them.
   })
 
-  test("responses streaming: reasoning event name deviates from design §5", () => {
-    // Design §5 names response.reasoning_summary_text.delta; the
-    // façade emits response.reasoning_text.delta. No door fixture
-    // exercises reasoning deltas (the muse stub has none), so this
-    // is recorded against the spec, not a door recording.
+  test("responses streaming: reasoning events use the §5 name — #1442 closed", () => {
+    // Design §5 names response.reasoning_summary_text.delta. Before
+    // #1442 the façade emitted response.reasoning_text.delta and no
+    // reasoning item lifecycle at all. No door fixture exercises
+    // reasoning deltas (the muse stub has none), so this is recorded
+    // against the spec, not a door recording.
     const translator = new ResponsesStreamTranslator({ id: "resp_x", created: CREATED, model: "m" })
-    const frames = translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "thinking" }))
-    expect(frames[0]).toContain("response.reasoning_text.delta")
-    // classification: real-gap (vs spec §5) — filed with the
-    // responses-streaming issue #1442.
+    const raw = [
+      translator.start(),
+      ...translator.push(LLMEvent.reasoningDelta({ id: "r1", text: "thinking" })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "stop" } })),
+    ]
+    const parsed = raw.flatMap((frame) =>
+      frame
+        .split("\n\n")
+        .filter(Boolean)
+        .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>),
+    )
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(raw.join("")).not.toContain("response.reasoning_text.delta")
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const delta = parsed.find((data) => data.type === "response.reasoning_summary_text.delta")
+    expect(delta).toMatchObject({ item_id: "rs_resp_x", output_index: 0, summary_index: 0, delta: "thinking" })
+    // Reasoning surfaces as a reasoning item on the completed
+    // response — never flattened into visible text (§5 fidelity).
+    const completed = parsed.find((data) => data.type === "response.completed")?.response as Record<string, unknown>
+    expect(completed.output).toEqual([
+      { type: "reasoning", id: "rs_resp_x", status: "completed", summary: [{ type: "summary_text", text: "thinking" }] },
+    ])
+    expect(translator.outputItems()).toEqual(completed.output as Array<Record<string, unknown>>)
+    // classification: the §5 reasoning-name diff recorded here is
+    // CLOSED by #1442.
   })
 
-  test("quota failure: door passes the upstream 429 through verbatim; façade answers 502", () => {
+  test("quota failure: door passes the upstream 429 through verbatim; façade answers 429 too (#1441)", () => {
     // Door recording (door test: "upstream 429 passes through and
     // never falls back to exec"): the stub upstream answers 429
     // {error: {message: "Subscription quota exhausted", type:
@@ -723,19 +827,14 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     // never retries through the CLI. Any reset hint in the upstream
     // body survives verbatim.
     const door = { status: 429, body: { error: { message: "Subscription quota exhausted", type: "rate_limit_error" } } }
-    // Façade: a quota failure inside generation surfaces through the
-    // handler as 502 {error: {message, type: "server_error"}} — the
-    // message (and any hint inside it) survives, the 429 does not.
-    const facade = { status: 502, body: errorBody("Subscription quota exhausted", "server_error") }
-    expectDiffs(door.body, facade.body, [
-      {
-        path: "error.type",
-        classification: "real-gap",
-        note: "Door relays the upstream type (rate_limit_error); façade emits server_error. Status also differs: 429 (door) vs 502 (façade) — the design §2 mapping promises 429 with the reset hint preserved in the message; the façade does not produce it today. Filed as #1441.",
-      },
-    ])
+    // Façade (#1441): a quota-classified generation failure surfaces
+    // through the handler as 429 {error: {message, type:
+    // "rate_limit_error"}} — status, type and message (reset hint
+    // included) all match the door. Exact parity; no diffs declared.
+    const facade = { status: 429, body: errorBody("Subscription quota exhausted", "rate_limit_error") }
+    expectDiffs(door.body, facade.body, [])
     expect(door.status).toBe(429)
-    expect(facade.status).toBe(502)
+    expect(facade.status).toBe(429)
   })
 
   test("models list: door serves the Muse catalog, façade serves routes + concrete refs", () => {
@@ -870,6 +969,154 @@ describe("door: muse — attestation case (shell/bash tools)", () => {
   })
 })
 
+
+// ------------------------------------------------------------ clef (systemone)
+
+describe("door: clef (bin/clef-proxy.mjs :18742) — systemone family (#1410)", () => {
+  // Recordings transcribed from developing-today/code
+  // bin/clef-proxy.mjs + bin/clef-proxy.test.mjs (the door's own stub
+  // fixtures, #690/#692/#2410/#2938 cases) and one live capture against
+  // the running door on 2026-11-02 (the probe below). The façade side
+  // is @opencode/core/systemone's translation layer; the HTTP-level
+  // pairs (status codes through the real handler, stub upstream) live
+  // in packages/server/test/facade-parity.test.ts.
+
+  const probeRequest = {
+    state: { request: "Which of these is a colour: blue or table?" },
+    questions: {
+      probe: {
+        type: "choice",
+        instructions: "Pick the word that names a colour.",
+        criteria: { blue: "A colour.", table: "A piece of furniture." },
+      },
+    },
+    model: "@cf/cloudflare/clef-flash",
+  }
+  // Live door capture (2026-11-02, no Authorization header — the
+  // door's file token served it): the typed probability answer shape.
+  const probeDoorAnswers = {
+    probe: { type: "choice", choice: "blue", probabilities: { blue: 0.8947, table: 0.1053 }, confidence: 0.6232 },
+  }
+
+  test("classification request parses and forwards only {state, questions} upstream", () => {
+    const parsed = parseSystemOneRequest(probeRequest)
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.model).toBe("@cf/cloudflare/clef-flash")
+    expect(parsed.value.state).toEqual(probeRequest.state)
+    expect(parsed.value.questions).toEqual(probeRequest.questions)
+    // The upstream payload the service builds is exactly {state,
+    // questions} (systemone.ts evaluate) — the door drops every other
+    // body field the same way.
+    expect(Object.keys({ state: parsed.value.state, questions: parsed.value.questions })).toEqual(["state", "questions"])
+  })
+
+  test("success shape is exactly {answers} — no diff from the door", () => {
+    // Door (stub fixture, clef-proxy.test.mjs happy path): 200
+    // {answers: <upstream result.answers>}. Façade: answersBody of the
+    // same upstream answers. The live capture's answer values are the
+    // canonical pair here.
+    expectDiffs({ answers: probeDoorAnswers }, answersBody(probeDoorAnswers), [])
+  })
+
+  test("noul (permission) question shape passes through verbatim", () => {
+    // OpenChamber's Jev permission request (routing/jev.js
+    // buildPermissionRequest): a noul question plus a choice question.
+    const body = {
+      state: { permission: { type: "bash", patterns: ["rm -rf /tmp/x"], metadata: {} } },
+      questions: {
+        ask: { type: "noul", instructions: "Should the agent stop and ask the user first?" },
+        kind: { type: "choice", instructions: "What is the most significant effect?", criteria: { deletes_data: "Deletes files." } },
+      },
+    }
+    const parsed = parseSystemOneRequest(body)
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.questions).toEqual(body.questions)
+    expect(parsed.value.model).toBe("@cf/cloudflare/clef-flash")
+  })
+
+  test("array and non-object bodies are a 400 with the door's exact message, before upstream (#2938)", () => {
+    // Door fixture: [] and [1,2] → 400 {error:"Invalid JSON body:
+    // expected an object"} and the stub upstream is never hit.
+    for (const raw of [[], [1, 2], null, "text", 42]) {
+      const parsed = parseSystemOneRequest(raw)
+      if (parsed.ok) throw new Error(`expected refusal for ${JSON.stringify(raw)}`)
+      expect(parsed.error).toBe("Invalid JSON body: expected an object")
+      expect(systemOneErrorBody(parsed.error)).toEqual({ error: "Invalid JSON body: expected an object" })
+    }
+  })
+
+  test("missing state/questions default to {} exactly as the door forwards them", () => {
+    const parsed = parseSystemOneRequest({})
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.state).toEqual({})
+    expect(parsed.value.questions).toEqual({})
+  })
+
+  test("model resolution matches the door's table, hostile models refused with the door's message (#2410)", () => {
+    const controls: Array<[unknown, string]> = [
+      [undefined, "@cf/cloudflare/clef-flash"],
+      ["clef", "@cf/cloudflare/clef"],
+      ["clef-flash", "@cf/cloudflare/clef-flash"],
+      ["@cf/cloudflare/clef", "@cf/cloudflare/clef"],
+      ["@cf/cloudflare/clef-omni", "@cf/cloudflare/clef-omni"],
+    ]
+    for (const [input, resolved] of controls) expect(resolveModel(input)).toBe(resolved)
+    const hostile = [
+      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/cloudflare/../../ai/models/search",
+      "clef/../../../../client/v4/accounts/OTHER/ai/run/x",
+      "@cf/cloudflare/clef?per_page=1#frag",
+      "my-clef-thing",
+    ]
+    for (const model of hostile) {
+      const parsed = parseSystemOneRequest({ state: {}, questions: {}, model })
+      if (parsed.ok) throw new Error(`expected refusal for ${model}`)
+      expect(parsed.error).toContain("Refused model")
+      expect(parsed.error).toContain("only Clef-family models (@cf/cloudflare/clef*) are served by this proxy")
+    }
+  })
+
+  test("error envelopes are the door's plain {error} shape, not the OpenAI shape", () => {
+    // Door: 401 {error:"Missing Cloudflare AI inference API token"};
+    // upstream failure {error:"Cloudflare Workers AI Clef execution
+    // failed", details:<upstream body>}; timeout 504 {error:"…
+    // timed out"}. The façade reproduces all three verbatim
+    // (systemone.ts); the OpenAI doors' {error:{message,type}} shape
+    // is NOT used here — that is the systemone standard's own envelope.
+    expect(systemOneErrorBody("Missing Cloudflare AI inference API token")).toEqual({ error: "Missing Cloudflare AI inference API token" })
+    expect(upstreamFailureBody({ success: false })).toEqual({ error: "Cloudflare Workers AI Clef execution failed", details: { success: false } })
+    expect(systemOneErrorBody("Cloudflare Workers AI Clef request timed out")).toEqual({ error: "Cloudflare Workers AI Clef request timed out" })
+  })
+
+  test("models floor: the door's static floor is advertised with the door's owned_by", () => {
+    const listed = modelsBody().data.filter((m) => m.owned_by === "cloudflare-workers-ai")
+    expect(listed.map((m) => m.id)).toEqual(["@cf/cloudflare/clef", "@cf/cloudflare/clef-flash"])
+  })
+
+  test("verdict: clef systemone family is PARITY with two named acceptable-by-design diffs", () => {
+    // Named diffs (both acceptable-by-design under Drew's rulings —
+    // neither changes a caller-visible contract for systemone
+    // clients):
+    //  1. /v1/models: the door serves the LIVE Cloudflare catalog
+    //     subset (5-min TTL + last-known-good); the façade advertises
+    //     the door's static floor in the shared models list. Callers
+    //     addressing a live-only model (clef-omni) still resolve —
+    //     model lookup passes provider/model refs through and the
+    //     systemone grammar accepts the whole Clef family.
+    //  2. GET /v1/systemone and /systemone// health aliases and the
+    //     door's non-/v1 /systemone POST alias are not reproduced:
+    //     the standard endpoint is POST /v1/systemone (Drew's §9.5
+    //     supersession for this family names /v1/systemone; the Jev
+    //     client only ever POSTs the configured /v1/systemone URL).
+    const outcome = {
+      door: "POST /v1/systemone (+ /systemone, / aliases), live /v1/models",
+      facade: "POST /v1/systemone, static-floor Clef entries in /v1/models",
+      classification: "acceptable-by-design" as Classification,
+    }
+    expect(outcome.classification).toBe("acceptable-by-design")
+  })
+})
+
 // ------------------------------------------------------------ verdict registry
 
 /** The per-door verdicts recorded on #1152 (and cross-referenced
@@ -900,19 +1147,26 @@ export const VERDICTS = {
     verdict: "FAIL",
     diffs: [
       "ATTESTATION: door answers shell/bash requests with a 200 (alias + CLI fallback); façade preserves names and surfaces the 403 as a provider failure — outcome differs (design §9.1 rule; Wave C gate for #1155, filed as #1443)",
-      "quota: door relays upstream 429 verbatim; façade answers 502 server_error (design §2 promises 429 + reset hint) — #1441",
-      "responses streaming: response.completed carries empty output; §5 grammar events missing; reasoning event name deviates from §5 — #1442",
+      "responses streaming: §5 grammar closed by #1442 — façade emits response.in_progress, per-item added/done + matching *.done events and monotonic sequence_numbers, reasoning uses response.reasoning_summary_text.delta, and response.completed carries the full output (door stub fixture is an abbreviated mid-grammar capture)",
       "tool-only chat answers: content null (façade) vs \"\" (door)",
       "responses non-streaming: façade adds created_at/annotations/status/default fields (additive)",
       "chat streaming: façade adds role:\"assistant\" to the first chunk",
     ],
   },
+  clef: {
+    verdict: "PARITY-WITH-NAMED-DIFFS",
+    diffs: [
+      "/v1/models: door serves the live Cloudflare catalog subset; façade advertises the door's static floor (live-only models still resolve via pass-through + grammar)",
+      "health and non-/v1 aliases (GET /v1/systemone, /systemone, /) not reproduced — the standard endpoint is POST /v1/systemone",
+    ],
+  },
 } as const
 
 test("verdict registry is consistent with the recorded classifications", () => {
-  expect(Object.keys(VERDICTS).sort()).toEqual(["codex", "designCode", "muse", "route"])
+  expect(Object.keys(VERDICTS).sort()).toEqual(["clef", "codex", "designCode", "muse", "route"])
   expect(VERDICTS.designCode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.designCode.diffs[0]).toContain("REAL-GAP")
+  expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.muse.verdict).toBe("FAIL")
   expect(VERDICTS.muse.diffs[0]).toContain("ATTESTATION")
   expect(VERDICTS.route.verdict).toBe("PARITY-WITH-NAMED-DIFFS")

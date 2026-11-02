@@ -1445,6 +1445,12 @@ export type ServerCompletionsMessagesOperation<E = never> = (
   input: ServerCompletionsMessagesInput,
 ) => Effect.Effect<ServerCompletionsMessagesOutput, E>
 
+export type ServerCompletionsSystemoneInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsSystemoneOutput = unknown
+export type ServerCompletionsSystemoneOperation<E = never> = (
+  input: ServerCompletionsSystemoneInput,
+) => Effect.Effect<ServerCompletionsSystemoneOutput, E>
+
 export type ServerCompletionsModelsOutput = unknown
 export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
 
@@ -1465,6 +1471,7 @@ export interface ServerCompletionsApi<E = never> {
   readonly responses: ServerCompletionsResponsesOperation<E>
   readonly embeddings: ServerCompletionsEmbeddingsOperation<E>
   readonly messages: ServerCompletionsMessagesOperation<E>
+  readonly systemone: ServerCompletionsSystemoneOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
   readonly model: ServerCompletionsModelOperation<E>
   readonly modelRef: ServerCompletionsModelRefOperation<E>

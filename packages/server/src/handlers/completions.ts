@@ -10,6 +10,7 @@ import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
 import { Embeddings } from "@opencode/core/embeddings"
+import { SystemOne } from "@opencode/core/systemone"
 import { OpenAIFacadeResponse } from "@opencode/core/openai-facade-response"
 
 const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
@@ -17,6 +18,23 @@ const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
   return error && typeof error === "object" && "message" in error && typeof error.message === "string"
     ? error.message
     : "completion failed"
+}
+
+/**
+ * Whether a streaming failure is the quota/rate-limit class (#1441):
+ * Generate surfaces that class as its own tagged error, so a stream
+ * that fails before (or instead of) producing output answers in the
+ * door's established error form, typed as a rate-limit failure, with
+ * the provider's message — reset hint included — preserved.
+ */
+const streamIsQuota = (cause: Cause.Cause<unknown>) => {
+  const error = Cause.squash(cause)
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "_tag" in error &&
+    (error as { _tag?: unknown })._tag === "Generate.QuotaError"
+  )
 }
 
 /**
@@ -40,10 +58,16 @@ const requestBody = (ctx: { request: { text: Effect.Effect<string, unknown> } })
 const errorResponse = (status: number, message: string, type: string, code?: string) =>
   HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type, code), { status })
 
+// Design §2 error mapping (#1441): quota/rate-limit failures answer
+// 429 with the provider's message (reset hint included) preserved;
+// selection failures are the caller's 400; everything else upstream
+// stays the generic 502.
 const serviceError = (error: Generate.Error) =>
   error._tag === "Generate.ModelSelectionError"
     ? errorResponse(400, error.message, "invalid_request_error")
-    : errorResponse(502, error.message, "server_error")
+    : error._tag === "Generate.QuotaError"
+      ? errorResponse(429, error.message, "rate_limit_error")
+      : errorResponse(502, error.message, "server_error")
 
 const messagesErrorResponse = (status: number, message: string, type: string) =>
   HttpServerResponse.jsonUnsafe(Completions.messagesErrorBody(message, type), { status })
@@ -51,7 +75,9 @@ const messagesErrorResponse = (status: number, message: string, type: string) =>
 const messagesServiceError = (error: Generate.Error) =>
   error._tag === "Generate.ModelSelectionError"
     ? messagesErrorResponse(400, error.message, "invalid_request_error")
-    : messagesErrorResponse(502, error.message, "api_error")
+    : error._tag === "Generate.QuotaError"
+      ? messagesErrorResponse(429, error.message, "rate_limit_error")
+      : messagesErrorResponse(502, error.message, "api_error")
 
 
 export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions", (handlers) =>
@@ -86,7 +112,12 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               .pipe(
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
                 Stream.catchCause((cause) =>
-                  Stream.make(Completions.errorFrame(streamErrorMessage(cause))),
+                  Stream.make(
+                    Completions.errorFrame(
+                      streamErrorMessage(cause),
+                      streamIsQuota(cause) ? "rate_limit_error" : "server_error",
+                    ),
+                  ),
                 ),
                 Stream.concat(Stream.suspend(() => (translator.failed ? Stream.empty : Stream.make(Completions.DONE_FRAME)))),
                 Stream.provide(services),
@@ -192,8 +223,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               ...meta,
               previousResponseId: parsed.value.previousResponseId,
             })
-            const failedFrame = (message: string) =>
-              `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: meta.id, object: "response", created_at: meta.created, model: meta.model, status: "failed", output: [], error: { message } } })}\n\n`
             const frames = generate
               .stream(generateInput)
               .pipe(
@@ -207,7 +236,17 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
                     : Effect.void,
                 ),
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                Stream.catchCause((cause) => Stream.make(failedFrame(streamErrorMessage(cause)))),
+                // The translator failure frame continues the stream
+                // sequence numbers (#1442) instead of restarting them;
+                // a quota failure carries the #1441 rate-limit code.
+                Stream.catchCause((cause) =>
+                  Stream.make(
+                    translator.failureFrame(
+                      streamErrorMessage(cause),
+                      streamIsQuota(cause) ? "rate_limit_exceeded" : undefined,
+                    ),
+                  ),
+                ),
                 Stream.provide(services),
               )
             const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
@@ -249,6 +288,34 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           }).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw(
+        "completions.systemone",
+        (ctx) =>
+          Effect.gen(function* () {
+            yield* awaitPlugins
+            // The door's own error discipline (#690 in the door): a
+            // malformed body is a 400 in the plain {error} envelope,
+            // never a 500 from the upstream path, and an array body is
+            // refused before anything reaches upstream (#2938 guard).
+            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            if (body === null)
+              return HttpServerResponse.jsonUnsafe(SystemOne.errorBody("Invalid JSON body: not valid JSON"), { status: 400 })
+            const parsed = SystemOne.parseSystemOneRequest(body)
+            if (!parsed.ok) return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(parsed.error), { status: 400 })
+            const systemone = yield* SystemOne.Service
+            const result = yield* Effect.result(
+              systemone.evaluate({
+                model: parsed.value.model,
+                state: parsed.value.state,
+                questions: parsed.value.questions,
+                authHeader: ctx.request.headers.authorization,
+              }),
+            )
+            if (Result.isFailure(result))
+              return HttpServerResponse.jsonUnsafe(result.failure.body, { status: result.failure.status })
+            return HttpServerResponse.jsonUnsafe(SystemOne.answersBody(result.success.answers))
+          }).pipe(Effect.provide(services), locationErrors),
+      )
+      .handleRaw(
         "completions.messages",
         (ctx) =>
           Effect.gen(function* () {
@@ -269,7 +336,14 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               .stream(input)
               .pipe(
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                Stream.catchCause((cause) => Stream.make(Completions.messagesErrorFrame(streamErrorMessage(cause)))),
+                Stream.catchCause((cause) =>
+                  Stream.make(
+                    Completions.messagesErrorFrame(
+                      streamErrorMessage(cause),
+                      streamIsQuota(cause) ? "rate_limit_error" : "api_error",
+                    ),
+                  ),
+                ),
                 Stream.provide(services),
               )
             const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
