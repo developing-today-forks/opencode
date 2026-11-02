@@ -1436,10 +1436,24 @@ export type ServerCompletionsResponsesOperation<E = never> = (
 export type ServerCompletionsModelsOutput = unknown
 export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
 
+export type ServerCompletionsModelInput = { readonly id: string }
+export type ServerCompletionsModelOutput = unknown
+export type ServerCompletionsModelOperation<E = never> = (
+  input: ServerCompletionsModelInput,
+) => Effect.Effect<ServerCompletionsModelOutput, E>
+
+export type ServerCompletionsModelRefInput = { readonly provider: string; readonly model: string }
+export type ServerCompletionsModelRefOutput = unknown
+export type ServerCompletionsModelRefOperation<E = never> = (
+  input: ServerCompletionsModelRefInput,
+) => Effect.Effect<ServerCompletionsModelRefOutput, E>
+
 export interface ServerCompletionsApi<E = never> {
   readonly chat: ServerCompletionsChatOperation<E>
   readonly responses: ServerCompletionsResponsesOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
+  readonly model: ServerCompletionsModelOperation<E>
+  readonly modelRef: ServerCompletionsModelRefOperation<E>
 }
 
 export type ProviderListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }

@@ -144,6 +144,57 @@ it.live("lists the route models at /v1/models", () =>
   }),
 )
 
+const getModel = (handler: (request: Request) => Promise<Response>, id: string) =>
+  Effect.promise(() => handler(new Request(`http://opencode.local/v1/models/${id}`)))
+
+it.live("gets a route model by its opencode-route id at /v1/models/{id}", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    // URL-encoded, as a client addressing a single path segment sends it,
+    // and raw, with the slash in the path.
+    for (const form of ["opencode-route%2Fworkhorse", "opencode-route/workhorse"]) {
+      const res = yield* getModel(handler, form)
+      expect(res.status).toBe(200)
+      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      expect(body).toEqual({ id: "opencode-route/workhorse", object: "model", created: 0, owned_by: "opencode-route" })
+    }
+    // The bare id exactly as it appears in the models list works too.
+    const bare = yield* getModel(handler, "workhorse")
+    expect(bare.status).toBe(200)
+    const bareBody = (yield* Effect.promise(() => bare.json())) as { id: string; owned_by: string }
+    expect(bareBody.id).toBe("workhorse")
+    expect(bareBody.owned_by).toBe("opencode-route")
+  }),
+)
+
+it.live("gets a concrete catalog model by provider/model ref at /v1/models/{id}", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    for (const form of ["deepseek%2Fdeepseek-chat", "deepseek/deepseek-chat"]) {
+      const res = yield* getModel(handler, form)
+      expect(res.status).toBe(200)
+      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      expect(body).toEqual({ id: "deepseek/deepseek-chat", object: "model", created: 0, owned_by: "deepseek" })
+    }
+  }),
+)
+
+it.live("answers an OpenAI-shaped 404 for an unknown model id", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    for (const id of ["opencode-route%2Fno-such-route", "no-such-model"]) {
+      const res = yield* getModel(handler, id)
+      expect(res.status).toBe(404)
+      const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+      expect(body.error.type).toBe("invalid_request_error")
+      expect(body.error.message).toContain("model not found:")
+    }
+    const route = yield* getModel(handler, "opencode-route%2Fno-such-route")
+    const body = (yield* Effect.promise(() => route.json())) as { error: { message: string } }
+    expect(body.error.message).toContain("opencode-route/no-such-route")
+  }),
+)
+
 
 const postTo = (handler: (request: Request) => Promise<Response>, url: string, body: unknown) =>
   Effect.promise(() =>
