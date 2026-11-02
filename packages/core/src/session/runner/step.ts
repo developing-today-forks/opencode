@@ -593,8 +593,9 @@ export const make = Effect.gen(function* () {
             // may switch to the next eligible credential on the same provider and re-issue the
             // same target (proximity: credential -> leaf -> sibling plan -> next route). There
             // is no per-message switch cap: each switched resolution carries its own
-            // credentialFallback excluding the credential that served it, so repeated switches
-            // walk the provider's eligible credentials in order and stop when none remain --
+            // credentialFallback excluding every credential this chain has already served,
+            // so repeated switches walk the provider's eligible credentials in order, try
+            // each at most once, and stop when none remain --
             // only then does the route fallback below run.
             if (isQuotaFailure(llmFailure) && input.model.routing.credentialFallback) {
               const switched = yield* Effect.result(input.model.routing.credentialFallback())

@@ -885,9 +885,18 @@ export const layer = Layer.effect(
           // at resolution time — not whatever happens to be active when the fallback runs:
           // another session may already have activated a healthy credential after this one
           // resolved, and that credential stays an eligible candidate (#6).
+          // The chain also carries every credential it has already served (`attempted`):
+          // eligibility is health-based, so a credential whose short cooldown expires
+          // mid-chain would otherwise become a candidate again and the walk could cycle
+          // between two credentials indefinitely instead of reaching route fallback.
+          // Each credential is tried at most once per chain; a fresh resolution starts
+          // a fresh chain (#1379, Codex review on PR #1392).
           const credentialFallback =
-            (servingID: Credential.ID | undefined) => (): Effect.Effect<Resolved | undefined, Error> =>
+            (servingID: Credential.ID | undefined, attempted?: ReadonlySet<Credential.ID>) =>
+            (): Effect.Effect<Resolved | undefined, Error> =>
               Effect.gen(function* () {
+                const tried: ReadonlySet<Credential.ID> =
+                  attempted ?? new Set(servingID === undefined ? [] : [servingID])
                 const provider = yield* providers.get(target.providerID)
                 const integrationID = provider?.integrationID ?? Integration.ID.make(target.providerID)
                 const info = yield* integrations.get(integrationID)
@@ -896,6 +905,7 @@ export const layer = Layer.effect(
                   (connection) =>
                     connection.type === "credential" &&
                     connection.id !== servingID &&
+                    !tried.has(connection.id) &&
                     ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
                     ModelRoute.credentialQuotaBlocked(connection.id, at) === undefined &&
                     !ModelRoute.demoted(target, at, connection.id),
@@ -933,10 +943,14 @@ export const layer = Layer.effect(
                   // Attribution follows the credential load() actually served on, which is
                   // the candidate just activated unless a concurrent session switched again
                   // mid-load (#6).
+                  const nextTried = new Set(tried)
+                  nextTried.add(candidate.id)
+                  if (retried.success.servingCredentialID !== undefined)
+                    nextTried.add(retried.success.servingCredentialID)
                   return makeResolved(
                     retried.success.resolved,
                     undefined,
-                    credentialFallback(retried.success.servingCredentialID),
+                    credentialFallback(retried.success.servingCredentialID, nextTried),
                     retried.success.servingCredentialID,
                   )
                 }

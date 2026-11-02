@@ -2287,11 +2287,12 @@ describe("ModelResolver routes", () => {
           expect(activated).toEqual(["cred-b"])
           expect(targetOf(switched!)).toBe("pa")
           expect(String(switched?.routing?.credentialID)).toBe("cred-b")
-          // The resolver rotates to the next eligible stored credential; the runner's
-          // one-switch-per-message guard is what stops a turn cycling the pool (#6).
+          // The chain remembers every credential it has served: cred-a stays excluded
+          // even though nothing health-based blocks it, so the walk cannot cycle back
+          // and forth between two credentials — it ends and route fallback runs (#1379).
           const rotated = yield* switched!.routing!.credentialFallback!()
-          expect(activated).toEqual(["cred-b", "cred-a"])
-          expect(String(rotated?.routing?.credentialID)).toBe("cred-a")
+          expect(activated).toEqual(["cred-b"])
+          expect(rotated).toBeUndefined()
         }),
       integration,
     )
