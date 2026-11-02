@@ -3,8 +3,8 @@ export * as ConfigMigration from "./migrate"
 import { TuiConfigV1 } from "@opencode/tui/config/v1"
 import { TuiKeybind } from "@opencode/tui/config/v1/keybind"
 import { Definitions } from "@opencode/tui/config/keybind"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, FileSystem, Option, Schema } from "effect"
-import { randomUUID } from "crypto"
 import { applyEdits, createScanner, modify, parse, parseTree, type Node, type ParseError } from "jsonc-parser"
 import path from "path"
 import { Info, SchemaURL } from "./schema"
@@ -20,26 +20,11 @@ export const run = Effect.fn("cli.config.migrate")(function* (input: {
   readonly state: string
 }) {
   const fs = yield* FileSystem.FileSystem
+  const fsUtil = yield* FSUtil.Service
   const persist = Effect.fnUntraced(function* (text: string, info: Info) {
-    // Match config.ts's write(): resolve through any symlink first (dotfiles
-    // setups) so the rename lands on the real file instead of replacing the
-    // link, and never widen an existing config's permissions (a read-only
-    // 0400 config stays read-only).
-    const destination = yield* fs.realPath(input.file).pipe(Effect.orElseSucceed(() => input.file))
-    const temp = `${destination}.${process.pid}.${randomUUID()}.tmp`
-    const cause = yield* Effect.gen(function* () {
-      yield* fs.makeDirectory(path.dirname(destination), { recursive: true })
-      const existing = yield* fs.stat(destination).pipe(
-        Effect.map((info) => info.mode),
-        Effect.orElseSucceed(() => undefined),
-      )
-      const mode = existing !== undefined ? existing & 0o600 : 0o600
-      yield* fs.writeFileString(temp, text, { mode })
-      yield* fs.rename(temp, destination)
-    }).pipe(
+    const cause = yield* fsUtil.writeAtomic(input.file, text, { modePolicy: "owner-capped" }).pipe(
       Effect.as(undefined),
       Effect.catchCause((cause) => Effect.succeed(cause)),
-      Effect.ensuring(fs.remove(temp).pipe(Effect.ignore)),
     )
     return cause === undefined ? { info } : { info, cause }
   })

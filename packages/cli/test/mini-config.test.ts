@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Effect, Option } from "effect"
 import { expect, mock, test } from "bun:test"
@@ -53,6 +54,7 @@ test("mini handler passes resolved CLI keybinds to the runtime", async () => {
       }).pipe(
         Effect.provide(Config.layer),
         Effect.provide(Global.layerWith({ config: configDirectory, state: stateDirectory })),
+        Effect.provide(FSUtil.layer),
         Effect.provide(NodeFileSystem.layer),
         Effect.scoped,
       ),

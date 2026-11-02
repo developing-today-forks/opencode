@@ -1,48 +1,28 @@
 import { describe, expect, test } from "bun:test"
+import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Effect } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { writePluginConfig, writePluginTempFileExclusive } from "../src/commands/handlers/plugin/add"
-import { removePluginConfig, writeRemoveTempFileExclusive } from "../src/commands/handlers/plugin/remove"
+import { writePluginConfig } from "../src/commands/handlers/plugin/add"
+import { removePluginConfig } from "../src/commands/handlers/plugin/remove"
 
 async function mode(file: string) {
   return (await fs.stat(file)).mode & 0o777
 }
 
-describe("plugin config temp creation", () => {
-  for (const [name, writeTemp] of [
-    ["add", writePluginTempFileExclusive],
-    ["remove", writeRemoveTempFileExclusive],
-  ] as const) {
-    test(`${name} temp creation refuses a pre-existing file and leaves it intact`, async () => {
-      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-plugin-config-"))
-      const temporary = path.join(directory, "opencode.json.tmp-fixed")
-      await fs.writeFile(temporary, "sentinel\n")
-
-      await expect(writeTemp(temporary, "replacement", 0o600)).rejects.toThrow()
-
-      expect(await fs.readFile(temporary, "utf8")).toBe("sentinel\n")
-    })
-
-    test(`${name} temp creation writes a fresh file with the requested mode`, async () => {
-      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-plugin-config-"))
-      const temporary = path.join(directory, "opencode.json.tmp-fixed")
-
-      await writeTemp(temporary, "content\n", 0o600)
-
-      expect(await fs.readFile(temporary, "utf8")).toBe("content\n")
-      if (process.platform !== "win32") expect(await mode(temporary)).toBe(0o600)
-    })
-  }
-})
+function run<A>(effect: Effect.Effect<A, unknown, FSUtil.Service>) {
+  return Effect.runPromise(effect.pipe(Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer)))
+}
 
 describe("plugin config write", () => {
   test("add creates a fresh config owner-only via temp file and rename", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-plugin-config-"))
     const config = path.join(directory, "opencode.json")
 
-    const changed = await writePluginConfig(config, "example-plugin")
+    const changed = await run(writePluginConfig(config, "example-plugin"))
 
     expect(changed).toBe(true)
     const configObject = parse(await fs.readFile(config, "utf8")) as { plugins: unknown[] }
@@ -58,7 +38,7 @@ describe("plugin config write", () => {
     await fs.writeFile(config, '{ // keep me\n  "theme": "opencode" }\n')
     await fs.chmod(config, 0o644)
 
-    await writePluginConfig(config, "example-plugin")
+    await run(writePluginConfig(config, "example-plugin"))
 
     const text = await fs.readFile(config, "utf8")
     expect(text).toContain("// keep me")
@@ -77,7 +57,7 @@ describe("plugin config write", () => {
     const config = path.join(directory, "opencode.json")
     await fs.symlink(target, config)
 
-    await writePluginConfig(config, "example-plugin")
+    await run(writePluginConfig(config, "example-plugin"))
 
     expect((await fs.lstat(config)).isSymbolicLink()).toBe(true)
     const configObject = parse(await fs.readFile(target, "utf8")) as { plugins: unknown[] }
@@ -90,9 +70,9 @@ describe("plugin config write", () => {
     const config = path.join(directory, "opencode.json")
 
     await Promise.all([
-      writePluginConfig(config, "one"),
-      writePluginConfig(config, "two"),
-      writePluginConfig(config, "three"),
+      run(writePluginConfig(config, "one")),
+      run(writePluginConfig(config, "two")),
+      run(writePluginConfig(config, "three")),
     ])
 
     const configObject = parse(await fs.readFile(config, "utf8")) as { plugins: unknown[] }
@@ -106,7 +86,7 @@ describe("plugin config write", () => {
     await fs.writeFile(config, "{}\n")
     await fs.chmod(config, 0o400)
 
-    await writePluginConfig(config, "example-plugin")
+    await run(writePluginConfig(config, "example-plugin"))
 
     const configObject = parse(await fs.readFile(config, "utf8")) as { plugins: unknown[] }
     expect(configObject.plugins).toEqual(["example-plugin"])
@@ -121,7 +101,7 @@ describe("plugin config write", () => {
     const config = path.join(directory, "opencode.json")
     await fs.symlink(target, config)
 
-    const removed = await removePluginConfig(config, "example-plugin")
+    const removed = await run(removePluginConfig(config, "example-plugin"))
 
     expect(removed).toBe(true)
     expect((await fs.lstat(config)).isSymbolicLink()).toBe(true)
@@ -136,7 +116,7 @@ describe("plugin config write", () => {
     await fs.writeFile(config, JSON.stringify({ plugins: ["example-plugin"] }) + "\n")
     await fs.chmod(config, 0o400)
 
-    const removed = await removePluginConfig(config, "example-plugin")
+    const removed = await run(removePluginConfig(config, "example-plugin"))
 
     expect(removed).toBe(true)
     const configObject = parse(await fs.readFile(config, "utf8")) as { plugins: unknown[] }

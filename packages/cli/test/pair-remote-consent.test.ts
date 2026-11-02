@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { Effect, FileSystem } from "effect"
@@ -18,10 +19,11 @@ afterEach(async () => {
   process.exitCode = 0
 })
 
-const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })),
+      Effect.provide(FSUtil.layer),
       Effect.provide(NodeFileSystem.layer),
     ),
   )

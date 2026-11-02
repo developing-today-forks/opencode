@@ -1,4 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { expect, test } from "bun:test"
 import { Effect, Exit, FileSystem } from "effect"
@@ -38,7 +39,7 @@ it.live("service CORS config persists multiple origins and preserves other setti
       expect(yield* ServiceConfig.get("cors")).toBe("[]")
       expect(JSON.parse(yield* fs.readFileString(file))).toEqual(existing)
     }).pipe(Effect.provideService(Global.Service, Global.make({ config, state })))
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(FSUtil.layer), Effect.provide(NodeServices.layer)),
 )
 
 it.live("service CORS config rejects empty lists, invalid origins, and extra arguments without changing config", () =>
@@ -90,7 +91,7 @@ it.live("service CORS config rejects empty lists, invalid origins, and extra arg
       )
       expect(JSON.parse(yield* fs.readFileString(file))).toEqual(existing)
     }).pipe(Effect.provideService(Global.Service, Global.make({ config, state })))
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(FSUtil.layer), Effect.provide(NodeServices.layer)),
 )
 
 test.each([
