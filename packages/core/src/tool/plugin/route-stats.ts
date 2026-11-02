@@ -44,6 +44,8 @@ export const Output = Schema.Struct({
 export interface Source {
   readonly routes: ReadonlyMap<string, ConfigModelRoutes.Route>
   readonly notes: readonly string[]
+  /** The Location directory whose quota gate judges tuning predictions (#1461). */
+  readonly location?: string
 }
 
 const NO_SOURCE: Source = { routes: new Map(), notes: [] }
@@ -97,7 +99,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
         usedLastDay: used.day,
       }
     })
-    const predictions = ModelRouteTuning.predict({ hourly, errors, now })
+    const predictions = ModelRouteTuning.predict({ hourly, errors, now, location: source.location })
     const suggestions = ModelRouteTuning.suggest({ stats, errors, now })
     const pools = new Map<string, ModelRouteReview.Configured>()
     for (const [id, route] of source.routes) {

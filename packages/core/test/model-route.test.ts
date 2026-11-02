@@ -1880,6 +1880,92 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("threshold-derived balance holds are judged under the judging Location's threshold (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      // Armed under A's threshold (1): a balance of 0.5 is dead for A, alive for B (0.05).
+      ModelRoute.observeCredentialQuota(target, "loc-hold-cred", balance, now, "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/b")).toBeUndefined()
+      // The durable record carries the hold's threshold origin, not just its baseline.
+      expect(
+        ModelRoute.activeAdjustments(now).find((item) => item.id === "quota-credential:loc-hold-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("threshold")
+
+      // B feeding the same grant a lower balance corrects the retained snapshot:
+      // 0.03 is dead under B's threshold too, so B is now blocked as well.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/a")).toEqual({ until: null })
+
+      // A fresh increase over the benched balance still releases the hold for everyone.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 2, observedAt: now + 2 },
+        now + 2,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/a")).toBeUndefined()
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/b")).toBeUndefined()
+
+      // Attempt-reported exhaustion holds keep their unconditional force: installed
+      // from a balance of 5, they block even the Location whose threshold admits 5.
+      ModelRoute.resetHealth()
+      ModelRoute.observeCredentialQuota(target, "attempt-cred", { ...balance, remaining: 5, observedAt: now }, now, "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(target, "attempt-cred", undefined, now + 1, "balance-exhaustion", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(
+        ModelRoute.activeAdjustments(now + 1).find((item) => item.id === "quota-credential:attempt-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("attempt")
+
+      // A threshold hold restored from its durable record (no in-memory state) is
+      // judged by its benched balance under the judging Location's threshold.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:restored-cred",
+          match: "credential:restored-cred",
+          action: "skip",
+          balanceBaseline: 0.5,
+          balanceGrant: "credits-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          credentialID: "restored-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/b")).toBeUndefined()
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
     const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
     const offB = ModelRoute.onSettingsConfig(

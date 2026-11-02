@@ -76,6 +76,7 @@ export const Plugin = define({
     yield* ModelRouteTuning.schedule(
       () => configuredTuning(loaded.entries),
       () => Array.from(configuredRoutes(loaded.entries).values(), (route) => route.autonomy),
+      ctx.location.directory,
     ).pipe(Effect.forkScoped)
 
     yield* ctx.tool.transform((editor) => {
@@ -88,6 +89,7 @@ export const Plugin = define({
       RouteStatsTool.add(editor, permission, () => ({
         routes: configuredRoutes(loaded.entries),
         notes: configuredTuning(loaded.entries)?.notes ?? [],
+        location: ctx.location.directory,
       }))
     })
 
