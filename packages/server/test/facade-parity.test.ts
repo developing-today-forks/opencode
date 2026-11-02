@@ -37,7 +37,7 @@ const response = LLMResponse.fromEvents(events)
 if (!response) throw new Error("expected a completed response")
 
 const QUOTA_MESSAGE = "Subscription quota exhausted; resets at 2026-11-03T04:00:00Z"
-type Mode = "ok" | "quota" | "selection"
+type Mode = "ok" | "quota" | "selection" | "failure"
 let mode: Mode = "ok"
 const captured: CompletionInput[] = []
 const fake = makeLocationNode({
@@ -48,13 +48,15 @@ const fake = makeLocationNode({
       text: () => Effect.die("unused"),
       complete: (input) => {
         captured.push(input)
-        if (mode === "quota") return Effect.fail(new Generate.UnavailableError({ message: QUOTA_MESSAGE }))
+        if (mode === "quota") return Effect.fail(new Generate.QuotaError({ message: QUOTA_MESSAGE }))
+        if (mode === "failure") return Effect.fail(new Generate.UnavailableError({ message: "upstream exploded" }))
         if (mode === "selection") return Effect.fail(new Generate.ModelSelectionError({ message: "no candidate for model" }))
         return Effect.succeed(response)
       },
       stream: (input) => {
         captured.push(input)
-        if (mode === "quota") return Stream.fail(new Generate.UnavailableError({ message: QUOTA_MESSAGE }))
+        if (mode === "quota") return Stream.fail(new Generate.QuotaError({ message: QUOTA_MESSAGE }))
+        if (mode === "failure") return Stream.fail(new Generate.UnavailableError({ message: "upstream exploded" }))
         if (mode === "selection") return Stream.fail(new Generate.ModelSelectionError({ message: "no candidate for model" }))
         return Stream.fromIterable(events)
       },
@@ -149,7 +151,7 @@ it.live("chat streaming: role chunk, usage-bearing finish chunk, [DONE]", () =>
   }),
 )
 
-it.live("quota failure, non-streaming: 502 server_error, reset hint preserved in the message, no Retry-After header", () =>
+it.live("quota failure, non-streaming: 429 rate_limit_error, reset hint preserved in the message, no Retry-After header (#1441)", () =>
   Effect.gen(function* () {
     mode = "quota"
     const handler = yield* setup
@@ -161,20 +163,72 @@ it.live("quota failure, non-streaming: 502 server_error, reset hint preserved in
     //   route proxy: 502 {error:{message:"leaf HTTP 429: …", type:"proxy_error"}}
     //   muse:        429, upstream error body verbatim (rate_limit_error)
     //   codex:       500 {error:{message:"Codex execution failed: …"}} (no type)
-    // Façade (this assertion): status parity with the route door
-    // only; the design §2 quota shape (429 + hint) is NOT produced —
-    // the hint survives only because it rides inside the message.
-    expect(res.status).toBe(502)
+    // Façade (this assertion, #1441): the design §2 quota shape —
+    // 429 with the reset hint preserved inside the message. This is a
+    // spec-conformant divergence from the route-proxy DOOR, which
+    // itself still answers 502 for the same failure (recorded above);
+    // the door side is not re-recorded, the façade follows the spec.
+    expect(res.status).toBe(429)
     expect(res.headers.get("retry-after")).toBeNull()
     const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
-    expect(body.error.type).toBe("server_error")
+    expect(body.error.type).toBe("rate_limit_error")
     expect(body.error.message).toContain("Subscription quota exhausted")
     expect(body.error.message).toContain("resets at 2026-11-03T04:00:00Z")
     mode = "ok"
   }),
 )
 
-it.live("quota failure, streaming: SSE error frame carries the message", () =>
+it.live("quota failure on the responses door, non-streaming: 429 rate_limit_error with the reset hint (#1441)", () =>
+  Effect.gen(function* () {
+    mode = "quota"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/responses", {
+      model: "workhorse",
+      input: "hi",
+    })
+    expect(res.status).toBe(429)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("rate_limit_error")
+    expect(body.error.message).toContain("resets at 2026-11-03T04:00:00Z")
+    mode = "ok"
+  }),
+)
+
+it.live("quota failure on the messages door, non-streaming: 429 rate_limit_error in the Anthropic envelope (#1441)", () =>
+  Effect.gen(function* () {
+    mode = "quota"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(429)
+    const body = (yield* Effect.promise(() => res.json())) as { type: string; error: { message: string; type: string } }
+    expect(body.type).toBe("error")
+    expect(body.error.type).toBe("rate_limit_error")
+    expect(body.error.message).toContain("resets at 2026-11-03T04:00:00Z")
+    mode = "ok"
+  }),
+)
+
+it.live("non-quota upstream failure, non-streaming: still 502 server_error (#1441)", () =>
+  Effect.gen(function* () {
+    mode = "failure"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "workhorse",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(502)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("server_error")
+    expect(body.error.message).toContain("upstream exploded")
+    mode = "ok"
+  }),
+)
+
+it.live("quota failure, streaming: SSE error frame carries the message typed as a rate-limit failure (#1441)", () =>
   Effect.gen(function* () {
     mode = "quota"
     const handler = yield* setup
@@ -188,9 +242,53 @@ it.live("quota failure, streaming: SSE error frame carries the message", () =>
     // Door recordings: codex and muse frame a stream failure as
     // `data: {error:{message}}` then [DONE]; the route door writes
     // the same error frame (with type proxy_error) and just ends.
+    // The stream is already open, so the 429 class rides in the
+    // frame's error type instead of the HTTP status.
     expect(text).toContain('"error"')
+    expect(text).toContain('"type":"rate_limit_error"')
     expect(text).toContain("Subscription quota exhausted")
+    expect(text).toContain("resets at 2026-11-03T04:00:00Z")
     expect(text).not.toContain('"finish_reason":"stop"')
+    mode = "ok"
+  }),
+)
+
+it.live("quota failure, responses streaming: response.failed carries the hint and the rate-limit code (#1441)", () =>
+  Effect.gen(function* () {
+    mode = "quota"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/responses", {
+      model: "workhorse",
+      input: "hi",
+      stream: true,
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    expect(text).toContain("event: response.failed")
+    expect(text).not.toContain("event: response.completed")
+    expect(text).toContain("Subscription quota exhausted")
+    expect(text).toContain("resets at 2026-11-03T04:00:00Z")
+    expect(text).toContain('"code":"rate_limit_exceeded"')
+    mode = "ok"
+  }),
+)
+
+it.live("quota failure, messages streaming: error event typed as a rate-limit failure (#1441)", () =>
+  Effect.gen(function* () {
+    mode = "quota"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      max_tokens: 64,
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    expect(text).toContain("event: error")
+    expect(text).toContain('"type":"rate_limit_error"')
+    expect(text).toContain("resets at 2026-11-03T04:00:00Z")
+    expect(text).not.toContain("event: message_stop")
     mode = "ok"
   }),
 )

@@ -3,7 +3,7 @@ import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
+import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, errorFrame, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -503,6 +503,19 @@ describe("messages door translation", () => {
     const frame = messagesErrorFrame("boom")
     expect(frame).toContain("event: error")
     expect(frame).toContain('"type":"error","error":{"type":"api_error","message":"boom"}')
+  })
+
+  test("error frames default to the generic types and carry rate_limit_error for the quota class (#1441)", () => {
+    expect(errorFrame("boom")).toContain('"type":"server_error"')
+    expect(errorFrame("quota exhausted; resets at 2026-11-03T04:00:00Z", "rate_limit_error")).toContain(
+      '"type":"rate_limit_error"',
+    )
+    expect(errorFrame("quota exhausted; resets at 2026-11-03T04:00:00Z", "rate_limit_error")).toContain(
+      "resets at 2026-11-03T04:00:00Z",
+    )
+    expect(messagesErrorFrame("boom", "rate_limit_error")).toContain(
+      '"type":"error","error":{"type":"rate_limit_error","message":"boom"}',
+    )
   })
 
   test("messages stream translator emits the Anthropic event grammar in order", () => {
