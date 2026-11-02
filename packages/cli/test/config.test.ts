@@ -1,5 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { Flock } from "@opencode/util/flock"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Effect, FileSystem, Option, Schema } from "effect"
 import { expect, test } from "bun:test"
@@ -14,6 +15,7 @@ function run<A, E>(directory: string, effect: Effect.Effect<A, E, Config.Service
     effect.pipe(
       Effect.provide(Config.layer),
       Effect.provide(Global.layerWith({ config: directory, state: directory })),
+      Effect.provide(FSUtil.layer),
       Effect.provide(NodeFileSystem.layer),
     ),
   )
@@ -424,6 +426,7 @@ test("uses migrated keybinds when persistence fails", async () => {
     }).pipe(
       Effect.provide(Config.layer),
       Effect.provide(Global.layerWith({ config: directory.path, state: directory.path })),
+      Effect.provide(FSUtil.layer),
       Effect.provideService(FileSystem.FileSystem, fs),
     ),
   )
@@ -520,6 +523,7 @@ test("config reads remain interruptible while waiting for the file lock", async 
       Config.Service.pipe(
         Effect.provide(Config.layer),
         Effect.provide(Global.layerWith({ config: directory.path, state: directory.path })),
+        Effect.provide(FSUtil.layer),
         Effect.provide(NodeFileSystem.layer),
       ),
     )

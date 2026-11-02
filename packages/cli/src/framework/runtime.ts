@@ -3,6 +3,7 @@ import { Command } from "effect/cli"
 import { PrintLogs } from "../commands/commands"
 import { Spec } from "./spec"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Updater } from "../services/updater"
 import { Config } from "../config"
 import { Npm } from "@opencode/util/npm"
@@ -19,7 +20,7 @@ type RuntimeHandler = (
 ) => Effect.Effect<
   void,
   unknown,
-  FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
+  FileSystem.FileSystem | FSUtil.Service | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
 >
 type Loader<Node extends Spec.Any> = () => Promise<{
   default: (
@@ -27,7 +28,7 @@ type Loader<Node extends Spec.Any> = () => Promise<{
   ) => Effect.Effect<
     void,
     any,
-    FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
+    FileSystem.FileSystem | FSUtil.Service | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
   >
 }>
 type ProvidedCommand = Command.Command<
@@ -35,7 +36,7 @@ type ProvidedCommand = Command.Command<
   unknown,
   unknown,
   unknown,
-  FileSystem.FileSystem | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
+  FileSystem.FileSystem | FSUtil.Service | Global.Service | Npm.Service | Updater.Service | Config.Service | Scope.Scope
 >
 
 export type Handlers<Node extends Spec.Any> = keyof Node["commands"] extends never

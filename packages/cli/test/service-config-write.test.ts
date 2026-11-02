@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, FileSystem } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -14,12 +15,13 @@ async function mode(file: string) {
 function runService<A>(
   config: string,
   state: string,
-  effect: Effect.Effect<A, unknown, Global.Service | FileSystem.FileSystem>,
+  effect: Effect.Effect<A, unknown, Global.Service | FileSystem.FileSystem | FSUtil.Service>,
 ) {
   return Effect.runPromise(
-    effect.pipe(
-      Effect.provideService(Global.Service, Global.make({ config, state })),
-      Effect.provide(NodeFileSystem.layer),
+      effect.pipe(
+        Effect.provideService(Global.Service, Global.make({ config, state })),
+        Effect.provide(FSUtil.layer),
+        Effect.provide(NodeFileSystem.layer),
     ),
   )
 }
