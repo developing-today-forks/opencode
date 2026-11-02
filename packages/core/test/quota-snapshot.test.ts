@@ -500,4 +500,21 @@ describe("QuotaSnapshot usageSince fixed-reset periods (#1342)", () => {
     const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
     expect(QuotaSnapshot.usageSince(plan, rolling, justAfterReset)).toBe(justAfterReset - 24 * 3_600_000)
   })
+
+  test("a rolling window with a recorded resetAt keeps the rolling lookback (PR #1352 Codex)", () => {
+    // plan-tracking records resetAt (the next known reset) on rolling windows too;
+    // it is a recorded fact, not a period boundary. At 12:00 with a five-hour
+    // window and a recorded reset at 13:00, the rolling start is 07:00 — usage
+    // from 07:00 to 08:00 still belongs to the window and must count.
+    const recorded = {
+      name: "5-hour",
+      unit: "requests",
+      limit: 100,
+      windowHours: 5,
+      resetRule: "rolling",
+      resetAt: "2026-10-27T13:00:00.000Z",
+    } as ModelPlan.QuotaWindow
+    const noon = Date.parse("2026-10-27T12:00:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, recorded, noon)).toBe(noon - 5 * 3_600_000)
+  })
 })

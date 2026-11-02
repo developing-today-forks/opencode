@@ -135,10 +135,15 @@ export const derive = (input: Input, options: Options): Snapshot => {
  * usage cannot re-gate the provider just after a reset. The period start is the next
  * reset minus the window's length, or the recorded reset itself when it is already in
  * the past; it never starts before the rolling lookback and never after `now`.
+ * A `rolling` rule is the exception: it stays rolling even when a next reset is
+ * recorded on the window — that `resetAt` is a recorded fact, not a period boundary,
+ * and period-aligning it would discard usage that still belongs to the rolling
+ * window (PR #1352 Codex finding).
  */
 export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, now: number): number => {
   if (window.windowHours !== undefined) {
     const rolling = now - window.windowHours * 3_600_000
+    if (window.resetRule === "rolling") return rolling
     const reset = resetAtOf(window, now)
     if (reset === null) return rolling
     const periodStart = reset <= now ? reset : reset - window.windowHours * 3_600_000
