@@ -494,6 +494,112 @@ describe("ModelRoute quota bench reset", () => {
     expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-balance")).toBe(false)
   })
 
+  test("a reclassified window replaces a balance hold with its normal timed gate (#1380)", () => {
+    const now = 500_000_000
+    const resetAt = now + 5 * 3_600_000
+    const balance = {
+      planID: "credits-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt: null,
+      observedAt: now,
+      stale: false,
+      balance: true,
+    }
+    // The same plan + window after a windowHours reclassification: derive() no longer
+    // reports it as a balance, so the snapshot is a resetting usage window.
+    const windowed = {
+      planID: "credits-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now + 1,
+      stale: false,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-reclass", balance, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-reclass", now)).toEqual({ until: null })
+    expect(
+      ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-reclass"),
+    ).toBe(true)
+
+    ModelRoute.observeCredentialQuota(target, "cred-reclass", windowed, now + 1)
+    // The stale increase-only hold is gone: the credential is gated only until the
+    // window's stated reset, and the durable baseline record is cleared.
+    expect(ModelRoute.credentialQuotaBlocked("cred-reclass", now + 1)).toEqual({ until: resetAt })
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some((item) => item.id === "quota-credential:cred-reclass"),
+    ).toBe(false)
+
+    // A non-balance snapshot from a DIFFERENT grant is not evidence about the hold.
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-other", balance, now)
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-other",
+      { ...windowed, planID: "other-plan", window: "five-hours" },
+      now + 1,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-other", now + 1)).toEqual({ until: null })
+
+    // The provider scope follows the same rule: its balance skip is replaced by the
+    // window's timed skip, with no balance baseline left on the record.
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(target, balance, now)
+    expect(
+      ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:reset-provider")?.balanceBaseline,
+    ).toBe(0)
+    ModelRoute.observeProviderQuota(target, windowed, now + 1)
+    const skip = ModelRoute.activeAdjustments(now + 1).find((item) => item.id === "quota:reset-provider")
+    expect(skip?.balanceBaseline).toBeUndefined()
+    expect(skip?.until).toBe(resetAt)
+  })
+
+  test("reconciling clears restored balance baselines whose grant plan ended (#1380)", () => {
+    const now = 550_000_000
+    ModelRoute.resetHealth()
+    // A baseline record restored after a restart, with no in-memory gate state: it blocks
+    // its credential until a fed snapshot releases it -- or until reconciliation clears it.
+    ModelRoute.addAdjustment({
+      id: "quota-credential:cred-restored",
+      match: "credential:cred-restored",
+      action: "skip",
+      balanceBaseline: 0,
+      balanceGrant: "dead-plan\ncredits",
+      credentialID: "cred-restored",
+      providerID: "reset-provider",
+      note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
+    })
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toEqual({ until: null })
+    // While the grant's plan still feeds the gate, the hold is still-applicable and stays.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["dead-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toEqual({ until: null })
+    // The grant's plan is gone and no balance grant remains: the stale baseline clears.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toBeUndefined()
+    expect(
+      ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-restored"),
+    ).toBe(false)
+
+    // The provider scope's restored balance skip follows the same rule.
+    ModelRoute.addAdjustment({
+      id: "quota:reset-provider",
+      match: "reset-provider/",
+      action: "skip",
+      balanceBaseline: 0,
+      balanceGrant: "dead-plan\ncredits",
+      note: "quota exhausted (proactive snapshot); held until the stated reset",
+    })
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["dead-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(true)
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(false)
+  })
+
   test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
     const now = 300_000_000
     const snapshots = [
