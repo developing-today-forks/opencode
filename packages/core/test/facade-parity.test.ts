@@ -51,6 +51,12 @@
  *     2026-10-27, free-tier pause) and the door process stays as
  *     the provider backend, so the resident-CLI session semantics
  *     (§9.2) survive behind the façade by construction.
+ *   - commandcode (bin/commandcode-proxy.mjs, :18748):
+ *     PARITY-WITH-NAMED-DIFFS — recorded on #1411 (Wave C). The
+ *     door has no live front callers (provider disabled fleet-wide
+ *     2026-10-31, credits exhausted) and the door process stays as
+ *     the provider backend, so the resident-ACP session semantics
+ *     (§9.2) survive behind the façade by construction.
  *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
  *     the door answers shell/bash-tool requests with a 200 (tool names
  *     aliased upstream, calls translated back; a residual 403 falls
@@ -1551,6 +1557,368 @@ describe("door: claude-code (bin/claude-code-proxy.mjs :18749)", () => {
   })
 })
 
+// ------------------------------------------------------------ commandcode
+//
+// Door: bin/commandcode-proxy.mjs (:18748) in developing-today/code.
+// Recordings transcribed from that file and
+// bin/commandcode-proxy.test.mjs: the front is chat-completions +
+// models only, backed by the CommandCode CLI — one resident ACP
+// process (session/new, session/load, session/prompt over stdio
+// JSON-RPC) with a spawn-per-request fallback (`commandcode -p
+// --output-format json -m <model> --max-turns 1 --no-session
+// --skip-onboarding --no-auto-update -t --permission-mode dont-ask`,
+// prompt on stdin; agency turns swap dont-ask for --tools-all and a
+// multi-turn budget). Success bodies are built inline in the chat
+// handler; failures are 502 `{error: {message: "CommandCode
+// execution failed: <detail>"}}` — commandcode errors never carry a
+// `type` — framed as an SSE error event + [DONE] when streaming.
+// The hosted API rejects the current plan, so the CLI is the only
+// backend (design §9.4); the door process stays as the provider
+// backend in this wave (#1411) — the façade chain is façade →
+// `commandcode` provider → door → CLI, so the cases below diff the
+// caller-facing wire shapes, which is what a repointing caller sees.
+
+describe("door: commandcode (bin/commandcode-proxy.mjs :18748)", () => {
+  const MODEL = "commandcode/deepseek/deepseek-v4-flash"
+  const CLI_MODEL = "deepseek/deepseek-v4-flash"
+  const modelEchoDiff = {
+    path: "model",
+    classification: "acceptable-by-design",
+    note: "The door's resolveModel strips a leading commandcode/ and echoes the bare CLI id; the façade echoes the caller's full provider/model ref (design §2 label rule, same pattern as the route bare-name case). Behind the façade the provider call sends the same bare CLI id to the door, so the resolved model is identical.",
+  } as const
+
+  test("chat non-streaming, spawn-path fixture: parity except model echo", () => {
+    // Door recording (commandcode-proxy.test.mjs, STUB: the ACP
+    // handshake fails fast and the spawn fallback answers canned
+    // NDJSON — text_delta STUB-OK, run_end finalText STUB-OK with
+    // usage inputTokens 10 / outputTokens 2). The door builds the
+    // body inline: message content, finish_reason "stop", usage
+    // prompt/completion/total, id prefix chatcmpl-commandcode-.
+    const door = {
+      id: "chatcmpl-commandcode-00000000-0000-0000-0000-000000000000",
+      object: "chat.completion",
+      created: CREATED,
+      model: CLI_MODEL,
+      choices: [{ index: 0, message: { role: "assistant", content: "STUB-OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+    }
+    const parsed = parseChatRequest({ model: MODEL, messages: [{ role: "user", content: "hi" }] })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(String(parsed.value.input.model?.providerID)).toBe("commandcode")
+    expect(String(parsed.value.input.model?.id)).toBe(CLI_MODEL)
+    const facade = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: parsed.value.modelLabel,
+      response: responseOf([
+        LLMEvent.textDelta({ id: "t1", text: "STUB-OK" }),
+        LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }),
+      ]),
+    })
+    expectDiffs(door, facade, [modelEchoDiff])
+  })
+
+  test("chat non-streaming, ACP fixture: cached-token usage parity, omitted when absent", () => {
+    // Door recording (commandcode-proxy.test.mjs ACP_STUB, #3114):
+    // the ACP prompt result carries usage inputTokens 50 /
+    // outputTokens 4 / cacheReadTokens 77, text ACP-OK; the door
+    // surfaces cacheReadTokens as prompt_tokens_details
+    // .cached_tokens, and omits prompt_tokens_details entirely when
+    // the ACP usage has no cache value (the NOCACHE turn).
+    const door = {
+      id: "chatcmpl-commandcode-00000000-0000-0000-0000-000000000000",
+      object: "chat.completion",
+      created: CREATED,
+      model: CLI_MODEL,
+      choices: [{ index: 0, message: { role: "assistant", content: "ACP-OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 4, total_tokens: 54, prompt_tokens_details: { cached_tokens: 77 } },
+    }
+    const facade = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: MODEL,
+      response: responseOf([
+        LLMEvent.textDelta({ id: "t1", text: "ACP-OK" }),
+        LLMEvent.finish({
+          reason: { normalized: "stop" },
+          usage: { inputTokens: 50, outputTokens: 4, totalTokens: 54, cacheReadInputTokens: 77 },
+        }),
+      ]),
+    })
+    expectDiffs(door, facade, [modelEchoDiff])
+    const noCache = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: MODEL,
+      response: responseOf([
+        LLMEvent.textDelta({ id: "t1", text: "ACP-OK" }),
+        LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 50, outputTokens: 4, totalTokens: 54 } }),
+      ]),
+    })
+    expect(noCache.usage).toEqual({ prompt_tokens: 50, completion_tokens: 4, total_tokens: 54 })
+  })
+
+  test("chat streaming, ACP fixture: façade adds role to the first delta; rest of grammar parity", () => {
+    // Door recording: ACP agent_message_chunk notifications become
+    // content chunks with delta {content} and NO role; the terminal
+    // chunk carries delta {}, finish_reason "stop" and the usage
+    // (incl. cached_tokens when > 0); then [DONE].
+    const events = [
+      LLMEvent.textDelta({ id: "t1", text: "ACP-OK" }),
+      LLMEvent.finish({
+        reason: { normalized: "stop" },
+        usage: { inputTokens: 50, outputTokens: 4, totalTokens: 54, cacheReadInputTokens: 77 },
+      }),
+    ]
+    const door = [
+      { object: "chat.completion.chunk", delta: { content: "ACP-OK" }, finish_reason: null },
+      {
+        object: "chat.completion.chunk",
+        delta: {},
+        finish_reason: "stop",
+        usage: { prompt_tokens: 50, completion_tokens: 4, total_tokens: 54, prompt_tokens_details: { cached_tokens: 77 } },
+      },
+      "[DONE]",
+    ]
+    expectDiffs(door, facadeChatFrames(events, MODEL), [
+      {
+        path: "[0].delta.role",
+        classification: "acceptable-by-design",
+        note: "The façade follows the OpenAI convention of role:\"assistant\" on the first chunk; the commandcode door omits it (same diff as the codex door). Content, finish and usage chunks are identical.",
+      },
+    ])
+  })
+
+  test("session continuity: door sends delta-only turns on a resident ACP thread; façade carries full history (§9.2)", () => {
+    // Door recording (commandcode-proxy.mjs, getSessionKey +
+    // Resident ACP engine + warm-session fallback): the
+    // conversation key comes from an explicit id header/body field,
+    // else `user:<user>`, else `turn0:<sha256(first user message)>`.
+    // A known key reuses its ACP thread (session/load re-attaches it
+    // after a restart) and only the NEWEST user turn is sent
+    // (deltaPrompt); a new thread gets the full flattened history
+    // once. The spawn fallback mirrors it: resume-by-transcript
+    // with only the latest turn, then a fresh full-history run.
+    const doorTurn2 = {
+      keyDerivation: ["explicit id", "user:", "turn0:first-user-hash"],
+      resumedSend: "latest user turn only",
+      freshSend: "full flattened history",
+      engine: "resident ACP thread per conversation key",
+    }
+    expect(doorTurn2.resumedSend).toBe("latest user turn only")
+    // Façade (§9.2 documented change): stateless per request — the
+    // SAME turn-2 request arrives with the full history and the
+    // façade carries ALL of it into generation; nothing is keyed,
+    // retained, or delta-compressed at the façade. A caller that
+    // relied on door-side history must send full history (every
+    // real caller does — OpenCode sessions always send full
+    // history to the provider) or chain via /v1/responses
+    // previous_response_id (§4).
+    const turn2 = parseChatRequest({
+      model: MODEL,
+      messages: [
+        { role: "user", content: "remember the codeword BLUEFIN" },
+        { role: "assistant", content: "BLUEFIN noted" },
+        { role: "user", content: "what was the codeword?" },
+      ],
+    })
+    if (!turn2.ok) throw new Error(turn2.error)
+    expect(turn2.value.input.messages.length).toBe(3)
+    expect(JSON.stringify(turn2.value.input.messages)).toContain("BLUEFIN")
+    expect(JSON.stringify(turn2.value.input.messages)).toContain("what was the codeword?")
+    // classification: acceptable-by-design — design §9.2 names this
+    // the one knowingly-unpreserved behaviour. Two mitigations are
+    // recorded on #1411: (a) the inventory found NO delta-only
+    // caller (the only consumers were the provider backend face,
+    // which sends full history, and a models-probe doc); (b) in the
+    // deployed chain the door remains the backend, and its session
+    // key derives from the first user message — stable across a
+    // conversation's full-history requests — so the ACP delta
+    // optimization still applies behind the façade.
+  })
+
+  test("agency request (tools present): door consumes tools itself; façade forwards them verbatim", () => {
+    // Door recording (commandcode-proxy.test.mjs, chat vs agency
+    // spawn contract): a request carrying tools is an AGENCY turn —
+    // the CLI runs with --tools-all and a multi-turn budget, does
+    // the task with its OWN tools, and the bridge returns its final
+    // text. The wire answer is a plain text completion (STUB-OK,
+    // finish_reason "stop") with NO tool_calls, whatever tools the
+    // caller named.
+    const door = {
+      id: "chatcmpl-commandcode-00000000-0000-0000-0000-000000000000",
+      object: "chat.completion",
+      created: CREATED,
+      model: CLI_MODEL,
+      choices: [{ index: 0, message: { role: "assistant", content: "STUB-OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+    }
+    // Façade: the caller's tools are parsed and forwarded to the
+    // provider verbatim (never renamed, dropped, or synthesized —
+    // the §9.1 rule), and the text answer this backend returns
+    // renders in the identical wire shape.
+    const parsed = parseChatRequest({
+      model: MODEL,
+      messages: [{ role: "user", content: "write it" }],
+      tools: [{ type: "function", function: { name: "write_file", description: "write a file", parameters: { type: "object", properties: {} } } }],
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.input.tools?.map((t) => t.name)).toEqual(["write_file"])
+    const facade = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: parsed.value.modelLabel,
+      response: responseOf([
+        LLMEvent.textDelta({ id: "t1", text: "STUB-OK" }),
+        LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }),
+      ]),
+    })
+    expectDiffs(door, facade, [modelEchoDiff])
+    // classification: acceptable-by-design — in the deployed chain
+    // the provider behind the façade IS this door, so agency is
+    // preserved by construction. The translation layer would render
+    // tool_calls only if a backend returned them; this door never
+    // does. (If the backend is ever replaced by a native provider,
+    // agency semantics change with it — that is a backend-wave
+    // decision, §8, not a front-migration diff.)
+  })
+
+  // The CLI failure detail used below is LIVE-VERIFIED, not
+  // invented: on 2026-11-02 a direct probe with the door's exact
+  // spawn shape authenticated against the upstream and failed with
+  // this run_error (the credit pool is empty; Drew disabled the
+  // provider fleet-wide on 2026-10-31 for this reason — #1411).
+  const CREDIT_DETAIL =
+    "POST /alpha/generate → 400 error: You have insufficient credits to make this request. Please purchase more credits to continue using the service."
+
+  test("CLI failure, non-streaming: 502 both sides; envelope framing differs", () => {
+    // Door recording: any CLI failure (run_error event, non-zero
+    // exit with no text, timeout, spawn failure) ends in 502
+    // `{error: {message: "CommandCode execution failed: <detail>"}}`
+    // — no `type`, ever.
+    const door = { status: 502, body: { error: { message: `CommandCode execution failed: ${CREDIT_DETAIL}` } } }
+    expect("type" in door.body.error).toBe(false)
+    // Façade: the handler maps a generation failure to 502 with
+    // Completions.errorBody(message, "server_error") — the
+    // provider's message is preserved verbatim. In this door's
+    // chain the provider IS the door, so the message that reaches
+    // the façade already carries the door's prefix — LIVE-VERIFIED
+    // 2026-11-02 (#1411): a real façade call returned 502 with the
+    // door's full prefixed message and type server_error, i.e. the
+    // type is the ONLY envelope diff in deployment.
+    const facade = { status: 502, body: errorBody(`CommandCode execution failed: ${CREDIT_DETAIL}`, "server_error") }
+    expect(facade.status).toBe(door.status)
+    expectDiffs(door.body, facade.body, [
+      {
+        path: "error.type",
+        classification: "real-gap",
+        note: "Commandcode door errors carry no type at all; the façade always emits one (server_error). Also: although the underlying cause is an empty credit pool, the failure reaches the façade as the door's 502 with no quota code, so it classifies as a provider-internal failure — NEITHER side produces the design §2 quota shape (429 + reset hint, #1441 as landed) for this door's failures.",
+      },
+    ])
+  })
+
+  test("CLI failure, streaming: door frames the error then [DONE]; façade ends without [DONE]", () => {
+    // Door recording: streaming writes 200 + SSE headers BEFORE the
+    // turn runs, so a failure can only be framed on the wire: one
+    // `data: {error: {message: "CommandCode execution failed: …"}}`
+    // event, then `data: [DONE]`.
+    const door = { frames: [{ error: { message: `CommandCode execution failed: ${CREDIT_DETAIL}` } }, "[DONE]"] }
+    // Façade: a provider-error event becomes the same-shaped error
+    // frame (with the façade's type), and the handler appends NO
+    // [DONE] after a failed stream (translator.failed rule).
+    const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: CREATED, model: MODEL })
+    const frames = translator.push(LLMEvent.providerError({ message: `CommandCode execution failed: ${CREDIT_DETAIL}` }))
+    if (!translator.failed) throw new Error("expected the translator to mark the stream failed")
+    const facade = { frames: chatFramesOf(frames) }
+    expectDiffs(door, facade, [
+      {
+        path: "frames.length",
+        classification: "real-gap",
+        note: "On the mid-stream provider-error path the door closes with [DONE] after the error frame while the façade translator marks the stream failed and the handler appends no [DONE] (minor: a client reading to close sees the error either way). A whole-stream failure — the Generate stream failing before any event — is error frame + [DONE] on BOTH sides; the server suite pins that case.",
+      },
+      {
+        path: "frames[0].error.type",
+        classification: "real-gap",
+        note: "Door error frames carry no type; the façade's carries server_error.",
+      },
+    ])
+  })
+
+  test("empty + malformed bodies: door 400s both; façade 400s malformed, accepts empty messages at parse", () => {
+    // Door recordings: an empty flattened prompt is 400
+    // `{error: {message: "Messages cannot be empty"}}`; a
+    // non-object JSON body is 400 `{error: {message: "Invalid JSON
+    // body: expected an object"}}` and invalid JSON is 400
+    // `Invalid JSON body: <parse error>` (door test #2816 pins
+    // null / [1,2] / "x" / 42 → 400 and the proxy staying alive).
+    // Neither carries a `type`.
+    const doorEmpty = { status: 400, body: { error: { message: "Messages cannot be empty" } } }
+    expect(doorEmpty.status).toBe(400)
+    // Façade: a non-object body fails parse ("request body must be
+    // a JSON object") and the handler answers 400
+    // invalid_request_error — status parity, typed envelope
+    // (acceptable-by-design: the façade's validation envelopes are
+    // the OpenAI-standard typed form on every door).
+    const bad = parseChatRequest(null)
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.error).toBe("request body must be a JSON object")
+    // But an EMPTY messages array parses clean on the façade and
+    // proceeds to generation, where the door rejects it up front.
+    const empty = parseChatRequest({ model: MODEL, messages: [] })
+    expect(empty.ok).toBe(true)
+    // classification: real-gap (minor) — a caller-visible strictness
+    // difference on an edge input; valid requests are unaffected.
+    // Recorded on #1411; no issue filed (no live caller sends empty
+    // message lists — the inventory found no front callers at all).
+  })
+
+  test("responses non-streaming + streaming: door has no /v1/responses", () => {
+    // Door recording: the fallthrough answers any other route with
+    // 404 `{error: {message: "Route not found: POST /v1/responses"}}`
+    // (no type).
+    const door = { status: 404, body: { error: { message: "Route not found: POST /v1/responses" } } }
+    expect(door.status).toBe(404)
+    expect("type" in door.body.error).toBe(false)
+    const parsed = parseResponsesRequest({ model: MODEL, input: "hi" })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.stream).toBe(false)
+    // classification: acceptable-by-design — façade superset
+    // (design §2/§9.6); commandcode callers gain /v1/responses —
+    // including previous_response_id chains, the §9.2-sanctioned
+    // stateful alternative — by repointing.
+  })
+
+  test("models list: door serves the live CLI catalog; façade serves routes + concrete refs", () => {
+    // Door recording: GET /v1/models serves the LIVE
+    // `commandcode --list-models` catalog (stale-while-revalidate
+    // over a static floor) as {id, object: "model", created: <now>,
+    // owned_by: "commandcode"} — ids are the bare CLI ids
+    // (vendor/model, e.g. deepseek/deepseek-v4-flash; the list
+    // verified live 2026-11-02 on #1411). The façade list is the
+    // route set (route case above); a concrete commandcode ref is
+    // instead served by the single-model lookup, echoed with the
+    // provider as owner — the per-model entry shape agrees (the
+    // door's created is a volatile now; the façade stamps 0).
+    expect(modelBody(MODEL)).toEqual({ id: MODEL, object: "model", created: 0, owned_by: "commandcode" })
+    // Repointing trap, pinned deliberately: the door's BARE id
+    // (deepseek/deepseek-v4-flash) is itself two-segment, so sent
+    // to the façade it parses as provider `deepseek` + model
+    // `deepseek-v4-flash` — a different (disabled) provider. Front
+    // callers must use the full commandcode/… ref; recorded on
+    // #1411 as the migration note for this door.
+    const bare = parseChatRequest({ model: CLI_MODEL, messages: [{ role: "user", content: "hi" }] })
+    if (!bare.ok) throw new Error(bare.error)
+    expect(String(bare.value.input.model?.providerID)).toBe("deepseek")
+    expect(String(bare.value.input.model?.id)).toBe("deepseek-v4-flash")
+    // classification: acceptable-by-design — design §2's grammar
+    // (first segment is the provider) applied to a provider whose
+    // model ids contain slashes; the provider-prefixed form is the
+    // documented caller form for every concrete ref.
+  })
+})
+
+
+
 // ------------------------------------------------------------ verdict registry
 
 /** The per-door verdicts recorded on #1152 (and cross-referenced
@@ -1587,6 +1955,19 @@ export const VERDICTS = {
       "chat streaming: façade adds role:\"assistant\" to the first chunk",
     ],
   },
+  commandcode: {
+    verdict: "PARITY-WITH-NAMED-DIFFS",
+    diffs: [
+      "model echo: door echoes the resolved bare CLI id (commandcode/ prefix stripped); façade echoes the caller's full provider/model ref",
+      "chat streaming: façade adds role:\"assistant\" to the first chunk",
+      "CLI-failure envelope: status 502 and message (including the door's 'CommandCode execution failed: ' prefix) preserved through the chain; the only diff is error.type — door carries none, façade adds server_error; the door's 502-wrapped failures classify as provider-internal at the façade, so no §2 429 shape on either side for them (#1441)",
+      "streaming failure: door appends [DONE] after the error frame; façade matches on whole-stream failures but ends a mid-stream provider-error without [DONE]",
+      "session continuity: door keeps resident ACP threads and sends delta-only turns (§9.2); façade is stateless — callers send full history or use responses chains (documented change; behind the façade the door-as-backend still applies its ACP optimization)",
+      "empty messages array: door 400s 'Messages cannot be empty'; façade parser accepts it and the request fails later in generation",
+      "models list: door serves the live CLI catalog (bare vendor/model ids, created=now); façade serves routes + concrete refs (created 0) — per-model entry shape agrees via the single-model lookup; bare CLI ids misparse as provider/model at the façade, so repointing callers must use the commandcode/… ref",
+      "responses front is a façade-only superset (door 404s /v1/responses)",
+    ],
+  },
   clef: {
     verdict: "PARITY-WITH-NAMED-DIFFS",
     diffs: [
@@ -1610,10 +1991,11 @@ export const VERDICTS = {
 } as const
 
 test("verdict registry is consistent with the recorded classifications", () => {
-  expect(Object.keys(VERDICTS).sort()).toEqual(["claude-code", "clef", "codex", "designCode", "muse", "route"])
+  expect(Object.keys(VERDICTS).sort()).toEqual(["claude-code", "clef", "codex", "commandcode", "designCode", "muse", "route"])
   expect(VERDICTS.designCode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.designCode.diffs[0]).toContain("REAL-GAP")
   expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
+  expect(VERDICTS.commandcode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS["claude-code"].verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.muse.verdict).toBe("FAIL")
   expect(VERDICTS.muse.diffs[0]).toContain("ATTESTATION")
