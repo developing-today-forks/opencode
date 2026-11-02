@@ -25,8 +25,8 @@ testEffect(Layer.empty).effect("parses a bare route id as an opencode-route mode
   Effect.sync(() => {
     const value = parsed({ model: "workhorse", messages: [{ role: "user", content: "hi" }] })
     expect(value.modelLabel).toBe("workhorse")
-    expect(value.input.model?.providerID).toBe("opencode-route")
-    expect(value.input.model?.id).toBe("workhorse")
+    expect(String(value.input.model?.providerID)).toBe("opencode-route")
+    expect(String(value.input.model?.id)).toBe("workhorse")
     expect(value.stream).toBe(false)
   }),
 )
@@ -42,9 +42,9 @@ testEffect(Layer.empty).effect("parses a prefixed ref with a variant and merges 
         { role: "system", content: "Be kind." },
       ],
     })
-    expect(value.input.model?.providerID).toBe("opencode-route")
-    expect(value.input.model?.id).toBe("workhorse")
-    expect(value.input.model?.variant).toBe("high")
+    expect(String(value.input.model?.providerID)).toBe("opencode-route")
+    expect(String(value.input.model?.id)).toBe("workhorse")
+    expect(String(value.input.model?.variant)).toBe("high")
     expect(value.input.system).toBe("Be terse.\nBe kind.")
     expect(value.stream).toBe(true)
     expect(value.input.messages).toHaveLength(1)
@@ -185,6 +185,7 @@ const integrations = Layer.mock(Integration.Service, {
   },
   command: {
     connect: () => Effect.die("unused"),
+    status: () => Effect.die("unused"),
     cancel: () => Effect.die("unused"),
   },
 })
