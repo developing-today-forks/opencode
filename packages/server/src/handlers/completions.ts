@@ -10,6 +10,7 @@ import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
 import { Embeddings } from "@opencode/core/embeddings"
+import { OpenAIFacadeResponse } from "@opencode/core/openai-facade-response"
 
 const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
   const error = Cause.squash(cause)
@@ -18,8 +19,8 @@ const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
     : "completion failed"
 }
 
-const errorResponse = (status: number, message: string, type: string) =>
-  HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type), { status })
+const errorResponse = (status: number, message: string, type: string, code?: string) =>
+  HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type, code), { status })
 
 const serviceError = (error: Generate.Error) =>
   error._tag === "Generate.ModelSelectionError"
@@ -90,22 +91,92 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             const parsed = Completions.parseResponsesRequest(body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
             const generate = yield* Generate.Service
+            const store = yield* OpenAIFacadeResponse.Service
             const meta = {
               id: Completions.responseId(),
               created: Math.floor(Date.now() / 1000),
               model: parsed.value.modelLabel,
             }
-            if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(parsed.value.input))
-              if (Result.isFailure(result)) return serviceError(result.failure)
-              return HttpServerResponse.jsonUnsafe(Completions.responsesBody({ ...meta, response: result.success }))
+            // Chain resolution (#1149, design §4): the referenced row's
+            // stored items are the cumulative history, so exactly one row
+            // is loaded and prepended to this turn's input. An unknown or
+            // expired id is OpenAI's 404 `response_not_found`; a chain
+            // already at the depth bound is a 400 asking for a full resend.
+            let input = parsed.value.input
+            let parent: OpenAIFacadeResponse.Stored | undefined
+            if (parsed.value.previousResponseId) {
+              parent = yield* store.get(parsed.value.previousResponseId)
+              if (!parent)
+                return errorResponse(
+                  404,
+                  `response not found: ${parsed.value.previousResponseId}`,
+                  "invalid_request_error",
+                  "response_not_found",
+                )
+              if (parent.depth >= OpenAIFacadeResponse.MAX_CHAIN_DEPTH)
+                return errorResponse(
+                  400,
+                  `previous_response_id chain is already ${OpenAIFacadeResponse.MAX_CHAIN_DEPTH} links deep; resend the full input to start a new chain`,
+                  "invalid_request_error",
+                )
+              const chained = Completions.chainResponsesInput(parsed.value, parent.responseItems)
+              if (!chained.ok) return errorResponse(400, chained.error, "invalid_request_error")
+              input = chained.input
             }
-            const translator = new Completions.ResponsesStreamTranslator(meta)
+            // Every completed response — streamed or not — is persisted so
+            // it can be chained from. A store failure must not lose an
+            // answer the provider already produced: it is logged loudly,
+            // and the id simply will not resolve for a later chain (404).
+            const persist = (
+              outputItems: ReadonlyArray<Record<string, unknown>>,
+              usage: Record<string, unknown> | undefined,
+            ) =>
+              store
+                .put({
+                  id: meta.id,
+                  createdAt: meta.created * 1000,
+                  ...(parsed.value.previousResponseId ? { previousResponseId: parsed.value.previousResponseId } : {}),
+                  depth: parent ? parent.depth + 1 : 0,
+                  model: parsed.value.modelLabel,
+                  resolvedModel: parsed.value.modelRef,
+                  requestItems: parsed.value.items,
+                  responseItems: [...(parent?.responseItems ?? []), ...parsed.value.items, ...outputItems],
+                  ...(usage ? { usage } : {}),
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("failed to persist façade response for chaining", { cause }),
+                  ),
+                )
+            if (!parsed.value.stream) {
+              const result = yield* Effect.result(generate.complete(input))
+              if (Result.isFailure(result)) return serviceError(result.failure)
+              const responseBody = Completions.responsesBody({
+                ...meta,
+                response: result.success,
+                previousResponseId: parsed.value.previousResponseId,
+              })
+              yield* persist(responseBody.output, responseBody.usage)
+              return HttpServerResponse.jsonUnsafe(responseBody)
+            }
+            const translator = new Completions.ResponsesStreamTranslator({
+              ...meta,
+              previousResponseId: parsed.value.previousResponseId,
+            })
             const failedFrame = (message: string) =>
               `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: meta.id, object: "response", created_at: meta.created, model: meta.model, status: "failed", output: [], error: { message } } })}\n\n`
             const frames = generate
-              .stream(parsed.value.input)
+              .stream(input)
               .pipe(
+                // On the finish event the translator has accumulated the
+                // full text and tool calls; persist before the terminal
+                // frame goes out so the id is chainable once the client
+                // has seen response.completed.
+                Stream.tap((event) =>
+                  event.type === "finish"
+                    ? persist(translator.outputItems(), Completions.responsesUsageBody(event.usage))
+                    : Effect.void,
+                ),
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
                 Stream.catchCause((cause) => Stream.make(failedFrame(streamErrorMessage(cause)))),
                 Stream.provide(services),

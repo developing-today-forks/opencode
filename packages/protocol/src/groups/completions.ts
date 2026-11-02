@@ -33,7 +33,7 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
         identifier: "completions.responses",
         summary: "Create a response (OpenAI-compatible)",
         description:
-          "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored and no response is retained (previous_response_id is rejected). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
+          "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Responses are retained in the façade's private item store, so callers chain with previous_response_id (bounded at 64 links, 24h TTL; an expired or unknown id answers 404 response_not_found). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
       }),
     ),
   )

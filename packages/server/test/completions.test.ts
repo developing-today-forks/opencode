@@ -19,6 +19,8 @@ const response = LLMResponse.fromEvents(events)
 if (!response) throw new Error("expected a completed response")
 
 const captured: CompletionInput[] = []
+/** One-shot responses for `complete`, consumed before the default response. */
+const responseQueue: LLMResponse[] = []
 const fake = makeLocationNode({
   service: Generate.Service,
   layer: Layer.succeed(
@@ -27,7 +29,7 @@ const fake = makeLocationNode({
       text: () => Effect.die("unused"),
       complete: (input) => {
         captured.push(input)
-        return Effect.succeed(response)
+        return Effect.succeed(responseQueue.shift() ?? response)
       },
       stream: (input) => {
         captured.push(input)
@@ -439,5 +441,167 @@ it.live("rejects an unsupported content block with a 400 naming the shape", () =
     expect(body.type).toBe("error")
     expect(body.error.type).toBe("invalid_request_error")
     expect(body.error.message).toContain("document")
+  }),
+)
+
+// ------------------------------------------------------------ responses chaining (#1149)
+
+const postResponses = (handler: (request: Request) => Promise<Response>, body: unknown) =>
+  postTo(handler, "http://opencode.local/v1/responses", body)
+
+const responseJson = (res: Response) =>
+  Effect.promise(() => res.json()) as Effect.Effect<{
+    id: string
+    previous_response_id?: string
+    output: Array<{ type: string; content?: Array<{ text: string }> }>
+    error?: { message: string; type: string; code?: string }
+  }>
+
+it.live("chains a second turn from previous_response_id with only the new input", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const first = yield* postResponses(handler, { model: "workhorse", input: "first question" })
+    expect(first.status).toBe(200)
+    const firstBody = yield* responseJson(first)
+    expect(firstBody.id).toStartWith("resp_")
+
+    const second = yield* postResponses(handler, {
+      model: "workhorse",
+      input: "second question",
+      previous_response_id: firstBody.id,
+    })
+    expect(second.status).toBe(200)
+    const secondBody = yield* responseJson(second)
+    expect(secondBody.id).not.toBe(firstBody.id)
+    expect(secondBody.previous_response_id).toBe(firstBody.id)
+
+    // The second call's effective input is turn 1's stored items plus the
+    // new input: the model sees the full prior turn, in order.
+    const seen = JSON.stringify(captured.at(-1)?.messages)
+    const firstAt = seen.indexOf("first question")
+    const answerAt = seen.indexOf("Hello world")
+    const secondAt = seen.indexOf("second question")
+    expect(firstAt).toBeGreaterThanOrEqual(0)
+    expect(answerAt).toBeGreaterThan(firstAt)
+    expect(secondAt).toBeGreaterThan(answerAt)
+  }),
+)
+
+it.live("chains from a streamed response: streamed items are persisted", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const streamed = yield* postResponses(handler, { model: "workhorse", input: "streamed question", stream: true })
+    expect(streamed.status).toBe(200)
+    const text = yield* Effect.promise(() => streamed.text())
+    expect(text).toContain("event: response.completed")
+    const id = /"id":"(resp_[^"]+)"/.exec(text)?.[1]
+    expect(id).toBeDefined()
+
+    const second = yield* postResponses(handler, { model: "workhorse", input: "follow up", previous_response_id: id })
+    expect(second.status).toBe(200)
+    const seen = JSON.stringify(captured.at(-1)?.messages)
+    expect(seen).toContain("streamed question")
+    expect(seen).toContain("Hello world")
+    expect(seen).toContain("follow up")
+  }),
+)
+
+it.live("answers 404 response_not_found for an unknown previous_response_id", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postResponses(handler, {
+      model: "workhorse",
+      input: "hi",
+      previous_response_id: "resp_does_not_exist",
+    })
+    expect(res.status).toBe(404)
+    const body = yield* responseJson(res)
+    expect(body.error?.code).toBe("response_not_found")
+    expect(body.error?.type).toBe("invalid_request_error")
+  }),
+)
+
+it.live("rejects an unmatched function_call_output with a 400, chained or not", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const solo = yield* postResponses(handler, {
+      model: "workhorse",
+      input: [{ type: "function_call_output", call_id: "call_nope", output: "sunny" }],
+    })
+    expect(solo.status).toBe(400)
+    const soloBody = yield* responseJson(solo)
+    expect(soloBody.error?.message).toContain("call_nope")
+
+    const first = yield* postResponses(handler, { model: "workhorse", input: "hi" })
+    const firstBody = yield* responseJson(first)
+    const chained = yield* postResponses(handler, {
+      model: "workhorse",
+      input: [{ type: "function_call_output", call_id: "call_nope", output: "sunny" }],
+      previous_response_id: firstBody.id,
+    })
+    expect(chained.status).toBe(400)
+    const chainedBody = yield* responseJson(chained)
+    expect(chainedBody.error?.message).toContain("call_nope")
+  }),
+)
+
+it.live("a chained function_call_output matches the stored function_call by call_id", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const toolResponse = LLMResponse.fromEvents([
+      LLMEvent.toolCall({ id: "call_1", name: "lookup", input: { city: "Austin" } }),
+      LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 3, outputTokens: 4 } }),
+    ])
+    if (!toolResponse) throw new Error("expected a completed response")
+    responseQueue.push(toolResponse)
+    const first = yield* postResponses(handler, {
+      model: "workhorse",
+      input: "Weather in Austin?",
+      tools: [{ type: "function", name: "lookup", description: "Look up", parameters: { type: "object" } }],
+    })
+    expect(first.status).toBe(200)
+    const firstBody = yield* responseJson(first)
+    expect(firstBody.output[0]?.type).toBe("function_call")
+
+    const second = yield* postResponses(handler, {
+      model: "workhorse",
+      input: [{ type: "function_call_output", call_id: "call_1", output: "sunny" }],
+      previous_response_id: firstBody.id,
+    })
+    expect(second.status).toBe(200)
+    const seen = JSON.stringify(captured.at(-1)?.messages)
+    expect(seen).toContain("lookup")
+    expect(seen).toContain("sunny")
+    expect(captured.at(-1)?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"])
+  }),
+)
+
+it.live("refuses to extend a chain already 64 links deep", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    let current = yield* postResponses(handler, { model: "workhorse", input: "turn 0" })
+    let id = (yield* responseJson(current)).id
+    for (let depth = 1; depth <= 64; depth++) {
+      current = yield* postResponses(handler, { model: "workhorse", input: `turn ${depth}`, previous_response_id: id })
+      expect(current.status).toBe(200)
+      id = (yield* responseJson(current)).id
+    }
+    const refused = yield* postResponses(handler, { model: "workhorse", input: "one too many", previous_response_id: id })
+    expect(refused.status).toBe(400)
+    const body = yield* responseJson(refused)
+    expect(body.error?.message).toContain("64")
+  }),
+)
+
+it.live("chained façade calls create no sessions", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const first = yield* postResponses(handler, { model: "workhorse", input: "first question" })
+    const firstBody = yield* responseJson(first)
+    yield* postResponses(handler, { model: "workhorse", input: "second question", previous_response_id: firstBody.id })
+    const res = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/session")))
+    expect(res.status).toBe(200)
+    const sessions = (yield* Effect.promise(() => res.json())) as { data: Array<unknown> }
+    expect(sessions.data).toHaveLength(0)
   }),
 )

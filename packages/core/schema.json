@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "bb94a60a-f0d3-4a7e-a33e-0212a658dc3f",
-  "prevIds": ["f985ec5e-4a2f-4e0e-b701-d55b545f132f"],
+  "id": "ef4cbe05-effd-4b8d-810e-c17a176ac90f",
+  "prevIds": ["bb94a60a-f0d3-4a7e-a33e-0212a658dc3f"],
   "ddl": [
     {
       "name": "account_state",
@@ -74,6 +74,10 @@
     },
     {
       "name": "route_note",
+      "entityType": "tables"
+    },
+    {
+      "name": "openai_facade_response",
       "entityType": "tables"
     },
     {
@@ -1682,6 +1686,106 @@
       "generated": null,
       "name": "id",
       "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_expires",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "previous_response_id",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "depth",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "model",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "resolved_model",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "request_items",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "response_items",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "usage",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
       "table": "permission"
     },
     {
@@ -3039,6 +3143,13 @@
     {
       "columns": ["id"],
       "nameExplicit": false,
+      "name": "openai_facade_response_pk",
+      "table": "openai_facade_response",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
       "name": "permission_pk",
       "table": "permission",
       "entityType": "pks"
@@ -3524,6 +3635,34 @@
       "name": "route_note_time_idx",
       "entityType": "indexes",
       "table": "route_note"
+    },
+    {
+      "columns": [
+        {
+          "value": "time_expires",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "openai_facade_response_expires_idx",
+      "entityType": "indexes",
+      "table": "openai_facade_response"
+    },
+    {
+      "columns": [
+        {
+          "value": "previous_response_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "openai_facade_response_previous_idx",
+      "entityType": "indexes",
+      "table": "openai_facade_response"
     },
     {
       "columns": [
