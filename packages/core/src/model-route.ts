@@ -838,13 +838,13 @@ export const giveUps = (target: Model.Ref, credentialID?: string) => {
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
-export const steady = (target: Model.Ref, credentialID?: string) =>
-  giveUps(target, credentialID) < activeSettings().escalation.afterGiveUps
+export const steady = (target: Model.Ref, credentialID?: string, location?: string) =>
+  giveUps(target, credentialID) < activeSettings(location).escalation.afterGiveUps
 
 /** A route should race its next target immediately when its current target keeps giving up. Whether a
  * route races at all depends on its autonomy level; see ModelRouteAutonomy.races. */
-export const escalates = (target: Model.Ref, credentialID?: string) =>
-  activeSettings().escalation.enabled && !steady(target, credentialID)
+export const escalates = (target: Model.Ref, credentialID?: string, location?: string) =>
+  activeSettings(location).escalation.enabled && !steady(target, credentialID, location)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
 // of every order, instead of being retried first on each new session.
@@ -852,8 +852,8 @@ const quotaEvents = new Map<string, number[]>()
 
 /** True when a target has hit its quota errors often enough recently to be put last. With a
  * credentialID, only that credential's quota errors count: the demotion is per credential (#6). */
-export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string) => {
-  const quota = activeSettings().quota
+export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string, location?: string) => {
+  const quota = activeSettings(location).quota
   const recent = (quotaEvents.get(credentialID ? credentialKey(target, credentialID) : key(target)) ?? []).filter(
     (at) => now - at <= quota.windowMs,
   )
@@ -1866,6 +1866,10 @@ export interface WeightScope extends ModelRouteOverrides.Scope {
   /** The credential that would serve this target, when the caller knows it: quota demotion is
    * judged against that credential's events, not the target's (#870). */
   readonly credentialID?: string
+  /** The Location directory whose route settings govern this judgement, when the caller
+   * knows it: behavior consumers read that Location's settings, not the unscoped
+   * fallback (#1423). */
+  readonly location?: string
 }
 
 const ruleMatches = (rule: WeightRule, target: Model.Ref, scope: WeightScope) => {
@@ -1927,7 +1931,7 @@ export const tracedWeightOf = (
   let weight = afterScheduled
   for (const item of userOverrides("prefer", target, now, scope)) {
     if (item.weight !== undefined) weight = item.weight
-    else weight *= item.factor ?? currentConstants().overrides.preferredFactor
+    else weight *= item.factor ?? currentConstants(scope.location).overrides.preferredFactor
   }
   const afterPrefer = weight
   if (scope.fixed !== true) {
@@ -1943,7 +1947,7 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID) ? currentConstants().demotion.factor : 1),
+    demotion: weight * (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
     gate: null,
   }
 }
@@ -1964,20 +1968,22 @@ export const keepsThrough = (
   target: Model.Ref,
   now = Date.now(),
   credentialID?: string,
+  location?: string,
 ) =>
   sessionID !== undefined &&
   continuityOf(routeID, sessionID)?.current === key(target) &&
-  steady(target, credentialID) &&
-  !demoted(target, now, credentialID)
+  steady(target, credentialID, location) &&
+  !demoted(target, now, credentialID, location)
 
 /** The scope overrides and weights are judged against: this route (and nested ids reached on the
  * way in), whether it is `fixed`, and the route-level schedule rules. */
-export const scopeOf = (definition: Definition, path: readonly string[] = []): WeightScope => ({
+export const scopeOf = (definition: Definition, path: readonly string[] = [], location?: string): WeightScope => ({
   routeID: definition.id,
   routes: [definition.id, ...path.filter((id) => id !== definition.id)],
   fixed: !ModelRouteAutonomy.usesRules(definition.autonomy),
   autonomy: definition.autonomy,
   ...(definition.schedules?.length ? { schedules: definition.schedules } : {}),
+  ...(location === undefined ? {} : { location }),
 })
 
 /** Chooses one leaf lazily. Only groups on the chosen path draw their sticky/rotation entry; nested
@@ -1992,6 +1998,7 @@ export const nextTarget = (
   unavailable?: ReadonlyMap<number, string>,
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
+  location?: string,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -2036,6 +2043,7 @@ export const nextTarget = (
     routes: [definition.id, ...path.filter((id) => id !== definition.id)],
     fixed: !ModelRouteAutonomy.usesRules(definition.autonomy),
     schedules: [...(definition.schedules ?? []), ...rules],
+    ...(location === undefined ? {} : { location }),
   })
   /** The average weight multiplier of a nested group's leaves, judged with the schedules that reach
    * into that group. The group's own weight stays in `weights`; a parent then scales the two.
@@ -2069,7 +2077,7 @@ export const nextTarget = (
   const allDemoted = (nodeIndex: number) => {
     const eligible = openLeaves(nodeIndex)
     return (
-      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index)))
+      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
     )
   }
   const label = (child: Node["children"][number]) => {
@@ -2172,7 +2180,7 @@ export const nextTarget = (
             if (child.leaf !== undefined)
               return {
                 weight: traces[position]?.adjustment ?? base,
-                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf)),
+                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf), location),
               }
             if (child.node !== undefined)
               return {
@@ -2216,7 +2224,7 @@ export const nextTarget = (
             const leaf = node.children[position].leaf
             if (leaf === undefined) return false
             const target = definition.targets[leaf]
-            return key(target) === current && !demoted(target, now, credentialOf?.(leaf))
+            return key(target) === current && !demoted(target, now, credentialOf?.(leaf), location)
           })
     const rank = (from: readonly number[]) =>
       [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1))

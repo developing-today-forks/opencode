@@ -751,7 +751,7 @@ export const layer = Layer.effect(
             const until = ModelRoute.cooldownUntil(target, now)
             // A fixed route only fails over: provider holds, skips and budgets are rules and above.
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
-            const scope = ModelRoute.scopeOf(definition)
+            const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
             // A user's "avoid" holds on every route; learned skips and budgets are rules the route opted into.
             const isSkipped =
               ModelRoute.userSkipped(target, now, scope) || (rules && ModelRoute.skipped(target, now, scope))
@@ -766,7 +766,7 @@ export const layer = Layer.effect(
             const limited = rules ? ModelRoute.limitedUntil(target, now, credentialID) : 0
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
-              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID)
+              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
             const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now) : undefined
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
@@ -829,6 +829,7 @@ export const layer = Layer.effect(
             unavailable,
             Math.random,
             (index) => credentialByProvider.get(definition.targets[index].providerID),
+            locationDirectory,
           )
           if (index === undefined) break
           triedTargets.add(index)
@@ -915,7 +916,7 @@ export const layer = Layer.effect(
                     !tried.has(connection.id) &&
                     ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
                     ModelRoute.credentialQuotaBlocked(connection.id, at) === undefined &&
-                    !ModelRoute.demoted(target, at, connection.id),
+                    !ModelRoute.demoted(target, at, connection.id, locationDirectory),
                 )
                 for (const candidate of candidates) {
                   if (candidate.type !== "credential") continue

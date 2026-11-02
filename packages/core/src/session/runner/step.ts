@@ -27,6 +27,7 @@ import { SessionModelRequest } from "../model-request.js"
 import { SessionSchema } from "../schema.js"
 import { toSessionError } from "../to-session-error.js"
 import { SessionUsage } from "../usage.js"
+import { Location } from "../../location.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteAutonomy } from "../../model-route-autonomy.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
@@ -216,6 +217,11 @@ export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
   const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
+  const location = yield* Effect.serviceOption(Location.Service)
+  const locationDirectory = Option.match(location, {
+    onNone: () => undefined,
+    onSome: (value) => value.directory as string,
+  })
   const toolOutput = yield* ToolOutput.Service
 
   const run = Effect.fn("SessionStep.run")(function* (
@@ -764,7 +770,7 @@ export const make = Effect.gen(function* () {
     const escalate =
       routing !== undefined &&
       ModelRouteAutonomy.races(routing.autonomy) &&
-      ModelRoute.escalates(routing.target, routing.credentialID)
+      ModelRoute.escalates(routing.target, routing.credentialID, locationDirectory)
     // Once a turn has been hedged, its retries stay on one request rather than racing again.
     if (!routing || (!routing.hedgeAfterMs && !escalate) || !prepareFor || wasHedged(input.assistantMessageID))
       return yield* run(input)

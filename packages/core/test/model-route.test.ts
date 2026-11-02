@@ -1758,6 +1758,37 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("behavior consumers judge with their own Location's settings, not the unscoped fallback (#1423)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    ModelRoute.failed(target, policy, now + 1)
+    ModelRoute.failed(target, policy, now + 2, { quota: true })
+    ModelRoute.failed(target, policy, now + 3, { quota: true })
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: false, afterGiveUps: 2 }, demotion: { after: 2, factor: 0.5 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: true, afterGiveUps: 2 }, demotion: { after: 9, factor: 0.9 } }),
+      "/loc/b",
+    )
+    try {
+      // Escalation: A switched it off, B left it on — each Location's step sees its own.
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.escalates(target, undefined, "/loc/b")).toBe(true)
+      // Quota demotion: two quota errors demote under A's threshold of 2, not B's 9.
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/b")).toBe(false)
+      // Weights: the traced demotion layer uses the judging Location's factor.
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/a" }).demotion).toBe(50)
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/b" }).demotion).toBe(100)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },
