@@ -3,7 +3,7 @@ import { Service } from "@opencode/client/effect/service"
 import { Session } from "@opencode/schema/session"
 import { SessionTransfer } from "@opencode/schema/session-transfer"
 import { Effect, Option, Schema } from "effect"
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { EOL } from "node:os"
 import path from "node:path"
 import { Commands } from "../../commands"
@@ -24,6 +24,17 @@ export const MAX_SESSION_TRANSFER_BYTES = 256 * 1024 * 1024
 // small-payload precedents (5-30 s): it exists to cut header stalls and
 // slow drips, which never finish at any speed.
 export const SESSION_IMPORT_FETCH_TIMEOUT_MS = 600_000
+
+// The local-file branch mirrors fetchRemote's cap: stat the file and
+// reject it before readFile buffers it whole, so an over-cap export on
+// disk fails with the same clear error as the remote branch instead of
+// an opaque RangeError/OOM past the engine string ceiling.
+export async function readLocal(file: string, maximumBytes = MAX_SESSION_TRANSFER_BYTES) {
+  const { size } = await stat(file)
+  if (size > maximumBytes)
+    throw new Error(`Session data too large: file exceeds the ${maximumBytes}-byte limit`)
+  return readFile(file, "utf8")
+}
 
 export function fetchRemote(url: string, timeoutMs = SESSION_IMPORT_FETCH_TIMEOUT_MS) {
   const signal = AbortSignal.timeout(timeoutMs)
@@ -94,7 +105,7 @@ export default Runtime.handler(
       try: () =>
         input.file.startsWith("http://") || input.file.startsWith("https://")
           ? fetchRemote(input.file)
-          : readFile(input.file, "utf8"),
+          : readLocal(input.file),
       catch: (cause) =>
         new Error(`Failed to read session data: ${cause instanceof Error ? cause.message : String(cause)}`),
     })
