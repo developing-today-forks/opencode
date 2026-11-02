@@ -1055,9 +1055,7 @@ function migrateFile(part: SessionV1.FilePart) {
   if (comma < 0) return undefined
   const header = part.url.slice(0, comma)
   const payload = part.url.slice(comma + 1)
-  const data = header.endsWith(";base64")
-    ? Buffer.from(payload, "base64").toString("base64")
-    : decodeFilePayload(payload)
+  const data = header.endsWith(";base64") ? decodeBase64Payload(payload) : decodeFilePayload(payload)
   if (data === undefined) return { _tag: "invalid-data-url" } as const
   return {
     data,
@@ -1069,6 +1067,18 @@ function migrateFile(part: SessionV1.FilePart) {
       ? { mention: { text: part.source.text.value, start: part.source.text.start, end: part.source.text.end } }
       : {}),
   }
+}
+
+function decodeBase64Payload(payload: string) {
+  // Buffer.from(..., "base64") never throws on a string and silently ignores
+  // characters outside the base64 alphabet, so a garbage payload would be
+  // stored as an empty or garbage-stripped file. Validate by canonical
+  // round-trip — the check prompt.ts applies to live attachments: a payload
+  // that does not re-encode to itself (garbage characters, stray padding,
+  // and, by decision, unpadded or whitespace-bearing payloads) takes the
+  // invalid-data-url path instead of being stored (#1360).
+  const data = Buffer.from(payload, "base64").toString("base64")
+  return data === payload ? data : undefined
 }
 
 function decodeFilePayload(payload: string) {
