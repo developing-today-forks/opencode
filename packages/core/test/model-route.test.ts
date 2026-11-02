@@ -1815,6 +1815,25 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("quota-gate recording and evaluation use the owning Location's gate (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 120_000 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // A rate-limit exhaustion with no stated reset installs the fallback gate of
+      // the Location whose attempt reported it — one minute for A, not the
+      // compiled 30-minute default the unscoped read used once B registered.
+      ModelRoute.observeQuotaFailure(target, "settings-cred-a", undefined, now, "rate-limit", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now, "/loc/a")).toEqual({ until: now + 60_000 })
+      ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now, "/loc/b")).toEqual({ until: now + 120_000 })
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

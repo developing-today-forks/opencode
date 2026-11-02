@@ -546,17 +546,17 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
  * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
  * Balance holds count until a fresh balance increase releases them, so a pool held by a
  * balance gate stays out with no timer-based re-admission (#1014). */
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number): boolean => {
+const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
   if (credentialID) {
     if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
-    return credentialQuotaBlocked(credentialID, now) !== undefined
+    return credentialQuotaBlocked(credentialID, now, location) !== undefined
   }
   if (quotaBench(health.get(key(target)), now)) return true
   const provider = providerQuota.get(target.providerID)
   if (
     provider &&
     (provider.balanceHold !== undefined ||
-      QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold))
+      QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold))
   )
     return true
   return activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip")
@@ -612,13 +612,14 @@ export const poolQuotaExhausted = (
   index: number,
   now = Date.now(),
   credentialOf?: (index: number) => string | undefined,
+  location?: string,
 ): boolean => {
   const pool = poolOf(definition, index)
   if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
   const out = new Set<number>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now)) out.add(leaf)
+    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
   }
   return out.size >= POOL_QUOTA_LEAVES
 }
@@ -675,7 +676,7 @@ export const failed = (
       now,
       hint,
       credentialID,
-      hint?.quota ? quotaResetAt(target, credentialID, now) : undefined,
+      hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
       location,
     )
     return
@@ -687,7 +688,7 @@ export const failed = (
     now,
     hint,
     undefined,
-    hint?.quota ? quotaResetAt(target, undefined, now) : undefined,
+    hint?.quota ? quotaResetAt(target, undefined, now, location) : undefined,
     location,
   )
 }
@@ -956,6 +957,7 @@ const observeCredentialQuotaState = (
   snapshot: QuotaSnapshot.Snapshot,
   now: number,
   resetAtTrusted: boolean,
+  location?: string,
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -983,7 +985,7 @@ const observeCredentialQuotaState = (
   // one carries no new information, even when it is still fresh — a below-limit reading
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
       ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
@@ -1026,7 +1028,8 @@ export const observeCredentialQuota = (
   credentialID: string,
   snapshot: QuotaSnapshot.Snapshot,
   now = Date.now(),
-) => observeCredentialQuotaState(target, credentialID, snapshot, now, true)
+  location?: string,
+) => observeCredentialQuotaState(target, credentialID, snapshot, now, true, location)
 
 /** Credentials of one provider currently held by the quota gate (a balance hold or a gated
  * known-full snapshot). The gate feed uses this to keep refreshing held credentials after
@@ -1059,6 +1062,7 @@ export const observeProviderQuota = (
   target: Model.Ref,
   snapshot: QuotaSnapshot.Snapshot,
   now = Date.now(),
+  location?: string,
 ) => {
   const previous = providerQuota.get(target.providerID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -1094,7 +1098,7 @@ export const observeProviderQuota = (
     // skip with this snapshot's normal timed gate (or removes it when not full).
   }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
       ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
@@ -1109,7 +1113,7 @@ export const observeProviderQuota = (
   })
   if (full) {
     if (snapshot.resetAt !== null) armBenchProbe(target, undefined, snapshot.resetAt, now)
-    const gate = currentConstants().quotaGate
+    const gate = currentConstants(location).quotaGate
     const until =
       snapshot.balance === true ? undefined : Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
     addAdjustment({
@@ -1196,8 +1200,8 @@ export const resetQuotaFeed = () => {
   lastQuotaFeedAt = 0
 }
 
-export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quotaGate.feedTtlMs) => {
-  if (now - lastQuotaFeedAt < ttlMs) return false
+export const shouldFeedQuota = (now = Date.now(), location?: string) => {
+  if (now - lastQuotaFeedAt < currentConstants(location).quotaGate.feedTtlMs) return false
   lastQuotaFeedAt = now
   return true
 }
@@ -1231,8 +1235,9 @@ export const observeQuotaFailure = (
    * snapshot was balance-shaped (#1014). Callers that predate classification omit it and
    * keep the historical balance-exhaustion reading. */
   classification: "balance-exhaustion" | "rate-limit" = "balance-exhaustion",
+  location?: string,
 ) => {
-  const gate = currentConstants().quotaGate
+  const gate = currentConstants(location).quotaGate
   const previous = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
   if (classification !== "rate-limit" && previous?.snapshot.balance === true) {
     const snapshot = { ...previous.snapshot, percent: null, resetAt: null, observedAt: now, stale: false }
@@ -1275,6 +1280,7 @@ export const observeQuotaFailure = (
       },
       now,
       false,
+      location,
     )
     return
   }
@@ -1293,13 +1299,14 @@ export const observeQuotaFailure = (
 export const credentialQuotaBlocked = (
   credentialID: string,
   now = Date.now(),
+  location?: string,
 ): { readonly until: number | null } | undefined => {
   const state = credentialQuota.get(credentialID)
   // No in-memory state but a durable baseline record: the hold survives the restart and
   // blocks selection (including credential fallback) until a fed snapshot releases it.
   if (!state) return restoredCredentialHold(credentialID) ? { until: null } : undefined
   if (state.balanceHold) return { until: null }
-  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)) {
+  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
     state.gated = true
     return { until: state.snapshot.resetAt }
   }
@@ -1645,7 +1652,12 @@ export const rateLimitOf = (target: Model.Ref, credentialID?: string) =>
  * actually exhausted provider window (not a nearby window), and still be a fresh future reset. Plan
  * snapshots are provider/credential scoped and already carry their own freshness and full-window checks.
  * The reactive quota gate's bounded fallback is deliberately not considered a window reset. */
-const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: number): number | undefined => {
+const quotaResetAt = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): number | undefined => {
   const resets: number[] = []
   const rateLimit = rateLimitOf(target, credentialID)
   const providerReset = rateLimit
@@ -1658,7 +1670,7 @@ const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: 
     planQuota &&
     planQuota.target.providerID === target.providerID &&
     planQuota.snapshot.balance !== true &&
-    QuotaSnapshot.isKnownFull(planQuota.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold) &&
+    QuotaSnapshot.isKnownFull(planQuota.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold) &&
     planQuota.snapshot.observedAt <= now &&
     planQuota.resetObservedAt !== undefined &&
     planQuota.resetObservedAt <= now &&

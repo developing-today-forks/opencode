@@ -471,6 +471,7 @@ export const make = Effect.gen(function* () {
             // Only a real exhaustion answer may install an increase-only balance hold; a
             // plain HTTP 429 rate limit keeps its stated timed recovery (#1014, #1380).
             quotaClassification,
+            locationDirectory,
           )
         }
         // A success that advertised no limit headers replaces the serving credential's hold:

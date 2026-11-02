@@ -441,7 +441,7 @@ const refreshQuotaGate = (
   location?: string,
 ) =>
   Effect.gen(function* () {
-    if (!ModelRoute.shouldFeedQuota(now)) return
+    if (!ModelRoute.shouldFeedQuota(now, location)) return
     let plans: readonly ModelPlan.Plan[] = []
     try {
       plans = ModelPlan.readStore(dataDir).plans
@@ -511,9 +511,9 @@ const refreshQuotaGate = (
             )
             if (!snapshot) return
             if (credentialID) {
-              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
+              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now, location)
             } else {
-              ModelRoute.observeProviderQuota(target, snapshot, now)
+              ModelRoute.observeProviderQuota(target, snapshot, now, location)
             }
           }
           feed(activeCredentialID)
@@ -742,8 +742,12 @@ export const layer = Layer.effect(
           for (const index of indexes)
             poolExhausted.set(
               index,
-              ModelRoute.poolQuotaExhausted(definition, index, now, (leaf) =>
-                credentialByProvider.get(definition.targets[leaf].providerID),
+              ModelRoute.poolQuotaExhausted(
+                definition,
+                index,
+                now,
+                (leaf) => credentialByProvider.get(definition.targets[leaf].providerID),
+                locationDirectory,
               ),
             )
           const ready = indexes.filter((index) => {
@@ -768,7 +772,7 @@ export const layer = Layer.effect(
             const kept =
               limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
-            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now) : undefined
+            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
@@ -809,7 +813,7 @@ export const layer = Layer.effect(
           const usable = indexes.filter((index) => !overLimit.has(index))
           const nonFull = usable.filter((index) => {
             const credentialID = credentialByProvider.get(definition.targets[index].providerID)
-            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now) === undefined
+            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
           // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
           // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
@@ -915,7 +919,7 @@ export const layer = Layer.effect(
                     connection.id !== servingID &&
                     !tried.has(connection.id) &&
                     ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
-                    ModelRoute.credentialQuotaBlocked(connection.id, at) === undefined &&
+                    ModelRoute.credentialQuotaBlocked(connection.id, at, locationDirectory) === undefined &&
                     !ModelRoute.demoted(target, at, connection.id, locationDirectory),
                 )
                 for (const candidate of candidates) {
