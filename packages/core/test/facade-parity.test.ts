@@ -35,6 +35,13 @@
  *   - route proxy (bin/opencode-route-proxy.mjs, :18750):
  *     PARITY-WITH-NAMED-DIFFS
  *   - codex (bin/codex-proxy.mjs, :18744): PARITY-WITH-NAMED-DIFFS
+ *   - design-code (bin/design-code-proxy.mjs, :18746):
+ *     PARITY-WITH-NAMED-DIFFS — persona prompt composition, recipe
+ *     order/failover, non-stream/stream shapes and error classes all
+ *     match (the failover walk + prompt application are pinned in
+ *     generate-persona-route.test.ts); named diffs below, including
+ *     one real-gap: persona routes are not advertised in the façade's
+ *     /v1/models list (ADVERTISED_MODELS is the six tier routes).
  *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
  *     the door answers shell/bash-tool requests with a 200 (tool names
  *     aliased upstream, calls translated back; a residual 403 falls
@@ -53,6 +60,7 @@
  */
 import { describe, expect, test } from "bun:test"
 import { LLMEvent, LLMResponse } from "@opencode/ai"
+import { applyRouteSystem } from "@opencode/core/generate"
 import {
   ChatStreamTranslator,
   ResponsesStreamTranslator,
@@ -879,6 +887,15 @@ export const VERDICTS = {
     verdict: "PARITY-WITH-NAMED-DIFFS",
     diffs: ["first streaming chunk gains role:\"assistant\"", "error envelope: door has no type and uses 500, façade has server_error and 502", "responses front is a façade-only superset", "bare catalog ids read as route names"],
   },
+  designCode: {
+    verdict: "PARITY-WITH-NAMED-DIFFS",
+    diffs: [
+      "REAL-GAP models list: door lists the 11 persona ids (owned_by design-code); façade /v1/models advertises only the six tier routes — persona routes resolve/complete but are not listed (#1413)",
+      "streaming: door relays the backend's empty initial role frame; façade emits role with first text (one-frame shift)",
+      "error envelopes: door bodies have no type field; façade adds OpenAI type (additive, §2)",
+      "AMR caller-Bearer verbatim bypass does not carry over (façade Bearer is the server credential; raw AMR is the opendesign provider) — Gate 1 on #1413",
+    ],
+  },
   muse: {
     verdict: "FAIL",
     diffs: [
@@ -893,10 +910,296 @@ export const VERDICTS = {
 } as const
 
 test("verdict registry is consistent with the recorded classifications", () => {
-  expect(Object.keys(VERDICTS).sort()).toEqual(["codex", "muse", "route"])
+  expect(Object.keys(VERDICTS).sort()).toEqual(["codex", "designCode", "muse", "route"])
+  expect(VERDICTS.designCode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
+  expect(VERDICTS.designCode.diffs[0]).toContain("REAL-GAP")
   expect(VERDICTS.muse.verdict).toBe("FAIL")
   expect(VERDICTS.muse.diffs[0]).toContain("ATTESTATION")
   expect(VERDICTS.route.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.codex.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   for (const door of Object.values(VERDICTS)) expect(door.diffs.length).toBeGreaterThan(0)
+})
+
+// ------------------------------------------------------------ design-code
+//
+// Door: bin/design-code-proxy.mjs (:18746) in developing-today/code.
+// Recordings transcribed from that file (MODELS recipe table,
+// dispatchWithFallback, hasUpstreamKey) and its stub fixtures
+// (bin/design-code-proxy.test.mjs), plus live recordings taken on the
+// laptop 2026-11-02 against the running door and its repointed
+// successor (design-code-flash / design-code-pro calls, see #1413).
+// The persona migration target: each persona id becomes a model_routes
+// route carrying the door's design system prompt in the route's
+// `system` field (#1413); primary/fallback recipe order becomes the
+// route's ordered targets, walked by Generate on failure
+// (generate-persona-route.test.ts pins the walk + prompt application
+// through the real resolver).
+
+const DESIGN_SYSTEM_PROMPT =
+  "You are an elite Code & Systems Design Architect.\nYour core expertise is in software architecture, clean code design, UI/UX design engineering, design tokens, component abstractions, domain-driven design, and maintainable systems patterns. Provide elegant, production-grade architectures and idiomatic design implementations."
+
+describe("door: design-code (bin/design-code-proxy.mjs :18746)", () => {
+  // The door's 11 virtual personas and their recipes, transcribed from
+  // the MODELS table AFTER the #1409 repoint (code PR #4626): port
+  // 18751 = antigravity-direct, 18744 = codex. Persona routes in the
+  // tracked config carry exactly these targets, in this order.
+  const RECIPES = [
+    { id: "claude-haiku-5.5", primary: "antigravity-direct/claude-sonnet-5-5", fallback: "antigravity-direct/gemini-3.8-flash" },
+    { id: "gpt-6-luna", primary: "openai-codex/gpt-6-luna", fallback: "antigravity-direct/gemini-3.8-flash" },
+    { id: "gpt-6.1-sol", primary: "openai-codex/gpt-6.1-sol", fallback: "antigravity-direct/gemini-3.8-flash" },
+    { id: "deepseek-v4.1-flash", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-5.6-luna" },
+    { id: "glm-5.3-flash", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-5.6-luna" },
+    { id: "glm-5.3-flashx", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-5.6-luna" },
+    { id: "mimo-v2.6-flash", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-5.6-luna" },
+    { id: "mimo-v2.6-pro", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-6.1-sol" },
+    { id: "design-code-pro", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-6.1-sol" },
+    { id: "design-code-flash", primary: "antigravity-direct/gemini-3.8-flash", fallback: "openai-codex/gpt-5.6-luna" },
+    { id: "open-design-pro", primary: "openai-codex/gpt-6.1-sol", fallback: "antigravity-direct/gemini-3.8-flash" },
+  ] as const
+
+  test("persona inventory: 11 recipes, every leg on a live door (no :18745)", () => {
+    expect(RECIPES.length).toBe(11)
+    for (const recipe of RECIPES) {
+      expect(recipe.primary).not.toContain("18745")
+      expect(recipe.fallback).not.toContain("18745")
+      expect(recipe.primary.startsWith("antigravity-direct/") || recipe.primary.startsWith("openai-codex/")).toBe(true)
+      expect(recipe.fallback.startsWith("antigravity-direct/") || recipe.fallback.startsWith("openai-codex/")).toBe(true)
+    }
+  })
+
+  test("models list: door lists personas; façade does not advertise persona routes (real-gap)", () => {
+    // Door recording: GET /v1/models serves the 11 persona ids as
+    // {id, object: "model", created: <now>, owned_by: "design-code"}.
+    const door = {
+      object: "list",
+      data: RECIPES.map((recipe) => ({ id: recipe.id, object: "model", created: 1793658533, owned_by: "design-code" })),
+    }
+    expect(door.data.length).toBe(11)
+    // Façade today: /v1/models advertises the concrete catalog plus
+    // ADVERTISED_MODELS (the six tier routes) only — a persona route
+    // resolves and completes by name but is NOT listed, and modelBody
+    // does not know it. Recorded as a real-gap on #1413: callers that
+    // enumerate personas (the OpenClaw heartbeat lifeline probe reads
+    // this list) cannot discover them from the façade yet. This test
+    // pins the gap so fixing advertisement fails it loudly.
+    expect(modelBody("design-code-flash")).toBeUndefined()
+    expect(modelBody("opencode-route/design-code-flash")).toBeUndefined()
+    // classification: real-gap — see VERDICTS.designCode.
+  })
+
+  test("chat non-streaming, persona model: parity (stub recording)", () => {
+    // Door recording (design-code-proxy.test.mjs, stub mode "ok"): the
+    // backend's completion is re-serialized with `model` rewritten to
+    // the persona id; no usage in the stub body, none in the façade's.
+    const door = {
+      id: "chatcmpl-stub",
+      object: "chat.completion",
+      created: 0,
+      model: "design-code-flash",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "hello from primary" }, finish_reason: "stop" },
+      ],
+    }
+    const events = [
+      LLMEvent.textDelta({ id: "t1", text: "hello from primary" }),
+      LLMEvent.finish({ reason: { normalized: "stop" } }),
+    ]
+    const parsed = parseChatRequest({ model: "design-code-flash", messages: [{ role: "user", content: "hi" }] })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const facade = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: parsed.value.modelLabel,
+      response: responseOf(events),
+    })
+    expectDiffs(door, facade, [])
+  })
+
+  test("chat non-streaming with usage: parity (live recording 2026-11-02)", () => {
+    // Door recording: live design-code-flash call through the deployed
+    // door after the :18751 repoint — usage carried through verbatim.
+    const door = {
+      id: "chatcmpl-live",
+      object: "chat.completion",
+      created: 1793658805,
+      model: "design-code-flash",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "DEPLOYED-REPOINT-OK" }, finish_reason: "stop" },
+      ],
+      usage: { prompt_tokens: 73, completion_tokens: 112, total_tokens: 185 },
+    }
+    const events = [
+      LLMEvent.textDelta({ id: "t1", text: "DEPLOYED-REPOINT-OK" }),
+      LLMEvent.finish({
+        reason: { normalized: "stop" },
+        usage: { inputTokens: 73, outputTokens: 112, totalTokens: 185 },
+      }),
+    ]
+    const parsed = parseChatRequest({ model: "design-code-flash", messages: [{ role: "user", content: "hi" }] })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const facade = completionBody({
+      id: "chatcmpl-facade",
+      created: CREATED,
+      model: parsed.value.modelLabel,
+      response: responseOf(events),
+    })
+    expectDiffs(door, facade, [])
+  })
+
+  test("chat streaming, persona model: relayed grammar parity (live recording)", () => {
+    // Door recording: live design-code-pro stream — role+content chunk,
+    // content chunk, usage-bearing finish chunk, [DONE]. The door
+    // rewrites each chunk's model to the persona id; the grammar
+    // projection (which excludes model) matches the façade's exactly.
+    const door = [
+      { object: "chat.completion.chunk", delta: { role: "assistant", content: "" }, finish_reason: null },
+      { object: "chat.completion.chunk", delta: { content: "STREAM-OK" }, finish_reason: null },
+      {
+        object: "chat.completion.chunk",
+        delta: {},
+        finish_reason: "stop",
+        usage: { prompt_tokens: 65, completion_tokens: 121, total_tokens: 186 },
+      },
+      "[DONE]",
+    ]
+    const events = [
+      LLMEvent.textDelta({ id: "t1", text: "STREAM-OK" }),
+      LLMEvent.finish({
+        reason: { normalized: "stop" },
+        usage: { inputTokens: 65, outputTokens: 121, totalTokens: 186 },
+      }),
+    ]
+    expectDiffs(door, facadeChatFrames(events, "design-code-pro"), [
+      {
+        path: ".length",
+        classification: "acceptable-by-design",
+        note: "Frame count differs by the door's relayed empty initial frame only: the door passes the backend's role-only first chunk through, the façade emits role with the first text.",
+      },
+      {
+        path: "[0].delta.content",
+        classification: "acceptable-by-design",
+        note: "The façade's first chunk carries the text; the door's first (relayed) chunk carries an empty content with the role. Role itself matches.",
+      },
+      {
+        path: "[1].delta.content",
+        classification: "acceptable-by-design",
+        note: "Index shift from the door's extra initial frame: this position is the façade's finish chunk (empty delta) against the door's content chunk.",
+      },
+      {
+        path: "[1].finish_reason",
+        classification: "acceptable-by-design",
+        note: "Index shift: finish_reason stop lands one frame earlier on the façade.",
+      },
+      {
+        path: "[1].usage",
+        classification: "acceptable-by-design",
+        note: "Index shift: usage rides the façade's finish chunk with identical fields (prompt/completion/total).",
+      },
+      {
+        path: "[2]",
+        classification: "acceptable-by-design",
+        note: "Index shift: the façade's [DONE] against the door's finish chunk; [DONE] terminates both streams.",
+      },
+    ])
+  })
+
+  test("persona system prompt: door composition equals route composition", () => {
+    // Door recording (dispatchWithFallback): the design prompt is
+    // PREPENDED to an existing system message
+    // (`${DESIGN_SYSTEM_PROMPT}\n\n${existing}`) or unshifted as the
+    // system message when the caller sent none.
+    // Façade: parseChatRequest lifts the caller's system text into
+    // input.system, and Generate.applyRouteSystem composes the route's
+    // carried prompt with it — the same composition, pinned here; the
+    // end-to-end application to the provider request (both candidates)
+    // is pinned in generate-persona-route.test.ts.
+    const withCaller = parseChatRequest({
+      model: "opencode-route/design-code-flash",
+      messages: [
+        { role: "system", content: "Caller system text." },
+        { role: "user", content: "hi" },
+      ],
+    })
+    if (!withCaller.ok) throw new Error(withCaller.error)
+    expect(applyRouteSystem(DESIGN_SYSTEM_PROMPT, withCaller.value.input.system)).toBe(
+      `${DESIGN_SYSTEM_PROMPT}\n\nCaller system text.`,
+    )
+    const bare = parseChatRequest({
+      model: "opencode-route/design-code-flash",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    if (!bare.ok) throw new Error(bare.error)
+    expect(applyRouteSystem(DESIGN_SYSTEM_PROMPT, bare.value.input.system)).toBe(DESIGN_SYSTEM_PROMPT)
+    expect(applyRouteSystem(undefined, "Caller system text.")).toBe("Caller system text.")
+  })
+
+  test("unknown model: 400 both sides, envelope type + message differ", () => {
+    // Door recording: resolveModelConfig refuses unknown ids with 400
+    // and a bare {error:{message}} body (no type field).
+    const door = {
+      status: 400,
+      body: { error: { message: 'Unknown model "no-such-persona": not a design-code model (see GET /v1/models)' } },
+    }
+    // Façade: an unknown route/model fails selection; the handler maps
+    // ModelSelectionError to 400 with the OpenAI envelope (design §2).
+    const facade = { status: 400, body: errorBody('Model unavailable: opencode-route/no-such-persona', "invalid_request_error") }
+    expect(facade.status).toBe(door.status)
+    expectDiffs(door.body, facade.body, [
+      {
+        path: "error.message",
+        classification: "acceptable-by-design",
+        note: "Message text is implementation wording on both sides; the §2 contract is the 400 + invalid_request_error envelope, which the façade supplies and the door lacks.",
+      },
+      {
+        path: "error.type",
+        classification: "acceptable-by-design",
+        note: "Door error bodies carry no type; the façade adds the OpenAI-standard type (purely additive).",
+      },
+    ])
+  })
+
+  test("all backends fail: 502 both sides, envelope type + message differ", () => {
+    // Door recording: primary and fallback both fail →
+    // 502 {error:{message:"All design code backends failed: <err>"}}.
+    // Façade (with #1413): Generate walks the route's candidates in
+    // order (generate-persona-route.test.ts) and the handler maps the
+    // final failure to 502 server_error — the door's outcome class.
+    const door = {
+      status: 502,
+      body: { error: { message: "All design code backends failed: connect ECONNREFUSED" } },
+    }
+    const facade = { status: 502, body: errorBody("primary backend down", "server_error") }
+    expect(facade.status).toBe(door.status)
+    expectDiffs(door.body, facade.body, [
+      {
+        path: "error.message",
+        classification: "acceptable-by-design",
+        note: "The façade surfaces the failing candidate's provider message (with any quota reset hint preserved, §2); the door wraps its last backend error in its own sentence. Status and outcome class match.",
+      },
+      {
+        path: "error.type",
+        classification: "acceptable-by-design",
+        note: "Door error bodies carry no type; the façade adds server_error (purely additive).",
+      },
+    ])
+  })
+
+  test("AMR caller-key bypass: door forwards verbatim, façade has no such path", () => {
+    // Door recording (hasUpstreamKey + chat handler): a request whose
+    // Authorization Bearer token is not a placeholder (or with
+    // OPEN_DESIGN_API_KEY/AMR_API_KEY in the door's env) is forwarded
+    // VERBATIM to https://amr-link.open-design.ai/v1 — no persona
+    // prompt, no recipe routing. The live unit sets neither env var
+    // (Gate 1, #1413 comment 6590151807), so today only caller keys
+    // trigger it.
+    const door = { upstream: "https://amr-link.open-design.ai/v1/chat/completions", personaApplied: false, recipeApplied: false }
+    expect(door.personaApplied).toBe(false)
+    // Façade: a Bearer token is the server credential, never an
+    // upstream key; raw AMR is addressed through the `opendesign`
+    // provider directly, as the deployed config already seats it.
+    // classification: acceptable-by-design — the façade does not grow
+    // per-request upstream-key passthrough (design §2: provider
+    // pass-through is via provider options in config, never
+    // per-request); recorded in the Gate 1 credential story on #1413.
+  })
 })

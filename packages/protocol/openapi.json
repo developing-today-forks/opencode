@@ -5519,7 +5519,7 @@
             }
           }
         },
-        "description": "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored and no response is retained (previous_response_id is rejected). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
+        "description": "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Responses are retained in the façade's private item store, so callers chain with previous_response_id (bounded at 64 links, 24h TTL; an expired or unknown id answers 404 response_not_found). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
         "summary": "Create a response (OpenAI-compatible)",
         "requestBody": {
           "content": {
@@ -15998,6 +15998,24 @@
                   "additionalProperties": false
                 }
               },
+              "model_route_demotion": {
+                "type": "object",
+                "properties": {
+                  "threshold": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 50,
+                    "description": "Quota failures within the window that demote a route target. Capped at 50, the number of quota events retained per target, so a threshold can never be set beyond what is counted. Defaults to 3."
+                  },
+                  "window_ms": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 7776000000,
+                    "description": "How long a quota failure counts toward demotion, in milliseconds. Defaults to 14400000 (4h)."
+                  }
+                },
+                "additionalProperties": false
+              },
               "routes": {
                 "type": "object",
                 "properties": {
@@ -16963,6 +16981,10 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "description": "System prompt this route carries, prepended to the caller's own system text on every request the route serves (persona routes, #1413: the design-code door's injected design prompt, carried by the route instead of a proxy). A route nested inside another route does not stack its prompt: only the addressed route's prompt applies."
           },
           "targets": {
             "type": "array",

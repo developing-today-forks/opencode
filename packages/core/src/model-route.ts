@@ -140,6 +140,8 @@ export type Budget = typeof Budget.Type
 
 const Definition = Schema.Struct({
   id: Model.ID,
+  /** The route's carried system prompt (config `system`, #1413), when one is declared. */
+  system: Schema.String.pipe(optional),
   targets: Schema.Array(Model.Ref),
   targetVariants: Schema.Array(TargetVariant),
   /** Parallel to `targets`; the resolved prompt-cache format for each leaf, an empty object when unset. */

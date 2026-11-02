@@ -263,6 +263,19 @@ export const isShapeRejection = (error: AIError): boolean => {
   return error.reason._tag === "InvalidRequest" && (status === 400 || status === 422)
 }
 
+/**
+ * Compose a route's carried system prompt with the caller's own system text
+ * (#1413): the route prompt leads, separated by a blank line — the exact
+ * composition the design-code door applied to its persona prompt — and a
+ * caller with no system text gets the route prompt alone. An undefined route
+ * prompt leaves the caller's text untouched.
+ */
+export const applyRouteSystem = (
+  routeSystem: string | undefined,
+  callerSystem: string | undefined,
+): string | undefined =>
+  routeSystem === undefined ? callerSystem : callerSystem ? `${routeSystem}\n\n${callerSystem}` : routeSystem
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -315,18 +328,31 @@ export const layer = Layer.effect(
         },
       })
 
-    const build = Effect.fn("Generate.build")(function* (input: CompletionInput) {
-      const resolved = yield* resolve(input.model)
-      // The pass-through fast path (spec §3): on a dialect match the caller's
-      // raw body, rewritten only as `rewriteRawBody` documents, is the body
-      // the provider receives. Route selection has already happened above —
-      // the same resolver, gates and demotion as the translated path — and
-      // the attempt below is ledgered identically whichever path runs.
+    // The pass-through fast path (spec §3): on a dialect match the caller's
+    // raw body, rewritten only as `rewriteRawBody` documents, is the body
+    // the provider receives. Route selection has already happened —
+    // the same resolver, gates and demotion as the translated path — and
+    // the attempt below is ledgered identically whichever path runs.
+    // A route's carried system prompt (#1413) leads the caller's own system
+    // text and suppresses the fast path: a verbatim body cannot carry a
+    // prompt the caller never sent, so a persona route always runs the
+    // translated path.
+    const buildFor = (resolved: ModelResolver.Resolved, input: CompletionInput) => {
+      const routeSystem = resolved.routing?.system
+      const effective =
+        routeSystem === undefined ? input : { ...input, system: applyRouteSystem(routeSystem, input.system) }
       const raw =
-        input.rawBody !== undefined && passthroughDialect(resolved, input.dialect) !== undefined
+        routeSystem === undefined &&
+        input.rawBody !== undefined &&
+        passthroughDialect(resolved, input.dialect) !== undefined
           ? rewriteRawBody(input.rawBody, String(resolved.model.id))
           : undefined
-      return { resolved, raw, request: canonicalRequest(resolved, input, raw) }
+      return { resolved, raw, effective, request: canonicalRequest(resolved, effective, raw) }
+    }
+
+    const build = Effect.fn("Generate.build")(function* (input: CompletionInput) {
+      const resolved = yield* resolve(input.model)
+      return buildFor(resolved, input)
     })
 
     const unavailable = (resolved: ModelResolver.Resolved) => (error: AIError) =>
@@ -370,20 +396,38 @@ export const layer = Layer.effect(
     })
 
     const runComplete = Effect.fn("Generate.runComplete")(function* (input: CompletionInput) {
-      const { resolved, raw, request } = yield* build(input)
-      const first = yield* Effect.result(attempt(resolved, request))
-      if (Result.isSuccess(first)) return first.success
-      // Shape-rejection fallback (spec §3): a supposedly-native provider that
-      // rejects the verbatim shape is retried ONCE through translation
-      // against the same resolved model. Both tries are separate ledger
-      // rows (each `attempt` records its own), so the retry is never a
-      // silent second billing. Quota/auth failures never reach this branch.
-      if (raw !== undefined && first.failure instanceof AIError && isShapeRejection(first.failure)) {
-        const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, input)))
-        if (Result.isSuccess(second)) return second.success
-        return yield* Effect.fail(unavailable(resolved)(second.failure))
+      let built = yield* build(input)
+      // Route failover (spec §3; #1413): when the resolved model is a route
+      // candidate and its attempt fails, the route's remaining candidates
+      // are tried in configured order — the primary→fallback walk the
+      // design-code door's recipes and the route proxy's callers depend on.
+      // Each candidate is its own ledgered attempt; a direct (unrouted)
+      // resolution has no fallback and fails exactly as before. The tried
+      // set bounds the walk even if a fallback ever repeated a candidate.
+      const tried = new Set<string>()
+      while (true) {
+        const { resolved, raw, effective, request } = built
+        tried.add(`${resolved.ref.providerID}/${resolved.ref.id}`)
+        const first = yield* Effect.result(attempt(resolved, request))
+        if (Result.isSuccess(first)) return first.success
+        let failure = first.failure
+        // Shape-rejection fallback (spec §3): a supposedly-native provider that
+        // rejects the verbatim shape is retried ONCE through translation
+        // against the same resolved model. Both tries are separate ledger
+        // rows (each `attempt` records its own), so the retry is never a
+        // silent second billing. Quota/auth failures never reach this branch.
+        if (raw !== undefined && failure instanceof AIError && isShapeRejection(failure)) {
+          const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, effective)))
+          if (Result.isSuccess(second)) return second.success
+          failure = second.failure
+        }
+        const fallback = resolved.routing?.fallback
+        const next = fallback ? yield* Effect.result(fallback()) : undefined
+        const candidate = next && Result.isSuccess(next) ? next.success : undefined
+        if (!candidate || tried.has(`${candidate.ref.providerID}/${candidate.ref.id}`))
+          return yield* Effect.fail(unavailable(resolved)(failure))
+        built = buildFor(candidate, input)
       }
-      return yield* Effect.fail(unavailable(resolved)(first.failure))
     })
 
     const complete: Interface["complete"] = (input) =>
@@ -423,24 +467,49 @@ export const layer = Layer.effect(
     const stream: Interface["stream"] = (input) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          const { resolved, raw, request } = yield* build(input)
-          let emitted = 0
-          const primary = attemptStream(resolved, request, () => emitted++)
-          // The streaming shape-rejection fallback: only before any event
-          // has been emitted (a retry after output would duplicate it), and
-          // only for the pass-through path's shape-class failures.
-          const composed =
-            raw === undefined
-              ? primary
-              : primary.pipe(
-                  Stream.catchCause((cause) => {
-                    const error = Cause.squash(cause)
-                    return emitted === 0 && error instanceof AIError && isShapeRejection(error)
-                      ? attemptStream(resolved, canonicalRequest(resolved, input), () => {})
-                      : Stream.failCause(cause)
+          const built = yield* build(input)
+          // The candidate that most recently served an attempt, so a failure
+          // after a failover walk is attributed to the candidate that failed.
+          let lastResolved = built.resolved
+          // One candidate's stream: the pass-through shape-rejection retry,
+          // then — only before any event has been emitted (a retry after
+          // output would duplicate it) — failover to the route's next
+          // candidate (#1413, spec §3), each its own ledgered attempt. The
+          // depth cap bounds the walk even if a fallback ever cycled.
+          const streamFor = (
+            current: ReturnType<typeof buildFor>,
+            depth: number,
+          ): Stream.Stream<LLMEvent, AIError> => {
+            const { resolved, raw, effective, request } = current
+            lastResolved = resolved
+            let emitted = 0
+            const primary = attemptStream(resolved, request, () => emitted++)
+            const composed =
+              raw === undefined
+                ? primary
+                : primary.pipe(
+                    Stream.catchCause((cause) => {
+                      const error = Cause.squash(cause)
+                      return emitted === 0 && error instanceof AIError && isShapeRejection(error)
+                        ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
+                        : Stream.failCause(cause)
+                    }),
+                  )
+            return composed.pipe(
+              Stream.catchCause((cause) => {
+                const fallback = resolved.routing?.fallback
+                if (emitted > 0 || !fallback || depth >= 32) return Stream.failCause(cause)
+                return Stream.unwrap(
+                  Effect.gen(function* () {
+                    const next = yield* Effect.result(fallback())
+                    const candidate = Result.isSuccess(next) ? next.success : undefined
+                    return candidate ? streamFor(buildFor(candidate, input), depth + 1) : Stream.failCause(cause)
                   }),
                 )
-          return composed.pipe(Stream.mapError(unavailable(resolved)))
+              }),
+            )
+          }
+          return streamFor(built, 0).pipe(Stream.mapError((error) => unavailable(lastResolved)(error)))
         }).pipe(
           Effect.catchTag("Integration.Authorization", () =>
             Effect.fail(new UnavailableError({ message: "Generation credentials are unavailable" })),

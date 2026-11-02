@@ -113,6 +113,7 @@ export const Plugin = define({
           settings: {
             [ModelRoute.SETTING]: {
               id: Model.ID.make(id),
+              ...(route.system ? { system: route.system } : {}),
               targets: expanded.map((target) => target.ref),
               targetVariants: expanded.map((target) => ({
                 ...(target.defaultVariant ? { default: target.defaultVariant } : {}),

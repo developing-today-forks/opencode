@@ -269,6 +269,10 @@ export class GlobalSchedule extends Schema.Class<GlobalSchedule>("Config.ModelRo
 
 export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
   name: Schema.String.pipe(optional),
+  system: Schema.String.annotate({
+    description:
+      "System prompt this route carries, prepended to the caller's own system text on every request the route serves (persona routes, #1413: the design-code door's injected design prompt, carried by the route instead of a proxy). A route nested inside another route does not stack its prompt: only the addressed route's prompt applies.",
+  }).pipe(optional),
   targets: Schema.Array(Target).annotate({
     description: "Ordered provider/model references. A route may include another route reference.",
   }),
