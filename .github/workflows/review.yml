@@ -13,6 +13,7 @@ concurrency:
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
 
 jobs:
   check-guidelines:

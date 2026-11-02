@@ -15,6 +15,7 @@ on:
       - main
     paths:
       - packages/web/src/content/docs/*.mdx
+  workflow_dispatch:
 
 jobs:
   sync-locales:
