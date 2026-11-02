@@ -40,6 +40,46 @@ describe("OauthCallbackPage", () => {
     expect(nodes.detail.textContent).toContain("deadline exceeded")
   })
 
+  test("the bootstrap POST deadline aborts a stalled error-body read", async () => {
+    const nodes = pageNodes()
+    const controller = new AbortController()
+    let resolveBodyRead = () => {}
+    const bodyReadStarted = new Promise<void>((resolve) => (resolveBodyRead = resolve))
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          resolveBodyRead()
+        },
+        cancel() {
+          cancelled = true
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const html = OauthCallbackPage.bootstrap({ tokenPath: "/token" })
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+    expect(script).toBeDefined()
+    runScript(
+      script!,
+      nodes,
+      {
+        timeout(milliseconds) {
+          expect(milliseconds).toBe(5_000)
+          return controller.signal
+        },
+      },
+      async () => new Response(body, { status: 400 }),
+    )
+
+    await bodyReadStarted
+    controller.abort(new Error("deadline exceeded"))
+    await nodes.detailUpdated
+    expect(nodes.card.dataset.status).toBe("error")
+    expect(nodes.detail.textContent).toContain("callback failed (400)")
+    expect(cancelled).toBe(true)
+  })
+
   test("the bootstrap displays a capped error excerpt and cancels an oversized body", async () => {
     const nodes = pageNodes()
     let cancelled = false
