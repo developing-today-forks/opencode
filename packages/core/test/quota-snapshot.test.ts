@@ -142,9 +142,9 @@ describe("QuotaSnapshot", () => {
       const input = { plan: { ...plan, id } as ModelPlan.Plan, window, totals: totals({ requests: 50 }), observedAt }
       // An empty record and a JSON-parsed record naming other plans both lack an own entry for the plan.
       expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }).stale).toBe(true)
-      expect(
-        QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale,
-      ).toBe(true)
+      expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale).toBe(
+        true,
+      )
       expect(QuotaSnapshot.known(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }))).toBe(false)
     }
   })
@@ -457,5 +457,83 @@ describe("QuotaSnapshot balance classification and gating selection (#1014 fix p
     const gating = QuotaSnapshot.gatingSnapshot([requests, balance], now)
     expect(gating?.planID).toBe("mixed-plan")
     expect(gating?.balance).toBe(true)
+  })
+})
+
+describe("QuotaSnapshot gating fallback evidence (#1341)", () => {
+  const unknownWindow = { name: "monthly", unit: "requests" } as ModelPlan.QuotaWindow
+
+  test("the fallback returns a known later window instead of an unknown first snapshot", () => {
+    const unknown = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    expect(QuotaSnapshot.known(unknown)).toBe(false)
+    const known = QuotaSnapshot.derive({ plan, window, totals: totals({ requests: 50 }), observedAt: now }, { now })
+    expect(QuotaSnapshot.known(known)).toBe(true)
+    const gating = QuotaSnapshot.gatingSnapshot([unknown, known], now)
+    expect(gating?.window).toBe("5-hour")
+    expect(gating && QuotaSnapshot.known(gating)).toBe(true)
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(false)
+  })
+
+  test("a gate armed by a later window can clear: the cleared known reading is selected over an unknown first snapshot", () => {
+    const unknown = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    const full = QuotaSnapshot.derive({ plan, window, totals: totals({ requests: 200 }), observedAt: now }, { now })
+    expect(QuotaSnapshot.gatingSnapshot([unknown, full], now)?.window).toBe("5-hour")
+    expect(QuotaSnapshot.isKnownFull(full, now)).toBe(true)
+
+    const later = now + 60_000
+    const cleared = QuotaSnapshot.derive(
+      { plan, window, totals: totals({ requests: 50 }), observedAt: later },
+      { now: later },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([unknown, cleared], later)
+    expect(gating?.window).toBe("5-hour")
+    expect(gating && QuotaSnapshot.isKnownFull(gating, later)).toBe(false)
+  })
+
+  test("an all-unknown set selects no known evidence and never reads as full", () => {
+    const first = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    const second = QuotaSnapshot.derive(
+      {
+        plan,
+        window: { name: "yearly", unit: "requests" } as ModelPlan.QuotaWindow,
+        totals: totals(),
+        observedAt: now,
+      },
+      { now },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([first, second], now)
+    expect(gating?.window).toBe("monthly")
+    expect(gating && QuotaSnapshot.known(gating)).toBe(false)
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(false)
+  })
+
+  test("a known balance snapshot still outranks a known windowed snapshot in the fallback", () => {
+    const creditPlan = { ...plan, coverage: "credits" } as ModelPlan.Plan
+    const balance = QuotaSnapshot.derive(
+      {
+        plan: creditPlan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 0.5 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(balance.balance).toBe(true)
+    expect(QuotaSnapshot.known(balance)).toBe(true)
+    const windowed = QuotaSnapshot.derive(
+      { plan, window, totals: totals({ requests: 50 }), observedAt: now + 60_000 },
+      { now: now + 60_000 },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([windowed, balance], now + 60_000)
+    expect(gating?.window).toBe("credits")
   })
 })
