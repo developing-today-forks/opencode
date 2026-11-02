@@ -57,6 +57,20 @@ const route = (
     ],
   ])
 
+describe("route system prompt (#1413)", () => {
+  test("config decoding carries the route's system prompt", () => {
+    const decoded = Schema.decodeUnknownSync(ConfigModelRoutes.Route)({
+      targets: [{ providerID: "anthropic", model: "claude-sonnet-4-5" }],
+      system: "You are a persona.",
+    })
+    expect(decoded.system).toBe("You are a persona.")
+    const bare = Schema.decodeUnknownSync(ConfigModelRoutes.Route)({
+      targets: [{ providerID: "anthropic", model: "claude-sonnet-4-5" }],
+    })
+    expect(bare.system).toBeUndefined()
+  })
+})
+
 describe("pool targets", () => {
   test("a glob target joins every matching model of its provider, in provider order", () => {
     const { leaves } = expand("r", route(["anthropic/*sonnet*", "anthropic/*opus*"]), definitions)

@@ -160,6 +160,8 @@ export interface Resolved {
   readonly routing?: {
     readonly routeID: ID
     readonly target: Ref
+    /** The addressed route's carried system prompt (#1413), when it declares one. */
+    readonly system?: string
     readonly policy: ModelRoute.Policy
     /** Requests per target before failing over. */
     readonly attempts: number
@@ -664,6 +666,7 @@ export const layer = Layer.effect(
           routing: {
             routeID: definition.id,
             target: current.ref,
+            ...(definition.system ? { system: definition.system } : {}),
             policy: definition.health,
             // Two requests by default: a single transient failure on a steady target is retried before the
             // route moves on. Rate limits skip the retry (see the runner). Set 1 to fail over at once.
