@@ -431,24 +431,36 @@ export const layer = (options?: Options) =>
       )
       yield* reloadLock.withPermit(reconcile(initial))
 
+      const writePatch = Effect.fnUntraced(function* (filepath: string, patch: Patch) {
+        const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
+        const updated = yield* Effect.try({
+          try: () =>
+            applyEdits(
+              text,
+              modify(text, ["shell"], patch.shell ?? undefined, {
+                formattingOptions: { tabSize: 2, insertSpaces: true },
+              }),
+            ),
+          catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
+        })
+        yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+      })
+
       const update = Effect.fn("Config.update")(
         function* (patch: Patch) {
+          // When an explicit config file is configured (OPENCODE_CONFIG), it is
+          // the runtime-writable layer: patches land there, so the global config
+          // file can stay a deliberate, tracked default (developing-today/code#4544).
+          if (initial.explicit) {
+            yield* writePatch(initial.explicit, patch)
+            yield* requestReload
+            return
+          }
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
           const filepath =
             (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
-          const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
-          const updated = yield* Effect.try({
-            try: () =>
-              applyEdits(
-                text,
-                modify(text, ["shell"], patch.shell ?? undefined, {
-                  formattingOptions: { tabSize: 2, insertSpaces: true },
-                }),
-              ),
-            catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
-          })
-          yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+          yield* writePatch(filepath, patch)
           yield* requestReload
         },
         (effect) => updateLock.withPermit(effect),
