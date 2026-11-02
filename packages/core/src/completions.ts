@@ -299,7 +299,9 @@ export const modelBody = (id: string) => {
   return undefined
 }
 
-export const errorBody = (message: string, type: string) => ({ error: { message, type } })
+export const errorBody = (message: string, type: string, code?: string) => ({
+  error: { message, type, ...(code ? { code } : {}) },
+})
 
 export const errorFrame = (message: string) => `data: ${JSON.stringify(errorBody(message, "server_error"))}\n\n`
 
@@ -400,16 +402,31 @@ export class ChatStreamTranslator {
 // the completions endpoint serves — route names and direct catalog
 // provider/model refs alike — is addressable here too. The dialect is
 // translated to and from the same internal shapes; nothing is excluded
-// because conversion is needed. Stateless like the completions door:
-// `previous_response_id` is rejected loudly instead of silently
-// dropping the caller's context, and reasoning items in the input
+// because conversion is needed. Reasoning items in the input
 // (provider-internal echoes) are accepted and skipped.
+//
+// Chaining (#1149, design §4): the call itself stays stateless and no
+// session is created, but every response is persisted in the façade's
+// private item store (`openai_facade_response`), so a caller can chain
+// with `previous_response_id` and send only the new input. The parse
+// below therefore keeps the request's normalized items next to the
+// translated input: the handler prepends the referenced row's stored
+// cumulative items via `chainResponsesInput` and persists the new
+// turn's cumulative snapshot. A `function_call_output` with no matching
+// `function_call` in the effective history is a loud 400, never a
+// silent drop.
 
 export const responseId = () => `resp_${randomBytes(12).toString("hex")}`
 
 export interface ParsedResponsesRequest {
   readonly modelLabel: string
+  /** The requested model ref as `provider/model`, before variant remapping. */
+  readonly modelRef: string
   readonly stream: boolean
+  readonly previousResponseId?: string
+  readonly instructions?: string
+  /** This turn's normalized input items, in Responses wire shape. */
+  readonly items: ReadonlyArray<Record<string, unknown>>
   readonly input: CompletionInput
 }
 
@@ -430,10 +447,158 @@ const responsesTextOf = (content: unknown): string | null => {
   return parts.join("")
 }
 
+/**
+ * One raw input item, normalized to the Responses wire shape the item
+ * store persists: message items carry their text as a single
+ * input_text/output_text part, function_call arguments stay the caller's
+ * JSON string, function_call_output is flattened to its text. Returns
+ * the item, null for an accepted-and-skipped item (reasoning echoes),
+ * or an error string.
+ */
+const normalizeResponsesItem = (item: unknown): Record<string, unknown> | null | string => {
+  if (!isRecord(item)) return "each input item must be an object"
+  if (item.type === "reasoning") return null
+  if (item.type === "function_call") {
+    if (typeof item.call_id !== "string" || typeof item.name !== "string")
+      return "function_call items must carry call_id and name"
+    if (typeof item.arguments === "string" && item.arguments) {
+      try {
+        JSON.parse(item.arguments)
+      } catch {
+        return `function_call ${item.call_id} arguments are not valid JSON`
+      }
+    } else if (item.arguments !== undefined && typeof item.arguments !== "string") {
+      return `function_call ${item.call_id} arguments must be a JSON string`
+    }
+    return {
+      type: "function_call",
+      call_id: item.call_id,
+      name: item.name,
+      arguments: typeof item.arguments === "string" && item.arguments ? item.arguments : "{}",
+    }
+  }
+  if (item.type === "function_call_output") {
+    if (typeof item.call_id !== "string") return "function_call_output items must carry call_id"
+    const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
+    if (text === null) return "function_call_output must carry text output"
+    return { type: "function_call_output", call_id: item.call_id, output: text }
+  }
+  if (item.type === "message" || item.type === undefined || typeof item.role === "string") {
+    if (typeof item.role !== "string") return "message items must carry a role"
+    const text = responsesTextOf(item.content)
+    if (text === null) {
+      if (item.role === "system" || item.role === "developer") return "system messages must carry text content"
+      if (item.role === "user") return "only text user content is supported by this door"
+      if (item.role === "assistant") return "only text assistant content is supported by this door"
+      return `unsupported message role: ${item.role}`
+    }
+    return {
+      type: "message",
+      role: item.role,
+      content: [{ type: item.role === "assistant" ? "output_text" : "input_text", text }],
+    }
+  }
+  return `unsupported input item type: ${String(item.type)}`
+}
+
+/** Normalized items for a whole `input` field: a bare string is one user message item. */
+const normalizeResponsesItems = (input: unknown): Array<Record<string, unknown>> | string => {
+  if (input === undefined) return []
+  if (typeof input === "string")
+    return [{ type: "message", role: "user", content: [{ type: "input_text", text: input }] }]
+  if (!Array.isArray(input)) return "input must be a string or an array of items"
+  const items: Array<Record<string, unknown>> = []
+  for (const raw of input) {
+    const item = normalizeResponsesItem(raw)
+    if (typeof item === "string") return item
+    if (item) items.push(item)
+  }
+  return items
+}
+
+/**
+ * The call_id of the first `function_call_output` with no matching
+ * `function_call` in the item list, or undefined when every output is
+ * matched. Matching is by call_id across the whole effective history —
+ * for a chained request that is the stored items plus the new items.
+ */
+export const unmatchedFunctionCallOutput = (items: ReadonlyArray<Record<string, unknown>>): string | undefined => {
+  const calls = new Set<string>()
+  for (const item of items) if (item.type === "function_call" && typeof item.call_id === "string") calls.add(item.call_id)
+  for (const item of items)
+    if (item.type === "function_call_output" && typeof item.call_id === "string" && !calls.has(item.call_id))
+      return item.call_id
+  return undefined
+}
+
+/** Normalized items → the internal system/messages shapes, in item order. */
+const responsesItemsToMessages = (
+  items: ReadonlyArray<Record<string, unknown>>,
+): { system: string[]; messages: Array<Message | Message.Input> } | string => {
+  const system: string[] = []
+  const messages: Array<Message | Message.Input> = []
+  const toolNames = new Map<string, string>()
+  for (const item of items) {
+    if (item.type === "function_call") {
+      if (typeof item.call_id !== "string" || typeof item.name !== "string")
+        return "function_call items must carry call_id and name"
+      let input: unknown = {}
+      if (typeof item.arguments === "string" && item.arguments) {
+        try {
+          input = JSON.parse(item.arguments)
+        } catch {
+          return `function_call ${item.call_id} arguments are not valid JSON`
+        }
+      }
+      toolNames.set(item.call_id, item.name)
+      messages.push(Message.assistant([ToolCallPart.make({ id: item.call_id, name: item.name, input })]))
+      continue
+    }
+    if (item.type === "function_call_output") {
+      if (typeof item.call_id !== "string") return "function_call_output items must carry call_id"
+      const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
+      if (text === null) return "function_call_output must carry text output"
+      messages.push(
+        Message.tool(
+          ToolResultPart.make({
+            id: item.call_id,
+            name: toolNames.get(item.call_id) ?? "tool",
+            result: text,
+            resultType: "text",
+          }),
+        ),
+      )
+      continue
+    }
+    if (item.type === "message") {
+      const text = responsesTextOf(item.content)
+      if (item.role === "system" || item.role === "developer") {
+        if (text === null) return "system messages must carry text content"
+        system.push(text)
+        continue
+      }
+      if (item.role === "user") {
+        if (text === null) return "only text user content is supported by this door"
+        messages.push(Message.user(text))
+        continue
+      }
+      if (item.role === "assistant") {
+        if (text === null) return "only text assistant content is supported by this door"
+        if (text) messages.push(Message.assistant(text))
+        continue
+      }
+      return `unsupported message role: ${String(item.role)}`
+    }
+    return `unsupported input item type: ${String(item.type)}`
+  }
+  return { system, messages }
+}
+
 export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
   if (!isRecord(body)) return { ok: false, error: "request body must be a JSON object" }
-  if (body.previous_response_id !== undefined)
-    return { ok: false, error: "previous_response_id is not supported by this stateless door" }
+  if (body.previous_response_id !== undefined && (typeof body.previous_response_id !== "string" || !body.previous_response_id))
+    return { ok: false, error: "previous_response_id must be a non-empty string" }
+  const previousResponseId = typeof body.previous_response_id === "string" ? body.previous_response_id : undefined
   const model = parseModel(body.model)
   if (typeof model === "string") return { ok: false, error: model }
 
@@ -458,79 +623,20 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
   if (isRecord(body.text) && isRecord(body.text.format) && body.text.format.type === "json_schema")
     return { ok: false, error: "structured output formats are not supported by this door" }
 
-  const system: string[] = []
-  if (typeof body.instructions === "string" && body.instructions) system.push(body.instructions)
-  const messages: Array<Message | Message.Input> = []
-  const toolNames = new Map<string, string>()
-  const pushMessage = (role: unknown, content: unknown): string | null => {
-    if (role === "system" || role === "developer") {
-      const text = responsesTextOf(content)
-      if (text === null) return "system messages must carry text content"
-      system.push(text)
-      return null
-    }
-    if (role === "user") {
-      const text = responsesTextOf(content)
-      if (text === null) return "only text user content is supported by this door"
-      messages.push(Message.user(text))
-      return null
-    }
-    if (role === "assistant") {
-      const text = responsesTextOf(content)
-      if (text === null) return "only text assistant content is supported by this door"
-      if (text) messages.push(Message.assistant(text))
-      return null
-    }
-    return `unsupported message role: ${String(role)}`
+  const instructions = typeof body.instructions === "string" && body.instructions ? body.instructions : undefined
+  const items = normalizeResponsesItems(body.input)
+  if (typeof items === "string") return { ok: false, error: items }
+  // Without a chain, the effective history is this request's items alone,
+  // so an unmatched output can be rejected here. With a chain, the match
+  // may live in the stored items: `chainResponsesInput` re-checks against
+  // the combined history.
+  if (!previousResponseId) {
+    const unmatched = unmatchedFunctionCallOutput(items)
+    if (unmatched) return { ok: false, error: `function_call_output ${unmatched} has no matching function_call` }
   }
-
-  if (typeof body.input === "string") {
-    messages.push(Message.user(body.input))
-  } else if (Array.isArray(body.input)) {
-    for (const item of body.input) {
-      if (!isRecord(item)) return { ok: false, error: "each input item must be an object" }
-      if (item.type === "reasoning") continue
-      if (item.type === "function_call") {
-        if (typeof item.call_id !== "string" || typeof item.name !== "string")
-          return { ok: false, error: "function_call items must carry call_id and name" }
-        let input: unknown = {}
-        if (typeof item.arguments === "string" && item.arguments) {
-          try {
-            input = JSON.parse(item.arguments)
-          } catch {
-            return { ok: false, error: `function_call ${item.call_id} arguments are not valid JSON` }
-          }
-        }
-        toolNames.set(item.call_id, item.name)
-        messages.push(Message.assistant([ToolCallPart.make({ id: item.call_id, name: item.name, input })]))
-        continue
-      }
-      if (item.type === "function_call_output") {
-        if (typeof item.call_id !== "string") return { ok: false, error: "function_call_output items must carry call_id" }
-        const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
-        if (text === null) return { ok: false, error: "function_call_output must carry text output" }
-        messages.push(
-          Message.tool(
-            ToolResultPart.make({
-              id: item.call_id,
-              name: toolNames.get(item.call_id) ?? "tool",
-              result: text,
-              resultType: "text",
-            }),
-          ),
-        )
-        continue
-      }
-      if (item.type === "message" || item.type === undefined || typeof item.role === "string") {
-        const error = pushMessage(item.role, item.content)
-        if (error) return { ok: false, error }
-        continue
-      }
-      return { ok: false, error: `unsupported input item type: ${String(item.type)}` }
-    }
-  } else if (body.input !== undefined) {
-    return { ok: false, error: "input must be a string or an array of items" }
-  }
+  const converted = responsesItemsToMessages(items)
+  if (typeof converted === "string") return { ok: false, error: converted }
+  const system = [...(instructions ? [instructions] : []), ...converted.system]
 
   // Responses carries reasoning effort on the request; the fork carries
   // it as the model variant. Apply it when the ref has no variant yet.
@@ -543,11 +649,15 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
     ok: true,
     value: {
       modelLabel: model.label,
+      modelRef: `${String(model.ref.providerID)}/${String(model.ref.id)}`,
       stream: body.stream === true,
+      ...(previousResponseId ? { previousResponseId } : {}),
+      ...(instructions ? { instructions } : {}),
+      items,
       input: {
         model: ref,
         system: system.length ? system.join("\n") : undefined,
-        messages,
+        messages: converted.messages,
         tools: tools.length ? tools : undefined,
         toolChoice,
         generation: {
@@ -556,6 +666,34 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
           ...(max !== undefined ? { maxTokens: max } : {}),
         },
       },
+    },
+  }
+}
+
+/**
+ * The effective input for a chained request: the referenced response's
+ * stored cumulative items followed by this turn's new items, converted
+ * as one history (so a new `function_call_output` matches a stored
+ * `function_call` by call_id, name included). The request's own model,
+ * tools and generation options are kept; `instructions` stay per-request
+ * and lead the system text, as in an unchained parse.
+ */
+export const chainResponsesInput = (
+  parsed: ParsedResponsesRequest,
+  storedItems: ReadonlyArray<Record<string, unknown>>,
+): { readonly ok: true; readonly input: CompletionInput } | { readonly ok: false; readonly error: string } => {
+  const combined = [...storedItems, ...parsed.items]
+  const unmatched = unmatchedFunctionCallOutput(combined)
+  if (unmatched) return { ok: false, error: `function_call_output ${unmatched} has no matching function_call` }
+  const converted = responsesItemsToMessages(combined)
+  if (typeof converted === "string") return { ok: false, error: converted }
+  const system = [...(parsed.instructions ? [parsed.instructions] : []), ...converted.system]
+  return {
+    ok: true,
+    input: {
+      ...parsed.input,
+      system: system.length ? system.join("\n") : undefined,
+      messages: converted.messages,
     },
   }
 }
@@ -582,6 +720,7 @@ export const responsesBody = (args: {
   readonly created: number
   readonly model: string
   readonly response: LLMResponse
+  readonly previousResponseId?: string
 }) => {
   const output: Array<Record<string, unknown>> = []
   const text = args.response.text
@@ -608,6 +747,7 @@ export const responsesBody = (args: {
     created_at: args.created,
     model: args.model,
     status: "completed",
+    ...(args.previousResponseId ? { previous_response_id: args.previousResponseId } : {}),
     output,
     ...(args.response.usage ? { usage: responsesUsageBody(args.response.usage) } : {}),
     parallel_tool_calls: true,
@@ -629,17 +769,62 @@ const responsesFrame = (type: string, data: Record<string, unknown>) =>
  */
 export class ResponsesStreamTranslator {
   failed = false
+  /** True once the finish event arrived: the response completed and can be persisted for chaining. */
+  completed = false
+  /** Usage from the finish event, when the provider reported it. */
+  usage: Usage | undefined
   private textStarted = false
   private textIndex = 0
   private nextIndex = 0
+  private text = ""
   private readonly toolSlots = new Map<string, { index: number; name: string; args: string }>()
 
   constructor(
-    private readonly meta: { readonly id: string; readonly created: number; readonly model: string },
+    private readonly meta: {
+      readonly id: string
+      readonly created: number
+      readonly model: string
+      readonly previousResponseId?: string
+    },
   ) {}
 
   private base(status: string) {
-    return { id: this.meta.id, object: "response", created_at: this.meta.created, model: this.meta.model, status, output: [] }
+    return {
+      id: this.meta.id,
+      object: "response",
+      created_at: this.meta.created,
+      model: this.meta.model,
+      status,
+      ...(this.meta.previousResponseId ? { previous_response_id: this.meta.previousResponseId } : {}),
+      output: [],
+    }
+  }
+
+  /**
+   * The completed response's output items, in the same wire shape
+   * `responsesBody` renders for a non-streamed response — what the item
+   * store persists so a streamed response can be chained from (#1149).
+   */
+  outputItems(): Array<Record<string, unknown>> {
+    const output: Array<Record<string, unknown>> = []
+    if (this.text)
+      output.push({
+        type: "message",
+        id: `msg_${this.meta.id}`,
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: this.text, annotations: [] }],
+      })
+    for (const [id, slot] of [...this.toolSlots.entries()].sort((a, b) => a[1].index - b[1].index))
+      output.push({
+        type: "function_call",
+        id: `fc_${id}`,
+        call_id: id,
+        name: slot.name,
+        arguments: slot.args || "{}",
+        status: "completed",
+      })
+    return output
   }
 
   start(): string {
@@ -653,6 +838,7 @@ export class ResponsesStreamTranslator {
           this.textStarted = true
           this.textIndex = this.nextIndex++
         }
+        this.text += event.text
         return [
           responsesFrame("response.output_text.delta", {
             item_id: `msg_${this.meta.id}`,
@@ -719,6 +905,8 @@ export class ResponsesStreamTranslator {
         ]
       }
       case "finish":
+        this.completed = true
+        this.usage = event.usage
         return [
           responsesFrame("response.completed", {
             response: {

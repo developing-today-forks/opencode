@@ -244,6 +244,20 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`openai_facade_response\` (
+          \`id\` text PRIMARY KEY,
+          \`time_created\` integer NOT NULL,
+          \`time_expires\` integer NOT NULL,
+          \`previous_response_id\` text,
+          \`depth\` integer NOT NULL,
+          \`model\` text NOT NULL,
+          \`resolved_model\` text NOT NULL,
+          \`request_items\` text NOT NULL,
+          \`response_items\` text NOT NULL,
+          \`usage\` text
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`permission\` (
           \`id\` text PRIMARY KEY,
           \`project_id\` text NOT NULL,
@@ -457,6 +471,12 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         `CREATE INDEX \`route_health_target_time_idx\` ON \`route_health\` (\`provider_id\`,\`model_id\`,\`time\`);`,
       )
       yield* tx.run(`CREATE INDEX \`route_note_time_idx\` ON \`route_note\` (\`time\`);`)
+      yield* tx.run(
+        `CREATE INDEX \`openai_facade_response_expires_idx\` ON \`openai_facade_response\` (\`time_expires\`);`,
+      )
+      yield* tx.run(
+        `CREATE INDEX \`openai_facade_response_previous_idx\` ON \`openai_facade_response\` (\`previous_response_id\`);`,
+      )
       yield* tx.run(
         `CREATE UNIQUE INDEX \`permission_project_action_resource_idx\` ON \`permission\` (\`project_id\`,\`action\`,\`resource\`);`,
       )

@@ -3,7 +3,7 @@ import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, messagesErrorBody, messagesErrorFrame, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
+import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -264,9 +264,75 @@ describe("responses door translation", () => {
     expect(parsed.value.input.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"])
   })
 
-  test("previous_response_id is rejected loudly", () => {
+  test("previous_response_id is accepted and carried with the normalized items", () => {
     const parsed = parseResponsesRequest({ model: "workhorse", input: "x", previous_response_id: "resp_1" })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.previousResponseId).toBe("resp_1")
+    expect(parsed.value.items).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "x" }] },
+    ])
+    expect(parseResponsesRequest({ model: "workhorse", input: "x", previous_response_id: 42 }).ok).toBe(false)
+    expect(parseResponsesRequest({ model: "workhorse", input: "x", previous_response_id: "" }).ok).toBe(false)
+  })
+
+  test("an unmatched function_call_output is a loud parse error without a chain", () => {
+    const parsed = parseResponsesRequest({
+      model: "workhorse",
+      input: [{ type: "function_call_output", call_id: "call_missing", output: "sunny" }],
+    })
     expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.error).toContain("call_missing")
+  })
+
+  test("chainResponsesInput prepends the stored cumulative items to the new input", () => {
+    const stored = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Weather in Austin?" }] },
+      { type: "function_call", call_id: "call_9", name: "get_weather", arguments: "{}" },
+    ]
+    const parsed = parseResponsesRequest({
+      model: "workhorse",
+      input: [
+        { type: "function_call_output", call_id: "call_9", output: "sunny" },
+        { role: "user", content: [{ type: "input_text", text: "Thanks" }] },
+      ],
+      previous_response_id: "resp_1",
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    // The output matches only a stored call: parse alone must not reject it.
+    const chained = chainResponsesInput(parsed.value, stored)
+    if (!chained.ok) throw new Error(chained.error)
+    expect(chained.input.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user"])
+    // The tool result carries the stored call's name, not the fallback.
+    expect(JSON.stringify(chained.input.messages[2]?.content)).toContain("get_weather")
+    expect(JSON.stringify(chained.input.messages[2]?.content)).toContain("sunny")
+  })
+
+  test("chainResponsesInput rejects an output matched by neither stored nor new items", () => {
+    const parsed = parseResponsesRequest({
+      model: "workhorse",
+      input: [{ type: "function_call_output", call_id: "call_nope", output: "sunny" }],
+      previous_response_id: "resp_1",
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const chained = chainResponsesInput(parsed.value, [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    ])
+    expect(chained.ok).toBe(false)
+    if (!chained.ok) expect(chained.error).toContain("call_nope")
+  })
+
+  test("responses stream translator accumulates the output items for the item store", () => {
+    const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
+    translator.push(LLMEvent.textDelta({ id: "block_1", text: "Hel" }))
+    translator.push(LLMEvent.textDelta({ id: "block_1", text: "lo" }))
+    translator.push(LLMEvent.toolCall({ id: "call_1", name: "lookup", input: { city: "Austin" } }))
+    translator.push(LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 5, outputTokens: 2 } }))
+    expect(translator.completed).toBe(true)
+    expect(translator.usage?.inputTokens).toBe(5)
+    const items = translator.outputItems()
+    expect(items[0]).toMatchObject({ type: "message", role: "assistant" })
+    expect(JSON.stringify(items[0])).toContain("Hello")
+    expect(items[1]).toMatchObject({ type: "function_call", call_id: "call_1", name: "lookup", arguments: "{\"city\":\"Austin\"}" })
   })
 
   test("responses body carries message output and usage", () => {
