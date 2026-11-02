@@ -2780,6 +2780,7 @@ export type ConfigEntry =
             resource: string
             effect: "allow" | "deny"
           }>
+          model_route_demotion?: { threshold?: number; window_ms?: number }
           routes?: {
             models?: ConfigModelRoutes
             providers?: ConfigModelRouteProviderRoutes
@@ -6673,6 +6674,10 @@ export type ServerCompletionsEmbeddingsOutput = any
 export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
 
 export type ServerCompletionsMessagesOutput = any
+
+export type ServerCompletionsSystemoneInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsSystemoneOutput = any
 
 export type ServerCompletionsModelsOutput = any
 
