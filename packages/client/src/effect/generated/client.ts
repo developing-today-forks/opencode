@@ -121,6 +121,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsMessagesInput,
+  ServerCompletionsMessagesOutput,
   ServerCompletionsModelsOutput,
   ServerCompletionsModelInput,
   ServerCompletionsModelOutput,
@@ -939,6 +941,15 @@ const EndpointServerCompletionsEmbeddings =
       ),
     )
 
+type ServerCompletionsMessagesRequest = Parameters<RawClient["server.completions"]["completions.messages"]>[0]
+const EndpointServerCompletionsMessages =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsMessagesInput) =>
+    preserveEffect<ServerCompletionsMessagesOutput>()(
+      raw["completions.messages"]({ payload: input["payload"] } as ServerCompletionsMessagesRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
 const EndpointServerCompletionsModels = (raw: RawClient["server.completions"]) => () =>
   preserveEffect<ServerCompletionsModelsOutput>()(raw["completions.models"]({}).pipe(Effect.mapError(mapClientError)))
 
@@ -959,6 +970,7 @@ const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
   chat: EndpointServerCompletionsChat(raw),
   responses: EndpointServerCompletionsResponses(raw),
   embeddings: EndpointServerCompletionsEmbeddings(raw),
+  messages: EndpointServerCompletionsMessages(raw),
   models: EndpointServerCompletionsModels(raw),
   model: EndpointServerCompletionsModel(raw),
   modelRef: EndpointServerCompletionsModelRef(raw),
