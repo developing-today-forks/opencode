@@ -33,7 +33,7 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
         identifier: "completions.responses",
         summary: "Create a response (OpenAI-compatible)",
         description:
-          "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored and no response is retained (previous_response_id is rejected). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
+          "The universal door in the Responses dialect: the same models the completions endpoint serves — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Responses are retained in the façade's private item store, so callers chain with previous_response_id (bounded at 64 links, 24h TTL; an expired or unknown id answers 404 response_not_found). Answers in the OpenAI Responses wire format, streamed as typed SSE events when the payload asks for it.",
       }),
     ),
   )
@@ -48,6 +48,34 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
         summary: "Create embeddings (OpenAI-compatible)",
         description:
           "Embed text with a registered embedding model. The model is a catalog ref (local-embed/snowflake-arctic-embed-m-v2.0, the first registered backend — a local Snowflake Arctic Embed server) or a bare embedding model id, resolved in-process against the embedding catalog; each registered model carries its own dimension and supported dimensions values, and an unsupported dimensions request is rejected. Input arrays pass through faithfully (varied lengths, no truncation at this layer). Answers in the OpenAI embeddings wire format; every call records a route_attempt row with session_id NULL like the other doors.",
+      }),
+    ),
+  )
+  .add(
+    HttpApiEndpoint.post("completions.messages", "/v1/messages", {
+      payload: Schema.Record(Schema.String, Schema.Unknown),
+      success: Schema.Unknown,
+      error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.messages",
+        summary: "Create a message (Anthropic-compatible)",
+        description:
+          "The universal door in the Anthropic Messages dialect: the same models the other doors serve — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Answers in the Anthropic Messages wire format, streamed as typed SSE events (message_start, content_block_*, message_delta, message_stop) when the payload asks for it. Server authorization is the server's own, as on the other doors; no Anthropic-style x-api-key handling is added.",
+      }),
+    ),
+  )
+  .add(
+    HttpApiEndpoint.post("completions.systemone", "/v1/systemone", {
+      payload: Schema.Record(Schema.String, Schema.Unknown),
+      success: Schema.Unknown,
+      error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.systemone",
+        summary: "Evaluate a System One decision request (systemone-standard)",
+        description:
+          "The systemone-standard door for decision-model JSON traffic (#1410): state + typed questions in, probabilities out, never text. Reproduces the standalone clef proxy's caller-visible contract exactly — the plain {error} envelope, the Clef model grammar, the {answers} success shape — so existing systemone clients (OpenChamber's Jev classifier client, clef callers) repoint with no contract change. Routed to the Cloudflare AI gateway Workers AI run endpoint for the Clef family through the fork's read-in-place credential resolution (caller Bearer, then env, then the Cloudflare config files). No session is created or stored; every attempt records a route_attempt row with session_id NULL like the other doors.",
       }),
     ),
   )

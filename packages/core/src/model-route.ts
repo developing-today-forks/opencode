@@ -421,8 +421,8 @@ export interface FailureHint {
 }
 
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
- * A stated retry-after is believed as-is and never multiplied; every other class doubles its
- * bench per consecutive failure (auth and quota start from the long bench), capped at a day.
+ * A stated retry-after is believed as-is and never multiplied; every other class multiplies its
+ * bench by the configured bench multiplier per consecutive failure (auth and quota start from the long bench), capped at maxCooldownMs.
  * A quota bench may end sooner at a trustworthy window reset; that reset is remembered on
  * the state, and one learned later arms the bench the same way (armBenchProbe). The count survives recover() and
  * resets only on a success, so a permanently failing target backs off instead of being retried at
@@ -445,7 +445,7 @@ const bench = (
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
-      : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
+      : Math.min(base * ladder.multiplier ** (state.consecutiveFailures - 1), ladder.maxCooldownMs)
   const until = now + cooldown
   state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
   const reason = hint?.quota
@@ -763,6 +763,10 @@ const DEFAULT_SETTINGS: Settings = {
 
 let settings: Settings = DEFAULT_SETTINGS
 
+/** Sets the process-wide fallback layer of `Settings`. Since #1151 the demotion half of
+ * this is only a fallback: a Location's `experimental.model_route_demotion` config,
+ * registered per Location through `onDemotionConfig`, overrides it field by field for
+ * that Location's traffic, and the compiled defaults apply where neither is set. */
 export const configure = (
   next: Partial<{ escalation: Partial<Settings["escalation"]>; quota: Partial<Settings["quota"]> }>,
 ) => {
@@ -864,6 +868,84 @@ const activeSettings = (location?: string): Settings => {
 
 export const currentSettings = (location?: string) => activeSettings(location)
 
+/** The quota demotion policy as config supplies it (#1151): `experimental.model_route_demotion
+ * { threshold, window_ms }` in the model-routes plugin's shape. Both fields are optional; an
+ * unset field keeps the layer below it. */
+export interface DemotionConfig {
+  readonly threshold?: number
+  readonly windowMs?: number
+}
+
+/** A demotion policy with every field resolved: the values `demoted` judges by. */
+export interface DemotionPolicy {
+  readonly threshold: number
+  readonly windowMs: number
+}
+
+/** The demotion defaults: today's hardcoded values, so an unconfigured Location behaves
+ * exactly as the machinery always has. */
+export const DEFAULT_DEMOTION_POLICY: DemotionPolicy = {
+  threshold: DEFAULT_SETTINGS.quota.demoteAfter,
+  windowMs: DEFAULT_SETTINGS.quota.windowMs,
+}
+
+/** Demotion policy readers keyed by Location directory (#1151, design §6 of the façades
+ * spec). The model-routes config plugin runs once per Location graph, so each registration
+ * belongs to that graph's Location alone: a module-global setter (the old shape of
+ * `ModelRoute.configure` for this policy) would let whichever Location loaded last rewrite
+ * every other Location's demotion behaviour. */
+const demotionReaders = new Map<string, () => DemotionConfig | undefined>()
+
+/** Registers where one Location's demotion policy comes from (the model-routes config
+ * plugin, keyed by that Location's directory). Read lazily at every use, so a config
+ * reload is honored without re-registering. The empty key is the unscoped registration
+ * (test seam and single-Location hosts). Returns the function that removes this
+ * registration again, for when the Location's graph closes. */
+export const onDemotionConfig = (read: () => DemotionConfig | undefined, location = "") => {
+  demotionReaders.set(location, read)
+  return () => {
+    if (demotionReaders.get(location) === read) demotionReaders.delete(location)
+  }
+}
+
+/** The demotion config in force for a Location. A caller that knows its Location gets
+ * exactly that Location's reader. An unscoped read serves the unscoped registration, or
+ * the single registered Location when there is only one; with several Locations an
+ * unscoped read cannot know which one it serves, so it gets no Location's config rather
+ * than another Location's policy. */
+const demotionConfig = (location?: string): DemotionConfig | undefined => {
+  if (location !== undefined) return demotionReaders.get(location)?.()
+  const unscoped = demotionReaders.get("")
+  if (unscoped) return unscoped()
+  if (demotionReaders.size === 1) return demotionReaders.values().next().value?.()
+  return undefined
+}
+
+/** The demotion policy in force for a Location: its `model_route_demotion` config over
+ * the fallback layer (`configure()` over the compiled defaults), field by field. */
+export const demotionPolicy = (location?: string): DemotionPolicy => {
+  const config = demotionConfig(location)
+  const fallback = activeSettings().quota
+  return {
+    threshold: config?.threshold ?? fallback.demoteAfter,
+    windowMs: config?.windowMs ?? fallback.windowMs,
+  }
+}
+
+/** The widest demotion window any registered Location judges by. Quota events are one
+ * shared history (the hot cache over the route_attempt ledger's failure records), so
+ * recording retains the union of windows; `demoted` applies the judging Location's own
+ * window over what is retained. With nothing configured this is exactly the fallback
+ * window, as before. */
+const retainedDemotionWindow = () => {
+  let window = activeSettings().quota.windowMs
+  for (const read of demotionReaders.values()) {
+    const configured = read()?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
  * target-level read would call a repeatedly failing credential steady forever. */
@@ -887,13 +969,15 @@ export const escalates = (target: Model.Ref, credentialID?: string, location?: s
 const quotaEvents = new Map<string, number[]>()
 
 /** True when a target has hit its quota errors often enough recently to be put last. With a
- * credentialID, only that credential's quota errors count: the demotion is per credential (#6). */
+ * credentialID, only that credential's quota errors count: the demotion is per credential (#6).
+ * The threshold and window are the demotion policy for the target's Location (#1151) when
+ * the caller names one, resolved per Location in `demotionPolicy`. */
 export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string, location?: string) => {
-  const quota = activeSettings(location).quota
+  const policy = demotionPolicy(location)
   const recent = (quotaEvents.get(credentialID ? credentialKey(target, credentialID) : key(target)) ?? []).filter(
-    (at) => now - at <= quota.windowMs,
+    (at) => now - at <= policy.windowMs,
   )
-  return recent.length >= quota.demoteAfter
+  return recent.length >= policy.threshold
 }
 
 // The quota-event history retained for a target: the widest demotion window any
@@ -910,7 +994,7 @@ const retainedQuotaWindowMs = () => {
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedQuotaWindowMs())
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -1250,7 +1334,9 @@ export const shouldFeedQuota = (now = Date.now(), location?: string) => {
 }
 
 /** The longest a single exhaustion reading may hold a gate: a stated reset further out than
- * this is capped rather than believed (mirrors ModelRouteTuning.MAX_QUOTA_RESET_MS). */
+ * this is capped rather than believed. This is the single source of truth for the quota-reset
+ * ceiling: ModelRouteTuning derives its prediction bound from the configured value
+ * (currentConstants().quotaGate.maxMs) instead of keeping a second constant in step by hand. */
 const QUOTA_GATE_MAX_MS = 30 * 86_400_000
 /** The hold when an exhaustion error states no usable reset: long enough to stop a 429 on
  * every turn, short enough that a recovered pool is retried promptly (mirrors the tuning
@@ -2233,18 +2319,23 @@ export const nextTarget = (
      * below every non-demoted tier instead, keeping its weight order among the demoted, and still
      * serves as last resort. A group is demoted only when every door under it is. Other modes never
      * read this. */
+    /** Tier keys are rounded to 12 decimal places: a group's weight averages its leaves'
+     * adjusted weights, so (0.1 + 0.1 + 0.1) / 3 lands on 0.10000000000000002 while an
+     * equally-weighted leaf sits at exactly 0.1 — computation noise must not split one
+     * tier in two (#1421). */
+    const tierKey = (weight: number) => Math.round(weight * 1e12) / 1e12
     const tiers =
       node.selection === "round-robin"
         ? node.children.map((child, position) => {
             const base = node.weights[position] ?? 1
             if (child.leaf !== undefined)
               return {
-                weight: traces[position]?.adjustment ?? base,
+                weight: tierKey(traces[position]?.adjustment ?? base),
                 demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf), location),
               }
             if (child.node !== undefined)
               return {
-                weight: base * factor(child.node, rules, nodePath, "adjustment"),
+                weight: tierKey(base * factor(child.node, rules, nodePath, "adjustment")),
                 demoted: allDemoted(child.node),
               }
             return { weight: base, demoted: false }
@@ -2464,8 +2555,7 @@ export const hedgeHome = (routeID: string, sessionID: string, location?: string)
  * hold — assembled here, after the mechanisms they parameterize, from the named constant at
  * each one. The defaults ARE today's behavior; config (experimental.routes.settings)
  * or configureConstants() replaces a value only where it sets one. Deliberately absent, as
- * invariants rather than knobs: the backoff exponent cap (30 — an overflow guard; 2^30 at a
- * 1ms base already exceeds the 24h bench cap, so the cap always binds first), the health /
+ * invariants rather than knobs: the health /
  * session / continuity LRU bounds, the recent-failure ring (200) and quota-event history
  * (50) caps, and the usage-accounting bucket widths. */
 export interface Constants {

@@ -5533,6 +5533,146 @@
         }
       }
     },
+    "/v1/embeddings": {
+      "post": {
+        "tags": ["completions"],
+        "operationId": "completions.embeddings",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Embed text with a registered embedding model. The model is a catalog ref (local-embed/snowflake-arctic-embed-m-v2.0, the first registered backend — a local Snowflake Arctic Embed server) or a bare embedding model id, resolved in-process against the embedding catalog; each registered model carries its own dimension and supported dimensions values, and an unsupported dimensions request is rejected. Input arrays pass through faithfully (varied lengths, no truncation at this layer). Answers in the OpenAI embeddings wire format; every call records a route_attempt row with session_id NULL like the other doors.",
+        "summary": "Create embeddings (OpenAI-compatible)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "tags": ["completions"],
+        "operationId": "completions.messages",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The universal door in the Anthropic Messages dialect: the same models the other doors serve — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Answers in the Anthropic Messages wire format, streamed as typed SSE events (message_start, content_block_*, message_delta, message_stop) when the payload asks for it. Server authorization is the server's own, as on the other doors; no Anthropic-style x-api-key handling is added.",
+        "summary": "Create a message (Anthropic-compatible)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/v1/models": {
       "get": {
         "tags": ["completions"],

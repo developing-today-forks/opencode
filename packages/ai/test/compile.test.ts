@@ -14,7 +14,7 @@ import { AnthropicMessages, OpenAIChat, OpenAIResponses } from "../src/protocols
 import { Auth, LLMClient } from "../src/route.js"
 import { compileRequest } from "../src/route/client.js"
 import { it } from "./lib/effect.js"
-import { dynamicResponse } from "./lib/http.js"
+import { dynamicResponse, fixedResponse } from "./lib/http.js"
 import { deltaChunk } from "./lib/openai-chunks.js"
 import { sseEvents } from "./lib/sse.js"
 
@@ -462,6 +462,46 @@ describe("request option precedence", () => {
 
       expect(withoutMaxTokens.body.max_tokens).toBe(32_000)
       expect(withMaxTokens.body.max_tokens).toBe(8_000)
+    }),
+  )
+})
+
+describe("http.rawBody pass-through (#1146)", () => {
+  it.effect("sends the raw body byte-for-byte and still decodes the response through the protocol", () =>
+    Effect.gen(function* () {
+      const seen: string[] = []
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: "https://api.openai.test/v1" }, auth: Auth.bearer("test") })
+        .model({ id: "gpt-4o-mini" })
+      const raw = `{"model":"gpt-4o-mini", "stream":true,  "messages":[{"role":"user","content":"hi"}], "vendor_extension":{"x":1}}`
+      const response = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello.", http: { rawBody: raw } })).pipe(
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.sync(() => {
+              seen.push(input.text)
+              return input.respond(sseEvents(deltaChunk({ content: "OK" }), deltaChunk({}, "stop")), {
+                headers: { "content-type": "text/event-stream" },
+              })
+            }),
+          ),
+        ),
+      )
+      expect(seen).toEqual([raw])
+      expect(response.text).toBe("OK")
+    }),
+  )
+
+  it.effect("rejects a raw body that is not a JSON object", () =>
+    Effect.gen(function* () {
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: "https://api.openai.test/v1" }, auth: Auth.bearer("test") })
+        .model({ id: "gpt-4o-mini" })
+      const result = yield* Effect.result(
+        LLMClient.generate(LLM.request({ model, prompt: "Say hello.", http: { rawBody: "[1,2]" } })).pipe(
+          Effect.provide(fixedResponse(sseEvents(deltaChunk({}, "stop")))),
+        ),
+      )
+      expect(result._tag).toBe("Failure")
     }),
   )
 })

@@ -1647,9 +1647,12 @@ function requiredBetaHeaders(body: Pick<AnthropicMessagesBody, "messages" | "con
   // model and ignores it where unsupported, while manual-thinking models need
   // it for thinking between tool calls.
   const betas: string[] = ["interleaved-thinking-2025-05-14"]
-  const requestsCompaction = (body.context_management?.edits.length ?? 0) > 0
+  const requestsCompaction = (body.context_management?.edits?.length ?? 0) > 0
+  // A verbatim pass-through body (#1146) may carry string message content,
+  // which the Messages dialect allows; only array content can replay a
+  // compaction block.
   const replaysCompaction = body.messages.some((message) =>
-    message.content.some((block) => block.type === "compaction"),
+    Array.isArray(message.content) && message.content.some((block) => block.type === "compaction"),
   )
   if (requestsCompaction || replaysCompaction) betas.push("compact-2026-01-12")
 

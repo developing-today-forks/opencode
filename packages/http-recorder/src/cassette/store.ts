@@ -170,14 +170,18 @@ export const fileSystem = (
               // created: a wx collision leaves the other writer's file
               // untouched.
               let created = false
-              yield* fs.writeFileString(temporary, formatCassette(cassette), { flag: "wx", mode: 0o600 }).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
+              yield* Effect.gen(function* () {
+                yield* Effect.scoped(
+                  Effect.gen(function* () {
+                    const handle = yield* fs.open(temporary, { flag: "wx", mode: 0o600 })
                     created = true
+                    yield* handle.writeAll(new TextEncoder().encode(formatCassette(cassette)))
                   }),
-                ),
-                Effect.flatMap(() => fs.chmod(temporary, 0o600)),
-                Effect.flatMap(() => renameWithRetry(temporary, target)),
+                )
+                yield* fs.chmod(temporary, 0o600)
+                yield* renameWithRetry(temporary, target)
+                created = false
+              }).pipe(
                 Effect.onError(() =>
                   created ? fs.remove(temporary, { force: true }).pipe(Effect.ignore) : Effect.void,
                 ),

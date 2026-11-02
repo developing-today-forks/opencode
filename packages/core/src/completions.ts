@@ -9,6 +9,7 @@ export * as Completions from "./completions.js"
  * (a 400 the caller can see) instead of being silently dropped.
  */
 import {
+  Media,
   Message,
   ToolCallPart,
   ToolResultPart,
@@ -270,7 +271,17 @@ export const completionBody = (args: {
 
 export const modelsBody = () => ({
   object: "list",
-  data: ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+  data: [
+    ...ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+    // The systemone family's Clef models (#1410): the door's static
+    // floor, advertised so a caller browsing /v1/models finds the
+    // models POST /v1/systemone serves. The door additionally serves
+    // the live catalog subset (e.g. @cf/cloudflare/clef-omni); those
+    // resolve through modelBody's provider/model pass-through and the
+    // systemone grammar check, not this static list.
+    { id: "@cf/cloudflare/clef", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+    { id: "@cf/cloudflare/clef-flash", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+  ],
 })
 
 /**
@@ -298,9 +309,12 @@ export const modelBody = (id: string) => {
   return undefined
 }
 
-export const errorBody = (message: string, type: string) => ({ error: { message, type } })
+export const errorBody = (message: string, type: string, code?: string) => ({
+  error: { message, type, ...(code ? { code } : {}) },
+})
 
-export const errorFrame = (message: string) => `data: ${JSON.stringify(errorBody(message, "server_error"))}\n\n`
+export const errorFrame = (message: string, type = "server_error") =>
+  `data: ${JSON.stringify(errorBody(message, type))}\n\n`
 
 /**
  * Stateful OpenAI SSE translator: internal LLM events in, `data:` frames
@@ -399,16 +413,31 @@ export class ChatStreamTranslator {
 // the completions endpoint serves — route names and direct catalog
 // provider/model refs alike — is addressable here too. The dialect is
 // translated to and from the same internal shapes; nothing is excluded
-// because conversion is needed. Stateless like the completions door:
-// `previous_response_id` is rejected loudly instead of silently
-// dropping the caller's context, and reasoning items in the input
+// because conversion is needed. Reasoning items in the input
 // (provider-internal echoes) are accepted and skipped.
+//
+// Chaining (#1149, design §4): the call itself stays stateless and no
+// session is created, but every response is persisted in the façade's
+// private item store (`openai_facade_response`), so a caller can chain
+// with `previous_response_id` and send only the new input. The parse
+// below therefore keeps the request's normalized items next to the
+// translated input: the handler prepends the referenced row's stored
+// cumulative items via `chainResponsesInput` and persists the new
+// turn's cumulative snapshot. A `function_call_output` with no matching
+// `function_call` in the effective history is a loud 400, never a
+// silent drop.
 
 export const responseId = () => `resp_${randomBytes(12).toString("hex")}`
 
 export interface ParsedResponsesRequest {
   readonly modelLabel: string
+  /** The requested model ref as `provider/model`, before variant remapping. */
+  readonly modelRef: string
   readonly stream: boolean
+  readonly previousResponseId?: string
+  readonly instructions?: string
+  /** This turn's normalized input items, in Responses wire shape. */
+  readonly items: ReadonlyArray<Record<string, unknown>>
   readonly input: CompletionInput
 }
 
@@ -429,10 +458,162 @@ const responsesTextOf = (content: unknown): string | null => {
   return parts.join("")
 }
 
+/**
+ * One raw input item, normalized to the Responses wire shape the item
+ * store persists: message items carry their text as a single
+ * input_text/output_text part, function_call arguments stay the caller's
+ * JSON string, function_call_output is flattened to its text. Returns
+ * the item, null for an accepted-and-skipped item (reasoning echoes),
+ * or an error string.
+ */
+const normalizeResponsesItem = (item: unknown): Record<string, unknown> | null | string => {
+  if (!isRecord(item)) return "each input item must be an object"
+  if (item.type === "reasoning") return null
+  if (item.type === "function_call") {
+    if (typeof item.call_id !== "string" || typeof item.name !== "string")
+      return "function_call items must carry call_id and name"
+    if (typeof item.arguments === "string" && item.arguments) {
+      try {
+        JSON.parse(item.arguments)
+      } catch {
+        return `function_call ${item.call_id} arguments are not valid JSON`
+      }
+    } else if (item.arguments !== undefined && typeof item.arguments !== "string") {
+      return `function_call ${item.call_id} arguments must be a JSON string`
+    }
+    return {
+      type: "function_call",
+      call_id: item.call_id,
+      name: item.name,
+      arguments: typeof item.arguments === "string" && item.arguments ? item.arguments : "{}",
+    }
+  }
+  if (item.type === "function_call_output") {
+    if (typeof item.call_id !== "string") return "function_call_output items must carry call_id"
+    const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
+    if (text === null) return "function_call_output must carry text output"
+    return { type: "function_call_output", call_id: item.call_id, output: text }
+  }
+  if (item.type === "message" || item.type === undefined || typeof item.role === "string") {
+    if (typeof item.role !== "string") return "message items must carry a role"
+    const text = responsesTextOf(item.content)
+    if (text === null) {
+      if (item.role === "system" || item.role === "developer") return "system messages must carry text content"
+      if (item.role === "user") return "only text user content is supported by this door"
+      if (item.role === "assistant") return "only text assistant content is supported by this door"
+      return `unsupported message role: ${item.role}`
+    }
+    return {
+      type: "message",
+      role: item.role,
+      content: [{ type: item.role === "assistant" ? "output_text" : "input_text", text }],
+    }
+  }
+  return `unsupported input item type: ${String(item.type)}`
+}
+
+/** Normalized items for a whole `input` field: a bare string is one user message item. */
+const normalizeResponsesItems = (input: unknown): Array<Record<string, unknown>> | string => {
+  if (input === undefined) return []
+  if (typeof input === "string")
+    return [{ type: "message", role: "user", content: [{ type: "input_text", text: input }] }]
+  if (!Array.isArray(input)) return "input must be a string or an array of items"
+  const items: Array<Record<string, unknown>> = []
+  for (const raw of input) {
+    const item = normalizeResponsesItem(raw)
+    if (typeof item === "string") return item
+    if (item) items.push(item)
+  }
+  return items
+}
+
+/**
+ * The call_id of the first `function_call_output` with no matching
+ * `function_call` in the item list, or undefined when every output is
+ * matched. Matching is by call_id across the whole effective history —
+ * for a chained request that is the stored items plus the new items.
+ */
+export const unmatchedFunctionCallOutput = (items: ReadonlyArray<Record<string, unknown>>): string | undefined => {
+  const calls = new Set<string>()
+  for (const item of items) if (item.type === "function_call" && typeof item.call_id === "string") calls.add(item.call_id)
+  for (const item of items)
+    if (item.type === "function_call_output" && typeof item.call_id === "string" && !calls.has(item.call_id))
+      return item.call_id
+  return undefined
+}
+
+/** Normalized items → the internal system/messages shapes, in item order. */
+const responsesItemsToMessages = (
+  items: ReadonlyArray<Record<string, unknown>>,
+): { system: string[]; messages: Array<Message | Message.Input> } | string => {
+  const system: string[] = []
+  const messages: Array<Message | Message.Input> = []
+  const toolNames = new Map<string, string>()
+  for (const item of items) {
+    // Reasoning items are provider-internal echoes (and, since #1442, part
+    // of a streamed response's stored output): accepted and skipped, as in
+    // normalizeResponsesItem, never rendered as messages.
+    if (item.type === "reasoning") continue
+    if (item.type === "function_call") {
+      if (typeof item.call_id !== "string" || typeof item.name !== "string")
+        return "function_call items must carry call_id and name"
+      let input: unknown = {}
+      if (typeof item.arguments === "string" && item.arguments) {
+        try {
+          input = JSON.parse(item.arguments)
+        } catch {
+          return `function_call ${item.call_id} arguments are not valid JSON`
+        }
+      }
+      toolNames.set(item.call_id, item.name)
+      messages.push(Message.assistant([ToolCallPart.make({ id: item.call_id, name: item.name, input })]))
+      continue
+    }
+    if (item.type === "function_call_output") {
+      if (typeof item.call_id !== "string") return "function_call_output items must carry call_id"
+      const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
+      if (text === null) return "function_call_output must carry text output"
+      messages.push(
+        Message.tool(
+          ToolResultPart.make({
+            id: item.call_id,
+            name: toolNames.get(item.call_id) ?? "tool",
+            result: text,
+            resultType: "text",
+          }),
+        ),
+      )
+      continue
+    }
+    if (item.type === "message") {
+      const text = responsesTextOf(item.content)
+      if (item.role === "system" || item.role === "developer") {
+        if (text === null) return "system messages must carry text content"
+        system.push(text)
+        continue
+      }
+      if (item.role === "user") {
+        if (text === null) return "only text user content is supported by this door"
+        messages.push(Message.user(text))
+        continue
+      }
+      if (item.role === "assistant") {
+        if (text === null) return "only text assistant content is supported by this door"
+        if (text) messages.push(Message.assistant(text))
+        continue
+      }
+      return `unsupported message role: ${String(item.role)}`
+    }
+    return `unsupported input item type: ${String(item.type)}`
+  }
+  return { system, messages }
+}
+
 export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
   if (!isRecord(body)) return { ok: false, error: "request body must be a JSON object" }
-  if (body.previous_response_id !== undefined)
-    return { ok: false, error: "previous_response_id is not supported by this stateless door" }
+  if (body.previous_response_id !== undefined && (typeof body.previous_response_id !== "string" || !body.previous_response_id))
+    return { ok: false, error: "previous_response_id must be a non-empty string" }
+  const previousResponseId = typeof body.previous_response_id === "string" ? body.previous_response_id : undefined
   const model = parseModel(body.model)
   if (typeof model === "string") return { ok: false, error: model }
 
@@ -457,79 +638,20 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
   if (isRecord(body.text) && isRecord(body.text.format) && body.text.format.type === "json_schema")
     return { ok: false, error: "structured output formats are not supported by this door" }
 
-  const system: string[] = []
-  if (typeof body.instructions === "string" && body.instructions) system.push(body.instructions)
-  const messages: Array<Message | Message.Input> = []
-  const toolNames = new Map<string, string>()
-  const pushMessage = (role: unknown, content: unknown): string | null => {
-    if (role === "system" || role === "developer") {
-      const text = responsesTextOf(content)
-      if (text === null) return "system messages must carry text content"
-      system.push(text)
-      return null
-    }
-    if (role === "user") {
-      const text = responsesTextOf(content)
-      if (text === null) return "only text user content is supported by this door"
-      messages.push(Message.user(text))
-      return null
-    }
-    if (role === "assistant") {
-      const text = responsesTextOf(content)
-      if (text === null) return "only text assistant content is supported by this door"
-      if (text) messages.push(Message.assistant(text))
-      return null
-    }
-    return `unsupported message role: ${String(role)}`
+  const instructions = typeof body.instructions === "string" && body.instructions ? body.instructions : undefined
+  const items = normalizeResponsesItems(body.input)
+  if (typeof items === "string") return { ok: false, error: items }
+  // Without a chain, the effective history is this request's items alone,
+  // so an unmatched output can be rejected here. With a chain, the match
+  // may live in the stored items: `chainResponsesInput` re-checks against
+  // the combined history.
+  if (!previousResponseId) {
+    const unmatched = unmatchedFunctionCallOutput(items)
+    if (unmatched) return { ok: false, error: `function_call_output ${unmatched} has no matching function_call` }
   }
-
-  if (typeof body.input === "string") {
-    messages.push(Message.user(body.input))
-  } else if (Array.isArray(body.input)) {
-    for (const item of body.input) {
-      if (!isRecord(item)) return { ok: false, error: "each input item must be an object" }
-      if (item.type === "reasoning") continue
-      if (item.type === "function_call") {
-        if (typeof item.call_id !== "string" || typeof item.name !== "string")
-          return { ok: false, error: "function_call items must carry call_id and name" }
-        let input: unknown = {}
-        if (typeof item.arguments === "string" && item.arguments) {
-          try {
-            input = JSON.parse(item.arguments)
-          } catch {
-            return { ok: false, error: `function_call ${item.call_id} arguments are not valid JSON` }
-          }
-        }
-        toolNames.set(item.call_id, item.name)
-        messages.push(Message.assistant([ToolCallPart.make({ id: item.call_id, name: item.name, input })]))
-        continue
-      }
-      if (item.type === "function_call_output") {
-        if (typeof item.call_id !== "string") return { ok: false, error: "function_call_output items must carry call_id" }
-        const text = typeof item.output === "string" ? item.output : responsesTextOf(item.output)
-        if (text === null) return { ok: false, error: "function_call_output must carry text output" }
-        messages.push(
-          Message.tool(
-            ToolResultPart.make({
-              id: item.call_id,
-              name: toolNames.get(item.call_id) ?? "tool",
-              result: text,
-              resultType: "text",
-            }),
-          ),
-        )
-        continue
-      }
-      if (item.type === "message" || item.type === undefined || typeof item.role === "string") {
-        const error = pushMessage(item.role, item.content)
-        if (error) return { ok: false, error }
-        continue
-      }
-      return { ok: false, error: `unsupported input item type: ${String(item.type)}` }
-    }
-  } else if (body.input !== undefined) {
-    return { ok: false, error: "input must be a string or an array of items" }
-  }
+  const converted = responsesItemsToMessages(items)
+  if (typeof converted === "string") return { ok: false, error: converted }
+  const system = [...(instructions ? [instructions] : []), ...converted.system]
 
   // Responses carries reasoning effort on the request; the fork carries
   // it as the model variant. Apply it when the ref has no variant yet.
@@ -542,11 +664,15 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
     ok: true,
     value: {
       modelLabel: model.label,
+      modelRef: `${String(model.ref.providerID)}/${String(model.ref.id)}`,
       stream: body.stream === true,
+      ...(previousResponseId ? { previousResponseId } : {}),
+      ...(instructions ? { instructions } : {}),
+      items,
       input: {
         model: ref,
         system: system.length ? system.join("\n") : undefined,
-        messages,
+        messages: converted.messages,
         tools: tools.length ? tools : undefined,
         toolChoice,
         generation: {
@@ -555,6 +681,34 @@ export const parseResponsesRequest = (body: unknown): ParseResponsesResult => {
           ...(max !== undefined ? { maxTokens: max } : {}),
         },
       },
+    },
+  }
+}
+
+/**
+ * The effective input for a chained request: the referenced response's
+ * stored cumulative items followed by this turn's new items, converted
+ * as one history (so a new `function_call_output` matches a stored
+ * `function_call` by call_id, name included). The request's own model,
+ * tools and generation options are kept; `instructions` stay per-request
+ * and lead the system text, as in an unchained parse.
+ */
+export const chainResponsesInput = (
+  parsed: ParsedResponsesRequest,
+  storedItems: ReadonlyArray<Record<string, unknown>>,
+): { readonly ok: true; readonly input: CompletionInput } | { readonly ok: false; readonly error: string } => {
+  const combined = [...storedItems, ...parsed.items]
+  const unmatched = unmatchedFunctionCallOutput(combined)
+  if (unmatched) return { ok: false, error: `function_call_output ${unmatched} has no matching function_call` }
+  const converted = responsesItemsToMessages(combined)
+  if (typeof converted === "string") return { ok: false, error: converted }
+  const system = [...(parsed.instructions ? [parsed.instructions] : []), ...converted.system]
+  return {
+    ok: true,
+    input: {
+      ...parsed.input,
+      system: system.length ? system.join("\n") : undefined,
+      messages: converted.messages,
     },
   }
 }
@@ -581,8 +735,17 @@ export const responsesBody = (args: {
   readonly created: number
   readonly model: string
   readonly response: LLMResponse
+  readonly previousResponseId?: string
 }) => {
   const output: Array<Record<string, unknown>> = []
+  const reasoning = args.response.reasoning
+  if (reasoning)
+    output.push({
+      type: "reasoning",
+      id: `rs_${args.id}`,
+      status: "completed",
+      summary: [{ type: "summary_text", text: reasoning }],
+    })
   const text = args.response.text
   if (text)
     output.push({
@@ -607,6 +770,7 @@ export const responsesBody = (args: {
     created_at: args.created,
     model: args.model,
     status: "completed",
+    ...(args.previousResponseId ? { previous_response_id: args.previousResponseId } : {}),
     output,
     ...(args.response.usage ? { usage: responsesUsageBody(args.response.usage) } : {}),
     parallel_tool_calls: true,
@@ -618,72 +782,343 @@ export const responsesBody = (args: {
 const responsesFrame = (type: string, data: Record<string, unknown>) =>
   `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
 
+interface ResponsesToolSlot {
+  readonly callId: string
+  readonly index: number
+  readonly name: string
+  args: string
+  argsDone: boolean
+  done: boolean
+}
+
 /**
  * Stateful Responses SSE translator: internal LLM events in, typed
- * Responses frames out (`response.output_text.delta`,
- * `response.function_call_arguments.delta`, …). `start()` emits
- * `response.created`; the finish event emits `response.completed`
- * carrying the full response object. The Responses dialect has no
- * [DONE] sentinel — the stream simply ends after `response.completed`.
+ * Responses frames out, following the design spec section 5 grammar
+ * (#1146 spec, #1442): `response.created` -> `response.in_progress` ->
+ * per output item `response.output_item.added`, the content deltas
+ * (`response.output_text.delta` /
+ * `response.reasoning_summary_text.delta` /
+ * `response.function_call_arguments.delta` as applicable), the matching
+ * `*.done` events and `response.output_item.done` -> finally
+ * `response.completed` carrying the full response object — the
+ * accumulated output items (the same items `outputItems()` reports for
+ * the #1149 item store) and usage. Every event carries a monotonic
+ * `sequence_number`, starting at 0 for `response.created`. The
+ * Responses dialect has no [DONE] sentinel — the stream simply ends
+ * after `response.completed`.
+ *
+ * Fidelity rules (spec section 5): reasoning surfaces as a reasoning
+ * item, never flattened into visible text; tool calls surface as
+ * function_call items with arguments assembled from the provider
+ * deltas, never executed; a provider failure terminates the stream
+ * with `response.failed`, never a clean completion over partial
+ * output.
+ *
+ * Aggregation: as in `responsesBody`, all text fragments form ONE
+ * message item and all reasoning fragments ONE reasoning item (their
+ * authoritative per-fragment `*-end` texts replace that fragment's
+ * accumulated deltas), while each tool call is its own item. Text and
+ * reasoning items are therefore closed (their `*.done` /
+ * `response.output_item.done` frames) at the finish event, in
+ * output_index order; a tool item is closed at its `tool-input-end` /
+ * `tool-call`, or at finish when the provider sent neither.
  */
 export class ResponsesStreamTranslator {
   failed = false
+  /** True once the finish event arrived: the response completed and can be persisted for chaining. */
+  completed = false
+  /** Usage from the finish event, when the provider reported it. */
+  usage: Usage | undefined
+  private seq = 0
+  private nextIndex = 0
   private textStarted = false
   private textIndex = 0
-  private nextIndex = 0
-  private readonly toolSlots = new Map<string, { index: number; name: string; args: string }>()
+  private textDone = false
+  private readonly textFragments = new Map<string, string>()
+  private readonly textOrder: string[] = []
+  private reasoningStarted = false
+  private reasoningIndex = 0
+  private reasoningDone = false
+  private readonly reasoningFragments = new Map<string, string>()
+  private readonly reasoningOrder: string[] = []
+  private readonly toolSlots = new Map<string, ResponsesToolSlot>()
 
   constructor(
-    private readonly meta: { readonly id: string; readonly created: number; readonly model: string },
+    private readonly meta: {
+      readonly id: string
+      readonly created: number
+      readonly model: string
+      readonly previousResponseId?: string
+    },
   ) {}
 
+  private frame(type: string, data: Record<string, unknown>): string {
+    return responsesFrame(type, { sequence_number: this.seq++, ...data })
+  }
+
   private base(status: string) {
-    return { id: this.meta.id, object: "response", created_at: this.meta.created, model: this.meta.model, status, output: [] }
+    return {
+      id: this.meta.id,
+      object: "response",
+      created_at: this.meta.created,
+      model: this.meta.model,
+      status,
+      ...(this.meta.previousResponseId ? { previous_response_id: this.meta.previousResponseId } : {}),
+      output: [],
+    }
+  }
+
+  private static appendFragment(map: Map<string, string>, order: string[], id: string, text: string) {
+    if (!map.has(id)) order.push(id)
+    map.set(id, (map.get(id) ?? "") + text)
+  }
+
+  private static setFragment(map: Map<string, string>, order: string[], id: string, text: string) {
+    if (!map.has(id)) order.push(id)
+    map.set(id, text)
+  }
+
+  private static fragmentText(map: Map<string, string>, order: string[]): string {
+    return order.map((id) => map.get(id) ?? "").join("")
+  }
+
+  private get text(): string {
+    return ResponsesStreamTranslator.fragmentText(this.textFragments, this.textOrder)
+  }
+
+  private get reasoning(): string {
+    return ResponsesStreamTranslator.fragmentText(this.reasoningFragments, this.reasoningOrder)
+  }
+
+  private messageItem(status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "message",
+      id: `msg_${this.meta.id}`,
+      role: "assistant",
+      status,
+      content: [{ type: "output_text", text: status === "completed" ? this.text : "", annotations: [] }],
+    }
+  }
+
+  private reasoningItem(status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "reasoning",
+      id: `rs_${this.meta.id}`,
+      status,
+      summary:
+        status === "completed" && this.reasoning ? [{ type: "summary_text", text: this.reasoning }] : [],
+    }
+  }
+
+  private functionCallItem(slot: ResponsesToolSlot, status: "in_progress" | "completed"): Record<string, unknown> {
+    return {
+      type: "function_call",
+      id: `fc_${slot.callId}`,
+      call_id: slot.callId,
+      name: slot.name,
+      arguments: status === "completed" ? slot.args || "{}" : "",
+      status,
+    }
+  }
+
+  /**
+   * The completed response's output items, in the same wire shape
+   * `responsesBody` renders for a non-streamed response — what the item
+   * store persists so a streamed response can be chained from (#1149),
+   * and exactly what the `response.completed` event carries (#1442).
+   */
+  outputItems(): Array<Record<string, unknown>> {
+    const items: Array<{ index: number; item: Record<string, unknown> }> = []
+    if (this.reasoningStarted) items.push({ index: this.reasoningIndex, item: this.reasoningItem("completed") })
+    if (this.textStarted) items.push({ index: this.textIndex, item: this.messageItem("completed") })
+    for (const slot of this.toolSlots.values())
+      items.push({ index: slot.index, item: this.functionCallItem(slot, "completed") })
+    return items
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => entry.item)
   }
 
   start(): string {
-    return responsesFrame("response.created", { response: this.base("in_progress") })
+    return (
+      this.frame("response.created", { response: this.base("in_progress") }) +
+      this.frame("response.in_progress", { response: this.base("in_progress") })
+    )
+  }
+
+  /** The terminal failure frame (spec section 5): sequence-numbered like every other event. */
+  failureFrame(message: string, code?: string): string {
+    this.failed = true
+    return this.frame("response.failed", {
+      response: { ...this.base("failed"), error: { message, ...(code ? { code } : {}) } },
+    })
+  }
+
+  private ensureTextItem(): string[] {
+    if (this.textStarted) return []
+    this.textStarted = true
+    this.textIndex = this.nextIndex++
+    return [
+      this.frame("response.output_item.added", {
+        output_index: this.textIndex,
+        item: this.messageItem("in_progress"),
+      }),
+    ]
+  }
+
+  private ensureReasoningItem(): string[] {
+    if (this.reasoningStarted) return []
+    this.reasoningStarted = true
+    this.reasoningIndex = this.nextIndex++
+    return [
+      this.frame("response.output_item.added", {
+        output_index: this.reasoningIndex,
+        item: this.reasoningItem("in_progress"),
+      }),
+    ]
+  }
+
+  private closeTextItem(): string[] {
+    if (!this.textStarted || this.textDone) return []
+    this.textDone = true
+    return [
+      this.frame("response.output_text.done", {
+        item_id: `msg_${this.meta.id}`,
+        output_index: this.textIndex,
+        content_index: 0,
+        text: this.text,
+      }),
+      this.frame("response.output_item.done", {
+        output_index: this.textIndex,
+        item: this.messageItem("completed"),
+      }),
+    ]
+  }
+
+  private closeReasoningItem(): string[] {
+    if (!this.reasoningStarted || this.reasoningDone) return []
+    this.reasoningDone = true
+    return [
+      this.frame("response.reasoning_summary_text.done", {
+        item_id: `rs_${this.meta.id}`,
+        output_index: this.reasoningIndex,
+        summary_index: 0,
+        text: this.reasoning,
+      }),
+      this.frame("response.output_item.done", {
+        output_index: this.reasoningIndex,
+        item: this.reasoningItem("completed"),
+      }),
+    ]
+  }
+
+  private closeToolItem(slot: ResponsesToolSlot): string[] {
+    if (slot.done) return []
+    slot.done = true
+    const frames: string[] = []
+    if (!slot.argsDone) {
+      slot.argsDone = true
+      frames.push(
+        this.frame("response.function_call_arguments.done", {
+          item_id: `fc_${slot.callId}`,
+          output_index: slot.index,
+          arguments: slot.args || "{}",
+        }),
+      )
+    }
+    frames.push(
+      this.frame("response.output_item.done", {
+        output_index: slot.index,
+        item: this.functionCallItem(slot, "completed"),
+      }),
+    )
+    return frames
+  }
+
+  /** Close every still-open item, in output_index order, before a terminal event. */
+  private closeOpenItems(): string[] {
+    const closers: Array<{ index: number; close: () => string[] }> = []
+    if (this.reasoningStarted && !this.reasoningDone)
+      closers.push({ index: this.reasoningIndex, close: () => this.closeReasoningItem() })
+    if (this.textStarted && !this.textDone)
+      closers.push({ index: this.textIndex, close: () => this.closeTextItem() })
+    for (const slot of this.toolSlots.values())
+      if (!slot.done) closers.push({ index: slot.index, close: () => this.closeToolItem(slot) })
+    return closers
+      .sort((a, b) => a.index - b.index)
+      .flatMap((entry) => entry.close())
   }
 
   push(event: LLMEvent): string[] {
     switch (event.type) {
+      case "text-start":
+        return this.ensureTextItem()
       case "text-delta": {
-        if (!this.textStarted) {
-          this.textStarted = true
-          this.textIndex = this.nextIndex++
-        }
-        return [
-          responsesFrame("response.output_text.delta", {
+        const frames = this.ensureTextItem()
+        ResponsesStreamTranslator.appendFragment(this.textFragments, this.textOrder, String(event.id), event.text)
+        frames.push(
+          this.frame("response.output_text.delta", {
             item_id: `msg_${this.meta.id}`,
             output_index: this.textIndex,
             content_index: 0,
             delta: event.text,
           }),
-        ]
+        )
+        return frames
       }
-      case "reasoning-delta":
-        return [
-          responsesFrame("response.reasoning_text.delta", {
+      case "text-end": {
+        // The end event's authoritative text replaces this fragment's
+        // accumulated deltas. The aggregated message item stays open
+        // until finish (a later fragment may still follow); its done
+        // events are emitted there with the final text.
+        if (event.text !== undefined)
+          ResponsesStreamTranslator.setFragment(this.textFragments, this.textOrder, String(event.id), event.text)
+        return []
+      }
+      case "reasoning-start":
+        return this.ensureReasoningItem()
+      case "reasoning-delta": {
+        const frames = this.ensureReasoningItem()
+        ResponsesStreamTranslator.appendFragment(
+          this.reasoningFragments,
+          this.reasoningOrder,
+          String(event.id),
+          event.text,
+        )
+        frames.push(
+          this.frame("response.reasoning_summary_text.delta", {
             item_id: `rs_${this.meta.id}`,
-            output_index: this.textIndex,
-            content_index: 0,
+            output_index: this.reasoningIndex,
+            summary_index: 0,
             delta: event.text,
           }),
-        ]
+        )
+        return frames
+      }
+      case "reasoning-end": {
+        if (event.text !== undefined)
+          ResponsesStreamTranslator.setFragment(
+            this.reasoningFragments,
+            this.reasoningOrder,
+            String(event.id),
+            event.text,
+          )
+        return []
+      }
       case "tool-input-start": {
-        const slot = { index: this.nextIndex++, name: event.name, args: "" }
-        this.toolSlots.set(String(event.id), slot)
+        if (this.toolSlots.has(String(event.id))) return []
+        const slot: ResponsesToolSlot = {
+          callId: String(event.id),
+          index: this.nextIndex++,
+          name: event.name,
+          args: "",
+          argsDone: false,
+          done: false,
+        }
+        this.toolSlots.set(slot.callId, slot)
         return [
-          responsesFrame("response.output_item.added", {
+          this.frame("response.output_item.added", {
             output_index: slot.index,
-            item: {
-              type: "function_call",
-              id: `fc_${String(event.id)}`,
-              call_id: String(event.id),
-              name: event.name,
-              arguments: "",
-              status: "in_progress",
-            },
+            item: this.functionCallItem(slot, "in_progress"),
           }),
         ]
       }
@@ -692,43 +1127,563 @@ export class ResponsesStreamTranslator {
         if (!slot) return []
         slot.args += event.text
         return [
-          responsesFrame("response.function_call_arguments.delta", {
-            item_id: `fc_${String(event.id)}`,
+          this.frame("response.function_call_arguments.delta", {
+            item_id: `fc_${slot.callId}`,
             output_index: slot.index,
             delta: event.text,
           }),
         ]
       }
+      case "tool-input-end": {
+        const slot = this.toolSlots.get(String(event.id))
+        return slot ? this.closeToolItem(slot) : []
+      }
       case "tool-call": {
-        if (this.toolSlots.has(String(event.id))) return []
-        const slot = { index: this.nextIndex++, name: event.name, args: JSON.stringify(event.input ?? {}) }
-        this.toolSlots.set(String(event.id), slot)
-        return [
-          responsesFrame("response.output_item.added", {
+        const existing = this.toolSlots.get(String(event.id))
+        if (existing) {
+          if (existing.done) return []
+          if (!existing.args) existing.args = JSON.stringify(event.input ?? {})
+          return this.closeToolItem(existing)
+        }
+        const slot: ResponsesToolSlot = {
+          callId: String(event.id),
+          index: this.nextIndex++,
+          name: event.name,
+          args: JSON.stringify(event.input ?? {}),
+          argsDone: false,
+          done: false,
+        }
+        this.toolSlots.set(slot.callId, slot)
+        const frames = [
+          this.frame("response.output_item.added", {
             output_index: slot.index,
-            item: {
-              type: "function_call",
-              id: `fc_${String(event.id)}`,
-              call_id: String(event.id),
-              name: event.name,
-              arguments: slot.args,
-              status: "in_progress",
-            },
+            item: this.functionCallItem(slot, "in_progress"),
           }),
         ]
+        if (slot.args)
+          frames.push(
+            this.frame("response.function_call_arguments.delta", {
+              item_id: `fc_${slot.callId}`,
+              output_index: slot.index,
+              delta: slot.args,
+            }),
+          )
+        frames.push(...this.closeToolItem(slot))
+        return frames
       }
-      case "finish":
-        return [
-          responsesFrame("response.completed", {
+      case "finish": {
+        this.completed = true
+        this.usage = event.usage
+        const frames = this.closeOpenItems()
+        frames.push(
+          this.frame("response.completed", {
             response: {
               ...this.base("completed"),
+              output: this.outputItems(),
               ...(event.usage ? { usage: responsesUsageBody(event.usage) } : {}),
             },
           }),
+        )
+        return frames
+      }
+      case "provider-error":
+        return [this.failureFrame(event.message)]
+      default:
+        return []
+    }
+  }
+}
+
+// ------------------------------------------------------------ messages door
+//
+// The same universal door in the Anthropic Messages dialect (#1146;
+// Drew, 2026-11-02: "allow v1 messages for any model"). Every model the
+// other doors serve — route names and direct catalog provider/model
+// refs alike — is addressable here too, whether the caller's dialect
+// matches the resolved provider's native dialect or not: the request
+// is translated to and from the same canonical internal shapes, and
+// the provider layer speaks its native dialect from there. Stateless
+// like the other doors: no session is created or stored. Anthropic
+// request features this wave does not carry (thinking blocks and
+// thinking configuration, document blocks, server tools, MCP servers)
+// fail loudly at parse time, naming the shape, instead of being
+// silently dropped or forwarded blindly.
+
+export const messageId = () => `msg_${randomBytes(12).toString("hex")}`
+
+export interface ParsedMessagesRequest {
+  readonly modelLabel: string
+  readonly stream: boolean
+  readonly input: CompletionInput
+}
+
+export type ParseMessagesResult =
+  | { readonly ok: true; readonly value: ParsedMessagesRequest }
+  | { readonly ok: false; readonly error: string }
+
+/**
+ * Anthropic reports `input_tokens` as the non-cached portion only, with
+ * cache reads/writes as separate fields; the canonical Usage carries
+ * the inclusive total plus the breakdown, so the non-cached portion is
+ * recovered here (preferring the breakdown the protocol mapper stored).
+ */
+export const messagesUsageBody = (usage: Usage | undefined) => {
+  if (!usage) return { input_tokens: 0, output_tokens: 0 }
+  const cacheRead = usage.cacheReadInputTokens ?? 0
+  const cacheWrite = usage.cacheWriteInputTokens ?? 0
+  const nonCached = usage.nonCachedInputTokens ?? Math.max(0, (usage.inputTokens ?? 0) - cacheRead - cacheWrite)
+  return {
+    input_tokens: nonCached,
+    output_tokens: usage.outputTokens ?? 0,
+    ...(cacheRead ? { cache_read_input_tokens: cacheRead } : {}),
+    ...(cacheWrite ? { cache_creation_input_tokens: cacheWrite } : {}),
+  }
+}
+
+const stopSequenceOf = (metadata: unknown): string | null => {
+  if (!isRecord(metadata)) return null
+  for (const value of Object.values(metadata)) {
+    if (isRecord(value) && typeof value.stopSequence === "string") return value.stopSequence
+  }
+  return null
+}
+
+const messagesStop = (normalized: string, raw: string | undefined, hasToolCalls: boolean, stopSequence: string | null) => {
+  if (raw === "stop_sequence") return { stop_reason: "stop_sequence", stop_sequence: stopSequence }
+  if (hasToolCalls && normalized !== "length") return { stop_reason: "tool_use", stop_sequence: null }
+  switch (normalized) {
+    case "length":
+      return { stop_reason: "max_tokens", stop_sequence: null }
+    case "tool-calls":
+      return { stop_reason: "tool_use", stop_sequence: null }
+    case "content-filter":
+      return { stop_reason: "refusal", stop_sequence: null }
+    default:
+      return { stop_reason: "end_turn", stop_sequence: null }
+  }
+}
+
+export const messagesBody = (args: { readonly id: string; readonly model: string; readonly response: LLMResponse }) => {
+  const content: Array<Record<string, unknown>> = []
+  const reasoning = args.response.reasoning
+  if (reasoning) content.push({ type: "thinking", thinking: reasoning, signature: "" })
+  const text = args.response.text
+  if (text) content.push({ type: "text", text })
+  for (const call of args.response.toolCalls)
+    content.push({ type: "tool_use", id: String(call.id), name: call.name, input: call.input ?? {} })
+  const finish = args.response.events.find((event) => event.type === "finish")
+  const stop = messagesStop(
+    args.response.finishReason.normalized,
+    args.response.finishReason.raw,
+    args.response.toolCalls.length > 0,
+    finish ? stopSequenceOf(finish.providerMetadata) : null,
+  )
+  return {
+    id: args.id,
+    type: "message",
+    role: "assistant",
+    model: args.model,
+    content,
+    stop_reason: stop.stop_reason,
+    stop_sequence: stop.stop_sequence,
+    usage: messagesUsageBody(args.response.usage),
+  }
+}
+
+const parseMessagesImage = (block: Record<string, unknown>): ContentPart | string => {
+  if (!isRecord(block.source)) return "image blocks must carry a source object"
+  if (block.source.type === "base64") {
+    if (typeof block.source.media_type !== "string" || typeof block.source.data !== "string")
+      return "image base64 sources must carry media_type and data"
+    if (!block.source.media_type.startsWith("image/"))
+      return `unsupported image media_type: ${block.source.media_type}`
+    return Message.media(Media.base64(block.source.data, block.source.media_type))
+  }
+  if (block.source.type === "url") {
+    if (typeof block.source.url !== "string") return "image url sources must carry a url"
+    return Message.media(Media.url(block.source.url))
+  }
+  return `unsupported image source type: ${String(block.source.type)} (supported: base64, url)`
+}
+
+const parseMessagesToolResult = (
+  block: Record<string, unknown>,
+  toolNames: Map<string, string>,
+): ContentPart | string => {
+  if (typeof block.tool_use_id !== "string") return "tool_result blocks must carry tool_use_id"
+  let result: unknown = ""
+  let resultType: "text" | "json" | "error" = "text"
+  if (typeof block.content === "string") {
+    result = block.content
+  } else if (Array.isArray(block.content)) {
+    const texts: string[] = []
+    let structured: unknown
+    let hasStructured = false
+    for (const item of block.content) {
+      if (!isRecord(item)) return "tool_result content blocks must be objects"
+      if (item.type === "text") {
+        if (typeof item.text !== "string") return "tool_result text blocks must carry text"
+        texts.push(item.text)
+        continue
+      }
+      if (item.type === "json") {
+        structured = item.json
+        hasStructured = true
+        continue
+      }
+      return `unsupported tool_result content block type: ${String(item.type)}`
+    }
+    if (hasStructured && texts.length) return "tool_result content must not mix text and json blocks in this door"
+    if (hasStructured) {
+      result = structured
+      resultType = "json"
+    } else {
+      result = texts.join("")
+    }
+  } else if (block.content !== undefined) {
+    return "tool_result content must be a string or an array of blocks"
+  }
+  if (block.is_error === true) resultType = "error"
+  return ToolResultPart.make({
+    id: block.tool_use_id,
+    name: toolNames.get(block.tool_use_id) ?? "tool",
+    result,
+    resultType,
+  })
+}
+
+const parseMessagesBlocks = (
+  entry: Record<string, unknown>,
+  toolNames: Map<string, string>,
+): { readonly parts: ContentPart[]; readonly toolResults: ContentPart[] } | string => {
+  const parts: ContentPart[] = []
+  const toolResults: ContentPart[] = []
+  if (typeof entry.content === "string") {
+    if (entry.content) parts.push(Message.text(entry.content))
+    return { parts, toolResults }
+  }
+  if (!Array.isArray(entry.content)) return "message content must be a string or an array of blocks"
+  if (entry.content.length === 0) return "messages must carry at least one content block"
+  for (const block of entry.content) {
+    if (!isRecord(block) || typeof block.type !== "string")
+      return "content blocks must be objects with a type"
+    if (block.type === "text") {
+      if (typeof block.text !== "string") return "text blocks must carry text"
+      parts.push(Message.text(block.text))
+      continue
+    }
+    if (block.type === "image") {
+      if (entry.role !== "user") return "image blocks are only supported in user messages"
+      const image = parseMessagesImage(block)
+      if (typeof image === "string") return image
+      parts.push(image)
+      continue
+    }
+    if (block.type === "tool_use") {
+      if (entry.role !== "assistant") return "tool_use blocks are only supported in assistant messages"
+      if (typeof block.id !== "string" || typeof block.name !== "string")
+        return "tool_use blocks must carry an id and a name"
+      toolNames.set(block.id, block.name)
+      parts.push(ToolCallPart.make({ id: block.id, name: block.name, input: block.input ?? {} }))
+      continue
+    }
+    if (block.type === "tool_result") {
+      if (entry.role !== "user") return "tool_result blocks are only supported in user messages"
+      const result = parseMessagesToolResult(block, toolNames)
+      if (typeof result === "string") return result
+      toolResults.push(result)
+      continue
+    }
+    if (block.type === "thinking" || block.type === "redacted_thinking")
+      return `${block.type} blocks in input are not supported by this door (they are provider-internal and cannot round-trip)`
+    return `unsupported content block type: ${block.type}`
+  }
+  if (toolResults.length && parts.length)
+    return "tool_result blocks must not be mixed with other content blocks in one message in this door; send them in their own user message"
+  return { parts, toolResults }
+}
+
+export const parseMessagesRequest = (body: unknown): ParseMessagesResult => {
+  if (!isRecord(body)) return { ok: false, error: "request body must be a JSON object" }
+  for (const field of ["thinking", "context_management", "mcp_servers", "container", "service_tier"] as const) {
+    if (body[field] !== undefined) return { ok: false, error: `${field} is not supported by this door` }
+  }
+  if (isRecord(body.metadata) && body.metadata.user_id !== undefined)
+    return { ok: false, error: "metadata.user_id is not supported by this door" }
+  if (!Array.isArray(body.messages)) return { ok: false, error: "messages must be an array" }
+  if (typeof body.max_tokens !== "number") return { ok: false, error: "max_tokens is required and must be a number" }
+  const model = parseModel(body.model)
+  if (typeof model === "string") return { ok: false, error: model }
+
+  const tools: ToolDefinition.Input[] = []
+  if (body.tools !== undefined) {
+    if (!Array.isArray(body.tools)) return { ok: false, error: "tools must be an array" }
+    for (const tool of body.tools) {
+      if (!isRecord(tool)) return { ok: false, error: "each tool must be an object" }
+      if (typeof tool.type === "string" && tool.type !== "custom")
+        return { ok: false, error: `server tools are not supported by this door: ${tool.type}` }
+      if (typeof tool.name !== "string") return { ok: false, error: "tools must carry a name" }
+      tools.push({
+        name: tool.name,
+        description: typeof tool.description === "string" ? tool.description : "",
+        inputSchema: isRecord(tool.input_schema) ? tool.input_schema : { type: "object", properties: {} },
+      })
+    }
+  }
+
+  let toolChoice: ToolChoice.Input | undefined
+  if (body.tool_choice !== undefined) {
+    if (!isRecord(body.tool_choice)) return { ok: false, error: "unsupported tool_choice" }
+    const disable = body.tool_choice.disable_parallel_tool_use === true ? { disableParallelToolUse: true } : {}
+    if (body.tool_choice.type === "auto") toolChoice = { type: "auto", ...disable }
+    else if (body.tool_choice.type === "any") toolChoice = { type: "required", ...disable }
+    else if (body.tool_choice.type === "none") toolChoice = { type: "none" }
+    else if (body.tool_choice.type === "tool") {
+      if (typeof body.tool_choice.name !== "string") return { ok: false, error: "tool_choice of type tool must carry a name" }
+      toolChoice = { type: "tool", name: body.tool_choice.name, ...disable }
+    } else return { ok: false, error: `unsupported tool_choice type: ${String(body.tool_choice.type)}` }
+  }
+
+  let system: string | undefined
+  if (typeof body.system === "string") {
+    system = body.system
+  } else if (Array.isArray(body.system)) {
+    const texts: string[] = []
+    for (const block of body.system) {
+      if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string")
+        return { ok: false, error: "only text blocks are supported in the system field by this door" }
+      texts.push(block.text)
+    }
+    system = texts.join("")
+  } else if (body.system !== undefined) {
+    return { ok: false, error: "system must be a string or an array of text blocks" }
+  }
+
+  if (body.stop_sequences !== undefined && (!Array.isArray(body.stop_sequences) || !body.stop_sequences.every((s) => typeof s === "string")))
+    return { ok: false, error: "stop_sequences must be an array of strings" }
+
+  const messages: Array<Message | Message.Input> = []
+  const toolNames = new Map<string, string>()
+  for (const entry of body.messages) {
+    if (!isRecord(entry) || typeof entry.role !== "string")
+      return { ok: false, error: "each message must be an object with a role" }
+    if (entry.role === "system")
+      return { ok: false, error: "system content belongs in the top-level system field, not in messages" }
+    if (entry.role !== "user" && entry.role !== "assistant")
+      return { ok: false, error: `unsupported message role: ${entry.role}` }
+    if (entry.content === undefined) return { ok: false, error: "each message must carry content" }
+    const parsedBlocks = parseMessagesBlocks(entry, toolNames)
+    if (typeof parsedBlocks === "string") return { ok: false, error: parsedBlocks }
+    if (parsedBlocks.toolResults.length) {
+      messages.push(Message.tool(parsedBlocks.toolResults[0] as ToolResultPart))
+      for (const extra of parsedBlocks.toolResults.slice(1))
+        messages.push(Message.tool(extra as ToolResultPart))
+      continue
+    }
+    messages.push(entry.role === "user" ? Message.user(parsedBlocks.parts) : Message.assistant(parsedBlocks.parts))
+  }
+
+  return {
+    ok: true,
+    value: {
+      modelLabel: model.label,
+      stream: body.stream === true,
+      input: {
+        model: model.ref,
+        system: system || undefined,
+        messages,
+        tools: tools.length ? tools : undefined,
+        toolChoice,
+        generation: {
+          ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
+          ...(typeof body.top_p === "number" ? { topP: body.top_p } : {}),
+          ...(typeof body.top_k === "number" ? { topK: body.top_k } : {}),
+          maxTokens: body.max_tokens,
+          ...(Array.isArray(body.stop_sequences) ? { stop: body.stop_sequences as string[] } : {}),
+        },
+      },
+    },
+  }
+}
+
+const messagesFrame = (type: string, data: Record<string, unknown>) =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
+
+export const PING_FRAME = messagesFrame("ping", {})
+
+/**
+ * Anthropic error envelope for this door: `{type: "error", error:
+ * {type, message}}` — deliberately NOT the OpenAI-shaped `errorBody`
+ * the chat/responses doors use.
+ */
+export const messagesErrorBody = (message: string, type: string) => ({ type: "error", error: { type, message } })
+
+export const messagesErrorFrame = (message: string, type = "api_error") =>
+  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, type))}\n\n`
+
+interface MessagesBlockSlot {
+  readonly index: number
+  closed: boolean
+}
+
+/**
+ * Stateful Anthropic SSE translator: internal LLM events in, typed
+ * Messages frames out. `start()` emits `message_start` plus a `ping`
+ * (the dialect's keep-alive event); text, thinking, and tool_use
+ * content blocks follow the content_block_start/delta/stop grammar
+ * with per-block indices; the finish event closes any open block, then
+ * emits `message_delta` (stop_reason plus cumulative usage) and
+ * `message_stop`. A provider failure terminates the stream with an
+ * `error` event — never a clean `message_stop` over partial output.
+ */
+export class MessagesStreamTranslator {
+  failed = false
+  private nextIndex = 0
+  private readonly textBlocks = new Map<string, MessagesBlockSlot>()
+  private readonly reasoningBlocks = new Map<string, MessagesBlockSlot>()
+  private readonly toolBlocks = new Map<string, MessagesBlockSlot & { name: string }>()
+  private usage: Usage | undefined
+
+  constructor(private readonly meta: { readonly id: string; readonly model: string }) {}
+
+  start(): string {
+    return (
+      messagesFrame("message_start", {
+        message: {
+          id: this.meta.id,
+          type: "message",
+          role: "assistant",
+          model: this.meta.model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: messagesUsageBody(undefined),
+        },
+      }) + PING_FRAME
+    )
+  }
+
+  private open(map: Map<string, MessagesBlockSlot>, id: string, block: Record<string, unknown>): string {
+    const slot = { index: this.nextIndex++, closed: false }
+    map.set(id, slot)
+    return messagesFrame("content_block_start", { index: slot.index, content_block: block })
+  }
+
+  private close(slot: MessagesBlockSlot): string {
+    slot.closed = true
+    return messagesFrame("content_block_stop", { index: slot.index })
+  }
+
+  push(event: LLMEvent): string[] {
+    switch (event.type) {
+      case "text-start": {
+        if (this.textBlocks.has(String(event.id))) return []
+        return [this.open(this.textBlocks, String(event.id), { type: "text", text: "" })]
+      }
+      case "text-delta": {
+        const frames: string[] = []
+        if (!this.textBlocks.has(String(event.id)))
+          frames.push(this.open(this.textBlocks, String(event.id), { type: "text", text: "" }))
+        const slot = this.textBlocks.get(String(event.id))!
+        frames.push(
+          messagesFrame("content_block_delta", { index: slot.index, delta: { type: "text_delta", text: event.text } }),
+        )
+        return frames
+      }
+      case "text-end": {
+        const slot = this.textBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "reasoning-start": {
+        if (this.reasoningBlocks.has(String(event.id))) return []
+        return [this.open(this.reasoningBlocks, String(event.id), { type: "thinking", thinking: "" })]
+      }
+      case "reasoning-delta": {
+        const frames: string[] = []
+        if (!this.reasoningBlocks.has(String(event.id)))
+          frames.push(this.open(this.reasoningBlocks, String(event.id), { type: "thinking", thinking: "" }))
+        const slot = this.reasoningBlocks.get(String(event.id))!
+        frames.push(
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "thinking_delta", thinking: event.text },
+          }),
+        )
+        return frames
+      }
+      case "reasoning-end": {
+        const slot = this.reasoningBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "tool-input-start": {
+        if (this.toolBlocks.has(String(event.id))) return []
+        const slot = { index: this.nextIndex++, closed: false, name: event.name }
+        this.toolBlocks.set(String(event.id), slot)
+        return [
+          messagesFrame("content_block_start", {
+            index: slot.index,
+            content_block: { type: "tool_use", id: String(event.id), name: event.name, input: {} },
+          }),
         ]
+      }
+      case "tool-input-delta": {
+        const slot = this.toolBlocks.get(String(event.id))
+        if (!slot) return []
+        return [
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "input_json_delta", partial_json: event.text },
+          }),
+        ]
+      }
+      case "tool-input-end": {
+        const slot = this.toolBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "tool-call": {
+        const existing = this.toolBlocks.get(String(event.id))
+        if (existing) return existing.closed ? [] : [this.close(existing)]
+        const slot = { index: this.nextIndex++, closed: false, name: event.name }
+        this.toolBlocks.set(String(event.id), slot)
+        return [
+          messagesFrame("content_block_start", {
+            index: slot.index,
+            content_block: { type: "tool_use", id: String(event.id), name: event.name, input: {} },
+          }),
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "input_json_delta", partial_json: JSON.stringify(event.input ?? {}) },
+          }),
+          this.close(slot),
+        ]
+      }
+      case "step-finish": {
+        if (event.usage) this.usage = event.usage
+        return []
+      }
+      case "finish": {
+        const usage = event.usage ?? this.usage
+        const frames: string[] = []
+        for (const slot of [...this.textBlocks.values(), ...this.reasoningBlocks.values(), ...this.toolBlocks.values()])
+          if (!slot.closed) frames.push(this.close(slot))
+        const stop = messagesStop(
+          event.reason.normalized,
+          event.reason.raw,
+          this.toolBlocks.size > 0,
+          stopSequenceOf(event.providerMetadata),
+        )
+        frames.push(
+          messagesFrame("message_delta", {
+            delta: { stop_reason: stop.stop_reason, stop_sequence: stop.stop_sequence },
+            usage: messagesUsageBody(usage),
+          }),
+        )
+        frames.push(messagesFrame("message_stop", {}))
+        return frames
+      }
       case "provider-error":
         this.failed = true
-        return [responsesFrame("response.failed", { response: { ...this.base("failed"), error: { message: event.message } } })]
+        return [messagesErrorFrame(event.message)]
       default:
         return []
     }

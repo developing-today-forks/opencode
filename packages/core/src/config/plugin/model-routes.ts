@@ -4,6 +4,7 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { Document, type Entry } from "@opencode/schema/config"
 import { ConfigModel } from "@opencode/schema/config/model"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
+import type { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Effect } from "effect"
 import { Config } from "../../config.js"
@@ -61,6 +62,15 @@ export const Plugin = define({
       ctx.location.directory,
     )
     yield* Effect.addFinalizer(() => Effect.sync(offSettingsConfig))
+
+    // Quota demotion policy (#1151), from experimental.model_route_demotion. Registered
+    // under this Location's directory so another Location's activation cannot replace it,
+    // and removed again when this Location's graph closes.
+    const offDemotionConfig = ModelRoute.onDemotionConfig(
+      () => demotionConfig(configuredDemotion(loaded.entries)),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offDemotionConfig))
 
     // Scheduled review of the routing history, off unless configured.
     yield* ModelRouteTuning.schedule(
@@ -238,6 +248,30 @@ function configuredLog(entries: readonly Entry[]) {
     .reduce<
       ConfigModelRoutes.Log | undefined
     >((found, entry) => entry.info.experimental?.routes?.log ?? found, undefined)
+}
+
+function configuredDemotion(entries: readonly Entry[]) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .reduce<
+      ConfigExperimental.ModelRouteDemotion | undefined
+    >((found, entry) => entry.info.experimental?.model_route_demotion ?? found, undefined)
+}
+
+/** The demotion policy in the core's shape: only the fields config actually set — a decoded
+ * demotion block carries every unset field as undefined, and passing those through would
+ * erase the defaults they sit over. */
+function demotionConfig(
+  demotion: ConfigExperimental.ModelRouteDemotion | undefined,
+): ModelRoute.DemotionConfig | undefined {
+  if (!demotion) return undefined
+  const threshold = demotion.threshold
+  const windowMs = demotion.window_ms
+  if (threshold === undefined && windowMs === undefined) return undefined
+  return {
+    ...(threshold !== undefined ? { threshold } : {}),
+    ...(windowMs !== undefined ? { windowMs } : {}),
+  }
 }
 
 function configuredSettings(entries: readonly Entry[]) {
