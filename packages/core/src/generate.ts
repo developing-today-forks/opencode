@@ -20,6 +20,7 @@ import { llmClient } from "./effect/app-node-platform.js"
 import { ModelResolver } from "./model-resolver.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteLog } from "./model-route-log.js"
+import { MuseAttestation } from "./muse-attestation.js"
 import { Model } from "./model.js"
 import { SessionUsage } from "./session/usage.js"
 
@@ -79,7 +80,22 @@ export class QuotaError extends Schema.TaggedError<QuotaError>()("Generate.Quota
   service: Schema.optional(Schema.String),
 }) {}
 
-export type Error = ModelSelectionError | UnavailableError | QuotaError
+/**
+ * An attestation denial from the muse backend (#1443): the upstream
+ * answered 403 `client_attestation_denied` despite the facade's
+ * backend-scoped tool aliasing (see MuseAttestation). The muse door
+ * answers this case with a CLI-door fallback and a 200; the facade has
+ * no CLI door, so the denial surfaces as a distinct provider failure -
+ * failover-eligible, never quota-classified, never retried against the
+ * same target - and the handlers map it to the design §2 502 envelope
+ * like any other upstream failure.
+ */
+export class AttestationError extends Schema.TaggedError<AttestationError>()("Generate.AttestationError", {
+  message: Schema.String,
+  service: Schema.optional(Schema.String),
+}) {}
+
+export type Error = ModelSelectionError | UnavailableError | QuotaError | AttestationError
 
 /**
  * The quota/rate-limit classification the routing and demotion
@@ -344,22 +360,44 @@ export const layer = Layer.effect(
 
     const build = Effect.fn("Generate.build")(function* (input: CompletionInput) {
       const resolved = yield* resolve(input.model)
+      // Muse attestation aliasing (#1443): judged against the resolved
+      // concrete model, exactly like the pass-through match below - only
+      // the muse backend (provider `meta`) is subject to Meta's
+      // subscription-key attestation gate, so only a muse target's
+      // shell/bash tool names are presented upstream under the door's
+      // aliases, on the translated input and on the raw pass-through
+      // body alike. Every other provider keeps the design §9.1 rule:
+      // tool names preserved verbatim. The messages dialect is the
+      // door's absent front and is never aliased.
+      const museTarget =
+        String(resolved.ref.providerID) === MuseAttestation.PROVIDER_ID && input.dialect !== "messages"
+      const attestation = museTarget ? MuseAttestation.plan(MuseAttestation.toolNames(input.tools)) : undefined
+      const effective = attestation ? MuseAttestation.aliasInput(input, attestation) : input
       // The pass-through fast path (spec §3): on a dialect match the caller's
-      // raw body, rewritten only as `rewriteRawBody` documents, is the body
-      // the provider receives. Route selection has already happened above —
-      // the same resolver, gates and demotion as the translated path — and
+      // raw body, rewritten only as `rewriteRawBody` documents (plus the
+      // attestation aliasing above, when it engages), is the body the
+      // provider receives. Route selection has already happened above -
+      // the same resolver, gates and demotion as the translated path - and
       // the attempt below is ledgered identically whichever path runs.
+      const rawBody =
+        attestation && input.rawBody !== undefined && (input.dialect === "chat" || input.dialect === "responses")
+          ? (MuseAttestation.aliasRawBody(input.rawBody, input.dialect, attestation) ?? input.rawBody)
+          : input.rawBody
       const raw =
-        input.rawBody !== undefined && passthroughDialect(resolved, input.dialect) !== undefined
-          ? rewriteRawBody(input.rawBody, String(resolved.model.id))
+        rawBody !== undefined && passthroughDialect(resolved, input.dialect) !== undefined
+          ? rewriteRawBody(rawBody, String(resolved.model.id))
           : undefined
-      return { resolved, raw, request: canonicalRequest(resolved, input, raw) }
+      return { resolved, raw, request: canonicalRequest(resolved, effective, raw), input: effective, attestation, museTarget }
     })
 
-    const unavailable = (resolved: ModelResolver.Resolved) => (error: AIError): Error =>
-      isQuotaFailure(error)
-        ? new QuotaError({ message: error.message, service: resolved.ref.providerID })
-        : new UnavailableError({ message: error.message, service: resolved.ref.providerID })
+    const unavailable =
+      (resolved: ModelResolver.Resolved, museTarget = false) =>
+      (error: AIError): Error =>
+        museTarget && MuseAttestation.isAttestationDenial(error)
+          ? new AttestationError({ message: error.message, service: resolved.ref.providerID })
+          : isQuotaFailure(error)
+            ? new QuotaError({ message: error.message, service: resolved.ref.providerID })
+            : new UnavailableError({ message: error.message, service: resolved.ref.providerID })
 
     const observe = (resolved: ModelResolver.Resolved) =>
       ModelRouteLog.observer(
@@ -399,20 +437,23 @@ export const layer = Layer.effect(
     })
 
     const runComplete = Effect.fn("Generate.runComplete")(function* (input: CompletionInput) {
-      const { resolved, raw, request } = yield* build(input)
+      const { resolved, raw, request, input: effective, attestation, museTarget } = yield* build(input)
+      // Returned tool calls are translated back under the caller's own
+      // names whenever attestation aliasing engaged (#1443).
+      const unalias = (response: LLMResponse) => (attestation ? MuseAttestation.unaliasResponse(response, attestation) : response)
       const first = yield* Effect.result(attempt(resolved, request))
-      if (Result.isSuccess(first)) return first.success
+      if (Result.isSuccess(first)) return unalias(first.success)
       // Shape-rejection fallback (spec §3): a supposedly-native provider that
       // rejects the verbatim shape is retried ONCE through translation
       // against the same resolved model. Both tries are separate ledger
       // rows (each `attempt` records its own), so the retry is never a
       // silent second billing. Quota/auth failures never reach this branch.
       if (raw !== undefined && first.failure instanceof AIError && isShapeRejection(first.failure)) {
-        const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, input)))
-        if (Result.isSuccess(second)) return second.success
-        return yield* Effect.fail(unavailable(resolved)(second.failure))
+        const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, effective)))
+        if (Result.isSuccess(second)) return unalias(second.success)
+        return yield* Effect.fail(unavailable(resolved, museTarget)(second.failure))
       }
-      return yield* Effect.fail(unavailable(resolved)(first.failure))
+      return yield* Effect.fail(unavailable(resolved, museTarget)(first.failure))
     })
 
     const complete: Interface["complete"] = (input) =>
@@ -452,7 +493,7 @@ export const layer = Layer.effect(
     const stream: Interface["stream"] = (input) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          const { resolved, raw, request } = yield* build(input)
+          const { resolved, raw, request, input: effective, attestation, museTarget } = yield* build(input)
           let emitted = 0
           const primary = attemptStream(resolved, request, () => emitted++)
           // The streaming shape-rejection fallback: only before any event
@@ -465,11 +506,16 @@ export const layer = Layer.effect(
                   Stream.catchCause((cause) => {
                     const error = Cause.squash(cause)
                     return emitted === 0 && error instanceof AIError && isShapeRejection(error)
-                      ? attemptStream(resolved, canonicalRequest(resolved, input), () => {})
+                      ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
                       : Stream.failCause(cause)
                   }),
                 )
-          return composed.pipe(Stream.mapError(unavailable(resolved)))
+          // Streamed tool events are translated back under the caller's
+          // own names whenever attestation aliasing engaged (#1443).
+          const renamed = attestation
+            ? composed.pipe(Stream.map((event) => MuseAttestation.unaliasEvent(event, attestation)))
+            : composed
+          return renamed.pipe(Stream.mapError(unavailable(resolved, museTarget)))
         }).pipe(
           Effect.catchTag("Integration.Authorization", () =>
             Effect.fail(new UnavailableError({ message: "Generation credentials are unavailable" })),
