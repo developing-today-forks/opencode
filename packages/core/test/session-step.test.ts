@@ -9,6 +9,8 @@ import {
   ProviderInternalError,
   QuotaExceededError,
   RateLimitError,
+  TimeoutError,
+  UnknownProviderError,
 } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
@@ -595,6 +597,184 @@ it.effect("cools a target that reports an exhausted quota for the quota cooldown
     expect(cooldown).toBeGreaterThan(840000)
     expect(cooldown).toBeLessThanOrEqual(900000)
     expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
+it.effect("benches a routed target after repeated non-retryable timeout failures", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-timeout",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "timeout-model", provider: "timeout-provider", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("timeout-route"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ cooldownMs: 30_000, firstTokenTimeoutMs: false }),
+        fallback: () => Effect.succeed(primary),
+      },
+    })
+    const attempt = () =>
+      steps.attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+
+    const fail = () =>
+      TestLLM.failAfter(
+        new AIError({ reason: new TimeoutError({ message: "request deadline elapsed", timeoutMs: 1_000 }) }),
+      )
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    const first = ModelRoute.cooldownUntil(primary.ref)
+    expect(first).toBeGreaterThan(Date.now())
+
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    expect(ModelRoute.cooldownUntil(primary.ref) - first).toBeGreaterThan(25_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("benches a routed target after repeated non-retryable 402 billing failures", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-billing",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "billing-model", provider: "billing-provider", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("billing-route"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ cooldownMs: 30_000, firstTokenTimeoutMs: false }),
+        fallback: () => Effect.succeed(primary),
+      },
+    })
+    const attempt = () =>
+      steps.attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+
+    const fail = () =>
+      TestLLM.failAfter(
+        new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }),
+      )
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    const first = ModelRoute.cooldownUntil(primary.ref)
+    expect(first).toBeGreaterThan(Date.now())
+
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    expect(ModelRoute.cooldownUntil(primary.ref) - first).toBeGreaterThan(25_000)
+    ModelRoute.resetHealth()
   }),
 )
 

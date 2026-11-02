@@ -720,6 +720,17 @@ export const layer = Layer.effect(
           const indexes = definition.targets.flatMap((_, index) => (triedTargets.has(index) ? [] : [index]))
           const unavailable = new Map<number, string>()
           const overLimit = new Set<number>()
+          // Pool-shaped pull-out (#1014 PR3): a leaf whose nested group (pool) has had two
+          // distinct leaves answer quota in turn is out with its pool, derived from the
+          // leaves' live quota benches/gates at this moment.
+          const poolExhausted = new Map<number, boolean>()
+          for (const index of indexes)
+            poolExhausted.set(
+              index,
+              ModelRoute.poolQuotaExhausted(definition, index, now, (leaf) =>
+                credentialByProvider.get(definition.targets[leaf].providerID),
+              ),
+            )
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
             const until = ModelRoute.cooldownUntil(target, now)
@@ -750,10 +761,13 @@ export const layer = Layer.effect(
             const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
             const credentialProbe =
               credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            const isPoolExhausted = poolExhausted.get(index) ?? false
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
+            else if (isPoolExhausted)
+              unavailable.set(index, `pool-quota-exhausted:${ModelRoute.poolIDOf(definition, index) ?? "pool"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, "user-skip")
             else if (isOverBudget) unavailable.set(index, "soft-budget")
@@ -762,6 +776,7 @@ export const layer = Layer.effect(
               (until <= now || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
+              !isPoolExhausted &&
               (limited <= now || kept) &&
               !isSkipped &&
               !isOverBudget &&
@@ -781,7 +796,13 @@ export const layer = Layer.effect(
             const credentialID = credentialByProvider.get(definition.targets[index].providerID)
             return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now) === undefined
           })
-          const lastResort = nonFull.length > 0 ? nonFull : usable
+          // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
+          // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
+          // route resolves nothing and the cascade looks elsewhere instead. When every
+          // usable target sits in an exhausted pool there is no last resort at all.
+          const nonPool = usable.filter((index) => !poolExhausted.get(index))
+          const nonPoolNonFull = nonPool.filter((index) => nonFull.includes(index))
+          const lastResort = nonPool.length === 0 ? [] : nonPoolNonFull.length > 0 ? nonPoolNonFull : nonPool
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
           const index = ModelRoute.nextTarget(
             definition,
