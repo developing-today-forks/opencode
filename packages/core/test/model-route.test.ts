@@ -1766,6 +1766,234 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.escalates(other)).toBe(false)
   })
 
+  test("settings readers are scoped per Location, in either activation order", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, factor: 0.5 }, bench: { maxCooldownMs: 5_000 }, escalation: { afterGiveUps: 4 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 9, factor: 0.9 }, bench: { maxCooldownMs: 9_000 }, escalation: { afterGiveUps: 7 } }),
+      "/loc/b",
+    )
+    try {
+      // B activated last: before #1423 its reader would have governed A too.
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(7)
+      expect(ModelRoute.currentConstants("/loc/a").bench.maxCooldownMs).toBe(5_000)
+      expect(ModelRoute.currentConstants("/loc/b").bench.maxCooldownMs).toBe(9_000)
+      expect(ModelRoute.currentConstants("/loc/a").demotion.factor).toBe(0.5)
+      // An unscoped read with two Locations registered cannot know which it serves:
+      // it must fall back to the defaults rather than leak either Location's config.
+      expect(ModelRoute.currentSettings().escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("a Location with no settings block gets defaults without disturbing others", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ escalation: { afterGiveUps: 4 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("behavior consumers judge with their own Location's settings, not the unscoped fallback (#1423)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    ModelRoute.failed(target, policy, now + 1)
+    ModelRoute.failed(target, policy, now + 2, { quota: true })
+    ModelRoute.failed(target, policy, now + 3, { quota: true })
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: false, afterGiveUps: 2 }, demotion: { after: 2, factor: 0.5 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: true, afterGiveUps: 2 }, demotion: { after: 9, factor: 0.9 } }),
+      "/loc/b",
+    )
+    try {
+      // Escalation: A switched it off, B left it on — each Location's step sees its own.
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.escalates(target, undefined, "/loc/b")).toBe(true)
+      // Quota demotion: two quota errors demote under A's threshold of 2, not B's 9.
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/b")).toBe(false)
+      // Weights: the traced demotion layer uses the judging Location's factor.
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/a" }).demotion).toBe(50)
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/b" }).demotion).toBe(100)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("health recording keeps the judging Location's outcome window and bench ladder (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3 } }), "/loc/b")
+    try {
+      // Six give-ups recorded for A: A's window (10) keeps all six, so A's
+      // afterGiveUps (6) can actually trigger; the default window (5) would
+      // have truncated the history before the threshold could accumulate.
+      ModelRoute.resetHealth()
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 1_000_000 + index, undefined, undefined, "/loc/a")
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+      // Bench ladder: B's multiplier (3) doubles — triples — the second bench.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 180_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-gate recording and evaluation use the owning Location's gate (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 120_000 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // A rate-limit exhaustion with no stated reset installs the fallback gate of
+      // the Location whose attempt reported it — one minute for A, not the
+      // compiled 30-minute default the unscoped read used once B registered.
+      ModelRoute.observeQuotaFailure(target, "settings-cred-a", undefined, now, "rate-limit", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now, "/loc/a")).toEqual({ until: now + 60_000 })
+      ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now, "/loc/b")).toEqual({ until: now + 120_000 })
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ network: { providers: 2 }, continuity: { hedgeRequests: 5 } }),
+      "/loc/b",
+    )
+    try {
+      // Network forgiveness: two unrelated transport failures meet A's configured
+      // providers threshold (2), so the first target's bench is cleared — the
+      // default threshold (3) the unscoped read used would have kept it benched.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 1, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 2, "/loc/a")).toBe(0)
+      // Origin hedging: B allows five away responses before the session settles,
+      // so the origin is still offered after three — the default (2) would not.
+      const origin = ModelRoute.ref({ providerID: "p", model: "a" })
+      const away = ModelRoute.ref({ providerID: "p", model: "b" })
+      ModelRoute.moved("r", "s-net", origin)
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      expect(ModelRoute.hedgeHome("r", "s-net", "/loc/b")).toBe("p/a")
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("shared outcome history keeps each Location's window: retention is the union, evaluation is scoped (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 2_000_000 + index, undefined, undefined, "/loc/a")
+      // One success recorded through B (default window 5) must not erase the
+      // history A (window 10) still judges by.
+      ModelRoute.completed(target, policy, ok, 2_000_100, undefined, "/loc/b")
+      expect(ModelRoute.giveUps(target, undefined, "/loc/a")).toBe(6)
+      expect(ModelRoute.giveUps(target, undefined, "/loc/b")).toBe(4)
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-event and network histories retain the union of Location windows (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, windowMs: 60_000 }, network: { providers: 3, windowMs: 60_000 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { windowMs: 1_000 }, network: { windowMs: 1_000 } }),
+      "/loc/b",
+    )
+    try {
+      // Quota events: B's narrow window (1s) recording the second event must not
+      // prune the first event A (60s window, threshold 2) still counts.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, { quota: true }, undefined, "/loc/a")
+      ModelRoute.failed(target, policy, now + 2_000, { quota: true }, undefined, "/loc/b")
+      expect(ModelRoute.demoted(target, now + 2_000, undefined, "/loc/a")).toBe(true)
+      // Network history: failures through B must not prune A's longer window, so
+      // the third unrelated failure still triggers A's outage forgiveness.
+      ModelRoute.resetHealth()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const third = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 2_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(third, policy, now + 3_000, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 3_001, "/loc/a")).toBe(0)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("network forgiveness clears only the failures inside the judging Location's window (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 1_000, providers: 2 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const old = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const fresh1 = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const fresh2 = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(old, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(old, now + 1, "/loc/a")).toBeGreaterThan(now)
+      // Ten seconds later B detects its own outage from two fresh failures; its
+      // forgiveness must not reach back and clear A's older, unrelated bench,
+      // even though the shared history retains that entry for A's window.
+      ModelRoute.failed(fresh1, policy, now + 10_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(fresh2, policy, now + 10_500, { network: true }, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(fresh1, now + 10_501, "/loc/b")).toBe(0)
+      expect(ModelRoute.cooldownUntil(old, now + 10_501, "/loc/a")).toBeGreaterThan(now + 10_501)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

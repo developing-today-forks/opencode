@@ -208,9 +208,9 @@ export const policy = (input?: {
   readonly slowThreshold?: number
   readonly cooldownMs?: number
   readonly quotaCooldownMs?: number
-}): Policy => {
+}, location?: string): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
-  const ladder = currentConstants().bench
+  const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
@@ -289,8 +289,21 @@ const OUTCOME_WINDOW = 5
 
 const key = (target: Model.Ref) => `${target.providerID}/${target.id}`
 
+// The outcome history retained for a target: the widest window any registered
+// Location evaluates with, so one Location's narrower window cannot destructively
+// truncate history another Location still judges by (#1423). Recording retains the
+// union; each evaluation applies its own Location's window over it (see giveUps).
+const retainedOutcomeWindow = () => {
+  let window = constants.escalation.outcomeWindow
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.escalation?.outcomeWindow
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
 const pushOutcome = (outcomes: boolean[], answered: boolean) =>
-  [...outcomes, answered].slice(-currentConstants().escalation.outcomeWindow)
+  [...outcomes, answered].slice(-retainedOutcomeWindow())
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -354,15 +367,27 @@ const NETWORK_PROVIDERS = 3
 const PROVIDER_MODELS = 2
 const recentFailures: Array<{ readonly provider: string; readonly target: string; readonly time: number }> = []
 
+/** The network-failure history retained: the widest network window any registered
+ * Location evaluates with (the union-retention rule of retainedOutcomeWindow, #1423);
+ * networkSuspect() applies the judging Location's own window over what is retained. */
+const retainedNetworkWindowMs = () => {
+  let window = constants.network.windowMs
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.network?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
 /** True when failures hit many unrelated providers within a short window. */
-export const networkSuspect = (now = Date.now()) =>
+export const networkSuspect = (now = Date.now(), location?: string) =>
   new Set(
     recentFailures
-      .filter((failure) => now - failure.time <= currentConstants().network.windowMs)
+      .filter((failure) => now - failure.time <= currentConstants(location).network.windowMs)
       .map((failure) => failure.provider),
-  ).size >= currentConstants().network.providers
+  ).size >= currentConstants(location).network.providers
 
-const providerCooldownUntil = (providerID: string, now: number) => {
+const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
   const prefix = `${providerID}/`
   let count = 0
   let until = 0
@@ -371,15 +396,16 @@ const providerCooldownUntil = (providerID: string, now: number) => {
     count++
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= currentConstants().network.providerModels ? until : 0
+  return count >= currentConstants(location).network.providerModels ? until : 0
 }
 
-export const coolingDown = (target: Model.Ref, now = Date.now()) => cooldownUntil(target, now) > now
+export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string) =>
+  cooldownUntil(target, now, location) > now
 
-export const cooldownUntil = (target: Model.Ref, now = Date.now()) => {
+export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: string) => {
   const state = health.get(key(target))
   if (state) recover(target, state, now)
-  return Math.max(state?.cooldownUntil ?? 0, providerCooldownUntil(target.providerID, now))
+  return Math.max(state?.cooldownUntil ?? 0, providerCooldownUntil(target.providerID, now, location))
 }
 
 const MAX_COOLDOWN_MS = 86_400_000
@@ -411,12 +437,13 @@ const bench = (
   hint?: FailureHint,
   credentialID?: string,
   quotaResetAt?: number,
+  location?: string,
 ) => {
   state.samples = []
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
-  const ladder = currentConstants().bench
+  const ladder = currentConstants(location).bench
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
@@ -547,17 +574,17 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
  * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
  * Balance holds count until a fresh balance increase releases them, so a pool held by a
  * balance gate stays out with no timer-based re-admission (#1014). */
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number): boolean => {
+const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
   if (credentialID) {
     if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
-    return credentialQuotaBlocked(credentialID, now) !== undefined
+    return credentialQuotaBlocked(credentialID, now, location) !== undefined
   }
   if (quotaBench(health.get(key(target)), now)) return true
   const provider = providerQuota.get(target.providerID)
   if (
     provider &&
     (provider.balanceHold !== undefined ||
-      QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold))
+      QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold))
   )
     return true
   return activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip")
@@ -613,13 +640,14 @@ export const poolQuotaExhausted = (
   index: number,
   now = Date.now(),
   credentialOf?: (index: number) => string | undefined,
+  location?: string,
 ): boolean => {
   const pool = poolOf(definition, index)
   if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
   const out = new Set<number>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now)) out.add(leaf)
+    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
   }
   return out.size >= POOL_QUOTA_LEAVES
 }
@@ -630,6 +658,7 @@ export const failed = (
   now = Date.now(),
   hint?: FailureHint,
   credentialID?: string,
+  location?: string,
 ) => {
   // Quota, rate-limit and provider HTTP errors are not evidence of an internet outage.
   if (hint?.quota) recordQuota(target, now, credentialID)
@@ -641,15 +670,19 @@ export const failed = (
     })
   while (
     recentFailures.length > 200 ||
-    (recentFailures[0] && now - recentFailures[0].time > currentConstants().network.windowMs)
+    (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs())
   )
     recentFailures.shift()
-  if (hint?.network && networkSuspect(now)) {
+  if (hint?.network && networkSuspect(now, location)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
     // shared the same local outage, so treating each provider as independently unhealthy is wrong.
     // The escalation count is undone with the cooldown: a forgiven failure must not double the
     // target's next bench (#1034).
     for (const failure of recentFailures) {
+      // Forgiveness covers the outage the judging Location detected: failures older
+      // than its network window are retained for other Locations' evaluations, but
+      // they are not part of this outage and keep their benches (#1423).
+      if (now - failure.time > currentConstants(location).network.windowMs) continue
       const prior = health.get(failure.target) ?? credentialHealth.get(failure.target)
       if (prior) {
         if (prior.cooldownUntil > now) {
@@ -675,7 +708,8 @@ export const failed = (
       now,
       hint,
       credentialID,
-      hint?.quota ? quotaResetAt(target, credentialID, now) : undefined,
+      hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
+      location,
     )
     return
   }
@@ -686,7 +720,8 @@ export const failed = (
     now,
     hint,
     undefined,
-    hint?.quota ? quotaResetAt(target, undefined, now) : undefined,
+    hint?.quota ? quotaResetAt(target, undefined, now, location) : undefined,
+    location,
   )
 }
 
@@ -784,18 +819,42 @@ export interface SettingsConfig {
   }
 }
 
-let readSettingsConfig: (() => SettingsConfig | undefined) | undefined
+/** Settings readers keyed by Location directory (#1423). The model-routes config plugin
+ * runs once per Location graph, so each registration belongs to that graph's Location
+ * alone. Before this, a single module-global reader meant the last activated Location's
+ * settings (or its absence) governed every Location's routing machinery in the process. */
+const settingsReaders = new Map<string, () => SettingsConfig | undefined>()
 
-/** Registers where the config-derived settings come from (the model-routes config plugin,
- * mirroring ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
- * reload is honored without re-registering. */
-export const onSettingsConfig = (read: () => SettingsConfig | undefined) => {
-  readSettingsConfig = read
+/** The reader an unscoped call may use: config is only unambiguous when exactly one
+ * Location has registered. With several Locations an unscoped read cannot know which
+ * one it serves, so it gets no config reader (the configure()/compiled defaults) rather
+ * than another Location's settings. Callers that know their Location pass its directory. */
+const unscopedSettingsReader = (): (() => SettingsConfig | undefined) | undefined => {
+  if (settingsReaders.size !== 1) return undefined
+  return settingsReaders.values().next().value
 }
 
-/** The settings in force: what configure() set, with config over it. */
-const activeSettings = (): Settings => {
-  const config = readSettingsConfig?.()
+const settingsReaderFor = (location?: string) =>
+  location === undefined ? unscopedSettingsReader() : settingsReaders.get(location)
+
+/** Registers where one Location's config-derived settings come from (the model-routes
+ * config plugin, keyed by that Location's directory, mirroring
+ * ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
+ * reload is honored without re-registering. An unkeyed registration is kept under the
+ * empty key (test seam and single-Location hosts). Returns the function that removes
+ * this registration again, for when the Location's graph closes. */
+export const onSettingsConfig = (read: () => SettingsConfig | undefined, location?: string) => {
+  const key = location ?? ""
+  settingsReaders.set(key, read)
+  return () => {
+    if (settingsReaders.get(key) === read) settingsReaders.delete(key)
+  }
+}
+
+/** The settings in force for a Location: what configure() set, with that Location's
+ * config over it. */
+const activeSettings = (location?: string): Settings => {
+  const config = settingsReaderFor(location)?.()
   if (!config) return settings
   return {
     escalation: {
@@ -809,7 +868,7 @@ const activeSettings = (): Settings => {
   }
 }
 
-export const currentSettings = () => activeSettings()
+export const currentSettings = (location?: string) => activeSettings(location)
 
 /** The quota demotion policy as config supplies it (#1151): `experimental.model_route_demotion
  * { threshold, window_ms }` in the model-routes plugin's shape. Both fields are optional; an
@@ -892,19 +951,20 @@ const retainedDemotionWindow = () => {
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
  * target-level read would call a repeatedly failing credential steady forever. */
-export const giveUps = (target: Model.Ref, credentialID?: string) => {
+export const giveUps = (target: Model.Ref, credentialID?: string, location?: string) => {
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  return (state?.outcomes ?? []).filter((answered) => !answered).length
+  const window = currentConstants(location).escalation.outcomeWindow
+  return (state?.outcomes ?? []).slice(-window).filter((answered) => !answered).length
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
-export const steady = (target: Model.Ref, credentialID?: string) =>
-  giveUps(target, credentialID) < activeSettings().escalation.afterGiveUps
+export const steady = (target: Model.Ref, credentialID?: string, location?: string) =>
+  giveUps(target, credentialID, location) < activeSettings(location).escalation.afterGiveUps
 
 /** A route should race its next target immediately when its current target keeps giving up. Whether a
  * route races at all depends on its autonomy level; see ModelRouteAutonomy.races. */
-export const escalates = (target: Model.Ref, credentialID?: string) =>
-  activeSettings().escalation.enabled && !steady(target, credentialID)
+export const escalates = (target: Model.Ref, credentialID?: string, location?: string) =>
+  activeSettings(location).escalation.enabled && !steady(target, credentialID, location)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
 // of every order, instead of being retried first on each new session.
@@ -920,6 +980,18 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
     (at) => now - at <= policy.windowMs,
   )
   return recent.length >= policy.threshold
+}
+
+// The quota-event history retained for a target: the widest demotion window any
+// registered Location evaluates with (the union-retention rule of retainedOutcomeWindow,
+// #1423); demoted() applies the judging Location's own window over what is retained.
+const retainedQuotaWindowMs = () => {
+  let window = settings.quota.windowMs
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.demotion?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
 }
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
@@ -1014,6 +1086,7 @@ const observeCredentialQuotaState = (
   snapshot: QuotaSnapshot.Snapshot,
   now: number,
   resetAtTrusted: boolean,
+  location?: string,
 ) => {
   const previous = credentialQuota.get(credentialID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -1041,7 +1114,7 @@ const observeCredentialQuotaState = (
   // one carries no new information, even when it is still fresh — a below-limit reading
   // taken before the retained known-full reading cannot re-admit the credential (#6).
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
       ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
@@ -1084,7 +1157,8 @@ export const observeCredentialQuota = (
   credentialID: string,
   snapshot: QuotaSnapshot.Snapshot,
   now = Date.now(),
-) => observeCredentialQuotaState(target, credentialID, snapshot, now, true)
+  location?: string,
+) => observeCredentialQuotaState(target, credentialID, snapshot, now, true, location)
 
 /** Credentials of one provider currently held by the quota gate (a balance hold or a gated
  * known-full snapshot). The gate feed uses this to keep refreshing held credentials after
@@ -1117,6 +1191,7 @@ export const observeProviderQuota = (
   target: Model.Ref,
   snapshot: QuotaSnapshot.Snapshot,
   now = Date.now(),
+  location?: string,
 ) => {
   const previous = providerQuota.get(target.providerID)
   if (previous && !QuotaSnapshot.known(snapshot)) return
@@ -1152,7 +1227,7 @@ export const observeProviderQuota = (
     // skip with this snapshot's normal timed gate (or removes it when not full).
   }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
-  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
+  const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
       ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot) }
@@ -1167,7 +1242,7 @@ export const observeProviderQuota = (
   })
   if (full) {
     if (snapshot.resetAt !== null) armBenchProbe(target, undefined, snapshot.resetAt, now)
-    const gate = currentConstants().quotaGate
+    const gate = currentConstants(location).quotaGate
     const until =
       snapshot.balance === true ? undefined : Math.min(snapshot.resetAt ?? now + gate.fallbackMs, now + gate.maxMs)
     addAdjustment({
@@ -1254,8 +1329,8 @@ export const resetQuotaFeed = () => {
   lastQuotaFeedAt = 0
 }
 
-export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quotaGate.feedTtlMs) => {
-  if (now - lastQuotaFeedAt < ttlMs) return false
+export const shouldFeedQuota = (now = Date.now(), location?: string) => {
+  if (now - lastQuotaFeedAt < currentConstants(location).quotaGate.feedTtlMs) return false
   lastQuotaFeedAt = now
   return true
 }
@@ -1291,8 +1366,9 @@ export const observeQuotaFailure = (
    * snapshot was balance-shaped (#1014). Callers that predate classification omit it and
    * keep the historical balance-exhaustion reading. */
   classification: "balance-exhaustion" | "rate-limit" = "balance-exhaustion",
+  location?: string,
 ) => {
-  const gate = currentConstants().quotaGate
+  const gate = currentConstants(location).quotaGate
   const previous = credentialID ? credentialQuota.get(credentialID) : providerQuota.get(target.providerID)
   if (classification !== "rate-limit" && previous?.snapshot.balance === true) {
     const snapshot = { ...previous.snapshot, percent: null, resetAt: null, observedAt: now, stale: false }
@@ -1335,6 +1411,7 @@ export const observeQuotaFailure = (
       },
       now,
       false,
+      location,
     )
     return
   }
@@ -1353,13 +1430,14 @@ export const observeQuotaFailure = (
 export const credentialQuotaBlocked = (
   credentialID: string,
   now = Date.now(),
+  location?: string,
 ): { readonly until: number | null } | undefined => {
   const state = credentialQuota.get(credentialID)
   // No in-memory state but a durable baseline record: the hold survives the restart and
   // blocks selection (including credential fallback) until a fed snapshot releases it.
   if (!state) return restoredCredentialHold(credentialID) ? { until: null } : undefined
   if (state.balanceHold) return { until: null }
-  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)) {
+  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
     state.gated = true
     return { until: state.snapshot.resetAt }
   }
@@ -1398,6 +1476,7 @@ export const completed = (
   sample: { readonly firstTokenMs: number; readonly responseMs: number; readonly tokensPerSecond: number },
   now = Date.now(),
   credentialID?: string,
+  location?: string,
 ) => {
   // A success clears the serving credential's failure count and bench (#6); the target-level
   // accounting below is unchanged, since the target did serve the request.
@@ -1704,7 +1783,12 @@ export const rateLimitOf = (target: Model.Ref, credentialID?: string) =>
  * actually exhausted provider window (not a nearby window), and still be a fresh future reset. Plan
  * snapshots are provider/credential scoped and already carry their own freshness and full-window checks.
  * The reactive quota gate's bounded fallback is deliberately not considered a window reset. */
-const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: number): number | undefined => {
+const quotaResetAt = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): number | undefined => {
   const resets: number[] = []
   const rateLimit = rateLimitOf(target, credentialID)
   const providerReset = rateLimit
@@ -1717,7 +1801,7 @@ const quotaResetAt = (target: Model.Ref, credentialID: string | undefined, now: 
     planQuota &&
     planQuota.target.providerID === target.providerID &&
     planQuota.snapshot.balance !== true &&
-    QuotaSnapshot.isKnownFull(planQuota.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold) &&
+    QuotaSnapshot.isKnownFull(planQuota.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold) &&
     planQuota.snapshot.observedAt <= now &&
     planQuota.resetObservedAt !== undefined &&
     planQuota.resetObservedAt <= now &&
@@ -1930,6 +2014,10 @@ export interface WeightScope extends ModelRouteOverrides.Scope {
   /** The credential that would serve this target, when the caller knows it: quota demotion is
    * judged against that credential's events, not the target's (#870). */
   readonly credentialID?: string
+  /** The Location directory whose route settings govern this judgement, when the caller
+   * knows it: behavior consumers read that Location's settings, not the unscoped
+   * fallback (#1423). */
+  readonly location?: string
 }
 
 const ruleMatches = (rule: WeightRule, target: Model.Ref, scope: WeightScope) => {
@@ -1991,7 +2079,7 @@ export const tracedWeightOf = (
   let weight = afterScheduled
   for (const item of userOverrides("prefer", target, now, scope)) {
     if (item.weight !== undefined) weight = item.weight
-    else weight *= item.factor ?? currentConstants().overrides.preferredFactor
+    else weight *= item.factor ?? currentConstants(scope.location).overrides.preferredFactor
   }
   const afterPrefer = weight
   if (scope.fixed !== true) {
@@ -2007,7 +2095,7 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID) ? currentConstants().demotion.factor : 1),
+    demotion: weight * (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
     gate: null,
   }
 }
@@ -2028,20 +2116,22 @@ export const keepsThrough = (
   target: Model.Ref,
   now = Date.now(),
   credentialID?: string,
+  location?: string,
 ) =>
   sessionID !== undefined &&
   continuityOf(routeID, sessionID)?.current === key(target) &&
-  steady(target, credentialID) &&
-  !demoted(target, now, credentialID)
+  steady(target, credentialID, location) &&
+  !demoted(target, now, credentialID, location)
 
 /** The scope overrides and weights are judged against: this route (and nested ids reached on the
  * way in), whether it is `fixed`, and the route-level schedule rules. */
-export const scopeOf = (definition: Definition, path: readonly string[] = []): WeightScope => ({
+export const scopeOf = (definition: Definition, path: readonly string[] = [], location?: string): WeightScope => ({
   routeID: definition.id,
   routes: [definition.id, ...path.filter((id) => id !== definition.id)],
   fixed: !ModelRouteAutonomy.usesRules(definition.autonomy),
   autonomy: definition.autonomy,
   ...(definition.schedules?.length ? { schedules: definition.schedules } : {}),
+  ...(location === undefined ? {} : { location }),
 })
 
 /** Chooses one leaf lazily. Only groups on the chosen path draw their sticky/rotation entry; nested
@@ -2056,6 +2146,7 @@ export const nextTarget = (
   unavailable?: ReadonlyMap<number, string>,
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
+  location?: string,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -2100,6 +2191,7 @@ export const nextTarget = (
     routes: [definition.id, ...path.filter((id) => id !== definition.id)],
     fixed: !ModelRouteAutonomy.usesRules(definition.autonomy),
     schedules: [...(definition.schedules ?? []), ...rules],
+    ...(location === undefined ? {} : { location }),
   })
   /** The average weight multiplier of a nested group's leaves, judged with the schedules that reach
    * into that group. The group's own weight stays in `weights`; a parent then scales the two.
@@ -2133,7 +2225,7 @@ export const nextTarget = (
   const allDemoted = (nodeIndex: number) => {
     const eligible = openLeaves(nodeIndex)
     return (
-      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index)))
+      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
     )
   }
   const label = (child: Node["children"][number]) => {
@@ -2241,7 +2333,7 @@ export const nextTarget = (
             if (child.leaf !== undefined)
               return {
                 weight: tierKey(traces[position]?.adjustment ?? base),
-                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf)),
+                demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf), location),
               }
             if (child.node !== undefined)
               return {
@@ -2285,7 +2377,7 @@ export const nextTarget = (
             const leaf = node.children[position].leaf
             if (leaf === undefined) return false
             const target = definition.targets[leaf]
-            return key(target) === current && !demoted(target, now, credentialOf?.(leaf))
+            return key(target) === current && !demoted(target, now, credentialOf?.(leaf), location)
           })
     const rank = (from: readonly number[]) =>
       [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1))
@@ -2440,7 +2532,7 @@ export const moved = (routeID: string, sessionID: string, from: Model.Ref) => {
 }
 
 /** A request on this route was answered by `target`. Answering from the origin ends the move. */
-export const served = (routeID: string, sessionID: string, target: Model.Ref) => {
+export const served = (routeID: string, sessionID: string, target: Model.Ref, location?: string) => {
   const id = continuityKey(routeID, sessionID)
   const current = key(target)
   const prior = continuity.get(id)
@@ -2448,15 +2540,16 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref) =>
   remember(id, {
     current,
     origin: prior.origin,
-    away: Math.min(prior.away + 1, currentConstants().continuity.hedgeRequests),
+    away: Math.min(prior.away + 1, currentConstants(location).continuity.hedgeRequests),
   })
 }
 
 /** The origin a session should hedge back to: only just after it moved, and never once it has
  * settled on the new target. */
-export const hedgeHome = (routeID: string, sessionID: string) => {
+export const hedgeHome = (routeID: string, sessionID: string, location?: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= currentConstants().continuity.hedgeRequests) return undefined
+  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests)
+    return undefined
   return state.origin
 }
 
@@ -2548,8 +2641,8 @@ export const configureConstants = (next: ConstantsPatch) => {
  * (experimental.routes.settings), in that order. The config groups are picked field by
  * field where config's grouping differs from this one: demotion.after / demotion.windowMs
  * and the escalation switch live in `Settings`, not here. */
-export const currentConstants = (): Constants => {
-  const config = readSettingsConfig?.()
+export const currentConstants = (location?: string): Constants => {
+  const config = settingsReaderFor(location)?.()
   if (!config) return constants
   return mergeConstants(constants, {
     ...(config.bench ? { bench: config.bench } : {}),

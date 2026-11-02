@@ -14,6 +14,7 @@ import { Npm } from "@opencode/util/npm"
 import { Provider } from "./provider.js"
 import { Config } from "./config.js"
 import { ModelAlias } from "./model-alias.js"
+import { Location } from "./location.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
@@ -439,9 +440,10 @@ const refreshQuotaGate = (
   credentialByProvider: Map<string, Credential.ID>,
   dataDir: string | undefined,
   now: number,
+  location?: string,
 ) =>
   Effect.gen(function* () {
-    if (!ModelRoute.shouldFeedQuota(now)) return
+    if (!ModelRoute.shouldFeedQuota(now, location)) return
     let plans: readonly ModelPlan.Plan[] = []
     try {
       plans = ModelPlan.readStore(dataDir).plans
@@ -501,19 +503,19 @@ const refreshQuotaGate = (
                   ),
                 ),
               now,
-              { now, balanceDeadThreshold: ModelRoute.currentConstants().quotaGate.balanceDeadThreshold },
+              { now, balanceDeadThreshold: ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold },
             )
             if (snapshots.length === 0) return
             const snapshot = QuotaSnapshot.gatingSnapshot(
               snapshots,
               now,
-              ModelRoute.currentConstants().quotaGate.balanceDeadThreshold,
+              ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold,
             )
             if (!snapshot) return
             if (credentialID) {
-              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
+              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now, location)
             } else {
-              ModelRoute.observeProviderQuota(target, snapshot, now)
+              ModelRoute.observeProviderQuota(target, snapshot, now, location)
             }
           }
           feed(activeCredentialID)
@@ -532,6 +534,11 @@ export const layer = Layer.effect(
     const integrations = yield* Integration.Service
     const npm = yield* Npm.Service
     const aisdk = yield* AISDK.Service
+    const location = yield* Effect.serviceOption(Location.Service)
+    const locationDirectory = Option.match(location, {
+      onNone: () => undefined,
+      onSome: (value) => value.directory as string,
+    })
     const config = yield* Effect.serviceOption(Config.Service)
     const global = yield* Effect.serviceOption(Global.Service)
     const dataDir = Option.match(global, { onNone: () => undefined, onSome: (g) => g.data })
@@ -638,7 +645,7 @@ export const layer = Layer.effect(
           )
           if (connection?.type === "credential") credentialByProvider.set(target.providerID, connection.id)
         }
-        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now)
+        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
         const makeResolved = (
           current: Resolved,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
@@ -738,16 +745,20 @@ export const layer = Layer.effect(
           for (const index of indexes)
             poolExhausted.set(
               index,
-              ModelRoute.poolQuotaExhausted(definition, index, now, (leaf) =>
-                credentialByProvider.get(definition.targets[leaf].providerID),
+              ModelRoute.poolQuotaExhausted(
+                definition,
+                index,
+                now,
+                (leaf) => credentialByProvider.get(definition.targets[leaf].providerID),
+                locationDirectory,
               ),
             )
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
-            const until = ModelRoute.cooldownUntil(target, now)
+            const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
             // A fixed route only fails over: provider holds, skips and budgets are rules and above.
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
-            const scope = ModelRoute.scopeOf(definition)
+            const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
             // A user's "avoid" holds on every route; learned skips and budgets are rules the route opted into.
             const isSkipped =
               ModelRoute.userSkipped(target, now, scope) || (rules && ModelRoute.skipped(target, now, scope))
@@ -762,9 +773,9 @@ export const layer = Layer.effect(
             const limited = rules ? ModelRoute.limitedUntil(target, now, credentialID) : 0
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
-              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID)
+              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
-            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now) : undefined
+            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
@@ -805,7 +816,7 @@ export const layer = Layer.effect(
           const usable = indexes.filter((index) => !overLimit.has(index))
           const nonFull = usable.filter((index) => {
             const credentialID = credentialByProvider.get(definition.targets[index].providerID)
-            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now) === undefined
+            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
           // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
           // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
@@ -825,6 +836,7 @@ export const layer = Layer.effect(
             unavailable,
             Math.random,
             (index) => credentialByProvider.get(definition.targets[index].providerID),
+            locationDirectory,
           )
           if (index === undefined) break
           triedTargets.add(index)
@@ -851,7 +863,7 @@ export const layer = Layer.effect(
             load(source, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
           )
           if (Result.isFailure(resolved)) {
-            ModelRoute.failed(target, definition.health, now)
+            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory)
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.
@@ -910,8 +922,8 @@ export const layer = Layer.effect(
                     connection.id !== servingID &&
                     !tried.has(connection.id) &&
                     ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
-                    ModelRoute.credentialQuotaBlocked(connection.id, at) === undefined &&
-                    !ModelRoute.demoted(target, at, connection.id),
+                    ModelRoute.credentialQuotaBlocked(connection.id, at, locationDirectory) === undefined &&
+                    !ModelRoute.demoted(target, at, connection.id, locationDirectory),
                 )
                 for (const candidate of candidates) {
                   if (candidate.type !== "credential") continue
@@ -960,7 +972,7 @@ export const layer = Layer.effect(
                 return undefined
               })
           // A session that just moved off its origin races that origin rather than the next fallback.
-          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID)
+          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID, locationDirectory)
           const homeIndex =
             home === undefined ? -1 : definition.targets.findIndex((item) => `${item.providerID}/${item.id}` === home)
           const origin =

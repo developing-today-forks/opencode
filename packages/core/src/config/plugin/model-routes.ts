@@ -54,8 +54,14 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
-    // The route machinery's constants, from experimental.routes.settings.
-    ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
+    // The route machinery's constants, from experimental.routes.settings. Registered
+    // under this Location's directory (#1423) so another Location's activation cannot
+    // replace them, and removed again when this Location's graph closes.
+    const offSettingsConfig = ModelRoute.onSettingsConfig(
+      () => settingsConfig(configuredSettings(loaded.entries)),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offSettingsConfig))
 
     // Quota demotion policy (#1151), from experimental.model_route_demotion. Registered
     // under this Location's directory so another Location's activation cannot replace it,
@@ -103,7 +109,7 @@ export const Plugin = define({
         const leafCeiling = (target: (typeof expanded)[number]) =>
           Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
         const leafContext = Math.min(...expanded.map(leafCeiling))
-        const health = ModelRoute.policy(route.health)
+        const health = ModelRoute.policy(route.health, ctx.location.directory)
         const targetCacheFormats = expanded.map((target) =>
           target.cacheFormat ? { cacheFormat: target.cacheFormat } : {},
         )

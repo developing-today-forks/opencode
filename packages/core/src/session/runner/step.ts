@@ -27,6 +27,7 @@ import { SessionModelRequest } from "../model-request.js"
 import { SessionSchema } from "../schema.js"
 import { toSessionError } from "../to-session-error.js"
 import { SessionUsage } from "../usage.js"
+import { Location } from "../../location.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteAutonomy } from "../../model-route-autonomy.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
@@ -216,6 +217,11 @@ export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
   const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
+  const location = yield* Effect.serviceOption(Location.Service)
+  const locationDirectory = Option.match(location, {
+    onNone: () => undefined,
+    onSome: (value) => value.directory as string,
+  })
   const toolOutput = yield* ToolOutput.Service
 
   const run = Effect.fn("SessionStep.run")(function* (
@@ -291,7 +297,8 @@ export const make = Effect.gen(function* () {
               providerFailure = event
               return
             }
-            if (!event.classification) ModelRoute.failed(input.model.routing.target, input.model.routing.policy)
+            if (!event.classification)
+              ModelRoute.failed(input.model.routing.target, input.model.routing.policy, undefined, undefined, undefined, locationDirectory)
           }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
@@ -464,6 +471,7 @@ export const make = Effect.gen(function* () {
             // Only a real exhaustion answer may install an increase-only balance hold; a
             // plain HTTP 429 rate limit keeps its stated timed recovery (#1014, #1380).
             quotaClassification,
+            locationDirectory,
           )
         }
         // A success that advertised no limit headers replaces the serving credential's hold:
@@ -553,7 +561,7 @@ export const make = Effect.gen(function* () {
           // A transient failure on a target with a good record gets another try; a rate limit or a
           // target that keeps failing moves the turn on immediately.
           !isRateLimited(llmFailure) &&
-          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID) &&
+          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID, locationDirectory) &&
           (failedAttempts.get(retryKey) ?? 0) + 1 < input.model.routing.attempts
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
@@ -575,6 +583,7 @@ export const make = Effect.gen(function* () {
             Date.now(),
             failureHint(llmFailure),
             input.model.routing.credentialID,
+            locationDirectory,
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
@@ -698,9 +707,10 @@ export const make = Effect.gen(function* () {
             },
             Date.now(),
             input.model.routing.credentialID,
+            locationDirectory,
           )
           if (input.sessionID)
-            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
         }
         if (record.finish || record.failure) {
           const startSnapshot = yield* Fiber.join(pendingStartSnapshot)
@@ -764,7 +774,7 @@ export const make = Effect.gen(function* () {
     const escalate =
       routing !== undefined &&
       ModelRouteAutonomy.races(routing.autonomy) &&
-      ModelRoute.escalates(routing.target, routing.credentialID)
+      ModelRoute.escalates(routing.target, routing.credentialID, locationDirectory)
     // Once a turn has been hedged, its retries stay on one request rather than racing again.
     if (!routing || (!routing.hedgeAfterMs && !escalate) || !prepareFor || wasHedged(input.assistantMessageID))
       return yield* run(input)
