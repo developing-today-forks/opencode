@@ -366,6 +366,15 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
     expect(Schema.encodeSync(ConfigExperimental.Info)(decoded)).toEqual(input)
   })
 
+  test("accepts experimental.model_route_demotion with optional fields (#1151)", () => {
+    const decoded = decode({ model_route_demotion: { threshold: 1, window_ms: 60_000 } })
+    expect(decoded.model_route_demotion?.threshold).toBe(1)
+    expect(decoded.model_route_demotion?.window_ms).toBe(60_000)
+    expect(decode({ model_route_demotion: {} }).model_route_demotion).toBeDefined()
+    expect(decode({ model_route_demotion: { threshold: 2 } }).model_route_demotion?.window_ms).toBeUndefined()
+    expect(decode({}).model_route_demotion).toBeUndefined()
+  })
+
   test("still accepts the deprecated flat model_route_settings spelling in the schema", () => {
     // The flat keys stay in the schema so existing config files — and external file
     // readers — keep validating; normalization folds them into routes.settings.

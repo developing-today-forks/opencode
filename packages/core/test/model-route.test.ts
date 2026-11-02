@@ -1743,6 +1743,100 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
   })
 })
 
+describe("ModelRoute demotion policy (experimental.model_route_demotion, #1151)", () => {
+  const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-demotion" })
+  const policy = ModelRoute.policy({ cooldownMs: 60_000 })
+  const quota = { quota: true }
+  let offs: Array<() => void> = []
+
+  afterEach(() => {
+    offs.forEach((off) => off())
+    offs = []
+    ModelRoute.onSettingsConfig(() => undefined)
+    ModelRoute.configure({
+      escalation: { enabled: true, afterGiveUps: 2 },
+      quota: { demoteAfter: 3, windowMs: 4 * 3_600_000 },
+    })
+  })
+
+  test("unconfigured, the policy is exactly today's defaults", () => {
+    expect(ModelRoute.DEFAULT_DEMOTION_POLICY).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    expect(ModelRoute.demotionPolicy()).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    expect(ModelRoute.demotionPolicy("/unconfigured-location")).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    // And the behaviour matches: two quota failures do not demote, the third does,
+    // and a failure older than the 4h window no longer counts.
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    expect(ModelRoute.demoted(target, now + 2)).toBe(false)
+    ModelRoute.failed(target, policy, now + 2, quota)
+    expect(ModelRoute.demoted(target, now + 3)).toBe(true)
+    expect(ModelRoute.demoted(target, now + 14_400_000 + 10)).toBe(false)
+  })
+
+  test("a configured threshold of 1 demotes after a single quota failure inside the window", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1, windowMs: 60_000 }), "/proj-a"))
+    expect(ModelRoute.demotionPolicy("/proj-a")).toEqual({ threshold: 1, windowMs: 60_000 })
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-a")).toBe(true)
+    // The same failure is outside the configured window an hour later.
+    expect(ModelRoute.demoted(target, now + 3_600_000, undefined, "/proj-a")).toBe(false)
+    // A Location with no registration keeps the defaults: one failure is not enough.
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("failures outside the configured window do not count toward the threshold", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 2, windowMs: 1_000 }), "/proj-b"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 2_000, quota)
+    expect(ModelRoute.demoted(target, now + 2_000, undefined, "/proj-b")).toBe(false)
+    ModelRoute.failed(target, policy, now + 2_500, quota)
+    expect(ModelRoute.demoted(target, now + 2_500, undefined, "/proj-b")).toBe(true)
+  })
+
+  test("two Locations with divergent thresholds each judge by their own policy", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/proj-strict"))
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 3 }), "/proj-lenient"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-strict")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-lenient")).toBe(false)
+    // An unscoped read with several Locations registered cannot know which it serves,
+    // so it falls back to the defaults rather than borrowing another Location's policy.
+    expect(ModelRoute.demoted(target, now + 1)).toBe(false)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    ModelRoute.failed(target, policy, now + 2, quota)
+    expect(ModelRoute.demoted(target, now + 3, undefined, "/proj-lenient")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 3)).toBe(true)
+  })
+
+  test("an unscoped read follows the single registered Location (session and façade traffic alike)", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/only-proj"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1)).toBe(true)
+  })
+
+  test("a wider configured window retains quota events the default window would prune", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 2, windowMs: 6 * 3_600_000 }), "/proj-wide"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 5 * 3_600_000, quota)
+    // Both failures are inside the configured 6h window, so the target demotes there —
+    // under the default 4h window the first failure would not count.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-wide")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("removing a Location's registration restores the defaults for it", () => {
+    const off = ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/proj-gone")
+    off()
+    expect(ModelRoute.demotionPolicy("/proj-gone")).toEqual({ threshold: 3, windowMs: 14_400_000 })
+  })
+})
+
 describe("ModelRoute provider-route groups with no ready members", () => {
   const sibling = ModelRoute.ref({ providerID: "opendesign", model: "gpt-6-luna" })
   const groupNode = {

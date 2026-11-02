@@ -1036,6 +1036,17 @@ describe("provider routes and route settings survive normalization", () => {
     })
     expect(value.experimental?.routes?.settings?.bench?.multiplier).toBe(3)
   })
+
+  test("experimental.model_route_demotion reaches the decoded config (#1151)", () => {
+    const value = decoded({
+      experimental: { model_route_demotion: { threshold: 1, window_ms: 60_000 } },
+    })
+    expect(value.experimental?.model_route_demotion).toEqual({ threshold: 1, window_ms: 60_000 })
+    const partial = decoded({ experimental: { model_route_demotion: { threshold: 2 } } })
+    expect(partial.experimental?.model_route_demotion?.threshold).toBe(2)
+    expect(partial.experimental?.model_route_demotion?.window_ms).toBeUndefined()
+    expect(decoded({ experimental: {} }).experimental?.model_route_demotion).toBeUndefined()
+  })
 })
 
 describe("per-field normalization survival guard (#1285)", () => {
@@ -1092,6 +1103,7 @@ describe("per-field normalization survival guard (#1285)", () => {
     model_route_tuning: { enabled: true, notes: ["match: text"] },
     model_route_log: { captureErrorBodies: true },
     model_route_settings: { bench: { multiplier: 3 } },
+    model_route_demotion: { threshold: 1, window_ms: 60_000 },
     routes: {
       models: { pool: { targets: ["openai/gpt-6-luna"] } },
       providers: { "openai-plan": { providers: ["openai", "openai.alternate"], selection: "ordered" } },
