@@ -215,6 +215,15 @@ export namespace FSUtil {
           if (link === undefined) break
           target = yield* resolve(isAbsolute(link) ? link : join(dirname(target), link))
         }
+        // A chain longer than the walk (or a loop) leaves the target still a
+        // link: fail rather than rename over it and destroy the link.
+        if ((yield* fs.readLink(target).pipe(Effect.orElseSucceed(() => undefined))) !== undefined)
+          return yield* Effect.fail(
+            new FileSystemError({
+              method: "writeAtomic",
+              cause: new Error(`Too many levels of symbolic links: ${path}`),
+            }),
+          )
         yield* ensureDir(dirname(target))
         // One stat carries the existing mode (and ownership, when preserving):
         // the temp file renamed over the target must take both.

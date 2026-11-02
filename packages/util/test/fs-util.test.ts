@@ -283,6 +283,23 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
+  test("a dangling chain past the hop limit fails without replacing any link", async () => {
+    const directory = await dir()
+    const names = Array.from({ length: 9 }, (_, index) => `link-${index}.txt`)
+    names.forEach((name, index) => {
+      fs.symlinkSync(names[index + 1] ?? "referent.txt", path.join(directory, name))
+    })
+    const outcome = await writeAtomic(path.join(directory, names[0]), "created").then(
+      () => "succeeded",
+      () => "failed",
+    )
+    expect(outcome).toBe("failed")
+    for (const name of names) expect(fs.lstatSync(path.join(directory, name)).isSymbolicLink()).toBe(true)
+    expect(fs.existsSync(path.join(directory, "referent.txt"))).toBe(false)
+    expect(fs.readdirSync(directory).sort()).toEqual([...names].sort())
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
   test("a target basename near the component-length limit still replaces", async () => {
     const directory = await dir()
     const file = path.join(directory, `${"a".repeat(240)}.txt`)
