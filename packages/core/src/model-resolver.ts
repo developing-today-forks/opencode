@@ -580,18 +580,35 @@ export const layer = Layer.effect(
         servingCredentialID: connection?.type === "credential" ? connection.id : undefined,
       }
     })
-    const resolveRoute = (
+    // Cross-route cascade (#1014, PR2): when a route exhausts, the session re-enters
+    // through a parent route that nests it instead of dying on the sub-route. Tried
+    // targets are tracked by provider/model ref across definitions — per-definition
+    // index sets cannot seed a parent's tried set — and visited routes keep the
+    // upward walk from re-entering a route the chain already exhausted. `chain`
+    // holds every route the cascade has stood on, nearest last, so a parent that
+    // itself exhausts continues to its own parents and then to the remaining
+    // parents of the routes below it, in proximity order.
+    interface CascadeState {
+      readonly triedRefs: Set<string>
+      readonly visitedRoutes: Set<string>
+      readonly chain: Array<{
+        readonly definition: ModelRoute.Definition
+        readonly tried: ReadonlySet<number>
+      }>
+    }
+    const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
+    const resolveRouteWithin = (
       selected: Info,
       definition: ModelRoute.Definition,
       requestedVariant: VariantID | undefined,
-      tried: ReadonlySet<number>,
+      triedTargets: Set<number>,
       allowCooling: boolean,
-      sessionID?: string,
-      requestTokens?: number,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
-        const triedTargets = new Set(tried)
         let lastError: Error | undefined
         // The active stored credential per target provider (#6): the ready filter gates on the
         // credential that would actually serve the target, not only on the target itself.
@@ -634,7 +651,22 @@ export const layer = Layer.effect(
             autonomy: definition.autonomy,
             ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
             fallback: () =>
-              resolveRoute(selected, definition, requestedVariant, triedTargets, false, sessionID, requestTokens),
+              resolveRouteWithin(
+                selected,
+                definition,
+                requestedVariant,
+                triedTargets,
+                false,
+                sessionID,
+                requestTokens,
+                cascade,
+              ).pipe(
+                Effect.flatMap((next) =>
+                  next
+                    ? Effect.succeed(next)
+                    : cascadeToParent(definition, triedTargets, requestedVariant, sessionID, requestTokens, cascade),
+                ),
+              ),
             ...(origin ? { origin } : {}),
             ...(credentialFallback ? { credentialFallback } : {}),
           },
@@ -843,7 +875,7 @@ export const layer = Layer.effect(
           const origin =
             homeIndex >= 0 && homeIndex !== index
               ? () =>
-                  resolveRoute(
+                  resolveRouteWithin(
                     selected,
                     definition,
                     requestedVariant,
@@ -851,11 +883,65 @@ export const layer = Layer.effect(
                     false,
                     sessionID,
                     requestTokens,
+                    cascade,
                   )
               : undefined
           return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID)
         }
         if (lastError) return yield* Effect.fail(lastError)
+        return undefined
+      })
+
+    // Re-enter through the nearest route that nests an exhausted route (#1014, PR2).
+    // A parent nests the exhausted route when one of its expanded groups carries the
+    // route's id; the parent's tried set is seeded by target ref, so every leaf the
+    // chain already attempted — including the whole nested subtree — stays excluded,
+    // and the parent's remaining leaves answer in the parent's own proximity order.
+    const cascadeToParent = (
+      from: ModelRoute.Definition,
+      fromTried: ReadonlySet<number>,
+      requestedVariant: VariantID | undefined,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
+    ): Effect.Effect<Resolved | undefined, Error> =>
+      Effect.gen(function* () {
+        for (const index of fromTried) {
+          const target = from.targets[index]
+          if (target) cascade.triedRefs.add(cascadeRefKey(target))
+        }
+        if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
+          cascade.chain.push({ definition: from, tried: fromTried })
+        const available = yield* models
+          .available()
+          .pipe(Effect.catchCause(() => Effect.succeed([] as readonly Info[])))
+        for (let position = cascade.chain.length - 1; position >= 0; position--) {
+          const nested = cascade.chain[position].definition
+          for (const candidate of available) {
+            if (candidate.providerID !== ModelRoute.PROVIDER_ID) continue
+            const parent = ModelRoute.definition(candidate)
+            if (!parent || cascade.visitedRoutes.has(String(parent.id))) continue
+            if (!parent.nodes.some((node) => node.routeID === String(nested.id))) continue
+            cascade.visitedRoutes.add(String(parent.id))
+            const seed = new Set(
+              parent.targets.flatMap((target, index) =>
+                cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [],
+              ),
+            )
+            const resolved = yield* resolveRouteWithin(
+              candidate,
+              parent,
+              requestedVariant,
+              seed,
+              false,
+              sessionID,
+              requestTokens,
+              cascade,
+            )
+            if (resolved) return resolved
+            return yield* cascadeToParent(parent, seed, requestedVariant, sessionID, requestTokens, cascade)
+          }
+        }
         return undefined
       })
 
@@ -874,7 +960,27 @@ export const layer = Layer.effect(
             variant: requestedVariant,
           }),
         )
-      return resolveRoute(selected, definition, requestedVariant, new Set(), true, sessionID, requestTokens).pipe(
+      const cascade: CascadeState = {
+        triedRefs: new Set(),
+        visitedRoutes: new Set([String(definition.id)]),
+        chain: [],
+      }
+      const initialTried = new Set<number>()
+      return resolveRouteWithin(
+        selected,
+        definition,
+        requestedVariant,
+        initialTried,
+        true,
+        sessionID,
+        requestTokens,
+        cascade,
+      ).pipe(
+        Effect.flatMap((resolved) =>
+          resolved
+            ? Effect.succeed(resolved)
+            : cascadeToParent(definition, initialTried, requestedVariant, sessionID, requestTokens, cascade),
+        ),
         Effect.flatMap((resolved) =>
           resolved ? Effect.succeed(resolved) : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
         ),

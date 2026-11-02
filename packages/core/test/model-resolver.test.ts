@@ -1716,6 +1716,121 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  // #1014 PR2: a session seated on a sub-route re-enters through a parent route
+  // that nests it when the sub-route exhausts, instead of dying on the sub-route.
+  const routeAs = (id: string, leaves: ReadonlyArray<ReturnType<typeof leaf>>, extra: Record<string, unknown>) => {
+    const targets = leaves.map((item) => ModelRoute.ref({ providerID: item.providerID, model: item.id }))
+    return Info.make({
+      ...model(undefined),
+      providerID: ModelRoute.PROVIDER_ID,
+      id: ID.make(id),
+      settings: {
+        [ModelRoute.SETTING]: {
+          id,
+          targets,
+          targetVariants: targets.map(() => ({})),
+          health: ModelRoute.policy(),
+          attempts: 1,
+          ...extra,
+        },
+      },
+    })
+  }
+
+  const withCascadeResolver = <A, E>(
+    leaves: ReadonlyArray<ReturnType<typeof leaf>>,
+    routes: ReadonlyArray<ReturnType<typeof routeAs>>,
+    run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
+  ) => {
+    const provider = Provider.Info.make({
+      ...Provider.Info.empty(leaves[0].providerID),
+      activation: "enabled",
+      package: Provider.aisdk("@ai-sdk/openai"),
+      settings: { apiKey: "key" },
+    })
+    const catalog = [...routes, ...leaves]
+    const layer = ModelResolver.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Provider.Service, { get: () => Effect.succeed(provider) }),
+          Layer.mock(Model.Service, {
+            get: (providerID, id) =>
+              Effect.succeed(catalog.find((item) => item.providerID === providerID && item.id === id)),
+            available: () => Effect.succeed(catalog),
+            all: () => Effect.succeed(catalog),
+          }),
+          Layer.mock(Integration.Service, {
+            revision: () => 0,
+            connection: { active: () => Effect.undefined },
+          } as never),
+          Layer.mock(Npm.Service, {}),
+          Layer.mock(AISDK.Service, {} as never),
+        ),
+      ),
+    )
+    return withConfigEnv({}, () =>
+      Effect.gen(function* () {
+        return yield* run(yield* ModelResolver.Service)
+      }).pipe(Effect.provide(layer)),
+    )
+  }
+
+  const subAndParent = () => {
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const sub = routeAs("sub", [a, b], {
+      nodes: [{ selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] }],
+    })
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    return { a, b, c, sub, parent }
+  }
+
+  it.effect("cascades to the nesting parent route when a sub-route's fallback exhausts (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(String(second?.routing?.routeID)).toBe("sub")
+        expect(targetOf(second!)).toBe("pb")
+        // The sub-route is exhausted: the cascade re-enters through the parent,
+        // whose only untried leaf is the one outside the nested subtree.
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("parent")
+        expect(targetOf(third!)).toBe("pc")
+        // Every candidate in the chain has been tried: the cascade stops cleanly.
+        const fourth = yield* third!.routing!.fallback()
+        expect(fourth).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("cascades on initial resolution when a sub-route has no servable target (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    // The sub-route's leaves are not in the catalog the resolver can load, so the
+    // within-route pass selects and discards both, then the parent serves its
+    // remaining leaf with the tried leaves excluded by ref.
+    return withCascadeResolver([c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const resolved = yield* resolver.resolveModel(sub)
+        expect(String(resolved.routing?.routeID)).toBe("parent")
+        expect(targetOf(resolved)).toBe("pc")
+        expect(String(a.providerID)).toBe("pa")
+        expect(String(b.providerID)).toBe("pb")
+      }),
+    )
+  })
+
   it.effect("leaves compatibility unchanged when the route declares no cache format", () => {
     ModelRoute.resetHealth()
     const a = model(Provider.aisdk("@ai-sdk/openai"), {
