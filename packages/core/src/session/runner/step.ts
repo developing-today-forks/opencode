@@ -547,9 +547,17 @@ export const make = Effect.gen(function* () {
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
         } else clearFailedAttempt(retryKey)
-        // The failover return itself is deferred until after the attempt row is written,
-        // so the row can name the destination.
-        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
+        // Health accounting is broader than current-request failover: a terminal non-retryable
+        // error still makes the target unhealthy for later selections. Keep the routeFailure gate
+        // below so this does not broaden which failures may move the current request elsewhere.
+        if (
+          input.model.routing &&
+          llmFailure &&
+          failureError &&
+          !isContextOverflowFailure(llmFailure) &&
+          !sameTargetRetry &&
+          (routeFailure || !retry?.retry || recorded.outputStarted)
+        )
           ModelRoute.failed(
             input.model.routing.target,
             input.model.routing.policy,
@@ -557,6 +565,9 @@ export const make = Effect.gen(function* () {
             failureHint(llmFailure),
             input.model.routing.credentialID,
           )
+        // The failover return itself is deferred until after the attempt row is written,
+        // so the row can name the destination.
+        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
           if (!recorded.outputStarted && retry?.retry) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
