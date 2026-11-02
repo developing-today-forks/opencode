@@ -1,4 +1,5 @@
 export * as AnthropicMessages from "./anthropic-messages.js"
+export * as Antigravity from "./antigravity.js"
 export * as BedrockConverse from "./bedrock-converse.js"
 export * as CohereChat from "./cohere-chat.js"
 export * as Gemini from "./gemini.js"
