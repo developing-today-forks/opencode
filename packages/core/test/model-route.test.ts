@@ -1890,6 +1890,40 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("quota-event and network histories retain the union of Location windows (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, windowMs: 60_000 }, network: { providers: 3, windowMs: 60_000 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { windowMs: 1_000 }, network: { windowMs: 1_000 } }),
+      "/loc/b",
+    )
+    try {
+      // Quota events: B's narrow window (1s) recording the second event must not
+      // prune the first event A (60s window, threshold 2) still counts.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, { quota: true }, undefined, "/loc/a")
+      ModelRoute.failed(target, policy, now + 2_000, { quota: true }, undefined, "/loc/b")
+      expect(ModelRoute.demoted(target, now + 2_000, undefined, "/loc/a")).toBe(true)
+      // Network history: failures through B must not prune A's longer window, so
+      // the third unrelated failure still triggers A's outage forgiveness.
+      ModelRoute.resetHealth()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const third = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 2_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(third, policy, now + 3_000, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 3_001, "/loc/a")).toBe(0)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

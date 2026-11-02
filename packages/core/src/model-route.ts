@@ -365,6 +365,18 @@ const NETWORK_PROVIDERS = 3
 const PROVIDER_MODELS = 2
 const recentFailures: Array<{ readonly provider: string; readonly target: string; readonly time: number }> = []
 
+/** The network-failure history retained: the widest network window any registered
+ * Location evaluates with (the union-retention rule of retainedOutcomeWindow, #1423);
+ * networkSuspect() applies the judging Location's own window over what is retained. */
+const retainedNetworkWindowMs = () => {
+  let window = constants.network.windowMs
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.network?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
 /** True when failures hit many unrelated providers within a short window. */
 export const networkSuspect = (now = Date.now(), location?: string) =>
   new Set(
@@ -647,7 +659,7 @@ export const failed = (
   location?: string,
 ) => {
   // Quota, rate-limit and provider HTTP errors are not evidence of an internet outage.
-  if (hint?.quota) recordQuota(target, now, credentialID, location)
+  if (hint?.quota) recordQuota(target, now, credentialID)
   if (hint?.network)
     recentFailures.push({
       provider: target.providerID,
@@ -656,7 +668,7 @@ export const failed = (
     })
   while (
     recentFailures.length > 200 ||
-    (recentFailures[0] && now - recentFailures[0].time > currentConstants(location).network.windowMs)
+    (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs())
   )
     recentFailures.shift()
   if (hint?.network && networkSuspect(now, location)) {
@@ -880,9 +892,21 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= quota.demoteAfter
 }
 
-const recordQuota = (target: Model.Ref, now: number, credentialID?: string, location?: string) => {
+// The quota-event history retained for a target: the widest demotion window any
+// registered Location evaluates with (the union-retention rule of retainedOutcomeWindow,
+// #1423); demoted() applies the judging Location's own window over what is retained.
+const retainedQuotaWindowMs = () => {
+  let window = settings.quota.windowMs
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.demotion?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
+const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings(location).quota.windowMs)
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedQuotaWindowMs())
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
