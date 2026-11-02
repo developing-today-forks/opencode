@@ -1427,11 +1427,18 @@ export type ServerCompletionsChatOperation<E = never> = (
   input: ServerCompletionsChatInput,
 ) => Effect.Effect<ServerCompletionsChatOutput, E>
 
+export type ServerCompletionsResponsesInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsResponsesOutput = unknown
+export type ServerCompletionsResponsesOperation<E = never> = (
+  input: ServerCompletionsResponsesInput,
+) => Effect.Effect<ServerCompletionsResponsesOutput, E>
+
 export type ServerCompletionsModelsOutput = unknown
 export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
 
 export interface ServerCompletionsApi<E = never> {
   readonly chat: ServerCompletionsChatOperation<E>
+  readonly responses: ServerCompletionsResponsesOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
 }
 

@@ -6662,6 +6662,10 @@ export type ServerCompletionsChatInput = { readonly payload: { readonly [x: stri
 
 export type ServerCompletionsChatOutput = any
 
+export type ServerCompletionsResponsesInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsResponsesOutput = any
+
 export type ServerCompletionsModelsOutput = any
 
 export type ProviderListInput = {

@@ -143,3 +143,68 @@ it.live("lists the route models at /v1/models", () =>
     expect(body.data[0]?.owned_by).toBe("opencode-route")
   }),
 )
+
+
+const postTo = (handler: (request: Request) => Promise<Response>, url: string, body: unknown) =>
+  Effect.promise(() =>
+    handler(
+      new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    ),
+  )
+
+it.live("answers a non-streaming response in the Responses wire shape", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/responses", {
+      model: "workhorse",
+      instructions: "Be terse.",
+      input: "Say hi",
+    })
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as {
+      object: string
+      status: string
+      output: Array<{ content: Array<{ text: string }> }>
+      usage: { output_tokens: number }
+    }
+    expect(body.object).toBe("response")
+    expect(body.status).toBe("completed")
+    expect(body.output[0]?.content[0]?.text).toBe("Hello world")
+    expect(body.usage.output_tokens).toBe(2)
+    expect(captured.at(-1)?.system).toBe("Be terse.")
+  }),
+)
+
+it.live("streams typed Responses events with no [DONE] sentinel", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/responses", {
+      model: "opencode-route/workhorse",
+      input: "Say hi",
+      stream: true,
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    expect(text).toContain("event: response.created")
+    expect(text).toContain("response.output_text.delta")
+    expect(text).toContain("event: response.completed")
+    expect(text).not.toContain("[DONE]")
+  }),
+)
+
+it.live("addresses a direct catalog model through the completions door, not just routes", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* post(handler, {
+      model: "deepseek/deepseek-chat",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    expect(String(captured.at(-1)?.model?.providerID)).toBe("deepseek")
+    expect(String(captured.at(-1)?.model?.id)).toBe("deepseek-chat")
+  }),
+)

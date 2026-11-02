@@ -1,9 +1,9 @@
-import { expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, completionBody, parseChatRequest } from "@opencode/core/completions"
+import { ChatStreamTranslator, ResponsesStreamTranslator, completionBody, parseChatRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -230,3 +230,74 @@ it.effect("stream emits the completion as LLM events", () =>
     expect(response?.text).toBe("OK")
   }),
 )
+
+describe("responses door translation", () => {
+  test("string input and instructions become system plus one user message", () => {
+    const parsed = parseResponsesRequest({
+      model: "opencode-route/workhorse",
+      instructions: "Be terse.",
+      input: "Say hi",
+      reasoning: { effort: "high" },
+      max_output_tokens: 64,
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.input.system).toBe("Be terse.")
+    expect(parsed.value.input.messages.length).toBe(1)
+    expect(String(parsed.value.input.model?.variant)).toBe("high")
+    expect(parsed.value.input.generation?.maxTokens).toBe(64)
+  })
+
+  test("item input carries function calls and outputs; direct catalog refs pass through", () => {
+    const parsed = parseResponsesRequest({
+      model: "deepseek/deepseek-chat",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Weather in Austin?" }] },
+        { type: "function_call", call_id: "call_9", name: "get_weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_9", output: "sunny" },
+        { type: "reasoning", summary: [] },
+      ],
+      tools: [{ type: "function", name: "get_weather", description: "w", parameters: { type: "object" } }],
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(String(parsed.value.input.model?.providerID)).toBe("deepseek")
+    expect(parsed.value.input.messages.length).toBe(3)
+    expect(parsed.value.input.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"])
+  })
+
+  test("previous_response_id is rejected loudly", () => {
+    const parsed = parseResponsesRequest({ model: "workhorse", input: "x", previous_response_id: "resp_1" })
+    expect(parsed.ok).toBe(false)
+  })
+
+  test("responses body carries message output and usage", () => {
+    const response = LLMResponse.fromEvents([
+      LLMEvent.textDelta({ id: "t1", text: "Hello!" }),
+      LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 4, outputTokens: 6 } }),
+    ])
+    if (!response) throw new Error("expected a completed response")
+    const body = responsesBody({
+      id: "resp_fixed",
+      created: 1700000000,
+      model: "opencode-route/workhorse",
+      response,
+    }) as any
+    expect(body.status).toBe("completed")
+    expect(body.output[0].content[0].text).toBe("Hello!")
+    expect(body.usage.input_tokens).toBe(4)
+    expect(body.usage.total_tokens).toBe(10)
+  })
+
+  test("responses stream translator emits typed events ending in response.completed", () => {
+    const translator = new ResponsesStreamTranslator({ id: "resp_s", created: 1, model: "m" })
+    const frames = [
+      translator.start(),
+      ...translator.push(LLMEvent.textDelta({ id: "block_1", text: "Hi" })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "stop" } })),
+    ].join("")
+    expect(frames).toContain("event: response.created")
+    expect(frames).toContain("response.output_text.delta")
+    expect(frames).toContain('"delta":"Hi"')
+    expect(frames).toContain("event: response.completed")
+    expect(frames).not.toContain("[DONE]")
+  })
+})

@@ -111,6 +111,8 @@ import type {
   GenerateTextOutput,
   ServerCompletionsChatInput,
   ServerCompletionsChatOutput,
+  ServerCompletionsResponsesInput,
+  ServerCompletionsResponsesOutput,
   ServerCompletionsModelsOutput,
   ProviderListInput,
   ProviderListOutput,
@@ -1212,6 +1214,18 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/v1/chat/completions`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      responses: (input: ServerCompletionsResponsesInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsResponsesOutput>(
+          {
+            method: "POST",
+            path: `/v1/responses`,
             body: input["payload"],
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 503],
