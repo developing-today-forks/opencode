@@ -210,6 +210,27 @@ export namespace FSUtil {
         // is itself a symlink, and a dangling link falls back to the
         // link's own path, where a rename would replace the link instead
         // of creating its referent.
+        // The input path is rejected when a `..` in it traverses a
+        // symlinked component: resolve() collapses that `..` lexically
+        // before realpath runs, selecting a different file than
+        // filesystem semantics dictate.
+        const inputSegments = path.split(/[\/]/).filter((segment) => segment !== "" && segment !== ".")
+        let inputPrefix = isAbsolute(path) ? "/" : "."
+        let inputUnsafe = false
+        for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
+          if (inputSegments[index] === "..") continue
+          inputPrefix = join(inputPrefix, inputSegments[index])
+          if (inputSegments.slice(index + 1).includes(".."))
+            inputUnsafe =
+              (yield* fs.readLink(inputPrefix).pipe(Effect.orElseSucceed(() => undefined))) !== undefined
+        }
+        if (inputUnsafe)
+          return yield* Effect.fail(
+            new FileSystemError({
+              method: "writeAtomic",
+              cause: new Error(`Path traverses a symbolic link: ${path}`),
+            }),
+          )
         let target = yield* resolve(path)
         if ((yield* fs.readLink(path).pipe(Effect.orElseSucceed(() => undefined))) !== undefined) {
           let hopTarget: string = path
