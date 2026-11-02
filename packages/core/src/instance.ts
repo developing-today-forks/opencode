@@ -15,6 +15,7 @@ import { Formatter } from "./formatter.js"
 import { FileSystem } from "./filesystem.js"
 import { FileSystemSearch } from "./filesystem/search.js"
 import { Generate } from "./generate.js"
+import { Embeddings } from "./embeddings.js"
 import { Form } from "./form.js"
 import { Image } from "./image.js"
 import { LocationWatcher } from "./filesystem/location-watcher.js"
@@ -111,6 +112,7 @@ const nodes = [
   InstructionEntry.node,
   Form.node,
   Generate.node,
+  Embeddings.node,
   ReadToolFileSystem.node,
   McpTool.node,
   SessionInstructions.node,

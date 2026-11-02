@@ -9,6 +9,7 @@ import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
+import { Embeddings } from "@opencode/core/embeddings"
 
 const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
   const error = Cause.squash(cause)
@@ -111,7 +112,41 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             })
           }).pipe(Effect.provide(services), locationErrors),
       )
-    .handleRaw("completions.models", () => Effect.succeed(HttpServerResponse.jsonUnsafe(Completions.modelsBody())))
+      .handleRaw(
+        "completions.embeddings",
+        (ctx) =>
+          Effect.gen(function* () {
+            yield* awaitPlugins
+            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            const parsed = Embeddings.parseEmbeddingsRequest(body)
+            if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+            const embeddings = yield* Embeddings.Service
+            const result = yield* Effect.result(
+              embeddings.embed({
+                model: parsed.value.model,
+                inputs: parsed.value.inputs,
+                ...(parsed.value.dimensions !== undefined ? { dimensions: parsed.value.dimensions } : {}),
+              }),
+            )
+            if (Result.isFailure(result)) return errorResponse(502, result.failure.message, "server_error")
+            return HttpServerResponse.jsonUnsafe(
+              Embeddings.embeddingsBody({
+                model: parsed.value.modelLabel,
+                vectors: result.success.vectors,
+                promptTokens: result.success.promptTokens,
+                encodingFormat: parsed.value.encodingFormat,
+              }),
+            )
+          }).pipe(Effect.provide(services), locationErrors),
+      )
+      .handleRaw("completions.models", () =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe({
+            object: "list",
+            data: [...Completions.modelsBody().data, ...Embeddings.embeddingModelEntries()],
+          }),
+        ),
+      )
     .handleRaw("completions.model", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
     .handleRaw("completions.modelRef", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
   }),
