@@ -6658,6 +6658,12 @@ export type GenerateTextInput = {
 
 export type GenerateTextOutput = GenerateTextResponse["data"]
 
+export type ServerCompletionsChatInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsChatOutput = any
+
+export type ServerCompletionsModelsOutput = any
+
 export type ProviderListInput = {
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
 }

@@ -109,6 +109,9 @@ import type {
   ModelDefaultOutput,
   GenerateTextInput,
   GenerateTextOutput,
+  ServerCompletionsChatInput,
+  ServerCompletionsChatOutput,
+  ServerCompletionsModelsOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -1202,6 +1205,25 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+    },
+    "server.completions": {
+      chat: (input: ServerCompletionsChatInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsChatOutput>(
+          {
+            method: "POST",
+            path: `/v1/chat/completions`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      models: (requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelsOutput>(
+          { method: "GET", path: `/v1/models`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ),
     },
     provider: {
       list: (input?: ProviderListInput, requestOptions?: RequestOptions) =>

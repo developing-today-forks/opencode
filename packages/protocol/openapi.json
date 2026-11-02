@@ -4189,7 +4189,7 @@
             }
           }
         },
-        "description": "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
+        "description": "Interrupt active execution owned by this OpenCode process. Stops cascade background subagents; independent and detached children keep running. When force=true, stops everything under the session regardless of stop policy. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
         "summary": "Interrupt session execution"
       }
     },
@@ -5391,6 +5391,116 @@
           },
           "required": true
         }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": ["completions"],
+        "operationId": "completions.chat",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Run one stateless chat completion for an external harness. The model is a route reference (opencode-route/workhorse or a bare route id) resolved in-process through the server's own route and provider resolution; no session is created or stored. Answers in the OpenAI chat-completions wire format, streamed as SSE when the payload asks for it.",
+        "summary": "Create a chat completion (OpenAI-compatible)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": ["completions"],
+        "operationId": "completions.models",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The route models the completions door serves, in the OpenAI models-list wire format.",
+        "summary": "List completion models (OpenAI-compatible)"
       }
     },
     "/api/provider": {
@@ -15074,7 +15184,8 @@
             "type": "string"
           },
           "shell": {
-            "type": "string"
+            "type": "string",
+            "description": "Default shell to use for terminal and shell tool execution"
           },
           "model": {
             "anyOf": [
@@ -15104,15 +15215,18 @@
             ]
           },
           "default_agent": {
-            "type": "string"
+            "type": "string",
+            "description": "Default primary agent to use when no session agent is selected"
           },
           "update": {
             "type": "string",
-            "enum": ["disable", "notify", "auto"]
+            "enum": ["disable", "notify", "auto"],
+            "description": "Disable updates, notify when one is available, or install updates automatically"
           },
           "share": {
             "type": "string",
-            "enum": ["manual", "auto", "disabled"]
+            "enum": ["manual", "auto", "disabled"],
+            "description": "Control whether sessions may be shared manually, automatically, or not at all"
           },
           "enterprise": {
             "type": "object",
@@ -15121,13 +15235,15 @@
                 "type": "string"
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "description": "Enterprise sharing service configuration"
           },
           "username": {
-            "type": "string"
+            "type": "string",
+            "description": "Username displayed in conversations and used for telemetry identity"
           },
           "permissions": {
-            "$ref": "#/components/schemas/Permission.Ruleset"
+            "$ref": "#/components/schemas/Permission.Ruleset_1"
           },
           "policies": {
             "type": "array",
@@ -15154,10 +15270,12 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/Config.AgentEncoded"
-            }
+            },
+            "description": "Named built-in agent overrides and custom agent definitions"
           },
           "snapshots": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Enable snapshots used for undo and revert behavior"
           },
           "watcher": {
             "type": "object",
@@ -15182,7 +15300,8 @@
                   "$ref": "#/components/schemas/Config.Formatter.EntryEncoded"
                 }
               }
-            ]
+            ],
+            "description": "Enable built-in formatters or configure formatter overrides"
           },
           "lsp": {
             "anyOf": [
@@ -15210,7 +15329,8 @@
                   ]
                 }
               }
-            ]
+            ],
+            "description": "Enable built-in language servers or configure server overrides"
           },
           "media": {
             "type": "object",
@@ -15261,15 +15381,18 @@
                 "properties": {
                   "startup": {
                     "type": "integer",
-                    "exclusiveMinimum": 0
+                    "exclusiveMinimum": 0,
+                    "description": "Maximum time in milliseconds to establish and initialize the MCP server."
                   },
                   "catalog": {
                     "type": "integer",
-                    "exclusiveMinimum": 0
+                    "exclusiveMinimum": 0,
+                    "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
                   },
                   "execution": {
                     "type": "integer",
-                    "exclusiveMinimum": 0
+                    "exclusiveMinimum": 0,
+                    "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
                   }
                 },
                 "additionalProperties": false
@@ -15323,7 +15446,8 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/Config.CommandEncoded"
-            }
+            },
+            "description": "Named slash command definitions"
           },
           "instructions": {
             "type": "array",
@@ -15345,7 +15469,8 @@
                   "$ref": "#/components/schemas/Config.Reference.LocalEncoded"
                 }
               ]
-            }
+            },
+            "description": "Named local directories or Git repositories available as external context"
           },
           "websearch": {
             "anyOf": [
@@ -15356,7 +15481,8 @@
               {
                 "$ref": "#/components/schemas/ConfigWebSearch.InfoEncoded"
               }
-            ]
+            ],
+            "description": "Web search provider selection"
           },
           "plugins": {
             "type": "array",
@@ -15369,7 +15495,8 @@
                   "$ref": "#/components/schemas/Config.Plugin.EntryEncoded"
                 }
               ]
-            }
+            },
+            "description": "Ordered plugin enablement directives and external package declarations"
           },
           "worktree": {
             "$ref": "#/components/schemas/Config.Worktree"
@@ -15382,7 +15509,8 @@
               {
                 "$ref": "#/components/schemas/Config.WarmingEncoded"
               }
-            ]
+            ],
+            "description": "Keep recently active sessions warm with transient model requests (default: false)"
           },
           "messaging": {
             "type": "object",
@@ -15391,44 +15519,53 @@
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Topic presets: name to template, overriding or extending the built-in presets"
               },
               "vars": {
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Template variables: name to value or template, overriding or extending the built-in variables"
               },
               "session_start": {
-                "type": "string"
+                "type": "string",
+                "description": "Template added to every session's instructions when it starts (default: the current date, time and timezone). An empty string disables it"
               },
               "delivery": {
                 "type": "object",
                 "properties": {
                   "direct": {
                     "type": "string",
-                    "enum": ["none", "inbox", "wake"]
+                    "enum": ["none", "inbox", "wake"],
+                    "description": "Direct messages (default: \"wake\")"
                   },
                   "root": {
                     "type": "string",
-                    "enum": ["none", "inbox", "wake"]
+                    "enum": ["none", "inbox", "wake"],
+                    "description": "Messages to the root topic (default: \"wake\")"
                   },
                   "user": {
                     "type": "string",
-                    "enum": ["hidden", "visible", "wake"]
+                    "enum": ["hidden", "visible", "wake"],
+                    "description": "Whether the root session sees messages sent to the user (default: \"visible\")"
                   }
                 },
-                "additionalProperties": false
+                "additionalProperties": false,
+                "description": "Default delivery of messages into sessions"
               },
               "search": {
                 "type": "object",
                 "properties": {
                   "match": {
                     "type": "string",
-                    "enum": ["exact", "regex", "fuzzy", "semantic", "hybrid", "advanced"]
+                    "enum": ["exact", "regex", "fuzzy", "semantic", "hybrid", "advanced"],
+                    "description": "Default match mode for message and log searches (default: \"hybrid\")"
                   },
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Fast model (provider/model) that reranks advanced searches; defaults to the session provider's small model"
                   }
                 },
                 "additionalProperties": false
@@ -15441,7 +15578,8 @@
                   {
                     "$ref": "#/components/schemas/Config.Messaging.EmbeddingEncoded"
                   }
-                ]
+                ],
+                "description": "Local embedding model: a tier name (\"tiny\", \"default\", \"step-up\", \"top\", \"off\") or detailed settings"
               }
             },
             "additionalProperties": false
@@ -15459,19 +15597,22 @@
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Provider aliases mapping alias -> providerID, e.g. { ds: 'deepseek' }"
               },
               "models": {
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Model aliases. Bare key = global alias -> provider/model[#variant]. Scoped key = provider/key -> model[#variant]."
               },
               "variants": {
                 "type": "object",
                 "additionalProperties": {
                   "type": "string"
-                }
+                },
+                "description": "Variant/effort aliases. Keys can be bare 'alias', or 'provider/*#alias', '*/model#alias', or 'provider/model#alias'."
               }
             },
             "additionalProperties": false
@@ -15486,33 +15627,39 @@
                     "type": "object",
                     "additionalProperties": {
                       "type": "string"
-                    }
+                    },
+                    "description": "Provider aliases mapping alias -> providerID, e.g. { ds: 'deepseek' }"
                   },
                   "models": {
                     "type": "object",
                     "additionalProperties": {
                       "type": "string"
-                    }
+                    },
+                    "description": "Model aliases. Bare key = global alias -> provider/model[#variant]. Scoped key = provider/key -> model[#variant]."
                   },
                   "variants": {
                     "type": "object",
                     "additionalProperties": {
                       "type": "string"
-                    }
+                    },
+                    "description": "Variant/effort aliases. Keys can be bare 'alias', or 'provider/*#alias', '*/model#alias', or 'provider/model#alias'."
                   }
                 },
                 "additionalProperties": false
               },
               "portable_shell_scanner": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Enable the experimental portable shell permission scanner. Defaults to false."
               },
               "subagent_depth": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "description": "Maximum subagent nesting depth below a top-level session. 0 disables subagents and 1 stops subagents from launching their own. Defaults to 5."
               },
               "shell_timeout": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "description": "Default timeout in milliseconds for foreground shell commands. 0 disables the timeout. Defaults to 120000."
               },
               "policies": {
                 "type": "array",
@@ -15535,17 +15682,247 @@
                   "additionalProperties": false
                 }
               },
+              "routes": {
+                "type": "object",
+                "properties": {
+                  "models": {
+                    "$ref": "#/components/schemas/Config.ModelRoutes"
+                  },
+                  "providers": {
+                    "$ref": "#/components/schemas/Config.ModelRoute.ProviderRoutes"
+                  },
+                  "schedules": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Config.ModelRoute.GlobalScheduleEncoded"
+                    },
+                    "description": "Time-bound weight changes across routes: during a local-time window, matching provider/model targets are ranked higher or lower (or given a fixed weight) on every route they appear on. Weights order every selection mode; equal weights keep their configured order."
+                  },
+                  "windows": {
+                    "$ref": "#/components/schemas/Config.ModelRoute.Windows"
+                  },
+                  "tuning": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "description": "Review routing history on a schedule and put the resulting adjustments in force without asking, for every route that uses rules as well as those at adaptive or higher. They only lower a target's share or skip it, and lapse on their own. Defaults to false."
+                      },
+                      "intervalMinutes": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1440,
+                        "description": "Minutes between reviews. Defaults to 15."
+                      },
+                      "windowHours": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 336,
+                        "description": "How much history each review looks at. Defaults to 24."
+                      },
+                      "notes": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "What the history cannot say, one note per line as `match: text`, where `match` is a case-insensitive substring of provider/model. A text that states when a limit returns, such as `reset at 2026-01-01` or `back in 3 hours`, skips the matching targets until then. The rest is shown to the agent by route_stats."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "log": {
+                    "type": "object",
+                    "properties": {
+                      "captureErrorBodies": {
+                        "type": "boolean",
+                        "description": "Keep the first 2 KB of a failed request's error body in the routing history, with credentials redacted. A provider body can echo the request, so this is off by default. Defaults to false."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "settings": {
+                    "type": "object",
+                    "properties": {
+                      "bench": {
+                        "type": "object",
+                        "properties": {
+                          "maxCooldownMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "The longest bench any failure can impose, however far the ladder escalates. Defaults to 86400000 (24h)."
+                          },
+                          "multiplier": {
+                            "type": "number",
+                            "minimum": 1,
+                            "description": "Each consecutive failure multiplies the bench by this. 1 keeps every bench at its base. Defaults to 2."
+                          },
+                          "retryAfterMinMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 86400000,
+                            "description": "A provider's stated retry-after is believed, but never as less than this. Defaults to 1000."
+                          },
+                          "cooldownCapMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 86400000,
+                            "description": "Caps a route health block's failure cooldown (cooldownMs). Defaults to 3600000 (1h)."
+                          },
+                          "quotaCooldownCapMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "Caps a route health block's quota cooldown (quotaCooldownMs). Defaults to 86400000 (24h)."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "demotion": {
+                        "type": "object",
+                        "properties": {
+                          "after": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50,
+                            "description": "Quota errors within the window that demote a target. Capped at 50, the number of quota events retained per target, so a threshold can never be set beyond what is counted. Defaults to 3."
+                          },
+                          "windowMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "How long a quota error counts toward demotion. Defaults to 14400000 (4h)."
+                          },
+                          "factor": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 1,
+                            "description": "A demoted target's weight is multiplied by this. Defaults to 0.01."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "quotaGate": {
+                        "type": "object",
+                        "properties": {
+                          "maxMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "The longest a single exhaustion reading may hold a gate: a stated reset further out than this is capped rather than believed. Defaults to 2592000000 (30 days)."
+                          },
+                          "fallbackMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "The hold when an exhaustion reading states no usable reset: long enough to stop a 429 on every turn, short enough that a recovered pool is retried promptly. Defaults to 1800000 (30 minutes)."
+                          },
+                          "feedTtlMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 7776000000,
+                            "description": "How often quota snapshots are fed into the gate. Defaults to 60000."
+                          },
+                          "balanceDeadThreshold": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "escalation": {
+                        "type": "object",
+                        "properties": {
+                          "enabled": {
+                            "type": "boolean",
+                            "description": "Whether routes race their next target once the current one keeps giving up. Defaults to true."
+                          },
+                          "afterGiveUps": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50,
+                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                          },
+                          "outcomeWindow": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50,
+                            "description": "Recent finished requests per target that the give-up count reads. Defaults to 5."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "network": {
+                        "type": "object",
+                        "properties": {
+                          "windowMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 86400000,
+                            "description": "The window recent transport failures are compared within. Defaults to 30000."
+                          },
+                          "providers": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "allOf": [
+                              {
+                                "exclusiveMinimum": 1,
+                                "description": "Unrelated providers failing within the window that mark the fault as the local network. At least 2: a single provider failing is that provider's fault. Defaults to 3."
+                              }
+                            ]
+                          },
+                          "providerModels": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "description": "Models of one provider cooling at once that demote the provider itself to last resort. Defaults to 2."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "continuity": {
+                        "type": "object",
+                        "properties": {
+                          "hedgeRequests": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "description": "Requests a session that just failed over may hedge back to its origin for. Defaults to 2."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "overrides": {
+                        "type": "object",
+                        "properties": {
+                          "preferredFactor": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": "How much a user's \"prefer\" lifts a target when they don't say by how much. Defaults to 3."
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
               "model_routes": {
-                "$ref": "#/components/schemas/Config.ModelRoutes"
+                "$ref": "#/components/schemas/Config.ModelRoutes_1"
+              },
+              "provider_routes": {
+                "$ref": "#/components/schemas/Config.ModelRoute.ProviderRoutes_1"
               },
               "model_route_schedules": {
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/Config.ModelRoute.GlobalScheduleEncoded"
-                }
+                },
+                "description": "Deprecated: use experimental.routes.schedules. Time-bound weight changes across routes: during a local-time window, matching provider/model targets are ranked higher or lower (or given a fixed weight) on every route they appear on. Weights order every selection mode; equal weights keep their configured order."
               },
               "model_route_windows": {
-                "$ref": "#/components/schemas/Config.ModelRoute.Windows"
+                "$ref": "#/components/schemas/Config.ModelRoute.Windows_1"
               },
               "model_route_tuning": {
                 "type": "object",
@@ -15582,6 +15959,171 @@
                   "captureErrorBodies": {
                     "type": "boolean",
                     "description": "Keep the first 2 KB of a failed request's error body in the routing history, with credentials redacted. A provider body can echo the request, so this is off by default. Defaults to false."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "model_route_settings": {
+                "type": "object",
+                "properties": {
+                  "bench": {
+                    "type": "object",
+                    "properties": {
+                      "maxCooldownMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "The longest bench any failure can impose, however far the ladder escalates. Defaults to 86400000 (24h)."
+                      },
+                      "multiplier": {
+                        "type": "number",
+                        "minimum": 1,
+                        "description": "Each consecutive failure multiplies the bench by this. 1 keeps every bench at its base. Defaults to 2."
+                      },
+                      "retryAfterMinMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 86400000,
+                        "description": "A provider's stated retry-after is believed, but never as less than this. Defaults to 1000."
+                      },
+                      "cooldownCapMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 86400000,
+                        "description": "Caps a route health block's failure cooldown (cooldownMs). Defaults to 3600000 (1h)."
+                      },
+                      "quotaCooldownCapMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "Caps a route health block's quota cooldown (quotaCooldownMs). Defaults to 86400000 (24h)."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "demotion": {
+                    "type": "object",
+                    "properties": {
+                      "after": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 50,
+                        "description": "Quota errors within the window that demote a target. Capped at 50, the number of quota events retained per target, so a threshold can never be set beyond what is counted. Defaults to 3."
+                      },
+                      "windowMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "How long a quota error counts toward demotion. Defaults to 14400000 (4h)."
+                      },
+                      "factor": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1,
+                        "description": "A demoted target's weight is multiplied by this. Defaults to 0.01."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "quotaGate": {
+                    "type": "object",
+                    "properties": {
+                      "maxMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "The longest a single exhaustion reading may hold a gate: a stated reset further out than this is capped rather than believed. Defaults to 2592000000 (30 days)."
+                      },
+                      "fallbackMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "The hold when an exhaustion reading states no usable reset: long enough to stop a 429 on every turn, short enough that a recovered pool is retried promptly. Defaults to 1800000 (30 minutes)."
+                      },
+                      "feedTtlMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 7776000000,
+                        "description": "How often quota snapshots are fed into the gate. Defaults to 60000."
+                      },
+                      "balanceDeadThreshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "escalation": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "description": "Whether routes race their next target once the current one keeps giving up. Defaults to true."
+                      },
+                      "afterGiveUps": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 50,
+                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                      },
+                      "outcomeWindow": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 50,
+                        "description": "Recent finished requests per target that the give-up count reads. Defaults to 5."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "network": {
+                    "type": "object",
+                    "properties": {
+                      "windowMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 86400000,
+                        "description": "The window recent transport failures are compared within. Defaults to 30000."
+                      },
+                      "providers": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "allOf": [
+                          {
+                            "exclusiveMinimum": 1,
+                            "description": "Unrelated providers failing within the window that mark the fault as the local network. At least 2: a single provider failing is that provider's fault. Defaults to 3."
+                          }
+                        ]
+                      },
+                      "providerModels": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "description": "Models of one provider cooling at once that demote the provider itself to last resort. Defaults to 2."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "continuity": {
+                    "type": "object",
+                    "properties": {
+                      "hedgeRequests": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "description": "Requests a session that just failed over may hedge back to its origin for. Defaults to 2."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "overrides": {
+                    "type": "object",
+                    "properties": {
+                      "preferredFactor": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": "How much a user's \"prefer\" lifts a target when they don't say by how much. Defaults to 3."
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 },
                 "additionalProperties": false
@@ -15627,29 +16169,46 @@
         "type": "object",
         "properties": {
           "tier": {
-            "type": "string"
+            "type": "string",
+            "description": "Built-in model tier: \"tiny\", \"default\", \"step-up\", \"top\", or \"off\" (default: \"default\")"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "GGUF download URL used instead of the tier's model"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Expected SHA-256 of the custom GGUF file; verified after download when set"
+          },
+          "size": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "description": "Expected size in bytes of the custom GGUF file; bounds the download exactly when set"
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Existing local GGUF file used instead of downloading"
           },
           "pooling": {
             "type": "string",
-            "enum": ["last", "mean", "cls"]
+            "enum": ["last", "mean", "cls"],
+            "description": "Pooling override (default: the tier's pooling; for a custom model, last for Qwen3 embedding files and mean otherwise)"
           },
           "query": {
-            "type": "string"
+            "type": "string",
+            "description": "Instruction prefix for search queries, replacing the tier's prefix; the remote endpoint uses it too"
           },
           "server": {
-            "type": "string"
+            "type": "string",
+            "description": "llama-server executable to use instead of the downloaded llama.cpp build"
           },
           "autostart": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Download and start the model in the background at startup (default: true)"
           },
           "gpu_layers": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Layers to offload to the GPU (default: all)"
           },
           "threads": {
             "type": "integer",
@@ -15667,7 +16226,8 @@
                 "description": "Embedding model name"
               },
               "key": {
-                "type": "string"
+                "type": "string",
+                "description": "API key; {env:NAME} reads it from the environment"
               },
               "dimensions": {
                 "type": "integer",
@@ -15985,7 +16545,7 @@
                 "type": "string"
               }
             ],
-            "description": "When the change is in force: a window object, or the name of a window from experimental.model_route_windows. An unknown name drops the rule."
+            "description": "When the change is in force: a window object, or the name of a window from experimental.routes.windows. An unknown name drops the rule."
           },
           "factor": {
             "type": "number",
@@ -16003,6 +16563,84 @@
         },
         "required": ["when"],
         "additionalProperties": false
+      },
+      "Config.ModelRoute.ProviderRouteEncoded": {
+        "type": "object",
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Member provider ids, in configured order. Members must be concrete providers: a provider route cannot name another provider route (no nesting), and the routes provider is not a member. A member that names no known provider contributes no leaves."
+          },
+          "selection": {
+            "type": "string",
+            "enum": ["ordered", "round-robin", "weighted"],
+            "description": "How the serving member is picked for a model: ordered uses the first ready member, round-robin rotates per session (a weight is a priority tier there), weighted draws by weights. The choice is sticky per session and failover falls through the remaining members in order - the model-route selection modes, at provider level. Defaults to ordered."
+          },
+          "weights": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "description": "Relative weights keyed by member provider id, e.g. { \"openai.alternate\": 2, \"openai\": 1 }. Members without a weight count as 1. In a round-robin provider route a weight is a priority tier; in a weighted one it is a relative ratio; in an ordered one weights rank the failover order."
+          },
+          "windows": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "invert": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "description": "Per-member eligibility gates keyed by member provider id: the name of a window defined in experimental.routes.windows, or { \"name\": ..., \"invert\": true }. A member is a candidate only while its named window is active (or, inverted, only while it is not) — the provider-granularity counterpart of a model-route target's `window` gate, so a provider can be benched by the clock wherever it participates: as a model-route leaf or as a provider-route member (#1140). An unknown window name drops the gate, leaving the member always eligible."
+          },
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Config.ModelRoute.ScheduleEncoded"
+            },
+            "description": "Time-bound weight changes for this provider route's members, in the same shape as a model route's schedules: `targets` are `provider/model` patterns (`*` allowed), so a rule can name a provider (`openai/*`), a model (`*/gpt-6-*`), a provider/model pair, or every member (empty targets). The rules apply to the concrete leaves the provider route expands to, exactly as a model route's schedules apply to its targets."
+          }
+        },
+        "required": ["providers"],
+        "additionalProperties": false
+      },
+      "Config.ModelRoute.ProviderRoutes": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Config.ModelRoute.ProviderRouteEncoded"
+        },
+        "description": "Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model."
+      },
+      "Config.ModelRoute.ProviderRoutes_1": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Config.ModelRoute.ProviderRouteEncoded"
+        },
+        "description": "Deprecated: use experimental.routes.providers. Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model."
       },
       "Config.ModelRoute.RouteEncoded": {
         "type": "object",
@@ -16159,7 +16797,7 @@
                 "type": "string"
               }
             ],
-            "description": "When the change is in force: a window object, or the name of a window from experimental.model_route_windows. An unknown name drops the rule."
+            "description": "When the change is in force: a window object, or the name of a window from experimental.routes.windows. An unknown name drops the rule."
           },
           "factor": {
             "type": "number",
@@ -16190,6 +16828,13 @@
               "model": {
                 "$ref": "#/components/schemas/Config.ModelSelectionEncoded"
               },
+              "exclude": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Doors (provider ids) excluded from a door-set target (a target whose provider is `*`). Exclusions always win over the door set: an excluded door never contributes a leaf, even when its catalog lists the model. Providers removed by `disabled_providers` never reach expansion at all. Has no effect on a target that names a single provider."
+              },
               "defaultVariant": {
                 "type": "string",
                 "description": "Variant used when the route is selected without an explicit variant."
@@ -16215,9 +16860,7 @@
                     "description": "Caps the context this target serves within the route, below its own limit — e.g. 100000 keeps this target on requests inside a pricing tier that ends at 100k context. A request that does not fit this ceiling and the route's own cap skips this target like any other ineligible target."
                   }
                 },
-                "required": [
-                  "context"
-                ],
+                "required": ["context"],
                 "additionalProperties": false,
                 "description": "Per-target context ceiling within the route; a request that does not fit skips this target."
               },
@@ -16243,7 +16886,7 @@
                     "additionalProperties": false
                   }
                 ],
-                "description": "Eligibility gate: the name of a window defined in experimental.model_route_windows, or { \"name\": ..., \"invert\": true }. The target is only in the route while the named window is active, or while it is not active when inverted — e.g. a DeepSeek target gated on the inverse of \"deepseek-peak\" is a candidate off-peak only, and the same target gated on \"deepseek-peak\" itself is the peak fallback. An unknown window name drops the gate, leaving the target always eligible."
+                "description": "Eligibility gate: the name of a window defined in experimental.routes.windows, or { \"name\": ..., \"invert\": true }. The target is only in the route while the named window is active, or while it is not active when inverted — e.g. a DeepSeek target gated on the inverse of \"deepseek-peak\" is a candidate off-peak only, and the same target gated on \"deepseek-peak\" itself is the peak fallback. An unknown window name drops the gate, leaving the target always eligible."
               }
             },
             "required": ["model"],
@@ -16308,6 +16951,27 @@
             },
             "description": "Days of the month the window is active on. Empty or unset means every day."
           },
+          "dates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific local calendar dates the window is active on, each \"YYYY-MM-DD\" or an inclusive range \"YYYY-MM-DD/YYYY-MM-DD\", read as calendar days in the window's timezone. Unset means every date. Use for one-off days a recurring day list cannot express, such as a holiday calendar defined once as a named window."
+          },
+          "excludeDates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Local calendar dates the window is never active on, each \"YYYY-MM-DD\" or an inclusive range \"YYYY-MM-DD/YYYY-MM-DD\", in the window's timezone. Exclusions win over every other field — e.g. a weekday peak window with the provider's public holidays here stays off on those holidays."
+          },
+          "excludeWindows": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion."
+          },
           "start": {
             "type": "string",
             "description": "Local start of the daily window as \"HH:mm\". Unset means from the start of the day. A start later than the end runs past midnight into the following morning."
@@ -16340,7 +17004,18 @@
         },
         "additionalProperties": {
           "$ref": "#/components/schemas/Config.ModelRoute.WindowEncoded"
-        }
+        },
+        "description": "Named, reusable time windows for route rules, keyed by name, e.g. \"deepseek-peak\": weekdays 01:00-04:00 and 06:00-10:00 UTC. Schedules reference a window by name instead of repeating it, and a route target can gate its eligibility on one: the target is a candidate only while its named window is active (or, inverted, only while it is not). Windows belong to the meter, not the model."
+      },
+      "Config.ModelRoute.Windows_1": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Config.ModelRoute.WindowEncoded"
+        },
+        "description": "Deprecated: use experimental.routes.windows. Named, reusable time windows for route rules, keyed by name, e.g. \"deepseek-peak\": weekdays 01:00-04:00 and 06:00-10:00 UTC. Schedules reference a window by name instead of repeating it, and a route target can gate its eligibility on one: the target is a candidate only while its named window is active (or, inverted, only while it is not). Windows belong to the meter, not the model."
       },
       "Config.ModelRoutes": {
         "type": "object",
@@ -16349,7 +17024,18 @@
         },
         "additionalProperties": {
           "$ref": "#/components/schemas/Config.ModelRoute.RouteEncoded"
-        }
+        },
+        "description": "Named ordered provider/model routes with failure and performance failover"
+      },
+      "Config.ModelRoutes_1": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Config.ModelRoute.RouteEncoded"
+        },
+        "description": "Deprecated: use experimental.routes.models. Named ordered provider/model routes with failure and performance failover"
       },
       "Config.ModelSelectionEncoded": {
         "anyOf": [
@@ -16552,7 +17238,8 @@
         "type": "object",
         "properties": {
           "prompt": {
-            "type": "string"
+            "type": "string",
+            "description": "Prompt sent for keep-alive requests"
           },
           "interval": {
             "type": "string"
@@ -16571,7 +17258,8 @@
           }
         },
         "required": ["directory"],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Directory defaults for local worktree creation"
       },
       "ConfigShell.Option": {
         "type": "object",
@@ -16648,6 +17336,9 @@
           "method": {
             "type": "string",
             "enum": ["key", "oauth", "external"]
+          },
+          "methodID": {
+            "$ref": "#/components/schemas/Integration.MethodID"
           },
           "status": {
             "$ref": "#/components/schemas/Connection.Status"
@@ -16939,7 +17630,8 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Skip the interactive authentication prompt and use the default unless an answer is supplied"
           },
           "when": {
             "type": "array",
@@ -17144,7 +17836,8 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Skip the interactive authentication prompt and use the default unless an answer is supplied"
           },
           "when": {
             "type": "array",
@@ -17212,7 +17905,8 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Skip the interactive authentication prompt and use the default unless an answer is supplied"
           },
           "when": {
             "type": "array",
@@ -17267,7 +17961,8 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Skip the interactive authentication prompt and use the default unless an answer is supplied"
           },
           "when": {
             "type": "array",
@@ -17401,7 +18096,8 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Skip the interactive authentication prompt and use the default unless an answer is supplied"
           },
           "when": {
             "type": "array",
@@ -18365,7 +19061,8 @@
             }
           },
           "cwd": {
-            "type": "string"
+            "type": "string",
+            "description": "Working directory for the MCP server process. Relative paths resolve from the workspace directory."
           },
           "environment": {
             "type": "object",
@@ -18377,22 +19074,26 @@
             "type": "boolean"
           },
           "codemode": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Expose this server's tools through Code Mode. Defaults to true."
           },
           "timeout": {
             "type": "object",
             "properties": {
               "startup": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
               },
               "catalog": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
               },
               "execution": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
               }
             },
             "additionalProperties": false
@@ -18425,7 +19126,8 @@
             "type": "string"
           },
           "auth_server_metadata_url": {
-            "type": "string"
+            "type": "string",
+            "description": "URL of the OAuth or OpenID Connect authorization server metadata document. Set when the MCP server does not publish protected resource metadata that names its authorization server."
           }
         },
         "additionalProperties": false
@@ -18466,22 +19168,26 @@
             "type": "boolean"
           },
           "codemode": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Expose this server's tools through Code Mode. Defaults to true."
           },
           "timeout": {
             "type": "object",
             "properties": {
               "startup": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
               },
               "catalog": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
               },
               "execution": {
                 "type": "integer",
-                "exclusiveMinimum": 0
+                "exclusiveMinimum": 0,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
               }
             },
             "additionalProperties": false
@@ -18723,7 +19429,8 @@
           },
           "expand": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Show the first and latest N children of each"
           }
         },
         "required": ["session"],
@@ -18851,7 +19558,8 @@
             "type": "string"
           },
           "match": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "False for context entries around a match"
           },
           "score": {
             "anyOf": [
@@ -18899,11 +19607,13 @@
           },
           "context": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Entries of context around grep matches"
           },
           "scope": {
             "type": "string",
-            "enum": ["all", "context"]
+            "enum": ["all", "context"],
+            "description": "all: the full transcript. context: only what the model currently sees (after the last compaction)"
           },
           "since": {
             "type": "string"
@@ -18921,7 +19631,8 @@
           },
           "chars": {
             "type": "integer",
-            "exclusiveMinimum": 0
+            "exclusiveMinimum": 0,
+            "description": "Maximum characters per entry"
           }
         },
         "required": ["sessions"],
@@ -19009,7 +19720,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Messaging.Op"
-            }
+            },
+            "description": "Delete and restore operations applied to it"
           }
         },
         "required": ["id", "topic", "seq", "kind", "type", "writer", "time", "data"],
@@ -19019,16 +19731,20 @@
         "type": "object",
         "properties": {
           "tier": {
-            "type": "string"
+            "type": "string",
+            "description": "tiny, default, step-up, top, or off"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "GGUF download URL overriding the tier"
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Existing local GGUF file overriding the tier"
           },
           "start": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Start downloading and serving now"
           }
         },
         "additionalProperties": false
@@ -19072,10 +19788,12 @@
             "type": "string"
           },
           "source": {
-            "type": "string"
+            "type": "string",
+            "description": "Download URL, local path, or remote endpoint"
           },
           "server": {
-            "type": "string"
+            "type": "string",
+            "description": "llama-server executable"
           },
           "endpoint": {
             "type": "string"
@@ -19236,13 +19954,15 @@
         "type": "object",
         "properties": {
           "as": {
-            "type": "string"
+            "type": "string",
+            "description": "Viewer session ID; defaults to user"
           },
           "topics": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Topics to read; omit to search all"
           },
           "query": {
             "type": "string"
@@ -19254,7 +19974,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Writer session-set expressions"
           },
           "types": {
             "type": "array",
@@ -19269,18 +19990,21 @@
             }
           },
           "since": {
-            "type": "string"
+            "type": "string",
+            "description": "ISO time, relative age such as 2h or 3d, or a bare epoch (10 digits = seconds, 13 digits = milliseconds)"
           },
           "until": {
             "type": "string"
           },
           "after": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Only sequence numbers greater than this"
           },
           "before": {
             "type": "integer",
-            "exclusiveMinimum": 0
+            "exclusiveMinimum": 0,
+            "description": "Only sequence numbers less than this"
           },
           "hidden": {
             "$ref": "#/components/schemas/Messaging.HiddenMode"
@@ -19289,25 +20013,30 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Re-include only hidden messages hidden by these sessions (session-set expressions)"
           },
           "hiddenFrom": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Re-include only hidden messages written by these sessions (session-set expressions)"
           },
           "hiddenSince": {
-            "type": "string"
+            "type": "string",
+            "description": "Re-include only messages hidden since then"
           },
           "hiddenUntil": {
-            "type": "string"
+            "type": "string",
+            "description": "Re-include only messages hidden until then"
           },
           "unread": {
             "type": "boolean"
           },
           "inbox": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Only messages addressed to the person: those written to sessions' user topics"
           },
           "limit": {
             "type": "integer",
@@ -19318,11 +20047,13 @@
             "enum": ["asc", "desc"]
           },
           "markRead": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Advance the viewer's read position; defaults to true for a session's plain reads, false for searches and filtered reads"
           },
           "wait": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Seconds to wait for a first unread message"
           }
         },
         "additionalProperties": false
@@ -19353,13 +20084,15 @@
         "type": "object",
         "properties": {
           "as": {
-            "type": "string"
+            "type": "string",
+            "description": "Writer session ID; defaults to user"
           },
           "topic": {
             "type": "string"
           },
           "to": {
-            "type": "string"
+            "type": "string",
+            "description": "Session to message directly"
           },
           "text": {
             "type": "string"
@@ -19503,7 +20236,8 @@
             "type": "string"
           },
           "original": {
-            "type": "string"
+            "type": "string",
+            "description": "Directory at creation, when moved since"
           },
           "created": {
             "anyOf": [
@@ -19559,7 +20293,8 @@
           },
           "topics": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Topics it read or wrote"
           },
           "childWindow": {
             "$ref": "#/components/schemas/Messaging.ChildWindow"
@@ -19578,13 +20313,16 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Session-set expressions"
           },
           "parent": {
-            "type": "string"
+            "type": "string",
+            "description": "Parent session ID, or none for root sessions"
           },
           "ancestor": {
-            "type": "string"
+            "type": "string",
+            "description": "Only descendants of this session"
           },
           "project": {
             "type": "string"
@@ -19629,7 +20367,8 @@
           },
           "expand": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Show the first and latest N children of each"
           }
         },
         "additionalProperties": false
@@ -19641,13 +20380,15 @@
             "type": "string"
           },
           "scope": {
-            "type": "string"
+            "type": "string",
+            "description": "Session ID (inherited by its descendants), self, or global; defaults to self"
           },
           "name": {
             "type": "string"
           },
           "value": {
-            "type": "string"
+            "type": "string",
+            "description": "Omit to remove the variable"
           }
         },
         "required": ["name"],
@@ -19715,7 +20456,8 @@
             "type": "string"
           },
           "owner": {
-            "type": "string"
+            "type": "string",
+            "description": "Session the standard topic belongs to"
           },
           "creator": {
             "type": "string"
@@ -19795,7 +20537,8 @@
           },
           "expand": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Show the first and latest N writers and readers"
           }
         },
         "required": ["topic"],
@@ -19834,7 +20577,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Topics these sessions read or wrote"
           },
           "role": {
             "type": "string",
@@ -19850,7 +20594,8 @@
             "type": "string"
           },
           "standard": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Include the actor's standard topics"
           },
           "sort": {
             "type": "string",
@@ -19870,7 +20615,8 @@
           },
           "expand": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Show the first and latest N writers and readers"
           }
         },
         "additionalProperties": false
@@ -19889,7 +20635,8 @@
           },
           "root": {
             "type": "string",
-            "enum": ["hidden", "visible", "wake"]
+            "enum": ["hidden", "visible", "wake"],
+            "description": "Whether the root session sees the message: hidden (user only), visible, or wake (visible and run)"
           }
         },
         "required": ["as", "text"],
@@ -19915,7 +20662,8 @@
             "type": "string"
           },
           "scope": {
-            "type": "string"
+            "type": "string",
+            "description": "Where a custom variable is set"
           }
         },
         "required": ["name", "kind", "description"],
@@ -19953,7 +20701,8 @@
             "type": "boolean"
           },
           "render": {
-            "type": "string"
+            "type": "string",
+            "description": "Template to render"
           }
         },
         "additionalProperties": false
@@ -19976,13 +20725,15 @@
             "items": {
               "type": "integer",
               "exclusiveMinimum": 0
-            }
+            },
+            "description": "Messages to change; omit to set the default"
           },
           "for": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Viewers: session-set expressions or * for everyone; defaults to the actor"
           },
           "reason": {
             "type": "string"
@@ -20066,7 +20817,8 @@
           }
         },
         "required": ["total", "first", "latest"],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Sessions that read but never wrote"
       },
       "Messaging.Window_2": {
         "type": "object",
@@ -20089,7 +20841,8 @@
           }
         },
         "required": ["total", "first", "latest"],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Sessions allowed by limited-writer rules"
       },
       "Messaging.WriteMode": {
         "type": "string",
@@ -20104,10 +20857,12 @@
             "description": "Session ID or user"
           },
           "children": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Also allow its descendants"
           },
           "ancestors": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Also allow its ancestors"
           }
         },
         "required": ["session"],
@@ -20502,6 +21257,13 @@
         "items": {
           "$ref": "#/components/schemas/Permission.Rule"
         }
+      },
+      "Permission.Ruleset_1": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Permission.Rule"
+        },
+        "description": "Ordered tool permission rules applied to agent tool use"
       },
       "Permission.Source": {
         "anyOf": [
@@ -23610,7 +24372,8 @@
             "type": "boolean"
           },
           "vars": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Replace {variable} placeholders in the body with the invoking session's values"
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath"
@@ -23906,7 +24669,8 @@
             "type": "object",
             "properties": {
               "published": {
-                "type": "number"
+                "type": "number",
+                "description": "Publication time in milliseconds since the Unix epoch"
               }
             },
             "additionalProperties": false
@@ -24050,6 +24814,10 @@
     {
       "name": "generate",
       "description": "Experimental one-shot generation routes."
+    },
+    {
+      "name": "completions",
+      "description": "OpenAI-compatible completions routes for external harnesses."
     },
     {
       "name": "provider",
