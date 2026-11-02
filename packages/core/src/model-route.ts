@@ -395,8 +395,8 @@ export interface FailureHint {
 }
 
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
- * A stated retry-after is believed as-is and never multiplied; every other class doubles its
- * bench per consecutive failure (auth and quota start from the long bench), capped at a day.
+ * A stated retry-after is believed as-is and never multiplied; every other class multiplies its
+ * bench by the configured bench multiplier per consecutive failure (auth and quota start from the long bench), capped at maxCooldownMs.
  * A quota bench may end sooner at a trustworthy window reset; that reset is remembered on
  * the state, and one learned later arms the bench the same way (armBenchProbe). The count survives recover() and
  * resets only on a success, so a permanently failing target backs off instead of being retried at
@@ -418,7 +418,7 @@ const bench = (
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
-      : Math.min(base * ladder.multiplier ** Math.min(state.consecutiveFailures - 1, 30), ladder.maxCooldownMs)
+      : Math.min(base * ladder.multiplier ** (state.consecutiveFailures - 1), ladder.maxCooldownMs)
   const until = now + cooldown
   state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
   const reason = hint?.quota
@@ -2371,8 +2371,7 @@ export const hedgeHome = (routeID: string, sessionID: string) => {
  * hold — assembled here, after the mechanisms they parameterize, from the named constant at
  * each one. The defaults ARE today's behavior; config (experimental.routes.settings)
  * or configureConstants() replaces a value only where it sets one. Deliberately absent, as
- * invariants rather than knobs: the backoff exponent cap (30 — an overflow guard; 2^30 at a
- * 1ms base already exceeds the 24h bench cap, so the cap always binds first), the health /
+ * invariants rather than knobs: the health /
  * session / continuity LRU bounds, the recent-failure ring (200) and quota-event history
  * (50) caps, and the usage-accounting bucket widths. */
 export interface Constants {
