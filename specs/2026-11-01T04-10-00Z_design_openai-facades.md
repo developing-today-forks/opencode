@@ -340,6 +340,20 @@ The façade must preserve, or explicitly re-home, each behaviour callers depend 
    for route failover, never silently retried against the same target, and the
    façade must not strip the offending tools to make the call pass — callers
    configured those tools deliberately.
+   **Amendment (2026-11-02, #1443, Wave C):** Drew's sameness rule for door
+   retirement ("ensure merged proxy is same") overrides the verbatim rule for
+   the muse backend only. The façade now reproduces the door's aliasing scoped
+   to the resolved muse target (provider `meta`): `shell`/`bash` are presented
+   upstream as `run_command`/`terminal` (definitions, history calls,
+   tool_choice; pass-through raw bodies included, with the door's
+   collision guard) and returned calls are translated back, so a muse caller
+   gets the door's 200 with its own names. The verbatim rule above stands
+   unchanged for parsing and for every other provider. The one behaviour not
+   reproduced is the door's CLI fallback on a residual attestation 403 (the
+   fingerprint moving past the alias table): the façade surfaces it as a
+   distinct provider failure, and #1443 stays open on that leg — reproducing
+   the fallback would rebuild the CLI door inside the server, against §3 and
+   §9.2.
 2. **Warm conversation doors (agy, claude-code, commandcode, muse warm path).**
    These doors hold server-side conversation state: callers may send only the newest
    user turn and rely on the door's resident process for history (agy keys workers by

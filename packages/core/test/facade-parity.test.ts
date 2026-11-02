@@ -68,20 +68,15 @@
  *     (façade-wide), and error-envelope branding (quota status is
  *     429 on both sides since the #1441 fix) — none is specific to
  *     this fold's wire protocol.
- *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
- *     the door answers shell/bash-tool requests with a 200 (tool names
- *     aliased upstream, calls translated back; a residual 403 falls
- *     back to the CLI door), while the façade — by the design §9.1
- *     rule — preserves the names verbatim and surfaces an attestation
- *     403 as a provider failure. The caller-visible outcome differs;
- *     per #1152 that is a parity failure, recorded, not papered over.
- *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
- *     the door answers shell/bash-tool requests with a 200 (tool names
- *     aliased upstream, calls translated back; a residual 403 falls
- *     back to the CLI door), while the façade — by the design §9.1
- *     rule — preserves the names verbatim and surfaces an attestation
- *     403 as a provider failure. The caller-visible outcome differs;
- *     per #1152 that is a parity failure, recorded, not papered over.
+ *   - muse (bin/muse-proxy.mjs, :18747): PARITY-WITH-NAMED-DIFFS —
+ *     the attestation case is reproduced in-fork (#1443): when the
+ *     resolved target is the muse backend, shell/bash tool names are
+ *     aliased upstream and returned calls translated back, so the
+ *     caller gets the door's 200 with its own names. The one remaining
+ *     diff is the residual-403 leg: the door falls back to the CLI
+ *     door (still a 200); the façade has no CLI door and surfaces the
+ *     denial as a provider failure. That diff is a real-gap, named
+ *     below, and it keeps #1443 open — it is not papered over.
  *
  * RE-RUN (on the laptop, in this worktree):
  *   cd packages/core && bun run test test/facade-parity.test.ts
@@ -105,6 +100,7 @@ import {
   parseResponsesRequest,
   responsesBody,
 } from "@opencode/core/completions"
+import { MuseAttestation } from "@opencode/core/muse-attestation"
 import {
   answersBody,
   errorBody as systemOneErrorBody,
@@ -907,11 +903,19 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
 //      aliasing was needed; with aliasing it relays the (successful)
 //      upstream answer with names translated back.
 //
-// Façade behaviour (design §9.1 rule): tool names are NEVER renamed,
-// dropped, or synthesized, and there is no CLI door behind the
-// façade — an attestation 403 from the muse provider is a provider
-// failure (eligible for route failover to a DIFFERENT candidate),
-// not a successful answer from the same target.
+// Façade behaviour (design §9.1 rule, as amended by #1443): tool
+// names are NEVER renamed, dropped, or synthesized at parse, and no
+// provider but the muse backend is ever renamed for. When the
+// resolved target IS the muse backend, Generate applies the door's
+// own aliasing (scoped to that target, in
+// packages/core/src/muse-attestation.ts): the upstream sees the
+// aliases, the caller sees its own names back, and the outcome is
+// the door's 200. There is still no CLI door behind the façade — a
+// residual attestation 403 (the fingerprint moved past the alias
+// table) surfaces as a distinct provider failure (eligible for
+// route failover to a DIFFERENT candidate), not a successful answer
+// from the same target. That residual leg is the one remaining
+// diff, declared as a real-gap in the verdict test below.
 
 describe("door: muse — attestation case (shell/bash tools)", () => {
   const shellChatRequest = {
@@ -939,7 +943,7 @@ describe("door: muse — attestation case (shell/bash tools)", () => {
     expect(doorAttestationFallback.status).toBe(200)
   })
 
-  test("façade: shell/bash tool names are preserved verbatim — never aliased, never dropped", () => {
+  test("façade parse: shell/bash tool names are preserved verbatim — never aliased, never dropped at parse", () => {
     const chat = parseChatRequest({
       ...shellChatRequest,
       tools: [
@@ -964,7 +968,8 @@ describe("door: muse — attestation case (shell/bash tools)", () => {
     expect(responses.value.items[0]).toMatchObject({ type: "function_call", name: "shell" })
 
     // And a model call to `shell` renders back out under that exact
-    // name on both façade dialects — no alias ever leaks or applies.
+    // name on both façade dialects — the renderers never rename; any
+    // aliasing lives in Generate, keyed on the resolved target.
     const callEvents = [
       LLMEvent.toolCall({ id: "call_9", name: "shell", input: { command: "echo hi" } }),
       LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 } }),
@@ -975,27 +980,76 @@ describe("door: muse — attestation case (shell/bash tools)", () => {
     expect(respBody.output.find((item) => item.type === "function_call")).toMatchObject({ name: "shell" })
   })
 
-  test("verdict: attestation outcome is a parity FAIL, recorded not papered over", () => {
-    // The caller-visible outcomes differ in kind:
-    //   door:   200 completion (aliasing, or CLI fallback on a 403)
-    //   façade: the same request, sent verbatim to the muse provider,
-    //           draws the recorded 403 client_attestation_denied and
-    //           surfaces as a provider failure (failover to another
-    //           route candidate, or the 502 error envelope) — there
-    //           is no alias and no CLI door to rescue it.
-    // Design §9.1 sanctions the façade rule (never rename/strip; a
-    // 403 is failover-eligible), so this is a deliberate divergence —
-    // but #1152's acceptance rule is that the merged proxy be THE
-    // SAME, and by that rule this case FAILS. It gates the muse
-    // front's retirement in Wave C (#1155) until Drew accepts the
-    // §9.1 rule as the replacement behaviour or the muse provider
-    // gains door-side aliasing. Filed as #1443.
+  test("façade generation (#1443): a resolved muse target aliases upstream and translates back — the door's 200", () => {
+    // The generation-level reproduction, pinned here at the
+    // translation layer (the end-to-end replay through the resolver
+    // and the Meta Responses protocol lives in
+    // packages/core/test/muse-attestation.test.ts): the plan built
+    // from the request's own tools renames definitions, history
+    // calls and the tool choice, and the reverse map restores the
+    // caller's names on the way out.
+    const parsed = parseChatRequest({
+      ...shellChatRequest,
+      tools: [
+        ...shellChatRequest.tools,
+        { type: "function", function: { name: "bash", description: "Run a bash command", parameters: { type: "object", properties: {} } } },
+      ],
+      tool_choice: { type: "function", function: { name: "shell" } },
+    })
+    if (!parsed.ok) throw new Error(parsed.error)
+    const plan = MuseAttestation.plan(MuseAttestation.toolNames(parsed.value.input.tools))
+    if (!plan) throw new Error("expected an attestation plan for shell/bash tools")
+    const aliased = MuseAttestation.aliasInput(parsed.value.input, plan)
+    expect(aliased.tools?.map((t) => t.name)).toEqual(["run_command", "terminal"])
+    const historyNames = aliased.messages.flatMap((message) =>
+      Array.isArray(message.content) ? message.content.filter((part) => part.type === "tool-call").map((part) => (part.type === "tool-call" ? part.name : "")) : [],
+    )
+    expect(historyNames).toEqual(["run_command"])
+    // The model's answer under the alias renders for the caller
+    // under its own name, on both dialects.
+    const aliasEvents = [
+      LLMEvent.toolCall({ id: "call_9", name: "run_command", input: { command: "echo hi" } }),
+      LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 } }),
+    ]
+    const restored = MuseAttestation.unaliasResponse(responseOf(aliasEvents), plan)
+    const chatBody = completionBody({ id: "chatcmpl-facade", created: CREATED, model: "muse-spark-1.3", response: restored })
+    expect(chatBody.choices[0]?.message.tool_calls?.[0]?.function.name).toBe("shell")
+    const respBody = responsesBody({ id: "resp_facade", created: CREATED, model: "muse-spark-1.3", response: restored })
+    expect(respBody.output.find((item) => item.type === "function_call")).toMatchObject({ name: "shell" })
+    // Scope: the plan exists only for the muse backend — Generate
+    // builds it solely when the resolved provider is `meta`
+    // (packages/core/src/generate.ts); every other target keeps the
+    // verbatim parse above, end to end.
+    expect(MuseAttestation.PROVIDER_ID).toBe("meta")
+  })
+
+  test("verdict: attestation outcome is PARITY-WITH-NAMED-DIFFS — alias leg reproduced, residual-403 leg a named real-gap", () => {
+    // The caller-visible outcomes, after the #1443 reproduction:
+    //   door:   200 completion (aliasing; CLI fallback on a residual 403)
+    //   façade: 200 completion via the same aliasing, scoped to the
+    //           muse target; a residual 403 (the fingerprint moved
+    //           past the alias table) surfaces as a provider failure
+    //           (failover to another route candidate, or the 502
+    //           envelope) — there is no CLI door to rescue it.
+    // The alias leg — every shell/bash request as recorded today —
+    // is exact parity. The residual leg differs in kind (200 vs
+    // failure) but its precondition is hypothetical: it needs the
+    // upstream to deny DESPITE correct aliasing, which no recorded
+    // fixture or live observation shows for shell/bash. It is
+    // declared a real-gap, not acceptable-by-design: #1443 stays
+    // open on exactly this leg, and the muse front's retirement in
+    // Wave C (#1155) stays gated until Drew accepts the façade
+    // behaviour as the replacement or an in-fork CLI fallback is
+    // authorized — reproducing one would rebuild the CLI door
+    // inside the server, against design §3/§9.2.
     const outcome = {
       door: "200 via alias (run_command/terminal) or CLI fallback",
-      facade: "403 surfaces as provider failure / failover; no 200 from the muse target",
-      classification: "fail" as Classification,
+      facade: "200 via the same alias (muse target only); residual 403 surfaces as provider failure / failover",
+      aliasLeg: "parity",
+      residualLeg: "real-gap" as Classification,
     }
-    expect(outcome.classification).toBe("fail")
+    expect(outcome.aliasLeg).toBe("parity")
+    expect(outcome.residualLeg).toBe("real-gap")
   })
 })
 
@@ -2227,9 +2281,10 @@ export const VERDICTS = {
     diffs: ["model echo + owned_by naming follow the façade ref rules; door display name absent from list entries", "usage gains additive completion_tokens_details.reasoning_tokens (totals match, thoughts folded both sides)", "chat streaming: door emits a separate role preamble chunk; façade merges role into the first chunk", "chat non-streaming: façade completionBody drops reasoning_content (façade-wide; streaming + session paths preserve reasoning)", "error envelopes: quota is 429 on both sides after the #1441 fix (555edecde7); remaining diffs are branding — door upstream_error+code with the raw body prefixed vs façade rate_limit_error with the extracted message", "thought signatures: door stashes them server-side by tool_call id; the provider carries them in providerMetadata and falls back to the skip-thought-signature validator for stateless histories (upstream-visible, provider-layer suite)", "tool schemas: door + provider both reduce JSON Schema to the proto allowlist (code#2825 rules) — parity, pinned at the provider layer"],
   },
   muse: {
-    verdict: "FAIL",
+    verdict: "PARITY-WITH-NAMED-DIFFS",
     diffs: [
-      "ATTESTATION: door answers shell/bash requests with a 200 (alias + CLI fallback); façade preserves names and surfaces the 403 as a provider failure — outcome differs (design §9.1 rule; Wave C gate for #1155, filed as #1443)",
+      "ATTESTATION (residual-403 leg): door answers a residual attestation 403 with a CLI-door fallback (still a 200); façade surfaces it as a provider failure — real-gap, #1443 stays open on this leg and the #1155 front retirement stays gated on Drew accepting it or authorizing an in-fork CLI fallback. The alias leg itself is parity: shell/bash requests now answer 200 from the muse target with the caller's names intact, scoped to the muse backend only (#1443)",
+      "attestation back-translation keys off the names the request actually aliased; the door's unconditional reverse map mislabels a genuine run_command/terminal call as shell/bash — façade keeps the genuine name (door bug, not reproduced)",
       "responses streaming: §5 grammar closed by #1442 — façade emits response.in_progress, per-item added/done + matching *.done events and monotonic sequence_numbers, reasoning uses response.reasoning_summary_text.delta, and response.completed carries the full output (door stub fixture is an abbreviated mid-grammar capture)",
       "tool-only chat answers: content null (façade) vs \"\" (door)",
       "responses non-streaming: façade adds created_at/annotations/status/default fields (additive)",
@@ -2279,8 +2334,9 @@ test("verdict registry is consistent with the recorded classifications", () => {
   expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.commandcode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS["claude-code"].verdict).toBe("PARITY-WITH-NAMED-DIFFS")
-  expect(VERDICTS.muse.verdict).toBe("FAIL")
+  expect(VERDICTS.muse.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.muse.diffs[0]).toContain("ATTESTATION")
+  expect(VERDICTS.muse.diffs[0]).toContain("#1443 stays open")
   expect(VERDICTS.route.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.codex.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   for (const door of Object.values(VERDICTS)) expect(door.diffs.length).toBeGreaterThan(0)

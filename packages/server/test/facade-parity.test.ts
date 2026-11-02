@@ -7,7 +7,9 @@
  * the same recorded requests through the REAL server handler with a
  * fake Generate service, pinning the parts only the handler decides:
  * status codes, error envelopes, SSE framing, and that tool names
- * reach generation verbatim (the muse attestation case, §9.1).
+ * reach generation verbatim (the muse attestation case, §9.1 — the
+ * handler never renames; the muse backend's aliasing, when it
+ * engages, is Generate's target-scoped step, #1443).
  *
  * The clef/systemone family (#1410) is appended at the bottom:
  * its recordings come from bin/clef-proxy.mjs + clef-proxy.test.mjs
@@ -318,9 +320,15 @@ it.live("attestation case over HTTP: shell/bash tools reach generation verbatim"
       ],
     })
     expect(res.status).toBe(200)
-    // Design §9.1: the façade must not rename (no run_command /
-    // terminal aliases as the muse door applies upstream), drop, or
-    // synthesize tool names. What generation receives is the proof.
+    // Design §9.1 at the handler boundary: the handler must not
+    // rename (no run_command / terminal aliases as the muse door
+    // applies upstream), drop, or synthesize tool names — what
+    // generation receives is the proof. Aliasing, when the resolved
+    // target is the muse backend, happens inside Generate against
+    // the resolved model (#1443; pinned end-to-end in
+    // packages/core/test/muse-attestation.test.ts); this fake
+    // Generate is upstream of that step, and the route target here
+    // is not a muse model in any case.
     const input = captured.at(-1)
     expect(input?.tools?.map((t) => t.name)).toEqual(["shell", "bash"])
   }),
