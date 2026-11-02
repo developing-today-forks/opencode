@@ -1699,6 +1699,21 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("carries the route's declared system prompt into the resolution (#1413)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered, system: "You are a persona." })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(route)
+        expect(first.routing?.system).toBe("You are a persona.")
+        const next = yield* first.routing!.fallback()
+        expect(next?.routing?.system).toBe("You are a persona.")
+      }),
+    )
+  })
+
   it.effect("a target's declared cache format overrides the model's own compatibility", () => {
     ModelRoute.resetHealth()
     const a = model(Provider.aisdk("@ai-sdk/openai"), {

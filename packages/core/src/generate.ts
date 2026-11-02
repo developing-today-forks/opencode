@@ -306,6 +306,19 @@ export const isShapeRejection = (error: AIError): boolean => {
   return error.reason._tag === "InvalidRequest" && (status === 400 || status === 422)
 }
 
+/**
+ * Compose a route's carried system prompt with the caller's own system text
+ * (#1413): the route prompt leads, separated by a blank line — the exact
+ * composition the design-code door applied to its persona prompt — and a
+ * caller with no system text gets the route prompt alone. An undefined route
+ * prompt leaves the caller's text untouched.
+ */
+export const applyRouteSystem = (
+  routeSystem: string | undefined,
+  callerSystem: string | undefined,
+): string | undefined =>
+  routeSystem === undefined ? callerSystem : callerSystem ? `${routeSystem}\n\n${callerSystem}` : routeSystem
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -358,36 +371,49 @@ export const layer = Layer.effect(
         },
       })
 
-    const build = Effect.fn("Generate.build")(function* (input: CompletionInput) {
-      const resolved = yield* resolve(input.model)
-      // Muse attestation aliasing (#1443): judged against the resolved
-      // concrete model, exactly like the pass-through match below - only
-      // the muse backend (provider `meta`) is subject to Meta's
-      // subscription-key attestation gate, so only a muse target's
-      // shell/bash tool names are presented upstream under the door's
-      // aliases, on the translated input and on the raw pass-through
-      // body alike. Every other provider keeps the design §9.1 rule:
-      // tool names preserved verbatim. The messages dialect is the
-      // door's absent front and is never aliased.
+    // The pass-through fast path (spec §3): on a dialect match the caller's
+    // raw body, rewritten only as `rewriteRawBody` documents, is the body
+    // the provider receives. Route selection has already happened above —
+    // the same resolver, gates and demotion as the translated path — and
+    // the attempt below is ledgered identically whichever path runs.
+    // A route's carried system prompt (#1413) leads the caller's own system
+    // text and suppresses the fast path: a verbatim body cannot carry a
+    // prompt the caller never sent, so a persona route always runs the
+    // translated path.
+    const buildFor = (resolved: ModelResolver.Resolved, input: CompletionInput) => {
+      const routeSystem = resolved.routing?.system
+      const withSystem =
+        routeSystem === undefined ? input : { ...input, system: applyRouteSystem(routeSystem, input.system) }
+      // Muse attestation aliasing (#1443): judged against each resolved
+      // candidate, exactly like the pass-through match — only the muse
+      // backend (provider `meta`) is subject to Meta's subscription-key
+      // attestation gate, so only a muse candidate's shell/bash tool
+      // names are presented upstream under the door's aliases, on the
+      // translated input and on the raw pass-through body alike. Every
+      // other candidate keeps the design §9.1 rule: tool names
+      // preserved verbatim. The messages dialect is the door's absent
+      // front and is never aliased.
       const museTarget =
         String(resolved.ref.providerID) === MuseAttestation.PROVIDER_ID && input.dialect !== "messages"
-      const attestation = museTarget ? MuseAttestation.plan(MuseAttestation.toolNames(input.tools)) : undefined
-      const effective = attestation ? MuseAttestation.aliasInput(input, attestation) : input
-      // The pass-through fast path (spec §3): on a dialect match the caller's
-      // raw body, rewritten only as `rewriteRawBody` documents (plus the
-      // attestation aliasing above, when it engages), is the body the
-      // provider receives. Route selection has already happened above -
-      // the same resolver, gates and demotion as the translated path - and
-      // the attempt below is ledgered identically whichever path runs.
+      const attestation = museTarget ? MuseAttestation.plan(MuseAttestation.toolNames(withSystem.tools)) : undefined
+      const effective = attestation ? MuseAttestation.aliasInput(withSystem, attestation) : withSystem
       const rawBody =
-        attestation && input.rawBody !== undefined && (input.dialect === "chat" || input.dialect === "responses")
-          ? (MuseAttestation.aliasRawBody(input.rawBody, input.dialect, attestation) ?? input.rawBody)
-          : input.rawBody
+        attestation && withSystem.rawBody !== undefined && (input.dialect === "chat" || input.dialect === "responses")
+          ? (MuseAttestation.aliasRawBody(withSystem.rawBody, input.dialect, attestation) ?? withSystem.rawBody)
+          : withSystem.rawBody
       const raw =
-        rawBody !== undefined && passthroughDialect(resolved, input.dialect) !== undefined
+        routeSystem === undefined &&
+        rawBody !== undefined &&
+        passthroughDialect(resolved, input.dialect) !== undefined
           ? rewriteRawBody(rawBody, String(resolved.model.id))
           : undefined
-      return { resolved, raw, request: canonicalRequest(resolved, effective, raw), input: effective, attestation, museTarget }
+      return { resolved, raw, effective, request: canonicalRequest(resolved, effective, raw), attestation, museTarget }
+    }
+
+    const build = Effect.fn("Generate.build")(function* (input: CompletionInput) {
+      const resolved = yield* resolve(input.model)
+      return buildFor(resolved, input)
+
     })
 
     const unavailable =
@@ -437,23 +463,44 @@ export const layer = Layer.effect(
     })
 
     const runComplete = Effect.fn("Generate.runComplete")(function* (input: CompletionInput) {
-      const { resolved, raw, request, input: effective, attestation, museTarget } = yield* build(input)
-      // Returned tool calls are translated back under the caller's own
-      // names whenever attestation aliasing engaged (#1443).
-      const unalias = (response: LLMResponse) => (attestation ? MuseAttestation.unaliasResponse(response, attestation) : response)
-      const first = yield* Effect.result(attempt(resolved, request))
-      if (Result.isSuccess(first)) return unalias(first.success)
-      // Shape-rejection fallback (spec §3): a supposedly-native provider that
-      // rejects the verbatim shape is retried ONCE through translation
-      // against the same resolved model. Both tries are separate ledger
-      // rows (each `attempt` records its own), so the retry is never a
-      // silent second billing. Quota/auth failures never reach this branch.
-      if (raw !== undefined && first.failure instanceof AIError && isShapeRejection(first.failure)) {
-        const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, effective)))
-        if (Result.isSuccess(second)) return unalias(second.success)
-        return yield* Effect.fail(unavailable(resolved, museTarget)(second.failure))
+      let built = yield* build(input)
+      // Route failover (spec §3; #1413): when the resolved model is a route
+      // candidate and its attempt fails, the route's remaining candidates
+      // are tried in configured order — the primary→fallback walk the
+      // design-code door's recipes and the route proxy's callers depend on.
+      // Each candidate is its own ledgered attempt; a direct (unrouted)
+      // resolution has no fallback and fails exactly as before. The tried
+      // set bounds the walk even if a fallback ever repeated a candidate.
+      const tried = new Set<string>()
+      while (true) {
+        const { resolved, raw, effective, request, attestation, museTarget } = built
+        tried.add(`${resolved.ref.providerID}/${resolved.ref.id}`)
+        // Returned tool calls are translated back under the caller's
+        // own names whenever this candidate's attestation aliasing
+        // engaged (#1443).
+        const unalias = (response: LLMResponse) =>
+          attestation ? MuseAttestation.unaliasResponse(response, attestation) : response
+        const first = yield* Effect.result(attempt(resolved, request))
+        if (Result.isSuccess(first)) return unalias(first.success)
+        let failure = first.failure
+        // Shape-rejection fallback (spec §3): a supposedly-native provider that
+        // rejects the verbatim shape is retried ONCE through translation
+        // against the same resolved model. Both tries are separate ledger
+        // rows (each `attempt` records its own), so the retry is never a
+        // silent second billing. Quota/auth failures never reach this branch.
+        if (raw !== undefined && failure instanceof AIError && isShapeRejection(failure)) {
+          const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, effective)))
+          if (Result.isSuccess(second)) return unalias(second.success)
+          failure = second.failure
+        }
+        const fallback = resolved.routing?.fallback
+        const next = fallback ? yield* Effect.result(fallback()) : undefined
+        const candidate = next && Result.isSuccess(next) ? next.success : undefined
+        if (!candidate || tried.has(`${candidate.ref.providerID}/${candidate.ref.id}`))
+          return yield* Effect.fail(unavailable(resolved, museTarget)(failure))
+        built = buildFor(candidate, input)
       }
-      return yield* Effect.fail(unavailable(resolved, museTarget)(first.failure))
+
     })
 
     const complete: Interface["complete"] = (input) =>
@@ -493,29 +540,58 @@ export const layer = Layer.effect(
     const stream: Interface["stream"] = (input) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          const { resolved, raw, request, input: effective, attestation, museTarget } = yield* build(input)
-          let emitted = 0
-          const primary = attemptStream(resolved, request, () => emitted++)
-          // The streaming shape-rejection fallback: only before any event
-          // has been emitted (a retry after output would duplicate it), and
-          // only for the pass-through path's shape-class failures.
-          const composed =
-            raw === undefined
-              ? primary
-              : primary.pipe(
-                  Stream.catchCause((cause) => {
-                    const error = Cause.squash(cause)
-                    return emitted === 0 && error instanceof AIError && isShapeRejection(error)
-                      ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
-                      : Stream.failCause(cause)
+          const built = yield* build(input)
+          // The candidate that most recently served an attempt, so a failure
+          // after a failover walk is attributed to the candidate that failed.
+          let lastResolved = built.resolved
+          let lastMuseTarget = built.museTarget
+          // One candidate's stream: the pass-through shape-rejection retry,
+          // then — only before any event has been emitted (a retry after
+          // output would duplicate it) — failover to the route's next
+          // candidate (#1413, spec §3), each its own ledgered attempt. The
+          // depth cap bounds the walk even if a fallback ever cycled.
+          const streamFor = (
+            current: ReturnType<typeof buildFor>,
+            depth: number,
+          ): Stream.Stream<LLMEvent, AIError> => {
+            const { resolved, raw, effective, request, attestation } = current
+            lastResolved = resolved
+            lastMuseTarget = current.museTarget
+            let emitted = 0
+            const primary = attemptStream(resolved, request, () => emitted++)
+            const composed =
+              raw === undefined
+                ? primary
+                : primary.pipe(
+                    Stream.catchCause((cause) => {
+                      const error = Cause.squash(cause)
+                      return emitted === 0 && error instanceof AIError && isShapeRejection(error)
+                        ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
+                        : Stream.failCause(cause)
+                    }),
+                  )
+            // Streamed tool events are translated back under the
+            // caller's own names whenever this candidate's attestation
+            // aliasing engaged (#1443).
+            const renamed = attestation
+              ? composed.pipe(Stream.map((event) => MuseAttestation.unaliasEvent(event, attestation)))
+              : composed
+            return renamed.pipe(
+              Stream.catchCause((cause) => {
+                const fallback = resolved.routing?.fallback
+                if (emitted > 0 || !fallback || depth >= 32) return Stream.failCause(cause)
+                return Stream.unwrap(
+                  Effect.gen(function* () {
+                    const next = yield* Effect.result(fallback())
+                    const candidate = Result.isSuccess(next) ? next.success : undefined
+                    return candidate ? streamFor(buildFor(candidate, input), depth + 1) : Stream.failCause(cause)
                   }),
                 )
-          // Streamed tool events are translated back under the caller's
-          // own names whenever attestation aliasing engaged (#1443).
-          const renamed = attestation
-            ? composed.pipe(Stream.map((event) => MuseAttestation.unaliasEvent(event, attestation)))
-            : composed
-          return renamed.pipe(Stream.mapError(unavailable(resolved, museTarget)))
+              }),
+            )
+          }
+          return streamFor(built, 0).pipe(Stream.mapError((error) => unavailable(lastResolved, lastMuseTarget)(error)))
+
         }).pipe(
           Effect.catchTag("Integration.Authorization", () =>
             Effect.fail(new UnavailableError({ message: "Generation credentials are unavailable" })),

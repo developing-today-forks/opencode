@@ -60,6 +60,37 @@ the `basic`-prefixed names above — the full main-tier jobs (`build`,
 - `storybook` — paths-gated already; unchanged apart from the standard
   concurrency group.
 
+## Release gate (Phase 3, code#1782 step 7)
+
+**No publish workflow publishes from a SHA whose main-gate is not
+green.** The main-gate for a SHA is the set of watched main-tier
+workflows — `test`, `check`, `nix-eval`, the same set
+`main-broken.yml` watches: for the exact SHA being published, the
+latest completed run of each on branch `main` must have conclusion
+`success`. A failed, cancelled, or missing conclusion refuses the
+publish (fail-closed). Enforcement is the reusable
+`.github/actions/main-gate` check: `publish.yml` gates its `version`
+job on it (every other job follows through `needs`), and
+`publish-vscode.yml` and `publish-github-action.yml` gate their
+`publish` jobs on it the same way, with one refinement: those
+publishers take their release from the newest `vscode-v*` /
+`github-v*` tag (by committer date), not from the run's SHA, so
+their gate jobs resolve that tag once, gate its peeled commit (for
+vscode, the checked-out code's SHA is gated as well), and pass the
+same tag to the publish script as a pinned argument — the gated
+commit is always the published one. `release-github-action.yml` only
+cuts the `github-v*` tag and publishes nothing itself; the publish it
+feeds is gated, so it carries no separate gate. Because the main tier
+runs concurrently with a push-triggered publish, a push whose gate
+has not completed yet is refused: wait for a green main for that SHA,
+then re-run (dispatch) the publish workflow.
+
+Hotfix override: set the repository variable `MAIN_GATE_OVERRIDE=1`
+to bypass the gate for one release — the bypass is announced as a
+warning in the run log — and unset it immediately afterwards. The
+override is for a legitimate hotfix that cannot wait for a green
+main; it is not a way to make red-main releases routine.
+
 ## Dedup rule
 
 A commit must not run the same suite twice via `push` +

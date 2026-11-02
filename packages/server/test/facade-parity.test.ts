@@ -14,10 +14,13 @@
  * The clef/systemone family (#1410) is appended at the bottom:
  * its recordings come from bin/clef-proxy.mjs + clef-proxy.test.mjs
  * and one live capture against the running door (2026-11-02).
+ * The claude-code door (#1412) is appended at the very bottom:
+ * its recordings come from bin/claude-code-proxy.mjs +
+ * claude-code-proxy.test.mjs.
  *
  * Door recordings cited per test are transcribed from
  * developing-today/code bin/ (opencode-route-proxy.mjs,
- * codex-proxy.mjs, muse-proxy.mjs) and their test files — see the
+ * codex-proxy.mjs, muse-proxy.mjs, commandcode-proxy.mjs) and their test files — see the
  * core suite's header for provenance and per-door verdicts.
  *
  * RE-RUN (laptop): cd packages/server && bun run test test/facade-parity.test.ts
@@ -44,7 +47,9 @@ const response = LLMResponse.fromEvents(events)
 if (!response) throw new Error("expected a completed response")
 
 const QUOTA_MESSAGE = "Subscription quota exhausted; resets at 2026-11-03T04:00:00Z"
-type Mode = "ok" | "quota" | "selection" | "failure"
+const CREDIT_MESSAGE =
+  "CommandCode execution failed: POST /alpha/generate \u2192 400 error: You have insufficient credits to make this request. Please purchase more credits to continue using the service."
+type Mode = "ok" | "quota" | "selection" | "failure" | "credits"
 let mode: Mode = "ok"
 const captured: CompletionInput[] = []
 const fake = makeLocationNode({
@@ -57,6 +62,7 @@ const fake = makeLocationNode({
         captured.push(input)
         if (mode === "quota") return Effect.fail(new Generate.QuotaError({ message: QUOTA_MESSAGE }))
         if (mode === "failure") return Effect.fail(new Generate.UnavailableError({ message: "upstream exploded" }))
+        if (mode === "credits") return Effect.fail(new Generate.UnavailableError({ message: CREDIT_MESSAGE }))
         if (mode === "selection") return Effect.fail(new Generate.ModelSelectionError({ message: "no candidate for model" }))
         return Effect.succeed(response)
       },
@@ -64,6 +70,7 @@ const fake = makeLocationNode({
         captured.push(input)
         if (mode === "quota") return Stream.fail(new Generate.QuotaError({ message: QUOTA_MESSAGE }))
         if (mode === "failure") return Stream.fail(new Generate.UnavailableError({ message: "upstream exploded" }))
+        if (mode === "credits") return Stream.fail(new Generate.UnavailableError({ message: CREDIT_MESSAGE }))
         if (mode === "selection") return Stream.fail(new Generate.ModelSelectionError({ message: "no candidate for model" }))
         return Stream.fromIterable(events)
       },
@@ -595,5 +602,223 @@ it.live("systemone: /v1/models carries the Clef floor alongside the route models
       "@cf/cloudflare/clef",
       "@cf/cloudflare/clef-flash",
     ])
+  }),
+)
+
+
+// ------------------------------------------------------------ claude-code door (#1412)
+//
+// Door recordings transcribed from developing-today/code
+// bin/claude-code-proxy.mjs + bin/claude-code-proxy.test.mjs (see
+// the core suite's claude-code section for the full pairs): the
+// door answers a CLI failure with 500 `{error: {message: "Claude
+// Code execution failed"}}` (bare, after its one fresh-session
+// retry; no `type`) and, when streaming after first content,
+// frames `Claude Code execution failed: <detail>` as an SSE error
+// event followed by [DONE]. Its success bodies echo the bare CLI
+// model id (resolveModel strips the provider prefix) and fold
+// cache-read tokens into prompt_tokens.
+
+it.live("claude-code model ref: 200, façade echoes the full provider/model ref as model", () =>
+  Effect.gen(function* () {
+    mode = "ok"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "claude-code/claude-haiku-5-5",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as { model: string; object: string }
+    expect(body.object).toBe("chat.completion")
+    // Door contrast: the door's resolveModel strips the provider
+    // prefix and echoes the bare CLI id (claude-haiku-5-5); the
+    // façade echoes the caller's ref (design §2 label rule).
+    expect(body.model).toBe("claude-code/claude-haiku-5-5")
+    const input = captured.at(-1)
+    expect(String(input?.model?.providerID)).toBe("claude-code")
+    expect(String(input?.model?.id)).toBe("claude-haiku-5-5")
+  }),
+)
+
+it.live("claude-code single-model lookup: entry shape agrees with the door's models entries except owned_by", () =>
+  Effect.gen(function* () {
+    mode = "ok"
+    const handler = yield* setup
+    const res = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/v1/models/claude-code%2Fclaude-haiku-5-5")),
+    )
+    expect(res.status).toBe(200)
+    const body = yield* Effect.promise(() => res.json())
+    // Door recording: its /v1/models entries are {id, object:
+    // "model", created: <now>, owned_by: "anthropic-claude-code"}
+    // for the BARE CLI ids; the façade's lookup answers the
+    // provider-prefixed ref with the same field shape, the
+    // provider id as owner, and the façade's 0 created stamp.
+    expect(body).toEqual({
+      id: "claude-code/claude-haiku-5-5",
+      object: "model",
+      created: 0,
+      owned_by: "claude-code",
+    })
+  }),
+)
+
+it.live("claude-code CLI failure, non-streaming: 502 server_error, detail preserved (door: bare 500)", () =>
+  Effect.gen(function* () {
+    mode = "failure"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "claude-code/claude-haiku-5-5",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    // Door recording for the same class of failure: 500 with
+    // {error: {message: "Claude Code execution failed"}} and NO
+    // type — the bare message after its one fresh-session retry
+    // (core suite, claude-code CLI-failure case). The façade's
+    // status is 502 and the envelope is typed, with the provider
+    // detail preserved in the message.
+    expect(res.status).toBe(502)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("server_error")
+    expect(body.error.message).toContain("upstream exploded")
+    mode = "ok"
+  }),
+)
+
+it.live("claude-code CLI failure, streaming: SSE error frame + [DONE] — sentinel parity with the door", () =>
+  Effect.gen(function* () {
+    mode = "failure"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "claude-code/claude-haiku-5-5",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    // Door recording: a stream failure is one SSE error frame
+    // (untyped, prefixed message) followed by `data: [DONE]`.
+    // Façade whole-stream failure: the error frame carries the
+    // message (and its type) and [DONE] follows — sentinel parity;
+    // the mid-stream provider-error path differs (no [DONE]) and
+    // is pinned in the core suite.
+    expect(text).toContain('"error"')
+    expect(text).toContain('"type":"server_error"')
+    expect(text).toContain("upstream exploded")
+    expect(text).toContain("data: [DONE]")
+    expect(text).not.toContain('"finish_reason":"stop"')
+    mode = "ok"
+  }),
+)
+
+// ------------------------------------------------------------ commandcode door (#1411)
+//
+// Door recordings transcribed from developing-today/code
+// bin/commandcode-proxy.mjs + bin/commandcode-proxy.test.mjs (see
+// the core suite's commandcode section for the full pairs): the
+// door answers a CLI failure with 502 `{error: {message:
+// "CommandCode execution failed: <detail>"}}` — no `type` — and,
+// when streaming, frames the same body as an SSE error event
+// followed by [DONE]. The failure detail used here is the
+// live-verified 2026-11-02 insufficient-credits run_error (the
+// pool is empty; the provider is disabled fleet-wide — #1411).
+// The fake's "credits" mode fails with Generate.UnavailableError
+// because that is what the real chain produces for this door:
+// the door's 502 (no quota code) classifies as a
+// provider-internal failure, not the #1441 quota class.
+
+it.live("commandcode model ref: 200, façade echoes the full provider/model ref as model", () =>
+  Effect.gen(function* () {
+    mode = "ok"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "commandcode/deepseek/deepseek-v4-flash",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as { model: string; object: string }
+    expect(body.object).toBe("chat.completion")
+    // Door contrast: the door's resolveModel strips the provider
+    // prefix and echoes the bare CLI id (deepseek/deepseek-v4-flash);
+    // the façade echoes the caller's ref (design §2 label rule).
+    expect(body.model).toBe("commandcode/deepseek/deepseek-v4-flash")
+    const input = captured.at(-1)
+    expect(String(input?.model?.providerID)).toBe("commandcode")
+    expect(String(input?.model?.id)).toBe("deepseek/deepseek-v4-flash")
+  }),
+)
+
+it.live("commandcode single-model lookup: entry shape agrees with the door's models entries", () =>
+  Effect.gen(function* () {
+    mode = "ok"
+    const handler = yield* setup
+    const res = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/v1/models/commandcode%2Fdeepseek%2Fdeepseek-v4-flash")),
+    )
+    expect(res.status).toBe(200)
+    const body = yield* Effect.promise(() => res.json())
+    // Door recording: its /v1/models entries are {id, object:
+    // "model", created: <now>, owned_by: "commandcode"} for the bare
+    // CLI ids; the façade's lookup answers the provider-prefixed ref
+    // with the same field shape (created is the façade's 0 stamp).
+    expect(body).toEqual({
+      id: "commandcode/deepseek/deepseek-v4-flash",
+      object: "model",
+      created: 0,
+      owned_by: "commandcode",
+    })
+  }),
+)
+
+it.live("commandcode CLI failure, non-streaming: 502 server_error, CLI detail preserved in the message", () =>
+  Effect.gen(function* () {
+    mode = "credits"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "commandcode/deepseek/deepseek-v4-flash",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    // Door recording for the same failure: 502 with
+    // {error: {message: "CommandCode execution failed: <detail>"}}
+    // and NO type. Status parity (502); the façade's envelope is
+    // typed and the message — the door's own prefixed message,
+    // carried through the provider chain — is preserved verbatim
+    // (core suite, commandcode CLI-failure case; live-verified on
+    // #1411 against the real chain).
+    expect(res.status).toBe(502)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("server_error")
+    expect(body.error.message).toContain("CommandCode execution failed:")
+    expect(body.error.message).toContain("insufficient credits")
+    mode = "ok"
+  }),
+)
+
+it.live("commandcode CLI failure, streaming: SSE error frame + [DONE] — sentinel parity with the door", () =>
+  Effect.gen(function* () {
+    mode = "credits"
+    const handler = yield* setup
+    const res = yield* post(handler, "http://opencode.local/v1/chat/completions", {
+      model: "commandcode/deepseek/deepseek-v4-flash",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    })
+    expect(res.status).toBe(200)
+    const text = yield* Effect.promise(() => res.text())
+    // Door recording: the same failure is one SSE error frame
+    // (untyped, prefixed message) followed by `data: [DONE]`.
+    // Façade: a whole-stream failure (the Generate stream fails
+    // before any event) is framed by the handler's catchCause as
+    // the same error frame — typed, with the door's message
+    // carried through — and [DONE] DOES follow, because the
+    // translator never marked the stream failed: sentinel parity
+    // with the door. (The no-[DONE] case is only the mid-stream
+    // provider-error EVENT path, pinned at translator level in
+    // the core suite.)
+    expect(text).toContain('"error"')
+    expect(text).toContain("insufficient credits")
+    expect(text).toContain("[DONE]")
+    expect(text).not.toContain('"finish_reason":"stop"')
+    mode = "ok"
   }),
 )

@@ -1,0 +1,23 @@
+name: main-gate
+description: >-
+  Phase 3 release gate (developing-today/code#1782): refuse to publish from a
+  SHA whose main-gate — the watched main-tier workflows test/check/nix-eval,
+  per .github/workflows/main-broken.yml — is not green for that exact SHA.
+  The rule and the hotfix override are recorded in .github/ci-policy.md.
+inputs:
+  sha:
+    description: "Commit SHA to gate (defaults to the workflow run's SHA)"
+    required: false
+    default: "${{ github.sha }}"
+  override:
+    description: "Pass the MAIN_GATE_OVERRIDE repository variable; '1' bypasses the gate with a warning (hotfix path, .github/ci-policy.md)"
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MAIN_GATE_OVERRIDE: ${{ inputs.override }}
+      run: '"${{ github.action_path }}/main-gate.sh" "${{ inputs.sha }}"'
