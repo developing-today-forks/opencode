@@ -355,6 +355,45 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
+  test("an input path with an ordinary parent traversal before a symlinked component is still rejected", async () => {
+    const root = await dir()
+    fs.mkdirSync(path.join(root, "ordinary"), { recursive: true })
+    fs.mkdirSync(path.join(root, "real", "nested"), { recursive: true })
+    fs.symlinkSync(path.join(root, "real", "nested"), path.join(root, "alias"))
+    fs.writeFileSync(path.join(root, "config.txt"), "unrelated")
+    fs.writeFileSync(path.join(root, "real", "config.txt"), "intended")
+
+    const outcome = await writeAtomic(`${path.join(root, "ordinary")}/../alias/../config.txt`, "created").then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(fs.readFileSync(path.join(root, "config.txt"), "utf8")).toBe("unrelated")
+    expect(fs.readFileSync(path.join(root, "real", "config.txt"), "utf8")).toBe("intended")
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  test("a link destination with an ordinary parent traversal before a symlinked component is rejected", async () => {
+    const root = await dir()
+    fs.mkdirSync(path.join(root, "ordinary"), { recursive: true })
+    fs.mkdirSync(path.join(root, "real", "nested"), { recursive: true })
+    fs.symlinkSync(path.join(root, "real", "nested"), path.join(root, "alias"))
+    const link = path.join(root, "link.txt")
+    fs.symlinkSync("ordinary/../alias/../config.txt", link)
+
+    const outcome = await writeAtomic(link, "created").then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(fs.existsSync(path.join(root, "real", "config.txt"))).toBe(false)
+    expect(fs.existsSync(path.join(root, "config.txt"))).toBe(false)
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
   test("a target basename near the component-length limit still replaces", async () => {
     const directory = await dir()
     const file = path.join(directory, `${"a".repeat(240)}.txt`)

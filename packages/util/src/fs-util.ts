@@ -218,7 +218,14 @@ export namespace FSUtil {
         let inputPrefix = isAbsolute(path) ? "/" : "."
         let inputUnsafe = false
         for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
-          if (inputSegments[index] === "..") continue
+          // A `..` applies to the prefix built so far (popping its last
+          // component) rather than being skipped: skipping it would check
+          // every later component at the wrong path and let a symlinked
+          // component hide behind an ordinary `..` (PR #1355 Codex).
+          if (inputSegments[index] === "..") {
+            inputPrefix = dirname(inputPrefix)
+            continue
+          }
           inputPrefix = join(inputPrefix, inputSegments[index])
           if (inputSegments.slice(index + 1).includes(".."))
             inputUnsafe =
@@ -250,7 +257,13 @@ export namespace FSUtil {
             let prefix = isAbsolute(link) ? "/" : parent
             let unsafe = false
             for (let index = 0; index < segments.length && !unsafe; index++) {
-              if (segments[index] === "..") continue
+              // As in the input walk above, a `..` pops the prefix rather
+              // than being skipped, so later components are checked at
+              // their true filesystem path.
+              if (segments[index] === "..") {
+                prefix = dirname(prefix)
+                continue
+              }
               prefix = join(prefix, segments[index])
               if (segments.slice(index + 1).includes(".."))
                 unsafe = (yield* fs.readLink(prefix).pipe(Effect.orElseSucceed(() => undefined))) !== undefined
