@@ -1646,6 +1646,23 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
   })
 
+  test("a fractional bench multiplier keeps growing past the old exponent limit until it reaches the cap", () => {
+    const now = 3_000_000
+    const quick = ModelRoute.policy({ cooldownMs: 60_000 })
+    ModelRoute.configureConstants({ bench: { multiplier: 1.1 } })
+
+    Array.from({ length: 32 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBeGreaterThan(now + 60_000 * 1.1 ** 30)
+
+    Array.from({ length: 50 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 86_400_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.configureConstants({ bench: { multiplier: 1 } })
+    Array.from({ length: 40 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+  })
+
   test("the bench multiplier and the caps on the health bases are configurable", () => {
     const quick = ModelRoute.policy({ cooldownMs: 1_000 })
     const now = 2_000_000
