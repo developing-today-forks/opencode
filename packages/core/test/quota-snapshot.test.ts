@@ -142,9 +142,9 @@ describe("QuotaSnapshot", () => {
       const input = { plan: { ...plan, id } as ModelPlan.Plan, window, totals: totals({ requests: 50 }), observedAt }
       // An empty record and a JSON-parsed record naming other plans both lack an own entry for the plan.
       expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }).stale).toBe(true)
-      expect(
-        QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale,
-      ).toBe(true)
+      expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale).toBe(
+        true,
+      )
       expect(QuotaSnapshot.known(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }))).toBe(false)
     }
   })
@@ -457,5 +457,47 @@ describe("QuotaSnapshot balance classification and gating selection (#1014 fix p
     const gating = QuotaSnapshot.gatingSnapshot([requests, balance], now)
     expect(gating?.planID).toBe("mixed-plan")
     expect(gating?.balance).toBe(true)
+  })
+})
+
+describe("QuotaSnapshot usageSince fixed-reset periods (#1342)", () => {
+  const dailyWindow = {
+    name: "daily",
+    unit: "requests",
+    limit: 100,
+    windowHours: 24,
+    resetRule: "daily 00:00 UTC",
+  } as ModelPlan.QuotaWindow
+
+  test("a daily window reads usage from the current period's start, not a rolling 24h lookback", () => {
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    const since = QuotaSnapshot.usageSince(plan, dailyWindow, justAfterReset)
+    expect(since).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+    // The worked example from #1342: 100 requests at 23:55 the previous day
+    // fall before the period start and cannot re-gate the new period; usage
+    // at 00:01 is inside it.
+    expect(Date.parse("2026-10-26T23:55:00.000Z")).toBeLessThan(since)
+    expect(Date.parse("2026-10-27T00:01:00.000Z")).toBeGreaterThanOrEqual(since)
+  })
+
+  test("mid-period, a daily window's period start is the most recent reset", () => {
+    const midPeriod = Date.parse("2026-10-27T12:00:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, dailyWindow, midPeriod)).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+  })
+
+  test("an explicit future resetAt starts the period one window-length before it", () => {
+    const explicit = {
+      ...dailyWindow,
+      resetRule: undefined,
+      resetAt: "2026-10-28T00:00:00.000Z",
+    } as ModelPlan.QuotaWindow
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, explicit, justAfterReset)).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+  })
+
+  test("a rolling window keeps the rolling lookback", () => {
+    const rolling = { ...dailyWindow, resetRule: "rolling" } as ModelPlan.QuotaWindow
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, rolling, justAfterReset)).toBe(justAfterReset - 24 * 3_600_000)
   })
 })
