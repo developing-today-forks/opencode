@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Layer, Schedule, Schema } from "effect"
+import { DateTime, Effect, Layer, Schedule, Schema, Stream } from "effect"
 import { Agent } from "@opencode/core/agent"
 import { AISDK } from "@opencode/core/aisdk"
 import { Bus } from "@opencode/core/bus"
@@ -115,7 +115,11 @@ const it = testEffect(
       Config.node.replace(config),
       Mcp.node.replace(emptyMcpLayer),
       Generate.node.replace(
-        Layer.succeed(Generate.Service, Generate.Service.of({ text: () => Effect.succeed('["2", "1"]') })),
+        Layer.succeed(Generate.Service, Generate.Service.of({
+            text: () => Effect.succeed('["2", "1"]'),
+            complete: () => Effect.die("unused"),
+            stream: () => Stream.die("unused"),
+          })),
       ),
     ],
   ).pipe(Layer.provideMerge(config)),

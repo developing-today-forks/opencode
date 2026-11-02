@@ -115,6 +115,11 @@ import type {
   ModelDefaultOutput,
   GenerateTextInput,
   GenerateTextOutput,
+  ServerCompletionsChatInput,
+  ServerCompletionsChatOutput,
+  ServerCompletionsResponsesInput,
+  ServerCompletionsResponsesOutput,
+  ServerCompletionsModelsOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -901,6 +906,32 @@ const EndpointGenerateText = (raw: RawClient["server.generate"]) => (input: Gene
   )
 
 const adaptGroupGenerate = (raw: RawClient["server.generate"]) => ({ text: EndpointGenerateText(raw) })
+
+type ServerCompletionsChatRequest = Parameters<RawClient["server.completions"]["completions.chat"]>[0]
+const EndpointServerCompletionsChat = (raw: RawClient["server.completions"]) => (input: ServerCompletionsChatInput) =>
+  preserveEffect<ServerCompletionsChatOutput>()(
+    raw["completions.chat"]({ payload: input["payload"] } as ServerCompletionsChatRequest).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
+type ServerCompletionsResponsesRequest = Parameters<RawClient["server.completions"]["completions.responses"]>[0]
+const EndpointServerCompletionsResponses =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsResponsesInput) =>
+    preserveEffect<ServerCompletionsResponsesOutput>()(
+      raw["completions.responses"]({ payload: input["payload"] } as ServerCompletionsResponsesRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+const EndpointServerCompletionsModels = (raw: RawClient["server.completions"]) => () =>
+  preserveEffect<ServerCompletionsModelsOutput>()(raw["completions.models"]({}).pipe(Effect.mapError(mapClientError)))
+
+const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
+  chat: EndpointServerCompletionsChat(raw),
+  responses: EndpointServerCompletionsResponses(raw),
+  models: EndpointServerCompletionsModels(raw),
+})
 
 const EndpointProviderList = (raw: RawClient["server.provider"]) => (input?: ProviderListInput) =>
   preserveEffect<ProviderListOutput>()(
@@ -1916,6 +1947,7 @@ const adaptClient = (raw: RawClient) => ({
   message: adaptGroupMessage(raw["server.message"]),
   model: adaptGroupModel(raw["server.model"]),
   generate: adaptGroupGenerate(raw["server.generate"]),
+  "server.completions": adaptGroupServerCompletions(raw["server.completions"]),
   provider: adaptGroupProvider(raw["server.provider"]),
   integration: adaptGroupIntegration(raw["server.integration"]),
   mcp: adaptGroupMcp(raw["server.mcp"]),

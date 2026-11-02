@@ -1421,6 +1421,27 @@ export interface GenerateApi<E = never> {
   readonly text: GenerateTextOperation<E>
 }
 
+export type ServerCompletionsChatInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsChatOutput = unknown
+export type ServerCompletionsChatOperation<E = never> = (
+  input: ServerCompletionsChatInput,
+) => Effect.Effect<ServerCompletionsChatOutput, E>
+
+export type ServerCompletionsResponsesInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsResponsesOutput = unknown
+export type ServerCompletionsResponsesOperation<E = never> = (
+  input: ServerCompletionsResponsesInput,
+) => Effect.Effect<ServerCompletionsResponsesOutput, E>
+
+export type ServerCompletionsModelsOutput = unknown
+export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
+
+export interface ServerCompletionsApi<E = never> {
+  readonly chat: ServerCompletionsChatOperation<E>
+  readonly responses: ServerCompletionsResponsesOperation<E>
+  readonly models: ServerCompletionsModelsOperation<E>
+}
+
 export type ProviderListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 export type ProviderListOutput = {
   readonly location: Location.PublicRef
@@ -2568,6 +2589,7 @@ export interface AppApi<E = never> {
   readonly message: MessageApi<E>
   readonly model: ModelApi<E>
   readonly generate: GenerateApi<E>
+  readonly "server.completions": ServerCompletionsApi<E>
   readonly provider: ProviderApi<E>
   readonly integration: IntegrationApi<E>
   readonly mcp: McpApi<E>

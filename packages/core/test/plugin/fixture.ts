@@ -41,7 +41,7 @@ import { Vcs } from "@opencode/core/vcs"
 import { WebSearch } from "@opencode/core/websearch"
 import { Worktree } from "@opencode/core/worktree"
 import { WorktreeStrategies } from "@opencode/core/worktree/strategies"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { tempLocationLayer } from "../fixture/location"
 import { emptyMcpLayer } from "../fixture/mcp"
 
@@ -56,7 +56,11 @@ const npmLayer = Layer.succeed(
   }),
 )
 
-const generateLayer = Layer.succeed(Generate.Service, Generate.Service.of({ text: () => Effect.succeed("") }))
+const generateLayer = Layer.succeed(Generate.Service, Generate.Service.of({
+    text: () => Effect.succeed(""),
+    complete: () => Effect.die("unused"),
+    stream: () => Stream.die("unused"),
+  }))
 
 const configLayer = Config.testLayer()
 
