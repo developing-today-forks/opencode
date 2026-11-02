@@ -425,6 +425,75 @@ describe("ModelRoute quota bench reset", () => {
     expect(ModelRoute.credentialCooldownUntil(target, "cred-fallback", now + 7)).toBe(now + 7 + day)
   })
 
+  test("reconciling the gate against live plans clears state derived from an ended plan (#1340)", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 3_600_000
+    const ended = {
+      planID: "ended-plan",
+      window: "five-hours",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-ended", ended, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // While the plan still feeds the gate, reconciliation keeps its state.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // The plan ends: it derives no replacement snapshot, so its retained gate state clears
+    // and the next route selection no longer blocks the credential on the stale snapshot.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toBeUndefined()
+
+    // Reactive attempt evidence is not plan capacity: an attempt-derived gate survives
+    // reconciliation even when no plan is live.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-reactive", resetAt, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+
+    // The provider scope follows the same rule, including its plan-derived skip adjustment.
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(target, ended, now)
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(true)
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(false)
+  })
+
+  test("reconciling the gate clears a balance baseline only when its grant's plan ended (#1340)", () => {
+    const now = 450_000_000
+    const balance = {
+      planID: "ended-balance-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt: null,
+      observedAt: now,
+      stale: false,
+      balance: true,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-balance", balance, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // The durable baseline record is what re-arms the hold after a restart; while the
+    // grant's plan is live, reconciliation leaves both state and record alone.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-balance-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // Once the grant's plan has ended, the baseline goes with the in-memory state:
+    // otherwise the restored hold would immediately re-block the credential.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toBeUndefined()
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-balance")).toBe(false)
+  })
+
   test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
     const now = 300_000_000
     const snapshots = [
@@ -1628,5 +1697,59 @@ describe("ModelRoute provider-route groups with no ready members", () => {
       candidate: "plan",
       reason: "no-ready-members",
     })
+  })
+})
+
+describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 5_000, quotaCooldownMs: 60_000 })
+  const leaves = [0, 1, 2].map((index) => ModelRoute.ref({ providerID: `pool-p${index}`, model: `m${index}` }))
+  const outside = ModelRoute.ref({ providerID: "pool-outside", model: "solo" })
+  // Root: the pool group (leaves 0-2, one nested route) plus one leaf that belongs to no pool.
+  const definition = {
+    id: "pool-route",
+    targets: [...leaves, outside],
+    targetVariants: [],
+    health: policy,
+    nodes: [
+      { selection: "ordered" as const, weights: [1, 1], children: [{ node: 1 }, { leaf: 3 }] },
+      { routeID: "pool-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
+    ],
+  } as unknown as ModelRoute.Definition
+
+  test("two distinct leaves answering quota in turn pull the whole pool; expiry re-admits it", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    expect(ModelRoute.poolIDOf(definition, 2)).toBe("pool-plan")
+    expect(ModelRoute.poolIDOf(definition, 3)).toBeUndefined()
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+
+    // One leaf's quota answer is leaf-shaped: the pool still serves through its other leaves.
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+
+    // A second distinct leaf answering quota is the pool-shaped signal: the remaining leaf
+    // is pulled with its pool instead of being spent next.
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+    expect(ModelRoute.poolQuotaExhausted(definition, 0, now)).toBe(true)
+    // A leaf outside the pool is never pulled by the pool's exhaustion.
+    expect(ModelRoute.poolQuotaExhausted(definition, 3, now)).toBe(false)
+
+    // Restoration is automatic: once the quota benches expire the pool re-enters rotation.
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now + 60_001)).toBe(false)
+    ModelRoute.resetHealth()
+  })
+
+  test("reactive quota gates on two leaves' providers exhaust the pool until the stated reset", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30 * 60_000
+    ModelRoute.observeQuotaFailure(leaves[0], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+    ModelRoute.observeQuotaFailure(leaves[1], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+    // The pull-out holds until the reset the providers stated, then lifts by itself.
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 1)).toBe(false)
+    ModelRoute.resetHealth()
   })
 })

@@ -122,6 +122,15 @@ export const readStore = (dataDir?: string): Store => {
   return Schema.decodeUnknownSync(Store)(parsed)
 }
 
+/**
+ * Whether a plan still describes capacity the quota gate may act on. A plan that has
+ * ended (`expired` or `cancelled`) stays in the store as history but must not feed the
+ * gate: its smaller window could otherwise produce the gating snapshot for a provider
+ * whose current plan has room (#1340). A plan whose status is `unknown` was never
+ * verified as ended, so it keeps feeding — only a positively ended plan drops out.
+ */
+export const feedsGate = (plan: Plan): boolean => plan.status !== "expired" && plan.status !== "cancelled"
+
 const transientRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
 const renameRetryDelays = [10, 25, 50, 100]
 const renameWait = new Int32Array(new SharedArrayBuffer(4))

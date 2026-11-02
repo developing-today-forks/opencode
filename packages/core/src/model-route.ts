@@ -530,6 +530,98 @@ export const activeBenches = (now = Date.now()): ActiveBench[] => {
   return benches.toSorted((left, right) => left.until - right.until)
 }
 
+/** How many distinct leaves of one pool must be quota-out before the pool itself is pulled:
+ * one leaf's quota answer can be leaf-specific, but a second distinct leaf of the same pool
+ * answering quota in turn is the pool-shaped signal (#1014 PR3). */
+const POOL_QUOTA_LEAVES = 2
+
+const quotaBench = (state: HealthState | undefined, now: number) =>
+  state !== undefined &&
+  state.cooldownUntil > now &&
+  (state.benchReason === "quota" || state.benchReason === "quota retry-after")
+
+/** Whether one leaf is currently out for a quota-class reason: a quota bench on the leaf (or
+ * on the credential that serves it), a quota gate on its credential, or a quota gate on its
+ * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
+ * Balance holds count until a fresh balance increase releases them, so a pool held by a
+ * balance gate stays out with no timer-based re-admission (#1014). */
+const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number): boolean => {
+  if (credentialID) {
+    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
+    return credentialQuotaBlocked(credentialID, now) !== undefined
+  }
+  if (quotaBench(health.get(key(target)), now)) return true
+  const provider = providerQuota.get(target.providerID)
+  if (
+    provider &&
+    (provider.balanceHold !== undefined ||
+      QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants().quotaGate.balanceDeadThreshold))
+  )
+    return true
+  return activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip")
+}
+
+interface PoolMembership {
+  readonly id: string
+  readonly leaves: readonly number[]
+}
+
+/** The pool a leaf belongs to: the deepest nested group (a node other than the route root)
+ * that contains it. A provider-route group is named by its provider route, a nested route by
+ * its route id. A leaf sitting directly on the root belongs to no pool. When a leaf appears
+ * under several groups the deepest one is its pool — that is the tightest shared fate. */
+const poolOf = (definition: Definition, index: number): PoolMembership | undefined => {
+  let best: { depth: number; nodeIndex: number; leaves: number[] } | undefined
+  const collect = (nodeIndex: number, into: number[]) => {
+    const node = definition.nodes[nodeIndex]
+    if (!node) return
+    for (const child of node.children) {
+      if (child.leaf !== undefined) into.push(child.leaf)
+      else if (child.node !== undefined) collect(child.node, into)
+    }
+  }
+  const visit = (nodeIndex: number, depth: number) => {
+    const node = definition.nodes[nodeIndex]
+    if (!node) return
+    if (nodeIndex !== 0) {
+      const leaves: number[] = []
+      collect(nodeIndex, leaves)
+      if (leaves.includes(index) && (best === undefined || depth > best.depth)) best = { depth, nodeIndex, leaves }
+    }
+    for (const child of node.children) if (child.node !== undefined) visit(child.node, depth + 1)
+  }
+  visit(0, 0)
+  if (best === undefined) return undefined
+  const found: { depth: number; nodeIndex: number; leaves: number[] } = best
+  const node = definition.nodes[found.nodeIndex]
+  return { id: node?.providerRoute ?? node?.routeID ?? `${definition.id}#${found.nodeIndex}`, leaves: found.leaves }
+}
+
+/** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
+export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
+
+/** Whether a leaf's pool is quota-exhausted: at least two distinct leaves of the pool are
+ * currently quota-out, so the pool is pulled as a whole instead of spending attempts on its
+ * remaining leaves one by one (#1014 PR3 dynamic pull-out). The verdict is derived from the
+ * leaves' live quota state, so it lifts by itself when the benches reach their stated reset,
+ * when a balance hold is released by a fresh increase, or when a benched leaf recovers — a
+ * recovered pool re-enters rotation with no second producer. */
+export const poolQuotaExhausted = (
+  definition: Definition,
+  index: number,
+  now = Date.now(),
+  credentialOf?: (index: number) => string | undefined,
+): boolean => {
+  const pool = poolOf(definition, index)
+  if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
+  const out = new Set<number>()
+  for (const leaf of pool.leaves) {
+    const target = definition.targets[leaf]
+    if (target && quotaOut(target, credentialOf?.(leaf), now)) out.add(leaf)
+  }
+  return out.size >= POOL_QUOTA_LEAVES
+}
+
 export const failed = (
   target: Model.Ref,
   policy: Policy,
@@ -992,6 +1084,44 @@ export const observeProviderQuota = (
     removeAdjustment(`quota:${target.providerID}`)
     if (previous?.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
   }
+}
+
+/** Reconciles retained gate state with the plans that still feed the gate (#1340): an
+ * ended plan derives no replacement snapshot, so without this step a known-full snapshot
+ * it produced would gate its credential/provider indefinitely on the feed paths that
+ * produce no new snapshot (every plan ended, or no gating snapshot derived). Only
+ * plan-derived state attributable to a plan outside `livePlanIDs` is cleared: reactive
+ * `attempt:` snapshots are attempt evidence, not plan capacity, and a durable balance
+ * baseline is removed only when its own grant's plan has also ended — a baseline whose
+ * grant is still live keeps blocking until a fresh snapshot releases it, so a genuinely
+ * exhausted credential is never re-admitted just because a neighbouring plan ended. */
+export const reconcileQuotaGate = (providerID: string, livePlanIDs: ReadonlySet<string>) => {
+  for (const [credentialID, state] of credentialQuota) {
+    if (state.target.providerID !== providerID) continue
+    if (state.snapshot.planID.startsWith("attempt:")) continue
+    if (livePlanIDs.has(state.snapshot.planID)) continue
+    credentialQuota.delete(credentialID)
+    const record = adjustments.find((item) => item.id === credentialBaselineID(credentialID))
+    const grantPlan = (state.balanceHold?.grant ?? record?.balanceGrant)?.split("\n")[0]
+    if (grantPlan !== undefined && !livePlanIDs.has(grantPlan)) removeAdjustment(credentialBaselineID(credentialID))
+    if (state.gated) logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  }
+  const state = providerQuota.get(providerID)
+  if (!state || state.snapshot.planID.startsWith("attempt:") || livePlanIDs.has(state.snapshot.planID)) return
+  providerQuota.delete(providerID)
+  const record = adjustments.find((item) => item.id === `quota:${providerID}`)
+  if (record) {
+    const grantPlan = record.balanceGrant?.split("\n")[0]
+    // The provider skip id is shared with the reactive gate, whose records carry an
+    // attempt-reported note: only the proactive plan-derived record is this gate's to clear.
+    if (
+      grantPlan !== undefined
+        ? !livePlanIDs.has(grantPlan)
+        : record.note?.startsWith("quota exhausted (proactive snapshot)")
+    )
+      removeAdjustment(record.id)
+  }
+  if (state.gated) logHealth(state.target, "quota-readmitted", `provider:${providerID}`)
 }
 
 let lastQuotaFeedAt = 0

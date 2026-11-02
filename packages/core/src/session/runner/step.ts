@@ -531,9 +531,17 @@ export const make = Effect.gen(function* () {
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
         } else clearFailedAttempt(retryKey)
-        // The failover return itself is deferred until after the attempt row is written,
-        // so the row can name the destination.
-        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
+        // Health accounting is broader than current-request failover: a terminal non-retryable
+        // error still makes the target unhealthy for later selections. Keep the routeFailure gate
+        // below so this does not broaden which failures may move the current request elsewhere.
+        if (
+          input.model.routing &&
+          llmFailure &&
+          failureError &&
+          !isContextOverflowFailure(llmFailure) &&
+          !sameTargetRetry &&
+          (routeFailure || !retry?.retry || recorded.outputStarted)
+        )
           ModelRoute.failed(
             input.model.routing.target,
             input.model.routing.policy,
@@ -541,15 +549,18 @@ export const make = Effect.gen(function* () {
             failureHint(llmFailure),
             input.model.routing.credentialID,
           )
-          // Failover is not gated on the retry hook: the hook decides whether the SAME target
-          // gets another request (sameTargetRetry / the Retry outcome below), not whether the
-          // route may move on. A declined retry therefore cascades instead of killing the turn
-          // while eligible candidates remain (#1014).
-          // Output already started keeps this gate closed on purpose: partial output is already
-          // published on this assistant message, so another model's output must not be appended
-          // to it. That case cascades through the Continue outcome below when a retry is
-          // authorized -- a new assistant message whose re-selection sees the target marked
-          // failed above; a hook that declines any further request ends the turn, as instructed.
+        // The failover return itself is deferred until after the attempt row is written,
+        // so the row can name the destination.
+        // Failover is not gated on the retry hook: the hook decides whether the SAME target
+        // gets another request (sameTargetRetry / the Retry outcome below), not whether the
+        // route may move on. A declined retry therefore cascades instead of killing the turn
+        // while eligible candidates remain (#1014).
+        // Output already started keeps this gate closed on purpose: partial output is already
+        // published on this assistant message, so another model's output must not be appended
+        // to it. That case cascades through the Continue outcome below when a retry is
+        // authorized -- a new assistant message whose re-selection sees the target marked
+        // failed above; a hook that declines any further request ends the turn, as instructed.
+        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
