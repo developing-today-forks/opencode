@@ -3,6 +3,7 @@ import path from "node:path"
 import { expect } from "bun:test"
 import { LLMEvent, LLMResponse } from "@opencode/ai"
 import { Generate, type CompletionInput } from "@opencode/core/generate"
+import { Embeddings, type EmbedInput } from "@opencode/core/embeddings"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
@@ -37,6 +38,24 @@ const fake = makeLocationNode({
   deps: [],
 })
 
+const embedded: EmbedInput[] = []
+const fakeEmbeddings = makeLocationNode({
+  service: Embeddings.Service,
+  layer: Layer.succeed(
+    Embeddings.Service,
+    Embeddings.Service.of({
+      embed: (input) => {
+        embedded.push(input)
+        return Effect.succeed({
+          vectors: input.inputs.map((text) => [text.length, 0.5, 0.25]),
+          promptTokens: 7,
+        })
+      },
+    }),
+  ),
+  deps: [],
+})
+
 const setup = Effect.gen(function* () {
   const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-completions-endpoint-")))
   const global = path.join(tmp.path, "global")
@@ -51,7 +70,7 @@ const setup = Effect.gen(function* () {
       fs: { filewatcher: false },
       models: { fetch: false },
     },
-    { overrides: [Generate.node.replace(fake)] },
+    { overrides: [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)] },
   )
 })
 
@@ -141,6 +160,67 @@ it.live("lists the route models at /v1/models", () =>
     const body = (yield* Effect.promise(() => res.json())) as { data: Array<{ id: string; owned_by: string }> }
     expect(body.data.map((m) => m.id)).toContain("workhorse")
     expect(body.data[0]?.owned_by).toBe("opencode-route")
+    const embedding = body.data.find((m) => m.id === "local-embed/snowflake-arctic-embed-m-v2.0")
+    expect(embedding?.owned_by).toBe("local-embed")
+  }),
+)
+
+const postEmbeddings = (handler: (request: Request) => Promise<Response>, body: unknown) =>
+  Effect.promise(() =>
+    handler(
+      new Request("http://opencode.local/v1/embeddings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    ),
+  )
+
+it.live("answers embeddings in the OpenAI wire shape through the registered backend", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postEmbeddings(handler, {
+      model: "local-embed/snowflake-arctic-embed-m-v2.0",
+      input: ["hi", "a longer input"],
+    })
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as {
+      object: string
+      model: string
+      data: Array<{ object: string; index: number; embedding: number[] }>
+      usage: { prompt_tokens: number; total_tokens: number }
+    }
+    expect(body.object).toBe("list")
+    expect(body.model).toBe("local-embed/snowflake-arctic-embed-m-v2.0")
+    expect(body.data.map((entry) => entry.index)).toEqual([0, 1])
+    expect(body.data[0]?.embedding).toEqual([2, 0.5, 0.25])
+    expect(body.data[1]?.embedding[0]).toBe("a longer input".length)
+    expect(body.usage).toEqual({ prompt_tokens: 7, total_tokens: 7 })
+    expect(embedded.at(-1)?.model.providerID).toBe("local-embed")
+    expect(embedded.at(-1)?.inputs).toEqual(["hi", "a longer input"])
+  }),
+)
+
+it.live("rejects an unsupported dimensions value with an OpenAI-shaped 400 before the backend", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const before = embedded.length
+    const res = yield* postEmbeddings(handler, { model: "snowflake-arctic-embed-m-v2.0", input: "hi", dimensions: 512 })
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(body.error.message).toContain("dimensions 512 is not supported")
+    expect(embedded.length).toBe(before)
+  }),
+)
+
+it.live("rejects an unregistered embedding model with an OpenAI-shaped 400", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postEmbeddings(handler, { model: "openai/text-embedding-3-small", input: "hi" })
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.message).toContain("not a registered embedding model")
   }),
 )
 
