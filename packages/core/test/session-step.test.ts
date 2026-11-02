@@ -14,6 +14,7 @@ import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
+import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { EventTable } from "@opencode/core/event/sql"
@@ -594,6 +595,311 @@ it.effect("cools a target that reports an exhausted quota for the quota cooldown
     const cooldown = ModelRoute.cooldownUntil(primary.ref) - Date.now()
     expect(cooldown).toBeGreaterThan(840000)
     expect(cooldown).toBeLessThanOrEqual(900000)
+    expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
+it.effect("fails over to the next target when the retry hook declines a route failure", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("smart-slow"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+        fallback: () => {
+          fallbackCalls++
+          return Effect.succeed(fallback)
+        },
+      },
+    })
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        // The hook declines another request to the SAME target; that must not veto the route
+        // moving on to an eligible candidate (#1014).
+        retry: () => Effect.succeed({ retry: false as const }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+
+    expect(Exit.isSuccess(result)).toBe(true)
+    if (Exit.isSuccess(result))
+      expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+    expect(fallbackCalls).toBe(1)
+    expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
+it.effect("switches to the next credential again on a second quota failure in the same message", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const otherTarget = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let routeFallbackCalls = 0
+    const credentialModel = (credentialID: string, next?: ReturnType<typeof SessionRunnerModel.resolved>) =>
+      SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("smart-slow"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          credentialID: Credential.ID.make(credentialID),
+          ...(next ? { credentialFallback: () => Effect.succeed(next) } : {}),
+          fallback: () => {
+            routeFallbackCalls++
+            return Effect.succeed(otherTarget)
+          },
+        },
+      })
+    const modelC = credentialModel("cred-c")
+    const modelB = credentialModel("cred-b", modelC)
+    const modelA = credentialModel("cred-a", modelB)
+    const attempt = (model: ReturnType<typeof SessionRunnerModel.resolved>) =>
+      steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: (_cause, _error, retry) =>
+            Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    const first = yield* attempt(modelA)
+    expect(Exit.isSuccess(first)).toBe(true)
+    if (Exit.isSuccess(first))
+      expect(first.value).toEqual(SessionStep.Outcome.Failover({ model: modelB, error: expect.anything() }))
+
+    // A second quota failure on the switched credential, in the same assistant message, tries
+    // the next credential on the same provider before any different target (proximity order:
+    // credential -> leaf -> sibling plan -> next route, #1014).
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    const second = yield* attempt(modelB)
+    expect(Exit.isSuccess(second)).toBe(true)
+    if (Exit.isSuccess(second))
+      expect(second.value).toEqual(SessionStep.Outcome.Failover({ model: modelC, error: expect.anything() }))
+    expect(routeFallbackCalls).toBe(0)
+    expect(yield* llm.requests()).toHaveLength(2)
+  }),
+)
+
+it.effect("does not fail over within the same message when a quota failure follows partial output", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("smart-slow"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+        fallback: () => {
+          fallbackCalls++
+          return Effect.succeed(fallback)
+        },
+      },
+    })
+    yield* llm.push(
+      TestLLM.failAfter(
+        new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }),
+        LLMEvent.textStart({ id: "answer" }),
+        LLMEvent.textDelta({ id: "answer", text: "partial" }),
+      ),
+    )
+
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+
+    // Pinned gate (#1014): partial output is already published on this assistant message, so a
+    // different model must not append to it via Failover; the post-output cascade is the
+    // Continue outcome on a new message when a retry is authorized. The target is still
+    // marked failed, so a later re-selection sees it cooling.
+    expect(Exit.isSuccess(result) ? result.value._tag : undefined).not.toBe("Failover")
+    expect(fallbackCalls).toBe(0)
+    expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
     expect(yield* llm.requests()).toHaveLength(1)
   }),
 )
