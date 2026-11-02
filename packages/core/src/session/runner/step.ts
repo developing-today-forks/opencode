@@ -561,7 +561,7 @@ export const make = Effect.gen(function* () {
           // A transient failure on a target with a good record gets another try; a rate limit or a
           // target that keeps failing moves the turn on immediately.
           !isRateLimited(llmFailure) &&
-          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID) &&
+          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID, locationDirectory) &&
           (failedAttempts.get(retryKey) ?? 0) + 1 < input.model.routing.attempts
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)

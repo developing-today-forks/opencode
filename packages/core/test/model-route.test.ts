@@ -1867,6 +1867,29 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("shared outcome history keeps each Location's window: retention is the union, evaluation is scoped (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 2_000_000 + index, undefined, undefined, "/loc/a")
+      // One success recorded through B (default window 5) must not erase the
+      // history A (window 10) still judges by.
+      ModelRoute.completed(target, policy, ok, 2_000_100, undefined, "/loc/b")
+      expect(ModelRoute.giveUps(target, undefined, "/loc/a")).toBe(6)
+      expect(ModelRoute.giveUps(target, undefined, "/loc/b")).toBe(4)
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

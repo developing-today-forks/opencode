@@ -287,8 +287,21 @@ const OUTCOME_WINDOW = 5
 
 const key = (target: Model.Ref) => `${target.providerID}/${target.id}`
 
-const pushOutcome = (outcomes: boolean[], answered: boolean, location?: string) =>
-  [...outcomes, answered].slice(-currentConstants(location).escalation.outcomeWindow)
+// The outcome history retained for a target: the widest window any registered
+// Location evaluates with, so one Location's narrower window cannot destructively
+// truncate history another Location still judges by (#1423). Recording retains the
+// union; each evaluation applies its own Location's window over it (see giveUps).
+const retainedOutcomeWindow = () => {
+  let window = constants.escalation.outcomeWindow
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.escalation?.outcomeWindow
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
+const pushOutcome = (outcomes: boolean[], answered: boolean) =>
+  [...outcomes, answered].slice(-retainedOutcomeWindow())
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -413,7 +426,7 @@ const bench = (
   location?: string,
 ) => {
   state.samples = []
-  state.outcomes = pushOutcome(state.outcomes, false, location)
+  state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
   const ladder = currentConstants(location).bench
@@ -838,14 +851,15 @@ export const currentSettings = (location?: string) => activeSettings(location)
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
  * target-level read would call a repeatedly failing credential steady forever. */
-export const giveUps = (target: Model.Ref, credentialID?: string) => {
+export const giveUps = (target: Model.Ref, credentialID?: string, location?: string) => {
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  return (state?.outcomes ?? []).filter((answered) => !answered).length
+  const window = currentConstants(location).escalation.outcomeWindow
+  return (state?.outcomes ?? []).slice(-window).filter((answered) => !answered).length
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
 export const steady = (target: Model.Ref, credentialID?: string, location?: string) =>
-  giveUps(target, credentialID) < activeSettings(location).escalation.afterGiveUps
+  giveUps(target, credentialID, location) < activeSettings(location).escalation.afterGiveUps
 
 /** A route should race its next target immediately when its current target keeps giving up. Whether a
  * route races at all depends on its autonomy level; see ModelRouteAutonomy.races. */
@@ -1352,12 +1366,12 @@ export const completed = (
   // accounting below is unchanged, since the target did serve the request.
   if (credentialID) {
     const credentialState = credentialEntry(target, credentialID)
-    credentialState.outcomes = pushOutcome(credentialState.outcomes, true, location)
+    credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
     endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
-  state.outcomes = pushOutcome(state.outcomes, true, location)
+  state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
   endBench(target, state, now)
   if (state.cooldownUntil > now) return
