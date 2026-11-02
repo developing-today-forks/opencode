@@ -595,6 +595,11 @@ export const layer = Layer.effect(
         readonly definition: ModelRoute.Definition
         readonly tried: ReadonlySet<number>
       }>
+      // Typed load failures recorded at cascade boundaries, in attempt order.
+      // When no route in the cascade resolves, the first one surfaces instead
+      // of a bare RouteUnavailableError, so configuration and authorization
+      // failures keep their identity for session error classification.
+      readonly loadErrors: Array<Error>
     }
     const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
     const resolveRouteWithin = (
@@ -638,6 +643,7 @@ export const layer = Layer.effect(
             triedRefs: new Set(cascade.triedRefs),
             visitedRoutes: new Set(cascade.visitedRoutes),
             chain: [...cascade.chain],
+            loadErrors: [...cascade.loadErrors],
           }
           return {
           ...current,
@@ -670,6 +676,7 @@ export const layer = Layer.effect(
                 triedRefs: new Set(branch.triedRefs),
                 visitedRoutes: new Set(branch.visitedRoutes),
                 chain: [...branch.chain],
+                loadErrors: [...branch.loadErrors],
               }
               return resolveRouteWithin(
                 selected,
@@ -682,12 +689,25 @@ export const layer = Layer.effect(
                 branchState,
               ).pipe(
                 // An exhausted-with-load-failures route is a cascade boundary,
-                // not a fatal error (#1014 Codex P2).
-                Effect.catchCause(() => Effect.succeed(undefined)),
+                // not a fatal error (#1014 Codex P2): record the typed failure
+                // and let the parents try; it re-surfaces below if nothing in
+                // the cascade resolves. Defects still propagate (Effect.catch
+                // only handles typed failures).
+                Effect.catch((error) => {
+                  branchState.loadErrors.push(error)
+                  return Effect.succeed(undefined)
+                }),
                 Effect.flatMap((next) =>
                   next
                     ? Effect.succeed(next)
                     : cascadeToParent(definition, branchTried, requestedVariant, sessionID, requestTokens, branchState),
+                ),
+                Effect.flatMap((resolved) =>
+                  resolved
+                    ? Effect.succeed(resolved)
+                    : branchState.loadErrors.length > 0
+                      ? Effect.fail(branchState.loadErrors[0])
+                      : Effect.succeed(undefined),
                 ),
               )
             },
@@ -931,8 +951,14 @@ export const layer = Layer.effect(
       definitions: ReadonlyMap<string, ModelRoute.Definition>,
       from: ModelRoute.Definition,
       targetID: string,
+      cache: Map<string, number | undefined>,
       seen: ReadonlySet<string> = new Set(),
     ): number | undefined => {
+      // Expanded node lists already contain every descendant, so an uncached
+      // recursion re-traverses each descendant per ancestor and blows up
+      // exponentially on deep hierarchies: memoize per (route, target).
+      const key = `${String(from.id)}>${targetID}`
+      if (cache.has(key)) return cache.get(key)
       let depth: number | undefined
       for (const node of from.nodes) {
         if (!node.routeID) continue
@@ -940,10 +966,11 @@ export const layer = Layer.effect(
         else if (!seen.has(node.routeID)) {
           const child = definitions.get(node.routeID)
           if (!child) continue
-          const below = nestingDepth(definitions, child, targetID, new Set([...seen, String(from.id), node.routeID]))
+          const below = nestingDepth(definitions, child, targetID, cache, new Set([...seen, String(from.id), node.routeID]))
           if (below !== undefined) depth = Math.max(depth ?? 0, below + 1)
         }
       }
+      cache.set(key, depth)
       return depth
     }
 
@@ -971,6 +998,7 @@ export const layer = Layer.effect(
           const definition = ModelRoute.definition(candidate)
           if (definition) definitions.set(String(definition.id), definition)
         }
+        const depthCache = new Map<string, number | undefined>()
         for (let position = cascade.chain.length - 1; position >= 0; position--) {
           const nested = cascade.chain[position].definition
           const parents = available
@@ -983,7 +1011,7 @@ export const layer = Layer.effect(
               // settings. The selected route's variant gate applies to every
               // route the cascade re-enters through (#1014 Codex P2).
               if (requestedVariant && !candidate.variants.some((item) => item.id === requestedVariant)) return []
-              const depth = nestingDepth(definitions, parent, String(nested.id))
+              const depth = nestingDepth(definitions, parent, String(nested.id), depthCache)
               return depth === undefined ? [] : [{ candidate, parent, depth, order }]
             })
             .sort((a, b) => a.depth - b.depth || a.order - b.order)
@@ -1007,7 +1035,12 @@ export const layer = Layer.effect(
               sessionID,
               requestTokens,
               cascade,
-            ).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+            ).pipe(
+              Effect.catch((error) => {
+                cascade.loadErrors.push(error)
+                return Effect.succeed(undefined)
+              }),
+            )
             if (resolved) return resolved
             const above = yield* cascadeToParent(parent, seed, requestedVariant, sessionID, requestTokens, cascade)
             if (above) return above
@@ -1035,6 +1068,7 @@ export const layer = Layer.effect(
         triedRefs: new Set(),
         visitedRoutes: new Set([String(definition.id)]),
         chain: [],
+        loadErrors: [],
       }
       const initialTried = new Set<number>()
       return resolveRouteWithin(
@@ -1048,16 +1082,24 @@ export const layer = Layer.effect(
         cascade,
       ).pipe(
         // Exhausted through load failures is a cascade boundary too (#1014
-        // Codex P2): the parents still get their chance before the route is
-        // reported unavailable.
-        Effect.catchCause(() => Effect.succeed(undefined)),
+        // Codex P2): the parents still get their chance, and the typed
+        // failure is recorded so it — not a bare RouteUnavailableError —
+        // surfaces when no ancestor can serve the request either.
+        Effect.catch((error) => {
+          cascade.loadErrors.push(error)
+          return Effect.succeed(undefined)
+        }),
         Effect.flatMap((resolved) =>
           resolved
             ? Effect.succeed(resolved)
             : cascadeToParent(definition, initialTried, requestedVariant, sessionID, requestTokens, cascade),
         ),
         Effect.flatMap((resolved) =>
-          resolved ? Effect.succeed(resolved) : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
+          resolved
+            ? Effect.succeed(resolved)
+            : cascade.loadErrors.length > 0
+              ? Effect.fail(cascade.loadErrors[0])
+              : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
         ),
       )
     }

@@ -1938,6 +1938,26 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("surfaces the typed load error when a parentless route's targets all fail to load (#1014)", () => {
+    ModelRoute.resetHealth()
+    const broken = model(Provider.aisdk("@ai-sdk/openai-compatible"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { baseURL: "https://${OPENCODE_5256_UNSET_HOST}/v1" },
+    })
+    const solo = routeAs("solo", [broken], {
+      nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+    })
+    return withCascadeResolver([broken], [solo], (resolver) =>
+      Effect.gen(function* () {
+        const failure = yield* resolver.resolveModel(solo).pipe(Effect.flip)
+        // Not RouteUnavailableError: the actionable initialization failure is
+        // preserved through the cascade boundary.
+        expect(failure._tag).toBe("SessionRunnerModel.UnresolvedProviderVariablesError")
+      }),
+    )
+  })
+
   it.effect("leaves compatibility unchanged when the route declares no cache format", () => {
     ModelRoute.resetHealth()
     const a = model(Provider.aisdk("@ai-sdk/openai"), {
