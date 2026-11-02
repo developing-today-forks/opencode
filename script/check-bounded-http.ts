@@ -11,7 +11,9 @@
  * reader (`readBoundedResponseText` / `readExcerptResponseText` from
  * `@opencode/util/http-body`, or `collectBoundedResponseBody` from
  * packages/core/src/tool/http-body.ts for Effect HttpClient sites).
- * This gate scans every `src` tree under packages/ and services/
+ * This gate scans every `src` tree under packages/ and services/, and
+ * (since #1394) every script tree (root `script/`, each package
+ * script/scripts tree, and `services/www/script`), in
  * (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
  * patterns —
  *   P-A: a `fetch(` call site. The pattern is deliberately line-shaped:
@@ -40,12 +42,14 @@
  * Comment-only lines are skipped: a comment mentioning `fetch(` is
  * documentation, not a call site.
  *
- * Scope note (#1256): the root `script/` tree itself is out of scope.
- * Those are operator-run local/CI tooling scripts, not deployed
- * production code handling untrusted upstreams on a request path;
- * several are this gate's own checker and tests, whose pattern
- * literals would self-match. Production trees (packages/, services/)
- * are the contract surface.
+ * Scope note (#1394, superseding the #1256 note): the script trees are
+ * in scope. They are operator-run local/CI tooling, but they run the
+ * release, publish, and CI paths against api.github.com and registries
+ * with a token in env, and every top-level `script/` fetch bug found
+ * before this extension (#1275, #1329, #1332, #1337, #1344) escaped
+ * precisely because this gate did not scan them. This gate's own
+ * checker and tests self-match (pattern literals, fixtures); those
+ * hits are dispositioned in the allowlist as fixtures, not hidden.
  *
  * Usage:
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
@@ -92,6 +96,32 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
+  // Script trees (#1394): root script/, every packages/*/script and
+  // packages/*/scripts, and services/*/script where present.
+  "script",
+  "packages/ai/script",
+  "packages/client/script",
+  "packages/cli/script",
+  "packages/codemode/script",
+  "packages/containers/script",
+  "packages/core/script",
+  "packages/desktop/scripts",
+  "packages/http-recorder/script",
+  "packages/merman/script",
+  "packages/plugin/script",
+  "packages/plugin-browser/script",
+  "packages/plugin-github/script",
+  "packages/posts/script",
+  "packages/protocol/script",
+  "packages/schema/script",
+  "packages/sdk/script",
+  "packages/server/script",
+  "packages/session-ui/script",
+  "packages/simulation/script",
+  "packages/theme/script",
+  "packages/ui/script",
+  "packages/util/script",
+  "services/www/script",
 ]
 
 export const ALLOWLIST_PATH = "script/check-bounded-http.allowlist.txt"
@@ -132,6 +162,12 @@ export function scanSource(file: string, source: string): Hit[] {
  * is the list of dispositions for the key, so N identical lines in a file
  * need N entries — one entry no longer silently covers a copy-pasted
  * duplicate line.
+ *
+ * The disposition is the LAST ` :: `-separated field and the hit text is
+ * everything between the file and it (#1394): a hit line can itself
+ * contain ` :: ` — the gate's own tests embed allowlist-format literals —
+ * while a disposition never does, so this split stays unambiguous for
+ * every entry written before this change (all have exactly 3 fields).
  */
 export function parseAllowlist(source: string): Map<string, string[]> {
   const entries = new Map<string, string[]>()
@@ -140,8 +176,8 @@ export function parseAllowlist(source: string): Map<string, string[]> {
     if (!line || line.startsWith("#")) continue
     const parts = line.split(" :: ")
     if (parts.length < 3) throw new Error(`Malformed allowlist line (want file :: line :: disposition): ${line}`)
-    const key = hitKey(parts[0], parts[1])
-    entries.set(key, [...(entries.get(key) ?? []), parts.slice(2).join(" :: ")])
+    const key = hitKey(parts[0], parts.slice(1, -1).join(" :: "))
+    entries.set(key, [...(entries.get(key) ?? []), parts[parts.length - 1]])
   }
   return entries
 }
