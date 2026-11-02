@@ -36,6 +36,15 @@ const transientRenameError = () =>
     cause: Object.assign(new Error("rename EPERM: operation not permitted"), { code: "EPERM" }),
   })
 
+const partialWriteError = () =>
+  systemError({
+    _tag: "WriteZero",
+    module: "FileSystem",
+    method: "write",
+    syscall: "write",
+    cause: new Error("injected partial write failure"),
+  })
+
 const safeInteraction = (index: number): Interaction => ({
   transport: "http",
   request: { method: "GET", url: `https://example.test/${index}`, headers: {}, body: "" },
@@ -263,12 +272,12 @@ describe("cassette", () => {
         yield* cassette.append("collide", safeInteraction(1))
       }),
       {
-        writeFileString: (path, content, options) => {
+        open: (path, options) => {
           if (options?.flag === "wx" && collided === undefined) {
             collided = path
             writeFileSync(path, "sentinel")
           }
-          return real.writeFileString(path, content, options)
+          return real.open(path, options)
         },
       },
     ).then(
@@ -282,6 +291,39 @@ describe("cassette", () => {
     // byte-identical, and no cassette may have been written.
     expect(readFileSync(collided!, "utf8")).toBe("sentinel")
     expect(existsSync(`${directory.path}/collide.json`)).toBe(false)
+  })
+
+  test("file append removes a partially written temp after a write failure", async () => {
+    using directory = tempDirectory("http-recorder-partial-write-")
+    const real = await realFileSystem()
+    let temporary: string | undefined
+    const outcome = await runFileCassetteWithFs(
+      directory.path,
+      Effect.gen(function* () {
+        const cassette = yield* Service
+        yield* cassette.append("partial", safeInteraction(1))
+      }),
+      {
+        open: (path, options) =>
+          real.open(path, options).pipe(
+            Effect.map((handle) => {
+              temporary = path
+              return {
+                ...handle,
+                writeAll: (buffer: Uint8Array) =>
+                  handle.writeAll(buffer.subarray(0, 16)).pipe(Effect.flatMap(() => Effect.fail(partialWriteError()))),
+              }
+            }),
+          ),
+      },
+    ).then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(temporary).toBeDefined()
+    expect(existsSync(temporary!)).toBe(false)
   })
 
 })
