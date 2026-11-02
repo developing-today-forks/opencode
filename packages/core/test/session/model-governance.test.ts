@@ -431,6 +431,112 @@ describe("ModelGovernance.assertAllowed", () => {
     expect(passed).toContain("test/a#max")
   })
 
+  test("a provider-route member exclusion denies the route (#1419)", async () => {
+    const parent = info("ses_excluding", { subagentPolicy: { excludedModels: ["openai/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("openai/gpt-6.1-terra")
+  })
+
+  test("a provider-route target passes an allowlist of its concrete members (#1419)", async () => {
+    const parent = info("ses_allowing", {
+      subagentPolicy: { models: ["openai/*", "openai.alternate/*"] },
+    })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    await run({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+  })
+
+  test("a provider route with only excluded members is denied (#1419)", async () => {
+    const parent = info("ses_excluding", {
+      subagentPolicy: { excludedModels: ["openai/*", "openai.alternate/*"] },
+    })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("openai/gpt-6.1-terra")
+  })
+
+  test("a provider-route member reachable only via a suffix-backed variant is still judged (#1428)", async () => {
+    const parent = info("ses_excluding", { subagentPolicy: { excludedModels: ["proxy/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["pool/m#high"] } },
+        provider_routes: { pool: { providers: ["allowed", "proxy"] } },
+      },
+    }
+    const catalogInput = {
+      allowed: { m: { variants: ["high"] } },
+      proxy: { m: {}, "m-high": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("proxy/m#high")
+  })
+
+  test("a provider route whose id names a configured model route is dropped, not expanded (#1428)", async () => {
+    const parent = info("ses_open", { subagentPolicy: { excludedModels: ["bad/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: {
+          main: { targets: ["pool/m", "safe/m"] },
+          pool: { targets: ["safe/m"] },
+        },
+        provider_routes: { pool: { providers: ["bad"] } },
+      },
+    }
+    const catalogInput = { safe: { m: {} }, bad: { m: {} } }
+    await run({ all: [parent], parent, configInput, catalogInput, model: ref("opencode-route/main") })
+  })
+
   test("a route named after an Object.prototype member is judged as an unknown route (#831)", async () => {
     const configInput = {
       experimental: { model_routes: { main: { targets: ["test/a"] } } },
