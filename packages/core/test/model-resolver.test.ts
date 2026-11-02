@@ -1831,6 +1831,113 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("cascades to the nearest ancestor when a grandparent also nests the sub-route (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const d = leaf("pd")
+    const grandparent = routeAs("grandparent", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ node: 1 }, { node: 2 }, { leaf: 3 }] },
+        {
+          routeID: "parent",
+          selection: "ordered",
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    // The grandparent comes first in the catalog: catalog order must not win
+    // over nesting proximity.
+    return withCascadeResolver([a, b, c, d], [grandparent, sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        const second = yield* first.routing!.fallback()
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("parent")
+        expect(targetOf(third!)).toBe("pc")
+        // Only once the parent is exhausted does the cascade climb to the grandparent.
+        const fourth = yield* third!.routing!.fallback()
+        expect(String(fourth?.routing?.routeID)).toBe("grandparent")
+        expect(targetOf(fourth!)).toBe("pd")
+      }),
+    )
+  })
+
+  it.effect("does not cascade into a parent that cannot serve the requested variant (#1014)", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("high") }],
+    })
+    const b = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pb"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("high") }],
+    })
+    const c = leaf("pc")
+    const sub = Info.make({
+      ...routeAs("sub", [a, b], {
+        nodes: [{ selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] }],
+      }),
+      variants: [{ id: VariantID.make("high") }],
+    })
+    // The parent route does not offer `high` (no variants advertised): entering
+    // it would serve pc at its default settings, silently dropping the variant.
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub, VariantID.make("high"))
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(targetOf(second!)).toBe("pb")
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("a speculative fallback does not consume the parent route for the primary's own fallback (#1014)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const sub = routeAs("sub", [a], {
+      nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+    })
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ node: 1 }, { leaf: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1], children: [{ leaf: 0 }] },
+      ],
+    })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(targetOf(first)).toBe("pa")
+        // Hedge exploration: the primary's fallback is called speculatively and
+        // lands in the parent.
+        const hedge = yield* first.routing!.fallback()
+        expect(String(hedge?.routing?.routeID)).toBe("parent")
+        expect(targetOf(hedge!)).toBe("pb")
+        // The race settles back on the primary: its own fallback must still be
+        // able to enter the parent, and from there reach the parent's last leaf.
+        const next = yield* first.routing!.fallback()
+        expect(String(next?.routing?.routeID)).toBe("parent")
+        const last = yield* next!.routing!.fallback()
+        expect(targetOf(last!)).toBe("pc")
+      }),
+    )
+  })
+
   it.effect("leaves compatibility unchanged when the route declares no cache format", () => {
     ModelRoute.resetHealth()
     const a = model(Provider.aisdk("@ai-sdk/openai"), {
