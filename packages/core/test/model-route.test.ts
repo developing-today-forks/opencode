@@ -425,6 +425,75 @@ describe("ModelRoute quota bench reset", () => {
     expect(ModelRoute.credentialCooldownUntil(target, "cred-fallback", now + 7)).toBe(now + 7 + day)
   })
 
+  test("reconciling the gate against live plans clears state derived from an ended plan (#1340)", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 3_600_000
+    const ended = {
+      planID: "ended-plan",
+      window: "five-hours",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-ended", ended, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // While the plan still feeds the gate, reconciliation keeps its state.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // The plan ends: it derives no replacement snapshot, so its retained gate state clears
+    // and the next route selection no longer blocks the credential on the stale snapshot.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toBeUndefined()
+
+    // Reactive attempt evidence is not plan capacity: an attempt-derived gate survives
+    // reconciliation even when no plan is live.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-reactive", resetAt, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+
+    // The provider scope follows the same rule, including its plan-derived skip adjustment.
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(target, ended, now)
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(true)
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(false)
+  })
+
+  test("reconciling the gate clears a balance baseline only when its grant's plan ended (#1340)", () => {
+    const now = 450_000_000
+    const balance = {
+      planID: "ended-balance-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt: null,
+      observedAt: now,
+      stale: false,
+      balance: true,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-balance", balance, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // The durable baseline record is what re-arms the hold after a restart; while the
+    // grant's plan is live, reconciliation leaves both state and record alone.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-balance-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // Once the grant's plan has ended, the baseline goes with the in-memory state:
+    // otherwise the restored hold would immediately re-block the credential.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toBeUndefined()
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-balance")).toBe(false)
+  })
+
   test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
     const now = 300_000_000
     const snapshots = [

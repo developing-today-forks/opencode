@@ -447,7 +447,15 @@ const refreshQuotaGate = (
       return
     }
     const targetProviders = new Set<string>(targets.map((target) => target.providerID))
-    const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID))
+    // Only plans that still feed the gate (#1340): ended plans are store history, not capacity.
+    const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID) && ModelPlan.feedsGate(plan))
+    // Ended plans derive no replacement snapshot, so reconcile the retained gate state
+    // against the plans that still feed it before any early return below (#1340).
+    for (const providerID of targetProviders)
+      ModelRoute.reconcileQuotaGate(
+        providerID,
+        new Set(relevantPlans.filter((plan) => plan.providerID === providerID).map((plan) => plan.id)),
+      )
     if (relevantPlans.length === 0) return
 
     const windows = relevantPlans.flatMap((plan) =>
