@@ -63,7 +63,27 @@ const setup = Effect.gen(function* () {
   const global = path.join(tmp.path, "global")
   yield* Effect.promise(() => fs.mkdir(global, { recursive: true }))
   yield* Effect.promise(() =>
-    fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })),
+    fs.writeFile(
+      path.join(global, "opencode.json"),
+      JSON.stringify({
+        model: "base/default",
+        // One persona route is disabled in config: it must not be
+        // advertised or resolvable through /v1/models (#1413).
+        providers: { "opencode-route": { models: { "design-code-pro": { disabled: true } } } },
+        experimental: {
+          model_routes: {
+            workhorse: { targets: ["anthropic/claude-sonnet-4-5"] },
+            speed: { targets: ["anthropic/claude-sonnet-4-5"] },
+            specialist: { targets: ["anthropic/claude-sonnet-4-5"] },
+            summit: { targets: ["anthropic/claude-sonnet-4-5"] },
+            scout: { targets: ["anthropic/claude-sonnet-4-5"] },
+            "workhorse-weighted": { targets: ["anthropic/claude-sonnet-4-5"] },
+            "design-code-flash": { targets: ["anthropic/claude-sonnet-4-5"] },
+            "design-code-pro": { targets: ["anthropic/claude-sonnet-4-5"] },
+          },
+        },
+      }),
+    ),
   )
   return yield* ServerFetch.make(
     {
@@ -162,6 +182,18 @@ it.live("lists the route models at /v1/models", () =>
     const body = (yield* Effect.promise(() => res.json())) as { data: Array<{ id: string; owned_by: string }> }
     expect(body.data.map((m) => m.id)).toContain("workhorse")
     expect(body.data[0]?.owned_by).toBe("opencode-route")
+    // The advertised routes are exactly the configured model_routes
+    // (in config order), minus the one disabled in config — the six
+    // tier routes plus the design-code persona route (#1413).
+    expect(body.data.filter((m) => m.owned_by === "opencode-route").map((m) => m.id)).toEqual([
+      "workhorse",
+      "speed",
+      "specialist",
+      "summit",
+      "scout",
+      "workhorse-weighted",
+      "design-code-flash",
+    ])
     const embedding = body.data.find((m) => m.id === "local-embed/snowflake-arctic-embed-m-v2.0")
     expect(embedding?.owned_by).toBe("local-embed")
   }),
@@ -246,6 +278,41 @@ it.live("gets a route model by its opencode-route id at /v1/models/{id}", () =>
     const bareBody = (yield* Effect.promise(() => bare.json())) as { id: string; owned_by: string }
     expect(bareBody.id).toBe("workhorse")
     expect(bareBody.owned_by).toBe("opencode-route")
+  }),
+)
+
+it.live("advertises persona routes at /v1/models and the single-model lookup agrees (#1413)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* Effect.promise(() => handler(new Request("http://opencode.local/v1/models")))
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as {
+      data: Array<{ id: string; object: string; created: number; owned_by: string }>
+    }
+    expect(body.data.find((m) => m.id === "design-code-flash")).toEqual({
+      id: "design-code-flash",
+      object: "model",
+      created: 0,
+      owned_by: "opencode-route",
+    })
+    // The single-model endpoint agrees with the list for the same
+    // route, in both the bare form the list carries and the prefixed
+    // ref callers use as a completion model.
+    for (const [form, id] of [
+      ["design-code-flash", "design-code-flash"],
+      ["opencode-route%2Fdesign-code-flash", "opencode-route/design-code-flash"],
+    ] as const) {
+      const one = yield* getModel(handler, form)
+      expect(one.status).toBe(200)
+      const entry = (yield* Effect.promise(() => one.json())) as { id: string; owned_by: string }
+      expect(entry.id).toBe(id)
+      expect(entry.owned_by).toBe("opencode-route")
+    }
+    // The persona route disabled in config is neither listed nor
+    // resolvable by id.
+    expect(body.data.map((m) => m.id)).not.toContain("design-code-pro")
+    const disabled = yield* getModel(handler, "opencode-route%2Fdesign-code-pro")
+    expect(disabled.status).toBe(404)
   }),
 )
 

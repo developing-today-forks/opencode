@@ -39,9 +39,10 @@
  *     PARITY-WITH-NAMED-DIFFS — persona prompt composition, recipe
  *     order/failover, non-stream/stream shapes and error classes all
  *     match (the failover walk + prompt application are pinned in
- *     generate-persona-route.test.ts); named diffs below, including
- *     one real-gap: persona routes are not advertised in the façade's
- *     /v1/models list (ADVERTISED_MODELS is the six tier routes).
+ *     generate-persona-route.test.ts); named diffs below. The former
+ *     real-gap — persona routes not advertised in /v1/models — is
+ *     FIXED (#1413): the list is now derived from the configured
+ *     model_routes, so personas are advertised like every other route.
  *   - clef (bin/clef-proxy.mjs, :18742) — systemone family (#1410):
  *     PARITY-WITH-NAMED-DIFFS (both acceptable-by-design; see the
  *     clef describe block)
@@ -242,31 +243,38 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
     LLMEvent.finish({ reason: { normalized: "stop" }, usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } }),
   ]
 
-  test("models list: identical advertised route set", () => {
+  test("models list: identical advertised route set for the same configured routes", () => {
     // Door: GET /v1/models serves ADVERTISED_MODELS (route proxy lines
     // ~106-113) as {id, object: "model", created: 0, owned_by:
-    // "opencode-route"} — the same six ids the façade advertises.
+    // "opencode-route"} — a hardcoded list of the six tier route ids.
+    const routes = ["workhorse", "speed", "specialist", "summit", "scout", "workhorse-weighted"]
     const door = {
       object: "list",
-      data: ["workhorse", "speed", "specialist", "summit", "scout", "workhorse-weighted"].map((id) => ({
+      data: routes.map((id) => ({
         id,
         object: "model",
         created: 0,
         owned_by: "opencode-route",
       })),
     }
-    // Since #1410 the façade's shared list also carries the
-    // systemone family's Clef floor (a façade-only superset, like the
-    // embeddings entries the handler adds): the route set itself is
-    // unchanged, the list is longer by exactly those entries.
-    expectDiffs(door, modelsBody(), [
+    // Façade: since the #1413 fix the route entries are NOT a
+    // hardcoded list — the handler derives them from the configured
+    // model_routes. Replayed with exactly the door's six routes
+    // configured, the advertised route set is identical to the door's;
+    // a configuration with more routes (the deployed one adds the
+    // design-code personas) advertises those too, where the door's
+    // list stays at its six. Since #1410 the façade's shared list also
+    // carries the systemone family's Clef floor (a façade-only
+    // superset, like the embeddings entries the handler adds): the
+    // list is longer by exactly those entries.
+    expectDiffs(door, modelsBody(routes), [
       {
         path: "data.length",
         classification: "acceptable-by-design",
         note: "façade-only superset: the systemone Clef models (#1410) share the /v1/models list",
       },
     ])
-    expect(modelBody("workhorse")).toEqual(door.data[0])
+    expect(modelBody("workhorse", routes)).toEqual(door.data[0])
   })
 
   test("chat non-streaming, route-name model (prefixed form): parity", () => {
@@ -556,7 +564,7 @@ describe("door: codex (bin/codex-proxy.mjs :18744)", () => {
     // <now>, owned_by: "openai-codex"}. The façade list is the route
     // set (route case above); concrete codex refs are instead served
     // by the single-model lookup, echoed with the provider as owner.
-    expect(modelBody("openai-codex/gpt-5.6-luna-low")).toEqual({
+    expect(modelBody("openai-codex/gpt-5.6-luna-low", [])).toEqual({
       id: "openai-codex/gpt-5.6-luna-low",
       object: "model",
       created: 0,
@@ -868,7 +876,7 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     // owned_by: "meta-muse"} for each Muse model plus one per
     // effort suffix. The façade's single-model lookup echoes a
     // concrete muse ref with the provider as owner.
-    expect(modelBody("meta-muse/muse-spark-1.3")).toEqual({
+    expect(modelBody("meta-muse/muse-spark-1.3", [])).toEqual({
       id: "meta-muse/muse-spark-1.3",
       object: "model",
       created: 0,
@@ -1173,7 +1181,7 @@ describe("door: clef (bin/clef-proxy.mjs :18742) — systemone family (#1410)", 
   })
 
   test("models floor: the door's static floor is advertised with the door's owned_by", () => {
-    const listed = modelsBody().data.filter((m) => m.owned_by === "cloudflare-workers-ai")
+    const listed = modelsBody([]).data.filter((m) => m.owned_by === "cloudflare-workers-ai")
     expect(listed.map((m) => m.id)).toEqual(["@cf/cloudflare/clef", "@cf/cloudflare/clef-flash"])
   })
 
@@ -1607,7 +1615,7 @@ describe("door: claude-code (bin/claude-code-proxy.mjs :18749)", () => {
     // per-model entry shape agrees except owned_by (the door's
     // "anthropic-claude-code" vs the façade's provider id) and the
     // created stamp (door: now; façade: 0).
-    expect(modelBody(MODEL)).toEqual({ id: MODEL, object: "model", created: 0, owned_by: "claude-code" })
+    expect(modelBody(MODEL, [])).toEqual({ id: MODEL, object: "model", created: 0, owned_by: "claude-code" })
     // Unknown concrete ids pass through on BOTH sides (door: to
     // the CLI; façade: as a provider/model ref).
     const unknown = parseChatRequest({ model: "claude-code/claude-sonnet-9-9", messages: [{ role: "user", content: "hi" }] })
@@ -1971,7 +1979,7 @@ describe("door: commandcode (bin/commandcode-proxy.mjs :18748)", () => {
     // instead served by the single-model lookup, echoed with the
     // provider as owner — the per-model entry shape agrees (the
     // door's created is a volatile now; the façade stamps 0).
-    expect(modelBody(MODEL)).toEqual({ id: MODEL, object: "model", created: 0, owned_by: "commandcode" })
+    expect(modelBody(MODEL, [])).toEqual({ id: MODEL, object: "model", created: 0, owned_by: "commandcode" })
     // Repointing trap, pinned deliberately: the door's BARE id
     // (deepseek/deepseek-v4-flash) is itself two-segment, so sent
     // to the façade it parses as provider `deepseek` + model
@@ -2039,7 +2047,7 @@ describe("door: antigravity-direct (bin/antigravity-direct.mjs :18751, backend f
     // effort-suffixed ids, each {id, object: "model", created: 0,
     // owned_by: "antigravity", name: <display name>}.
     const door = { id: "gemini-3.8-flash", object: "model", created: 0, owned_by: "antigravity", name: "Gemini 3.8 Flash" }
-    const facade = modelBody("antigravity-direct/gemini-3.8-flash")
+    const facade = modelBody("antigravity-direct/gemini-3.8-flash", [])
     expectDiffs(door, facade, [
       {
         path: "name",
@@ -2261,7 +2269,7 @@ describe("door: antigravity-direct (bin/antigravity-direct.mjs :18751, backend f
 export const VERDICTS = {
   route: {
     verdict: "PARITY-WITH-NAMED-DIFFS",
-    diffs: ["model echo for bare route names", "error type proxy_error vs server_error", "responses + concrete refs are façade-only supersets", "non-text content rejected on the translated path"],
+    diffs: ["model echo for bare route names", "error type proxy_error vs server_error", "responses + concrete refs are façade-only supersets", "non-text content rejected on the translated path", "models list source: door serves a hardcoded six tier routes; façade derives route entries from configured model_routes, so the deployed list is a superset (tier routes plus persona routes, #1413)"],
   },
   codex: {
     verdict: "PARITY-WITH-NAMED-DIFFS",
@@ -2270,7 +2278,7 @@ export const VERDICTS = {
   designCode: {
     verdict: "PARITY-WITH-NAMED-DIFFS",
     diffs: [
-      "REAL-GAP models list: door lists the 11 persona ids (owned_by design-code); façade /v1/models advertises only the six tier routes — persona routes resolve/complete but are not listed (#1413)",
+      "models list: door lists the 11 persona ids (owned_by design-code, created=now); façade advertises every configured route — personas included since the #1413 fix derives the list from configured model_routes — in its uniform route entry shape (owned_by opencode-route, created 0)",
       "streaming: door relays the backend's empty initial role frame; façade emits role with first text (one-frame shift)",
       "error envelopes: door bodies have no type field; façade adds OpenAI type (additive, §2)",
       "AMR caller-Bearer verbatim bypass does not carry over (façade Bearer is the server credential; raw AMR is the opendesign provider) — Gate 1 on #1413",
@@ -2330,7 +2338,8 @@ test("verdict registry is consistent with the recorded classifications", () => {
   expect(Object.keys(VERDICTS).sort()).toEqual(["antigravity", "claude-code", "clef", "codex", "commandcode", "designCode", "muse", "route"])
   expect(VERDICTS.designCode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.antigravity.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
-  expect(VERDICTS.designCode.diffs[0]).toContain("REAL-GAP")
+  expect(VERDICTS.designCode.diffs[0]).toContain("models list")
+  expect(VERDICTS.designCode.diffs.join(" ")).not.toContain("REAL-GAP")
   expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.commandcode.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS["claude-code"].verdict).toBe("PARITY-WITH-NAMED-DIFFS")
@@ -2389,7 +2398,7 @@ describe("door: design-code (bin/design-code-proxy.mjs :18746)", () => {
     }
   })
 
-  test("models list: door lists personas; façade does not advertise persona routes (real-gap)", () => {
+  test("models list: door lists personas; façade advertises persona routes from configured model_routes", () => {
     // Door recording: GET /v1/models serves the 11 persona ids as
     // {id, object: "model", created: <now>, owned_by: "design-code"}.
     const door = {
@@ -2397,16 +2406,49 @@ describe("door: design-code (bin/design-code-proxy.mjs :18746)", () => {
       data: RECIPES.map((recipe) => ({ id: recipe.id, object: "model", created: 1793658533, owned_by: "design-code" })),
     }
     expect(door.data.length).toBe(11)
-    // Façade today: /v1/models advertises the concrete catalog plus
-    // ADVERTISED_MODELS (the six tier routes) only — a persona route
-    // resolves and completes by name but is NOT listed, and modelBody
-    // does not know it. Recorded as a real-gap on #1413: callers that
+    // Façade after the #1413 fix: /v1/models route entries are derived
+    // from the configured model_routes (the server handler supplies
+    // the catalog's enabled opencode-route models — the same route
+    // definitions the resolver serves), not a hardcoded list. With
+    // the deployed configuration — the six tier routes plus the 11
+    // persona routes — every persona is advertised in the established
+    // route entry shape, and the single-model lookup agrees for both
+    // the bare id the list carries and the prefixed ref. Callers that
     // enumerate personas (the OpenClaw heartbeat lifeline probe reads
-    // this list) cannot discover them from the façade yet. This test
-    // pins the gap so fixing advertisement fails it loudly.
-    expect(modelBody("design-code-flash")).toBeUndefined()
-    expect(modelBody("opencode-route/design-code-flash")).toBeUndefined()
-    // classification: real-gap — see VERDICTS.designCode.
+    // this list) can now discover them from the façade. (This test
+    // previously PINNED the opposite as a real-gap; the gap is closed.)
+    const configured = [
+      "workhorse",
+      "speed",
+      "specialist",
+      "summit",
+      "scout",
+      "workhorse-weighted",
+      ...RECIPES.map((recipe) => recipe.id),
+    ]
+    const listed = modelsBody(configured).data.filter((m) => m.owned_by === "opencode-route").map((m) => m.id)
+    expect(listed).toEqual(configured)
+    for (const recipe of RECIPES) {
+      expect(modelBody(recipe.id, configured)).toEqual({
+        id: recipe.id,
+        object: "model",
+        created: 0,
+        owned_by: "opencode-route",
+      })
+      expect(modelBody(`opencode-route/${recipe.id}`, configured)).toEqual({
+        id: `opencode-route/${recipe.id}`,
+        object: "model",
+        created: 0,
+        owned_by: "opencode-route",
+      })
+    }
+    // A route that is not configured is not advertised, in either form.
+    expect(modelBody("no-such-persona", configured)).toBeUndefined()
+    expect(modelBody("opencode-route/no-such-persona", configured)).toBeUndefined()
+    // Remaining diff vs the door: entry metadata — the façade's
+    // uniform route shape (owned_by "opencode-route", created 0)
+    // instead of the door's (owned_by "design-code", created <now>).
+    // classification: acceptable-by-design — see VERDICTS.designCode.
   })
 
   test("chat non-streaming, persona model: parity (stub recording)", () => {
