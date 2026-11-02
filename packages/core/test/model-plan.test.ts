@@ -50,7 +50,7 @@ describe("ModelPlan store", () => {
     const temporary = path.join(root, `.tmp-${process.pid}-616263646566`)
     fs.writeFileSync(target, JSON.stringify(ModelPlan.emptyStore()))
     fs.writeFileSync(temporary, "sentinel")
-    const randomBytes = spyOn(crypto, "randomBytes").mockReturnValue(Buffer.from("abcdef"))
+    const randomBytes = spyOn(crypto, "randomBytes").mockImplementation(() => Buffer.from("abcdef") as never)
 
     try {
       expect(() => ModelPlan.writeStore(ModelPlan.emptyStore(), root)).toThrow()

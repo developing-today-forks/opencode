@@ -47,8 +47,9 @@ test("writeJsonAtomic replaces through a symlink and preserves the target mode",
 
 test("writeJsonAtomic refuses a colliding exclusive temp without removing it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "opencode-tui-persistence-"))
-  const temporary = path.join(root, `.tmp-${process.pid}-collision`)
-  const randomUUID = spyOn(crypto, "randomUUID").mockReturnValue("collision")
+  const collisionID = "00000000-0000-0000-0000-000000000001"
+  const temporary = path.join(root, `.tmp-${process.pid}-${collisionID}`)
+  const randomUUID = spyOn(crypto, "randomUUID").mockReturnValue(collisionID)
   try {
     const file = path.join(root, "state.json")
     await fs.promises.writeFile(file, '{"value":"before"}')

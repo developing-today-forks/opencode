@@ -120,7 +120,7 @@ describe("ModelRouteOverrides storage", () => {
     const temporary = path.join(dir, `.tmp-${process.pid}-616263646566`)
     fs.writeFileSync(file, JSON.stringify({ version: 1, overrides: [] }, null, 2))
     fs.writeFileSync(temporary, "sentinel")
-    const randomBytes = spyOn(crypto, "randomBytes").mockReturnValue(Buffer.from("abcdef"))
+    const randomBytes = spyOn(crypto, "randomBytes").mockImplementation(() => Buffer.from("abcdef") as never)
 
     try {
       expect(() => ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)).toThrow()

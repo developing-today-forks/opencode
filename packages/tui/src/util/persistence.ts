@@ -1,6 +1,6 @@
 import crypto from "node:crypto"
 import path from "path"
-import { appendFile, chmod, mkdir, open, readFile, readlink, realpath, rename, rm, stat } from "fs/promises"
+import { appendFile, chmod, mkdir, open, readFile, readlink, realpath, rename, rm, stat, writeFile } from "fs/promises"
 
 export function readText(filePath: string) {
   return readFile(filePath, "utf8")
