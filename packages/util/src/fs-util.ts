@@ -214,7 +214,14 @@ export namespace FSUtil {
         // symlinked component: resolve() collapses that `..` lexically
         // before realpath runs, selecting a different file than
         // filesystem semantics dictate.
-        const inputSegments = path.split(/[\/]/).filter((segment) => segment !== "" && segment !== ".")
+        // An absolute path's segments start after its root: the root is
+        // the walk's initial prefix, and re-joining its components (a
+        // Windows drive or UNC share) would check every component under
+        // a doubled root (PR #1355 Codex).
+        const inputRoot = isAbsolute(path) ? parse(path).root : ""
+        const inputSegments = (inputRoot === "" ? path : path.slice(inputRoot.length))
+          .split(/[\\/]/)
+          .filter((segment) => segment !== "" && segment !== ".")
         // Relative inputs are anchored at the absolute CWD, not ".": a
         // leading `..` must pop a real directory, and dirname(".") would
         // stay "." forever, checking later components under the CWD
@@ -223,7 +230,7 @@ export namespace FSUtil {
         // Windows drive or UNC root is preserved instead of collapsing
         // to "/" and checking components under a nonexistent root
         // (PR #1355 Codex).
-        let inputPrefix = isAbsolute(path) ? parse(path).root : process.cwd()
+        let inputPrefix = inputRoot === "" ? process.cwd() : inputRoot
         let inputUnsafe = false
         for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
           // A `..` applies to the prefix built so far (popping its last
@@ -261,8 +268,11 @@ export namespace FSUtil {
             // the traversal belongs to that link's target directory.
             // Such destinations cannot be resolved safely here, so
             // reject them rather than write to a guessed referent.
-            const segments = link.split(/[\\/]/).filter((segment) => segment !== "" && segment !== ".")
-            let prefix = isAbsolute(link) ? parse(link).root : parent
+            const linkRoot = isAbsolute(link) ? parse(link).root : ""
+            const segments = (linkRoot === "" ? link : link.slice(linkRoot.length))
+              .split(/[\\/]/)
+              .filter((segment) => segment !== "" && segment !== ".")
+            let prefix = linkRoot === "" ? parent : linkRoot
             let unsafe = false
             for (let index = 0; index < segments.length && !unsafe; index++) {
               // As in the input walk above, a `..` pops the prefix rather
