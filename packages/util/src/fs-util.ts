@@ -215,7 +215,11 @@ export namespace FSUtil {
         // before realpath runs, selecting a different file than
         // filesystem semantics dictate.
         const inputSegments = path.split(/[\/]/).filter((segment) => segment !== "" && segment !== ".")
-        let inputPrefix = isAbsolute(path) ? "/" : "."
+        // Relative inputs are anchored at the absolute CWD, not ".": a
+        // leading `..` must pop a real directory, and dirname(".") would
+        // stay "." forever, checking later components under the CWD
+        // instead of where the traversal actually lands (PR #1355 Codex).
+        let inputPrefix = isAbsolute(path) ? "/" : process.cwd()
         let inputUnsafe = false
         for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
           // A `..` applies to the prefix built so far (popping its last
