@@ -67,6 +67,7 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/amazon-bedrock-mantle", () => import("@opencode/ai/providers/amazon-bedrock-mantle")],
   ["@opencode/ai/providers/anthropic", () => import("@opencode/ai/providers/anthropic")],
   ["@opencode/ai/providers/anthropic-compatible", () => import("@opencode/ai/providers/anthropic-compatible")],
+  ["@opencode/ai/providers/antigravity", () => import("@opencode/ai/providers/antigravity")],
   ["@opencode/ai/providers/azure", () => import("@opencode/ai/providers/azure")],
   ["@opencode/ai/providers/azure/chat", () => import("@opencode/ai/providers/azure/chat")],
   ["@opencode/ai/providers/azure/responses", () => import("@opencode/ai/providers/azure/responses")],
