@@ -303,7 +303,8 @@ export const errorBody = (message: string, type: string, code?: string) => ({
   error: { message, type, ...(code ? { code } : {}) },
 })
 
-export const errorFrame = (message: string) => `data: ${JSON.stringify(errorBody(message, "server_error"))}\n\n`
+export const errorFrame = (message: string, type = "server_error") =>
+  `data: ${JSON.stringify(errorBody(message, type))}\n\n`
 
 /**
  * Stateful OpenAI SSE translator: internal LLM events in, `data:` frames
@@ -1248,8 +1249,8 @@ export const PING_FRAME = messagesFrame("ping", {})
  */
 export const messagesErrorBody = (message: string, type: string) => ({ type: "error", error: { type, message } })
 
-export const messagesErrorFrame = (message: string) =>
-  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, "api_error"))}\n\n`
+export const messagesErrorFrame = (message: string, type = "api_error") =>
+  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, type))}\n\n`
 
 interface MessagesBlockSlot {
   readonly index: number

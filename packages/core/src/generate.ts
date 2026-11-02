@@ -65,7 +65,34 @@ export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Ge
   service: Schema.optional(Schema.String),
 }) {}
 
-export type Error = ModelSelectionError | UnavailableError
+/**
+ * A quota / rate-limit failure from the provider (#1441, design §2):
+ * the attempt was refused because a quota is exhausted or a rate limit
+ * was hit, so the façade must answer 429 — not the generic 502 — with
+ * this message (which carries the provider's reset hint, when it gave
+ * one) preserved verbatim. Distinguished at the Generate boundary,
+ * where the provider's typed failure is still available, so HTTP
+ * handlers never have to re-classify from message text.
+ */
+export class QuotaError extends Schema.TaggedError<QuotaError>()("Generate.QuotaError", {
+  message: Schema.String,
+  service: Schema.optional(Schema.String),
+}) {}
+
+export type Error = ModelSelectionError | UnavailableError | QuotaError
+
+/**
+ * The quota/rate-limit classification the routing and demotion
+ * machinery already uses (session runner's `failureHint` /
+ * `isQuotaFailure`, model-route bench hints): the provider classified
+ * the failure as quota-exceeded or rate-limited, or it arrived as an
+ * HTTP 429 — the status `classifyProviderFailure` maps to exactly
+ * those two tags, so the status check only catches 429s a protocol
+ * constructed without going through that classifier. Auth failures
+ * are deliberately NOT quota: they keep their existing mapping.
+ */
+export const isQuotaFailure = (error: AIError): boolean =>
+  error.reason._tag === "QuotaExceeded" || error.reason._tag === "RateLimit" || error.reason.http?.status === 429
 
 export interface Interface {
   readonly text: (input: TextInput) => Effect.Effect<string, Error>
@@ -329,8 +356,10 @@ export const layer = Layer.effect(
       return { resolved, raw, request: canonicalRequest(resolved, input, raw) }
     })
 
-    const unavailable = (resolved: ModelResolver.Resolved) => (error: AIError) =>
-      new UnavailableError({ message: error.message, service: resolved.ref.providerID })
+    const unavailable = (resolved: ModelResolver.Resolved) => (error: AIError): Error =>
+      isQuotaFailure(error)
+        ? new QuotaError({ message: error.message, service: resolved.ref.providerID })
+        : new UnavailableError({ message: error.message, service: resolved.ref.providerID })
 
     const observe = (resolved: ModelResolver.Resolved) =>
       ModelRouteLog.observer(

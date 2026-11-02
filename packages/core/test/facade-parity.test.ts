@@ -296,7 +296,7 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
     // §2); route-proxy callers gain /v1/responses by repointing.
   })
 
-  test("quota failure: exhausted candidates — 502 both sides, envelope type/message differ", () => {
+  test("quota failure: exhausted candidates — door 502, façade 429 per design §2 (#1441)", () => {
     // Door recording: the single candidate leaf answers 429 with body
     // {"error":{"message":"quota"}} and `Retry-After: 30` (test leaf,
     // mode "rate"). classifyHttp wraps it as LeafError
@@ -305,23 +305,31 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
     // message). The Retry-After header is NOT forwarded to the client
     // — the reset hint survives only inside the ledger's quota JSON
     // and, when the upstream body carries it, inside the message.
+    // The DOOR side stays exactly as recorded: the route proxy itself
+    // returns 502 on quota exhaustion.
     const door = {
       status: 502,
       body: { error: { message: 'leaf HTTP 429: {"error":{"message":"quota"}}', type: "proxy_error" } },
     }
-    // Façade: the handler maps a generation failure to 502 with
-    // Completions.errorBody(message, "server_error") — the provider's
-    // message (and any reset hint inside it) is preserved verbatim.
+    // Façade (#1441): a quota-classified generation failure is a
+    // distinguishable Generate.QuotaError and the handler maps it to
+    // 429 with Completions.errorBody(message, "rate_limit_error") —
+    // the provider's message (and any reset hint inside it) is
+    // preserved verbatim. This is a spec-conformant divergence from
+    // the route-proxy door: design §2 promises 429 for quota /
+    // rate-limit failures, so the façade follows the spec, not the
+    // door's accidental 502.
     const facade = {
-      status: 502,
-      body: errorBody('leaf HTTP 429: {"error":{"message":"quota"}}', "server_error"),
+      status: 429,
+      body: errorBody('leaf HTTP 429: {"error":{"message":"quota"}}', "rate_limit_error"),
     }
-    expect(facade.status).toBe(door.status)
+    expect(door.status).toBe(502)
+    expect(facade.status).toBe(429)
     expectDiffs(door.body, facade.body, [
       {
         path: "error.type",
         classification: "acceptable-by-design",
-        note: "Door brands errors proxy_error; the façade uses the OpenAI-standard server_error. Status (502) and message carriage match; neither side forwards a Retry-After header.",
+        note: "Door brands its 502 as proxy_error; the façade answers the design §2 quota shape — 429 rate_limit_error — with the same message carriage. Neither side forwards a Retry-After header; the hint rides in the message.",
       },
     ])
   })
@@ -471,7 +479,7 @@ describe("door: codex (bin/codex-proxy.mjs :18744)", () => {
       {
         path: "error.message",
         classification: "real-gap",
-        note: "Message framing differs (door prefixes 'Codex execution failed: '; façade passes the provider message through). Neither side produces the design §2 quota shape (429 + reset hint) for codex traffic today — filed as #1441.",
+        note: "Message framing differs (door prefixes 'Codex execution failed: '; façade passes the provider message through). This fixture is an unclassified CLI execution failure — no quota/rate-limit signal (no 429, no quota tag) reaches the façade, so the §2 502 mapping is correct here; a quota-classified failure answers 429 instead (#1441, pinned in the muse quota case and the server suite).",
       },
       {
         path: "error.type",
@@ -705,7 +713,7 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     // responses-streaming issue #1442.
   })
 
-  test("quota failure: door passes the upstream 429 through verbatim; façade answers 502", () => {
+  test("quota failure: door passes the upstream 429 through verbatim; façade answers 429 too (#1441)", () => {
     // Door recording (door test: "upstream 429 passes through and
     // never falls back to exec"): the stub upstream answers 429
     // {error: {message: "Subscription quota exhausted", type:
@@ -715,19 +723,14 @@ describe("door: muse (bin/muse-proxy.mjs :18747)", () => {
     // never retries through the CLI. Any reset hint in the upstream
     // body survives verbatim.
     const door = { status: 429, body: { error: { message: "Subscription quota exhausted", type: "rate_limit_error" } } }
-    // Façade: a quota failure inside generation surfaces through the
-    // handler as 502 {error: {message, type: "server_error"}} — the
-    // message (and any hint inside it) survives, the 429 does not.
-    const facade = { status: 502, body: errorBody("Subscription quota exhausted", "server_error") }
-    expectDiffs(door.body, facade.body, [
-      {
-        path: "error.type",
-        classification: "real-gap",
-        note: "Door relays the upstream type (rate_limit_error); façade emits server_error. Status also differs: 429 (door) vs 502 (façade) — the design §2 mapping promises 429 with the reset hint preserved in the message; the façade does not produce it today. Filed as #1441.",
-      },
-    ])
+    // Façade (#1441): a quota-classified generation failure surfaces
+    // through the handler as 429 {error: {message, type:
+    // "rate_limit_error"}} — status, type and message (reset hint
+    // included) all match the door. Exact parity; no diffs declared.
+    const facade = { status: 429, body: errorBody("Subscription quota exhausted", "rate_limit_error") }
+    expectDiffs(door.body, facade.body, [])
     expect(door.status).toBe(429)
-    expect(facade.status).toBe(502)
+    expect(facade.status).toBe(429)
   })
 
   test("models list: door serves the Muse catalog, façade serves routes + concrete refs", () => {
@@ -883,7 +886,6 @@ export const VERDICTS = {
     verdict: "FAIL",
     diffs: [
       "ATTESTATION: door answers shell/bash requests with a 200 (alias + CLI fallback); façade preserves names and surfaces the 403 as a provider failure — outcome differs (design §9.1 rule; Wave C gate for #1155, filed as #1443)",
-      "quota: door relays upstream 429 verbatim; façade answers 502 server_error (design §2 promises 429 + reset hint) — #1441",
       "responses streaming: response.completed carries empty output; §5 grammar events missing; reasoning event name deviates from §5 — #1442",
       "tool-only chat answers: content null (façade) vs \"\" (door)",
       "responses non-streaming: façade adds created_at/annotations/status/default fields (additive)",
