@@ -580,18 +580,40 @@ export const layer = Layer.effect(
         servingCredentialID: connection?.type === "credential" ? connection.id : undefined,
       }
     })
-    const resolveRoute = (
+    // Cross-route cascade (#1014, PR2): when a route exhausts, the session re-enters
+    // through a parent route that nests it instead of dying on the sub-route. Tried
+    // targets are tracked by provider/model ref across definitions — per-definition
+    // index sets cannot seed a parent's tried set — and visited routes keep the
+    // upward walk from re-entering a route the chain already exhausted. `chain`
+    // holds every route the cascade has stood on, nearest last, so a parent that
+    // itself exhausts continues to its own parents and then to the remaining
+    // parents of the routes below it, in proximity order.
+    interface CascadeState {
+      readonly triedRefs: Set<string>
+      readonly visitedRoutes: Set<string>
+      readonly chain: Array<{
+        readonly definition: ModelRoute.Definition
+        readonly tried: ReadonlySet<number>
+      }>
+      // Typed load failures recorded at cascade boundaries, in attempt order.
+      // When no route in the cascade resolves, the first one surfaces instead
+      // of a bare RouteUnavailableError, so configuration and authorization
+      // failures keep their identity for session error classification.
+      readonly loadErrors: Array<Error>
+    }
+    const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
+    const resolveRouteWithin = (
       selected: Info,
       definition: ModelRoute.Definition,
       requestedVariant: VariantID | undefined,
-      tried: ReadonlySet<number>,
+      triedTargets: Set<number>,
       allowCooling: boolean,
-      sessionID?: string,
-      requestTokens?: number,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
-        const triedTargets = new Set(tried)
         let lastError: Error | undefined
         // The active stored credential per target provider (#6): the ready filter gates on the
         // credential that would actually serve the target, not only on the target itself.
@@ -615,7 +637,15 @@ export const layer = Layer.effect(
           // even when undefined (an env connection served): the credentialByProvider
           // snapshot is only the ready filter's gate input, never serving attribution.
           servingCredentialID: Credential.ID | undefined,
-        ): Resolved => ({
+        ): Resolved => {
+          const branch = {
+            tried: new Set(triedTargets),
+            triedRefs: new Set(cascade.triedRefs),
+            visitedRoutes: new Set(cascade.visitedRoutes),
+            chain: [...cascade.chain],
+            loadErrors: [...cascade.loadErrors],
+          }
+          return {
           ...current,
           // The alias advertises the safest shared request shape. Pricing and provider metadata stay
           // tied to the concrete target that answered.
@@ -633,12 +663,59 @@ export const layer = Layer.effect(
             ...(definition.hedgeAfterMs ? { hedgeAfterMs: definition.hedgeAfterMs } : {}),
             autonomy: definition.autonomy,
             ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
-            fallback: () =>
-              resolveRoute(selected, definition, requestedVariant, triedTargets, false, sessionID, requestTokens),
+            fallback: () => {
+              // Branch-local cascade state (#1014 Codex P2): a fallback call is a
+              // speculative branch as often as it is the primary's next step — a
+              // hedge explores it before the primary settles. Each call starts
+              // from the state as of this resolution, so a hedge exploration
+              // cannot consume the parent route (visited marks, tried refs) the
+              // primary's own fallback still needs; progression continues
+              // through the Resolved each call returns and its own fallback.
+              const branchTried = new Set(branch.tried)
+              const branchState: CascadeState = {
+                triedRefs: new Set(branch.triedRefs),
+                visitedRoutes: new Set(branch.visitedRoutes),
+                chain: [...branch.chain],
+                loadErrors: [...branch.loadErrors],
+              }
+              return resolveRouteWithin(
+                selected,
+                definition,
+                requestedVariant,
+                branchTried,
+                false,
+                sessionID,
+                requestTokens,
+                branchState,
+              ).pipe(
+                // An exhausted-with-load-failures route is a cascade boundary,
+                // not a fatal error (#1014 Codex P2): record the typed failure
+                // and let the parents try; it re-surfaces below if nothing in
+                // the cascade resolves. Defects still propagate (Effect.catch
+                // only handles typed failures).
+                Effect.catch((error) => {
+                  branchState.loadErrors.push(error)
+                  return Effect.succeed(undefined)
+                }),
+                Effect.flatMap((next) =>
+                  next
+                    ? Effect.succeed(next)
+                    : cascadeToParent(definition, branchTried, requestedVariant, sessionID, requestTokens, branchState),
+                ),
+                Effect.flatMap((resolved) =>
+                  resolved
+                    ? Effect.succeed(resolved)
+                    : branchState.loadErrors.length > 0
+                      ? Effect.fail(branchState.loadErrors[0])
+                      : Effect.succeed(undefined),
+                ),
+              )
+            },
             ...(origin ? { origin } : {}),
             ...(credentialFallback ? { credentialFallback } : {}),
           },
-        })
+          }
+        }
         while (triedTargets.size < definition.targets.length) {
           const indexes = definition.targets.flatMap((_, index) => (triedTargets.has(index) ? [] : [index]))
           const unavailable = new Map<number, string>()
@@ -843,7 +920,7 @@ export const layer = Layer.effect(
           const origin =
             homeIndex >= 0 && homeIndex !== index
               ? () =>
-                  resolveRoute(
+                  resolveRouteWithin(
                     selected,
                     definition,
                     requestedVariant,
@@ -851,11 +928,124 @@ export const layer = Layer.effect(
                     false,
                     sessionID,
                     requestTokens,
+                    cascade,
                   )
               : undefined
           return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID)
         }
         if (lastError) return yield* Effect.fail(lastError)
+        return undefined
+      })
+
+    // Re-enter through the nearest route that nests an exhausted route (#1014, PR2).
+    // A parent nests the exhausted route when one of its expanded groups carries the
+    // route's id; the parent's tried set is seeded by target ref, so every leaf the
+    // chain already attempted — including the whole nested subtree — stays excluded,
+    // and the parent's remaining leaves answer in the parent's own proximity order.
+    // Nesting distance from a candidate ancestor down to the exhausted route:
+    // the longest chain of node route references that reaches it (1 = nests it
+    // directly). A grandparent whose expanded groups also carry the exhausted
+    // route's id still reaches it through the parent as well, so the longest
+    // chain — not catalog order — decides proximity (#1014 Codex P2).
+    const nestingDepth = (
+      definitions: ReadonlyMap<string, ModelRoute.Definition>,
+      from: ModelRoute.Definition,
+      targetID: string,
+      cache: Map<string, number | undefined>,
+      seen: ReadonlySet<string> = new Set(),
+    ): number | undefined => {
+      // Expanded node lists already contain every descendant, so an uncached
+      // recursion re-traverses each descendant per ancestor and blows up
+      // exponentially on deep hierarchies: memoize per (route, target).
+      const key = `${String(from.id)}>${targetID}`
+      if (cache.has(key)) return cache.get(key)
+      let depth: number | undefined
+      for (const node of from.nodes) {
+        if (!node.routeID) continue
+        if (node.routeID === targetID) depth = Math.max(depth ?? 0, 1)
+        else if (!seen.has(node.routeID)) {
+          const child = definitions.get(node.routeID)
+          if (!child) continue
+          const below = nestingDepth(definitions, child, targetID, cache, new Set([...seen, String(from.id), node.routeID]))
+          if (below !== undefined) depth = Math.max(depth ?? 0, below + 1)
+        }
+      }
+      cache.set(key, depth)
+      return depth
+    }
+
+    const cascadeToParent = (
+      from: ModelRoute.Definition,
+      fromTried: ReadonlySet<number>,
+      requestedVariant: VariantID | undefined,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
+    ): Effect.Effect<Resolved | undefined, Error> =>
+      Effect.gen(function* () {
+        for (const index of fromTried) {
+          const target = from.targets[index]
+          if (target) cascade.triedRefs.add(cascadeRefKey(target))
+        }
+        if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
+          cascade.chain.push({ definition: from, tried: fromTried })
+        const available = yield* models
+          .available()
+          .pipe(Effect.catchCause(() => Effect.succeed([] as readonly Info[])))
+        const definitions = new Map<string, ModelRoute.Definition>()
+        for (const candidate of available) {
+          if (candidate.providerID !== ModelRoute.PROVIDER_ID) continue
+          const definition = ModelRoute.definition(candidate)
+          if (definition) definitions.set(String(definition.id), definition)
+        }
+        const depthCache = new Map<string, number | undefined>()
+        for (let position = cascade.chain.length - 1; position >= 0; position--) {
+          const nested = cascade.chain[position].definition
+          const parents = available
+            .flatMap((candidate, order) => {
+              if (candidate.providerID !== ModelRoute.PROVIDER_ID) return []
+              const parent = ModelRoute.definition(candidate)
+              if (!parent || cascade.visitedRoutes.has(String(parent.id))) return []
+              // A parent that does not offer the requested variant must not be
+              // entered: its leaves would silently run at their default
+              // settings. The selected route's variant gate applies to every
+              // route the cascade re-enters through (#1014 Codex P2).
+              if (requestedVariant && !candidate.variants.some((item) => item.id === requestedVariant)) return []
+              const depth = nestingDepth(definitions, parent, String(nested.id), depthCache)
+              return depth === undefined ? [] : [{ candidate, parent, depth, order }]
+            })
+            .sort((a, b) => a.depth - b.depth || a.order - b.order)
+          for (const { candidate, parent } of parents) {
+            if (cascade.visitedRoutes.has(String(parent.id))) continue
+            cascade.visitedRoutes.add(String(parent.id))
+            const seed = new Set(
+              parent.targets.flatMap((target, index) =>
+                cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [],
+              ),
+            )
+            // A parent whose remaining targets all fail to load is exhausted,
+            // not fatal: the cascade continues upward instead of dying on the
+            // failure (#1014 Codex P2).
+            const resolved = yield* resolveRouteWithin(
+              candidate,
+              parent,
+              requestedVariant,
+              seed,
+              false,
+              sessionID,
+              requestTokens,
+              cascade,
+            ).pipe(
+              Effect.catch((error) => {
+                cascade.loadErrors.push(error)
+                return Effect.succeed(undefined)
+              }),
+            )
+            if (resolved) return resolved
+            const above = yield* cascadeToParent(parent, seed, requestedVariant, sessionID, requestTokens, cascade)
+            if (above) return above
+          }
+        }
         return undefined
       })
 
@@ -874,9 +1064,42 @@ export const layer = Layer.effect(
             variant: requestedVariant,
           }),
         )
-      return resolveRoute(selected, definition, requestedVariant, new Set(), true, sessionID, requestTokens).pipe(
+      const cascade: CascadeState = {
+        triedRefs: new Set(),
+        visitedRoutes: new Set([String(definition.id)]),
+        chain: [],
+        loadErrors: [],
+      }
+      const initialTried = new Set<number>()
+      return resolveRouteWithin(
+        selected,
+        definition,
+        requestedVariant,
+        initialTried,
+        true,
+        sessionID,
+        requestTokens,
+        cascade,
+      ).pipe(
+        // Exhausted through load failures is a cascade boundary too (#1014
+        // Codex P2): the parents still get their chance, and the typed
+        // failure is recorded so it — not a bare RouteUnavailableError —
+        // surfaces when no ancestor can serve the request either.
+        Effect.catch((error) => {
+          cascade.loadErrors.push(error)
+          return Effect.succeed(undefined)
+        }),
         Effect.flatMap((resolved) =>
-          resolved ? Effect.succeed(resolved) : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
+          resolved
+            ? Effect.succeed(resolved)
+            : cascadeToParent(definition, initialTried, requestedVariant, sessionID, requestTokens, cascade),
+        ),
+        Effect.flatMap((resolved) =>
+          resolved
+            ? Effect.succeed(resolved)
+            : cascade.loadErrors.length > 0
+              ? Effect.fail(cascade.loadErrors[0])
+              : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
         ),
       )
     }
