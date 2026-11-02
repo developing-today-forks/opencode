@@ -9,6 +9,7 @@ import {
   fetchRemote,
   fetchServerLocation,
   postSessionImport,
+  readLocal,
   MAX_SESSION_INFO_BYTES,
 } from "../src/commands/handlers/session/import"
 import { OpenCode } from "@opencode/client"
@@ -269,6 +270,58 @@ test("readBoundedResponseBody aborts a stalled body read when the signal fires",
   )
   await expect(readBoundedResponseBody(stalled, 1024, AbortSignal.timeout(100))).rejects.toThrow()
 })
+
+test("readLocal returns a file under the cap and rejects a file over it before reading", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-import-local-"))
+  const file = path.join(root, "session.json")
+  try {
+    await fs.writeFile(file, "hello world")
+    await expect(readLocal(file, 1024)).resolves.toBe("hello world")
+    await expect(readLocal(file, 8)).rejects.toThrow(
+      "Session data too large: file exceeds the 8-byte limit",
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("import rejects a local file over the cap without reading it", async () => {
+  // A sparse file sized just over the cap: the import can only fail fast
+  // via the stat pre-check, since buffering 256 MiB of zeros would reach
+  // the session decode instead and fail differently.
+  const maximumBytes = 256 * 1024 * 1024
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-import-oversize-"))
+  const file = path.join(root, "session.json")
+  await fs.writeFile(file, "")
+  await fs.truncate(file, maximumBytes + 1)
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname === "/api/info") return status()
+      return new Response("Not found", { status: 404 })
+    },
+  })
+
+  try {
+    const [stdout, stderr, exitCode] = await run([
+      "session",
+      "import",
+      file,
+      "--server",
+      server.url.toString(),
+    ])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Failed to read session data: Session data too large: file exceeds the ${maximumBytes}-byte limit`,
+    )
+  } finally {
+    await server.stop(true)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
 
 test("fetchRemote cuts a slow-dripping remote body at the deadline", async () => {
   // Exercises the production import fetch: one AbortSignal.timeout deadline
