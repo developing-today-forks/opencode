@@ -3,7 +3,7 @@ import { OpenCode, type SessionMessageAssistantTool } from "@opencode/client/pro
 import { FSUtil } from "@opencode/util/fs-util"
 import { open } from "node:fs/promises"
 import path from "node:path"
-import { readStdin } from "../util/io"
+import { readPipedStdin } from "../util/io"
 import { ServerConnection } from "../services/server-connection"
 import { parseSessionTargetModel, resolveSessionTarget } from "../session-target"
 import { toolInlineInfo } from "@opencode/tui/mini/tool"
@@ -79,7 +79,7 @@ async function run(input: RunCommandInput, options: ExecutionOptions) {
     formatMessage(input.message),
     process.stdin.isTTY
       ? undefined
-      : await readStdin(() =>
+      : await readPipedStdin(() =>
           input.log?.("Reading stdin until EOF; redirect from /dev/null when no piped input is intended"),
         ),
   )
