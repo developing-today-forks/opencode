@@ -3,7 +3,7 @@ import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, ResponsesStreamTranslator, completionBody, parseChatRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
+import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -299,5 +299,177 @@ describe("responses door translation", () => {
     expect(frames).toContain('"delta":"Hi"')
     expect(frames).toContain("event: response.completed")
     expect(frames).not.toContain("[DONE]")
+  })
+})
+
+describe("messages door translation", () => {
+  const parsedMessages = (body: unknown) => {
+    const result = parseMessagesRequest(body)
+    if (!result.ok) throw new Error(`expected parse success, got: ${result.error}`)
+    return result.value
+  }
+
+  test("route name, system blocks, and generation options become the canonical input", () => {
+    const value = parsedMessages({
+      model: "workhorse",
+      max_tokens: 256,
+      system: [{ type: "text", text: "Be terse." }, { type: "text", text: "Be kind." }],
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.5,
+      top_p: 0.9,
+      stop_sequences: ["END"],
+    })
+    expect(String(value.input.model?.providerID)).toBe("opencode-route")
+    expect(String(value.input.model?.id)).toBe("workhorse")
+    expect(value.input.system).toBe("Be terse.Be kind.")
+    expect(value.input.generation).toMatchObject({ maxTokens: 256, temperature: 0.5, topP: 0.9, stop: ["END"] })
+    expect(value.stream).toBe(false)
+  })
+
+  test("direct catalog refs pass through the messages door too", () => {
+    const value = parsedMessages({
+      model: "anthropic/claude-sonnet-4-5",
+      max_tokens: 64,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    })
+    expect(String(value.input.model?.providerID)).toBe("anthropic")
+    expect(String(value.input.model?.id)).toBe("claude-sonnet-4-5")
+  })
+
+  test("tool_use and tool_result blocks round-trip through the canonical parts", () => {
+    const value = parsedMessages({
+      model: "workhorse",
+      max_tokens: 128,
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Checking." },
+            { type: "tool_use", id: "toolu_1", name: "lookup", input: { city: "Austin" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "sunny" }] },
+      ],
+      tools: [{ name: "lookup", description: "Look up weather", input_schema: { type: "object", properties: {} } }],
+      tool_choice: { type: "tool", name: "lookup", disable_parallel_tool_use: true },
+    })
+    expect(value.input.tools?.[0]).toMatchObject({ name: "lookup", description: "Look up weather" })
+    expect(JSON.stringify(value.input.toolChoice)).toContain("lookup")
+    const assistant = value.input.messages[1]
+    expect(assistant?.role).toBe("assistant")
+    expect(JSON.stringify(assistant?.content)).toContain("tool-call")
+    expect(JSON.stringify(assistant?.content)).toContain("Austin")
+    const tool = value.input.messages[2]
+    expect(tool?.role).toBe("tool")
+    expect(JSON.stringify(tool?.content)).toContain("tool-result")
+    expect(JSON.stringify(tool?.content)).toContain("sunny")
+    expect(JSON.stringify(tool?.content)).toContain("lookup")
+  })
+
+  test("image blocks become canonical media parts", () => {
+    const value = parsedMessages({
+      model: "workhorse",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what is this?" },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "AAECAw==" } },
+            { type: "image", source: { type: "url", url: "https://example.test/cat.png" } },
+          ],
+        },
+      ],
+    })
+    const content = JSON.stringify(value.input.messages[0]?.content)
+    expect(content).toContain('"type":"media"')
+    expect(content).toContain("image/png")
+    expect(content).toContain("example.test/cat.png")
+  })
+
+  test("unsupported shapes fail loudly, naming the shape", () => {
+    const base = { model: "workhorse", max_tokens: 64, messages: [{ role: "user", content: "hi" }] }
+    expect(parseMessagesRequest({ messages: base.messages }).ok).toBe(false) // max_tokens is required
+    expect(parseMessagesRequest({ ...base, messages: [{ role: "user", content: [{ type: "document", source: { type: "text", data: "x" } }] }] })).toMatchObject({ ok: false, error: expect.stringContaining("document") })
+    expect(parseMessagesRequest({ ...base, messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "s" }] }] })).toMatchObject({ ok: false, error: expect.stringContaining("thinking") })
+    expect(parseMessagesRequest({ ...base, tools: [{ type: "web_search_20250305", name: "web_search" }] })).toMatchObject({ ok: false, error: expect.stringContaining("web_search_20250305") })
+    expect(parseMessagesRequest({ ...base, thinking: { type: "enabled", budget_tokens: 1024 } })).toMatchObject({ ok: false, error: expect.stringContaining("thinking") })
+    expect(parseMessagesRequest({ ...base, messages: [{ role: "system", content: "hi" }] }).ok).toBe(false)
+  })
+
+  test("messages body carries text and tool_use blocks, stop_reason, and Anthropic usage", () => {
+    const response = LLMResponse.fromEvents([
+      LLMEvent.textDelta({ id: "t1", text: "Hello" }),
+      LLMEvent.toolCall({ id: "toolu_1", name: "lookup", input: { city: "Austin" } }),
+      LLMEvent.finish({
+        reason: { normalized: "tool-calls" },
+        usage: { inputTokens: 10, outputTokens: 4, nonCachedInputTokens: 6, cacheReadInputTokens: 4 },
+      }),
+    ])
+    if (!response) throw new Error("expected a completed response")
+    const body = messagesBody({ id: "msg_x", model: "workhorse", response }) as any
+    expect(body.type).toBe("message")
+    expect(body.role).toBe("assistant")
+    expect(body.content[0]).toEqual({ type: "text", text: "Hello" })
+    expect(body.content[1]).toEqual({ type: "tool_use", id: "toolu_1", name: "lookup", input: { city: "Austin" } })
+    expect(body.stop_reason).toBe("tool_use")
+    expect(body.stop_sequence).toBeNull()
+    expect(body.usage).toEqual({ input_tokens: 6, output_tokens: 4, cache_read_input_tokens: 4 })
+  })
+
+  test("messages body maps a length finish to max_tokens", () => {
+    const response = LLMResponse.fromEvents([
+      LLMEvent.textDelta({ id: "t1", text: "partial" }),
+      LLMEvent.finish({ reason: { normalized: "length" }, usage: { inputTokens: 3, outputTokens: 64 } }),
+    ])
+    if (!response) throw new Error("expected a completed response")
+    const body = messagesBody({ id: "msg_x", model: "workhorse", response }) as any
+    expect(body.stop_reason).toBe("max_tokens")
+    expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 64 })
+  })
+
+  test("messages stream translator emits the Anthropic event grammar in order", () => {
+    const translator = new MessagesStreamTranslator({ id: "msg_s", model: "workhorse" })
+    const frames = [
+      translator.start(),
+      ...translator.push(LLMEvent.textDelta({ id: "t1", text: "Hello" })),
+      ...translator.push(LLMEvent.textDelta({ id: "t1", text: " world" })),
+      ...translator.push(LLMEvent.toolCall({ id: "toolu_1", name: "lookup", input: { city: "Austin" } })),
+      ...translator.push(LLMEvent.finish({ reason: { normalized: "tool-calls" }, usage: { inputTokens: 5, outputTokens: 2 } })),
+    ]
+    const text = frames.join("")
+    const order = [
+      "event: message_start",
+      "event: ping",
+      "event: content_block_start",
+      "event: content_block_delta",
+      "event: content_block_stop",
+      "event: message_delta",
+      "event: message_stop",
+    ]
+    let at = -1
+    for (const marker of order) {
+      const next = text.indexOf(marker, at + 1)
+      expect(next).toBeGreaterThan(at)
+      at = next
+    }
+    expect(text).toContain('"type":"text_delta","text":"Hello"')
+    expect(text).toContain('"type":"tool_use","id":"toolu_1","name":"lookup"')
+    expect(text).toContain('"type":"input_json_delta","partial_json":"{\\"city\\":\\"Austin\\"}"')
+    expect(text).toContain('"stop_reason":"tool_use"')
+    expect(text).toContain('"input_tokens":5,"output_tokens":2')
+    expect(text).not.toContain("[DONE]")
+    expect(translator.failed).toBe(false)
+  })
+
+  test("messages stream translator terminates a provider failure with an error event, not message_stop", () => {
+    const translator = new MessagesStreamTranslator({ id: "msg_s", model: "workhorse" })
+    const frames = [translator.start(), ...translator.push(LLMEvent.providerError({ message: "boom" }))]
+    const text = frames.join("")
+    expect(text).toContain("event: error")
+    expect(text).toContain("boom")
+    expect(text).not.toContain("message_stop")
+    expect(translator.failed).toBe(true)
   })
 })

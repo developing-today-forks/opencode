@@ -9,6 +9,7 @@ export * as Completions from "./completions.js"
  * (a 400 the caller can see) instead of being silently dropped.
  */
 import {
+  Media,
   Message,
   ToolCallPart,
   ToolResultPart,
@@ -729,6 +730,495 @@ export class ResponsesStreamTranslator {
       case "provider-error":
         this.failed = true
         return [responsesFrame("response.failed", { response: { ...this.base("failed"), error: { message: event.message } } })]
+      default:
+        return []
+    }
+  }
+}
+
+// ------------------------------------------------------------ messages door
+//
+// The same universal door in the Anthropic Messages dialect (#1146;
+// Drew, 2026-11-02: "allow v1 messages for any model"). Every model the
+// other doors serve — route names and direct catalog provider/model
+// refs alike — is addressable here too, whether the caller's dialect
+// matches the resolved provider's native dialect or not: the request
+// is translated to and from the same canonical internal shapes, and
+// the provider layer speaks its native dialect from there. Stateless
+// like the other doors: no session is created or stored. Anthropic
+// request features this wave does not carry (thinking blocks and
+// thinking configuration, document blocks, server tools, MCP servers)
+// fail loudly at parse time, naming the shape, instead of being
+// silently dropped or forwarded blindly.
+
+export const messageId = () => `msg_${randomBytes(12).toString("hex")}`
+
+export interface ParsedMessagesRequest {
+  readonly modelLabel: string
+  readonly stream: boolean
+  readonly input: CompletionInput
+}
+
+export type ParseMessagesResult =
+  | { readonly ok: true; readonly value: ParsedMessagesRequest }
+  | { readonly ok: false; readonly error: string }
+
+/**
+ * Anthropic reports `input_tokens` as the non-cached portion only, with
+ * cache reads/writes as separate fields; the canonical Usage carries
+ * the inclusive total plus the breakdown, so the non-cached portion is
+ * recovered here (preferring the breakdown the protocol mapper stored).
+ */
+export const messagesUsageBody = (usage: Usage | undefined) => {
+  if (!usage) return { input_tokens: 0, output_tokens: 0 }
+  const cacheRead = usage.cacheReadInputTokens ?? 0
+  const cacheWrite = usage.cacheWriteInputTokens ?? 0
+  const nonCached = usage.nonCachedInputTokens ?? Math.max(0, (usage.inputTokens ?? 0) - cacheRead - cacheWrite)
+  return {
+    input_tokens: nonCached,
+    output_tokens: usage.outputTokens ?? 0,
+    ...(cacheRead ? { cache_read_input_tokens: cacheRead } : {}),
+    ...(cacheWrite ? { cache_creation_input_tokens: cacheWrite } : {}),
+  }
+}
+
+const stopSequenceOf = (metadata: unknown): string | null => {
+  if (!isRecord(metadata)) return null
+  for (const value of Object.values(metadata)) {
+    if (isRecord(value) && typeof value.stopSequence === "string") return value.stopSequence
+  }
+  return null
+}
+
+const messagesStop = (normalized: string, raw: string | undefined, hasToolCalls: boolean, stopSequence: string | null) => {
+  if (raw === "stop_sequence") return { stop_reason: "stop_sequence", stop_sequence: stopSequence }
+  if (hasToolCalls && normalized !== "length") return { stop_reason: "tool_use", stop_sequence: null }
+  switch (normalized) {
+    case "length":
+      return { stop_reason: "max_tokens", stop_sequence: null }
+    case "tool-calls":
+      return { stop_reason: "tool_use", stop_sequence: null }
+    case "content-filter":
+      return { stop_reason: "refusal", stop_sequence: null }
+    default:
+      return { stop_reason: "end_turn", stop_sequence: null }
+  }
+}
+
+export const messagesBody = (args: { readonly id: string; readonly model: string; readonly response: LLMResponse }) => {
+  const content: Array<Record<string, unknown>> = []
+  const reasoning = args.response.reasoning
+  if (reasoning) content.push({ type: "thinking", thinking: reasoning, signature: "" })
+  const text = args.response.text
+  if (text) content.push({ type: "text", text })
+  for (const call of args.response.toolCalls)
+    content.push({ type: "tool_use", id: String(call.id), name: call.name, input: call.input ?? {} })
+  const finish = args.response.events.find((event) => event.type === "finish")
+  const stop = messagesStop(
+    args.response.finishReason.normalized,
+    args.response.finishReason.raw,
+    args.response.toolCalls.length > 0,
+    finish ? stopSequenceOf(finish.providerMetadata) : null,
+  )
+  return {
+    id: args.id,
+    type: "message",
+    role: "assistant",
+    model: args.model,
+    content,
+    stop_reason: stop.stop_reason,
+    stop_sequence: stop.stop_sequence,
+    usage: messagesUsageBody(args.response.usage),
+  }
+}
+
+const parseMessagesImage = (block: Record<string, unknown>): ContentPart | string => {
+  if (!isRecord(block.source)) return "image blocks must carry a source object"
+  if (block.source.type === "base64") {
+    if (typeof block.source.media_type !== "string" || typeof block.source.data !== "string")
+      return "image base64 sources must carry media_type and data"
+    if (!block.source.media_type.startsWith("image/"))
+      return `unsupported image media_type: ${block.source.media_type}`
+    return Message.media(Media.base64(block.source.data, block.source.media_type))
+  }
+  if (block.source.type === "url") {
+    if (typeof block.source.url !== "string") return "image url sources must carry a url"
+    return Message.media(Media.url(block.source.url))
+  }
+  return `unsupported image source type: ${String(block.source.type)} (supported: base64, url)`
+}
+
+const parseMessagesToolResult = (
+  block: Record<string, unknown>,
+  toolNames: Map<string, string>,
+): ContentPart | string => {
+  if (typeof block.tool_use_id !== "string") return "tool_result blocks must carry tool_use_id"
+  let result: unknown = ""
+  let resultType: "text" | "json" | "error" = "text"
+  if (typeof block.content === "string") {
+    result = block.content
+  } else if (Array.isArray(block.content)) {
+    const texts: string[] = []
+    let structured: unknown
+    let hasStructured = false
+    for (const item of block.content) {
+      if (!isRecord(item)) return "tool_result content blocks must be objects"
+      if (item.type === "text") {
+        if (typeof item.text !== "string") return "tool_result text blocks must carry text"
+        texts.push(item.text)
+        continue
+      }
+      if (item.type === "json") {
+        structured = item.json
+        hasStructured = true
+        continue
+      }
+      return `unsupported tool_result content block type: ${String(item.type)}`
+    }
+    if (hasStructured && texts.length) return "tool_result content must not mix text and json blocks in this door"
+    if (hasStructured) {
+      result = structured
+      resultType = "json"
+    } else {
+      result = texts.join("")
+    }
+  } else if (block.content !== undefined) {
+    return "tool_result content must be a string or an array of blocks"
+  }
+  if (block.is_error === true) resultType = "error"
+  return ToolResultPart.make({
+    id: block.tool_use_id,
+    name: toolNames.get(block.tool_use_id) ?? "tool",
+    result,
+    resultType,
+  })
+}
+
+const parseMessagesBlocks = (
+  entry: Record<string, unknown>,
+  toolNames: Map<string, string>,
+): { readonly parts: ContentPart[]; readonly toolResults: ContentPart[] } | string => {
+  const parts: ContentPart[] = []
+  const toolResults: ContentPart[] = []
+  if (typeof entry.content === "string") {
+    if (entry.content) parts.push(Message.text(entry.content))
+    return { parts, toolResults }
+  }
+  if (!Array.isArray(entry.content)) return "message content must be a string or an array of blocks"
+  if (entry.content.length === 0) return "messages must carry at least one content block"
+  for (const block of entry.content) {
+    if (!isRecord(block) || typeof block.type !== "string")
+      return "content blocks must be objects with a type"
+    if (block.type === "text") {
+      if (typeof block.text !== "string") return "text blocks must carry text"
+      parts.push(Message.text(block.text))
+      continue
+    }
+    if (block.type === "image") {
+      if (entry.role !== "user") return "image blocks are only supported in user messages"
+      const image = parseMessagesImage(block)
+      if (typeof image === "string") return image
+      parts.push(image)
+      continue
+    }
+    if (block.type === "tool_use") {
+      if (entry.role !== "assistant") return "tool_use blocks are only supported in assistant messages"
+      if (typeof block.id !== "string" || typeof block.name !== "string")
+        return "tool_use blocks must carry an id and a name"
+      toolNames.set(block.id, block.name)
+      parts.push(ToolCallPart.make({ id: block.id, name: block.name, input: block.input ?? {} }))
+      continue
+    }
+    if (block.type === "tool_result") {
+      if (entry.role !== "user") return "tool_result blocks are only supported in user messages"
+      const result = parseMessagesToolResult(block, toolNames)
+      if (typeof result === "string") return result
+      toolResults.push(result)
+      continue
+    }
+    if (block.type === "thinking" || block.type === "redacted_thinking")
+      return `${block.type} blocks in input are not supported by this door (they are provider-internal and cannot round-trip)`
+    return `unsupported content block type: ${block.type}`
+  }
+  if (toolResults.length && parts.length)
+    return "tool_result blocks must not be mixed with other content blocks in one message in this door; send them in their own user message"
+  return { parts, toolResults }
+}
+
+export const parseMessagesRequest = (body: unknown): ParseMessagesResult => {
+  if (!isRecord(body)) return { ok: false, error: "request body must be a JSON object" }
+  for (const field of ["thinking", "context_management", "mcp_servers", "container", "service_tier"] as const) {
+    if (body[field] !== undefined) return { ok: false, error: `${field} is not supported by this door` }
+  }
+  if (isRecord(body.metadata) && body.metadata.user_id !== undefined)
+    return { ok: false, error: "metadata.user_id is not supported by this door" }
+  if (!Array.isArray(body.messages)) return { ok: false, error: "messages must be an array" }
+  if (typeof body.max_tokens !== "number") return { ok: false, error: "max_tokens is required and must be a number" }
+  const model = parseModel(body.model)
+  if (typeof model === "string") return { ok: false, error: model }
+
+  const tools: ToolDefinition.Input[] = []
+  if (body.tools !== undefined) {
+    if (!Array.isArray(body.tools)) return { ok: false, error: "tools must be an array" }
+    for (const tool of body.tools) {
+      if (!isRecord(tool)) return { ok: false, error: "each tool must be an object" }
+      if (typeof tool.type === "string" && tool.type !== "custom")
+        return { ok: false, error: `server tools are not supported by this door: ${tool.type}` }
+      if (typeof tool.name !== "string") return { ok: false, error: "tools must carry a name" }
+      tools.push({
+        name: tool.name,
+        description: typeof tool.description === "string" ? tool.description : "",
+        inputSchema: isRecord(tool.input_schema) ? tool.input_schema : { type: "object", properties: {} },
+      })
+    }
+  }
+
+  let toolChoice: ToolChoice.Input | undefined
+  if (body.tool_choice !== undefined) {
+    if (!isRecord(body.tool_choice)) return { ok: false, error: "unsupported tool_choice" }
+    const disable = body.tool_choice.disable_parallel_tool_use === true ? { disableParallelToolUse: true } : {}
+    if (body.tool_choice.type === "auto") toolChoice = { type: "auto", ...disable }
+    else if (body.tool_choice.type === "any") toolChoice = { type: "required", ...disable }
+    else if (body.tool_choice.type === "none") toolChoice = { type: "none" }
+    else if (body.tool_choice.type === "tool") {
+      if (typeof body.tool_choice.name !== "string") return { ok: false, error: "tool_choice of type tool must carry a name" }
+      toolChoice = { type: "tool", name: body.tool_choice.name, ...disable }
+    } else return { ok: false, error: `unsupported tool_choice type: ${String(body.tool_choice.type)}` }
+  }
+
+  let system: string | undefined
+  if (typeof body.system === "string") {
+    system = body.system
+  } else if (Array.isArray(body.system)) {
+    const texts: string[] = []
+    for (const block of body.system) {
+      if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string")
+        return { ok: false, error: "only text blocks are supported in the system field by this door" }
+      texts.push(block.text)
+    }
+    system = texts.join("")
+  } else if (body.system !== undefined) {
+    return { ok: false, error: "system must be a string or an array of text blocks" }
+  }
+
+  if (body.stop_sequences !== undefined && (!Array.isArray(body.stop_sequences) || !body.stop_sequences.every((s) => typeof s === "string")))
+    return { ok: false, error: "stop_sequences must be an array of strings" }
+
+  const messages: Array<Message | Message.Input> = []
+  const toolNames = new Map<string, string>()
+  for (const entry of body.messages) {
+    if (!isRecord(entry) || typeof entry.role !== "string")
+      return { ok: false, error: "each message must be an object with a role" }
+    if (entry.role === "system")
+      return { ok: false, error: "system content belongs in the top-level system field, not in messages" }
+    if (entry.role !== "user" && entry.role !== "assistant")
+      return { ok: false, error: `unsupported message role: ${entry.role}` }
+    if (entry.content === undefined) return { ok: false, error: "each message must carry content" }
+    const parsedBlocks = parseMessagesBlocks(entry, toolNames)
+    if (typeof parsedBlocks === "string") return { ok: false, error: parsedBlocks }
+    if (parsedBlocks.toolResults.length) {
+      messages.push(Message.tool(parsedBlocks.toolResults[0] as ToolResultPart))
+      for (const extra of parsedBlocks.toolResults.slice(1))
+        messages.push(Message.tool(extra as ToolResultPart))
+      continue
+    }
+    messages.push(entry.role === "user" ? Message.user(parsedBlocks.parts) : Message.assistant(parsedBlocks.parts))
+  }
+
+  return {
+    ok: true,
+    value: {
+      modelLabel: model.label,
+      stream: body.stream === true,
+      input: {
+        model: model.ref,
+        system: system || undefined,
+        messages,
+        tools: tools.length ? tools : undefined,
+        toolChoice,
+        generation: {
+          ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
+          ...(typeof body.top_p === "number" ? { topP: body.top_p } : {}),
+          ...(typeof body.top_k === "number" ? { topK: body.top_k } : {}),
+          maxTokens: body.max_tokens,
+          ...(Array.isArray(body.stop_sequences) ? { stop: body.stop_sequences as string[] } : {}),
+        },
+      },
+    },
+  }
+}
+
+const messagesFrame = (type: string, data: Record<string, unknown>) =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
+
+export const PING_FRAME = messagesFrame("ping", {})
+
+export const messagesErrorFrame = (message: string) =>
+  `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`
+
+interface MessagesBlockSlot {
+  readonly index: number
+  closed: boolean
+}
+
+/**
+ * Stateful Anthropic SSE translator: internal LLM events in, typed
+ * Messages frames out. `start()` emits `message_start` plus a `ping`
+ * (the dialect's keep-alive event); text, thinking, and tool_use
+ * content blocks follow the content_block_start/delta/stop grammar
+ * with per-block indices; the finish event closes any open block, then
+ * emits `message_delta` (stop_reason plus cumulative usage) and
+ * `message_stop`. A provider failure terminates the stream with an
+ * `error` event — never a clean `message_stop` over partial output.
+ */
+export class MessagesStreamTranslator {
+  failed = false
+  private nextIndex = 0
+  private readonly textBlocks = new Map<string, MessagesBlockSlot>()
+  private readonly reasoningBlocks = new Map<string, MessagesBlockSlot>()
+  private readonly toolBlocks = new Map<string, MessagesBlockSlot & { name: string }>()
+  private usage: Usage | undefined
+
+  constructor(private readonly meta: { readonly id: string; readonly model: string }) {}
+
+  start(): string {
+    return (
+      messagesFrame("message_start", {
+        message: {
+          id: this.meta.id,
+          type: "message",
+          role: "assistant",
+          model: this.meta.model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: messagesUsageBody(undefined),
+        },
+      }) + PING_FRAME
+    )
+  }
+
+  private open(map: Map<string, MessagesBlockSlot>, id: string, block: Record<string, unknown>): string {
+    const slot = { index: this.nextIndex++, closed: false }
+    map.set(id, slot)
+    return messagesFrame("content_block_start", { index: slot.index, content_block: block })
+  }
+
+  private close(slot: MessagesBlockSlot): string {
+    slot.closed = true
+    return messagesFrame("content_block_stop", { index: slot.index })
+  }
+
+  push(event: LLMEvent): string[] {
+    switch (event.type) {
+      case "text-start": {
+        if (this.textBlocks.has(String(event.id))) return []
+        return [this.open(this.textBlocks, String(event.id), { type: "text", text: "" })]
+      }
+      case "text-delta": {
+        const frames: string[] = []
+        if (!this.textBlocks.has(String(event.id)))
+          frames.push(this.open(this.textBlocks, String(event.id), { type: "text", text: "" }))
+        const slot = this.textBlocks.get(String(event.id))!
+        frames.push(
+          messagesFrame("content_block_delta", { index: slot.index, delta: { type: "text_delta", text: event.text } }),
+        )
+        return frames
+      }
+      case "text-end": {
+        const slot = this.textBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "reasoning-start": {
+        if (this.reasoningBlocks.has(String(event.id))) return []
+        return [this.open(this.reasoningBlocks, String(event.id), { type: "thinking", thinking: "" })]
+      }
+      case "reasoning-delta": {
+        const frames: string[] = []
+        if (!this.reasoningBlocks.has(String(event.id)))
+          frames.push(this.open(this.reasoningBlocks, String(event.id), { type: "thinking", thinking: "" }))
+        const slot = this.reasoningBlocks.get(String(event.id))!
+        frames.push(
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "thinking_delta", thinking: event.text },
+          }),
+        )
+        return frames
+      }
+      case "reasoning-end": {
+        const slot = this.reasoningBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "tool-input-start": {
+        if (this.toolBlocks.has(String(event.id))) return []
+        const slot = { index: this.nextIndex++, closed: false, name: event.name }
+        this.toolBlocks.set(String(event.id), slot)
+        return [
+          messagesFrame("content_block_start", {
+            index: slot.index,
+            content_block: { type: "tool_use", id: String(event.id), name: event.name, input: {} },
+          }),
+        ]
+      }
+      case "tool-input-delta": {
+        const slot = this.toolBlocks.get(String(event.id))
+        if (!slot) return []
+        return [
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "input_json_delta", partial_json: event.text },
+          }),
+        ]
+      }
+      case "tool-input-end": {
+        const slot = this.toolBlocks.get(String(event.id))
+        return slot && !slot.closed ? [this.close(slot)] : []
+      }
+      case "tool-call": {
+        const existing = this.toolBlocks.get(String(event.id))
+        if (existing) return existing.closed ? [] : [this.close(existing)]
+        const slot = { index: this.nextIndex++, closed: false, name: event.name }
+        this.toolBlocks.set(String(event.id), slot)
+        return [
+          messagesFrame("content_block_start", {
+            index: slot.index,
+            content_block: { type: "tool_use", id: String(event.id), name: event.name, input: {} },
+          }),
+          messagesFrame("content_block_delta", {
+            index: slot.index,
+            delta: { type: "input_json_delta", partial_json: JSON.stringify(event.input ?? {}) },
+          }),
+          this.close(slot),
+        ]
+      }
+      case "step-finish": {
+        if (event.usage) this.usage = event.usage
+        return []
+      }
+      case "finish": {
+        const usage = event.usage ?? this.usage
+        const frames: string[] = []
+        for (const slot of [...this.textBlocks.values(), ...this.reasoningBlocks.values(), ...this.toolBlocks.values()])
+          if (!slot.closed) frames.push(this.close(slot))
+        const stop = messagesStop(
+          event.reason.normalized,
+          event.reason.raw,
+          this.toolBlocks.size > 0,
+          stopSequenceOf(event.providerMetadata),
+        )
+        frames.push(
+          messagesFrame("message_delta", {
+            delta: { stop_reason: stop.stop_reason, stop_sequence: stop.stop_sequence },
+            usage: messagesUsageBody(usage),
+          }),
+        )
+        frames.push(messagesFrame("message_stop", {}))
+        return frames
+      }
+      case "provider-error":
+        this.failed = true
+        return [messagesErrorFrame(event.message)]
       default:
         return []
     }

@@ -339,3 +339,104 @@ it.live("addresses a direct catalog model through the completions door, not just
     expect(String(captured.at(-1)?.model?.id)).toBe("deepseek-chat")
   }),
 )
+
+it.live("answers a non-streaming message in the Anthropic wire shape for a route name", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      max_tokens: 128,
+      system: "Be terse.",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as {
+      id: string
+      type: string
+      role: string
+      model: string
+      content: Array<{ type: string; text?: string }>
+      stop_reason: string
+      usage: { input_tokens: number; output_tokens: number }
+    }
+    expect(body.id.startsWith("msg_")).toBe(true)
+    expect(body.type).toBe("message")
+    expect(body.role).toBe("assistant")
+    expect(body.model).toBe("workhorse")
+    expect(body.content[0]).toEqual({ type: "text", text: "Hello world" })
+    expect(body.stop_reason).toBe("end_turn")
+    expect(body.usage).toEqual({ input_tokens: 5, output_tokens: 2 })
+
+    const input = captured.at(-1)
+    expect(String(input?.model?.providerID)).toBe("opencode-route")
+    expect(String(input?.model?.id)).toBe("workhorse")
+    expect(input?.system).toBe("Be terse.")
+    expect(input?.generation?.maxTokens).toBe(128)
+  }),
+)
+
+it.live("addresses a direct catalog model through the messages door, not just routes", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "anthropic/claude-sonnet-4-5",
+      max_tokens: 64,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    })
+    expect(res.status).toBe(200)
+    expect(String(captured.at(-1)?.model?.providerID)).toBe("anthropic")
+    expect(String(captured.at(-1)?.model?.id)).toBe("claude-sonnet-4-5")
+  }),
+)
+
+it.live("streams the Anthropic event grammar with no [DONE] sentinel", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "opencode-route/speed",
+      max_tokens: 64,
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("text/event-stream")
+    const text = yield* Effect.promise(() => res.text())
+    const order = [
+      "event: message_start",
+      "event: ping",
+      "event: content_block_start",
+      "event: content_block_delta",
+      "event: content_block_stop",
+      "event: message_delta",
+      "event: message_stop",
+    ]
+    let at = -1
+    for (const marker of order) {
+      const next = text.indexOf(marker, at + 1)
+      expect(next).toBeGreaterThan(at)
+      at = next
+    }
+    expect(text).toContain('"delta":{"type":"text_delta","text":"Hello"}')
+    expect(text).toContain('"stop_reason":"end_turn"')
+    expect(text).toContain('"input_tokens":5,"output_tokens":2')
+    expect(text).not.toContain("[DONE]")
+    expect(String(captured.at(-1)?.model?.id)).toBe("speed")
+  }),
+)
+
+it.live("rejects an unsupported content block with a 400 naming the shape", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "x" } }] },
+      ],
+    })
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(body.error.message).toContain("document")
+  }),
+)
