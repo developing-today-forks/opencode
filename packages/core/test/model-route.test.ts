@@ -1924,6 +1924,30 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("network forgiveness clears only the failures inside the judging Location's window (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 1_000, providers: 2 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const old = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const fresh1 = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const fresh2 = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(old, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(old, now + 1, "/loc/a")).toBeGreaterThan(now)
+      // Ten seconds later B detects its own outage from two fresh failures; its
+      // forgiveness must not reach back and clear A's older, unrelated bench,
+      // even though the shared history retains that entry for A's window.
+      ModelRoute.failed(fresh1, policy, now + 10_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(fresh2, policy, now + 10_500, { network: true }, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(fresh1, now + 10_501, "/loc/b")).toBe(0)
+      expect(ModelRoute.cooldownUntil(old, now + 10_501, "/loc/a")).toBeGreaterThan(now + 10_501)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

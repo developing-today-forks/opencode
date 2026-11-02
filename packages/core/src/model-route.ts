@@ -677,6 +677,10 @@ export const failed = (
     // The escalation count is undone with the cooldown: a forgiven failure must not double the
     // target's next bench (#1034).
     for (const failure of recentFailures) {
+      // Forgiveness covers the outage the judging Location detected: failures older
+      // than its network window are retained for other Locations' evaluations, but
+      // they are not part of this outage and keep their benches (#1423).
+      if (now - failure.time > currentConstants(location).network.windowMs) continue
       const prior = health.get(failure.target) ?? credentialHealth.get(failure.target)
       if (prior) {
         if (prior.cooldownUntil > now) {
