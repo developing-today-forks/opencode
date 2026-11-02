@@ -710,7 +710,7 @@ export const make = Effect.gen(function* () {
             locationDirectory,
           )
           if (input.sessionID)
-            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
         }
         if (record.finish || record.failure) {
           const startSnapshot = yield* Fiber.join(pendingStartSnapshot)

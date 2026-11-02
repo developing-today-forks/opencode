@@ -752,7 +752,7 @@ export const layer = Layer.effect(
             )
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
-            const until = ModelRoute.cooldownUntil(target, now)
+            const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
             // A fixed route only fails over: provider holds, skips and budgets are rules and above.
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
             const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
@@ -969,7 +969,7 @@ export const layer = Layer.effect(
                 return undefined
               })
           // A session that just moved off its origin races that origin rather than the next fallback.
-          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID)
+          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID, locationDirectory)
           const homeIndex =
             home === undefined ? -1 : definition.targets.findIndex((item) => `${item.providerID}/${item.id}` === home)
           const origin =

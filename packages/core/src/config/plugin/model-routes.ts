@@ -99,7 +99,7 @@ export const Plugin = define({
         const leafCeiling = (target: (typeof expanded)[number]) =>
           Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
         const leafContext = Math.min(...expanded.map(leafCeiling))
-        const health = ModelRoute.policy(route.health)
+        const health = ModelRoute.policy(route.health, ctx.location.directory)
         const targetCacheFormats = expanded.map((target) =>
           target.cacheFormat ? { cacheFormat: target.cacheFormat } : {},
         )

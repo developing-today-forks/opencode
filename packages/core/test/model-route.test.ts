@@ -1834,6 +1834,39 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ network: { providers: 2 }, continuity: { hedgeRequests: 5 } }),
+      "/loc/b",
+    )
+    try {
+      // Network forgiveness: two unrelated transport failures meet A's configured
+      // providers threshold (2), so the first target's bench is cleared — the
+      // default threshold (3) the unscoped read used would have kept it benched.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 1, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 2, "/loc/a")).toBe(0)
+      // Origin hedging: B allows five away responses before the session settles,
+      // so the origin is still offered after three — the default (2) would not.
+      const origin = ModelRoute.ref({ providerID: "p", model: "a" })
+      const away = ModelRoute.ref({ providerID: "p", model: "b" })
+      ModelRoute.moved("r", "s-net", origin)
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      expect(ModelRoute.hedgeHome("r", "s-net", "/loc/b")).toBe("p/a")
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

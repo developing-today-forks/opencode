@@ -206,9 +206,9 @@ export const policy = (input?: {
   readonly slowThreshold?: number
   readonly cooldownMs?: number
   readonly quotaCooldownMs?: number
-}): Policy => {
+}, location?: string): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
-  const ladder = currentConstants().bench
+  const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
@@ -353,14 +353,14 @@ const PROVIDER_MODELS = 2
 const recentFailures: Array<{ readonly provider: string; readonly target: string; readonly time: number }> = []
 
 /** True when failures hit many unrelated providers within a short window. */
-export const networkSuspect = (now = Date.now()) =>
+export const networkSuspect = (now = Date.now(), location?: string) =>
   new Set(
     recentFailures
-      .filter((failure) => now - failure.time <= currentConstants().network.windowMs)
+      .filter((failure) => now - failure.time <= currentConstants(location).network.windowMs)
       .map((failure) => failure.provider),
-  ).size >= currentConstants().network.providers
+  ).size >= currentConstants(location).network.providers
 
-const providerCooldownUntil = (providerID: string, now: number) => {
+const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
   const prefix = `${providerID}/`
   let count = 0
   let until = 0
@@ -369,15 +369,16 @@ const providerCooldownUntil = (providerID: string, now: number) => {
     count++
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= currentConstants().network.providerModels ? until : 0
+  return count >= currentConstants(location).network.providerModels ? until : 0
 }
 
-export const coolingDown = (target: Model.Ref, now = Date.now()) => cooldownUntil(target, now) > now
+export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string) =>
+  cooldownUntil(target, now, location) > now
 
-export const cooldownUntil = (target: Model.Ref, now = Date.now()) => {
+export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: string) => {
   const state = health.get(key(target))
   if (state) recover(target, state, now)
-  return Math.max(state?.cooldownUntil ?? 0, providerCooldownUntil(target.providerID, now))
+  return Math.max(state?.cooldownUntil ?? 0, providerCooldownUntil(target.providerID, now, location))
 }
 
 const MAX_COOLDOWN_MS = 86_400_000
@@ -645,7 +646,7 @@ export const failed = (
     (recentFailures[0] && now - recentFailures[0].time > currentConstants(location).network.windowMs)
   )
     recentFailures.shift()
-  if (hint?.network && networkSuspect(now)) {
+  if (hint?.network && networkSuspect(now, location)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
     // shared the same local outage, so treating each provider as independently unhealthy is wrong.
     // The escalation count is undone with the cooldown: a forgiven failure must not double the
@@ -2396,7 +2397,7 @@ export const moved = (routeID: string, sessionID: string, from: Model.Ref) => {
 }
 
 /** A request on this route was answered by `target`. Answering from the origin ends the move. */
-export const served = (routeID: string, sessionID: string, target: Model.Ref) => {
+export const served = (routeID: string, sessionID: string, target: Model.Ref, location?: string) => {
   const id = continuityKey(routeID, sessionID)
   const current = key(target)
   const prior = continuity.get(id)
@@ -2404,15 +2405,16 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref) =>
   remember(id, {
     current,
     origin: prior.origin,
-    away: Math.min(prior.away + 1, currentConstants().continuity.hedgeRequests),
+    away: Math.min(prior.away + 1, currentConstants(location).continuity.hedgeRequests),
   })
 }
 
 /** The origin a session should hedge back to: only just after it moved, and never once it has
  * settled on the new target. */
-export const hedgeHome = (routeID: string, sessionID: string) => {
+export const hedgeHome = (routeID: string, sessionID: string, location?: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= currentConstants().continuity.hedgeRequests) return undefined
+  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests)
+    return undefined
   return state.origin
 }
 
