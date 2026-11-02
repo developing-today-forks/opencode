@@ -13,13 +13,14 @@ const fakeResponse = (
   chunks: Array<Uint8Array>,
   headers: Record<string, string> = {},
   onStream: () => void = () => undefined,
+  onChunk: () => void = () => undefined,
 ) =>
   ({
     headers,
     stream: Stream.unwrap(
       Effect.sync(() => {
         onStream()
-        return Stream.fromIterable(chunks)
+        return Stream.fromIterable(chunks).pipe(Stream.tap(() => Effect.sync(onChunk)))
       }),
     ),
   }) as unknown as HttpClientResponse.HttpClientResponse
@@ -56,7 +57,12 @@ describe("collectBoundedResponseBody (#1068)", () => {
 
   test("rejects a streamed oversized body in flight", async () => {
     const chunk = new Uint8Array(512)
-    await expect(collect(fakeResponse([chunk, chunk, chunk]), 1024)).rejects.toThrow("response body too large")
+    const chunks = [chunk, chunk, chunk, chunk]
+    let pulled = 0
+    await expect(collect(fakeResponse(chunks, {}, undefined, () => pulled++), 1024)).rejects.toThrow(
+      "response body too large",
+    )
+    expect(pulled).toBeLessThan(chunks.length)
   })
 
   test("skips zero-length chunks", async () => {
