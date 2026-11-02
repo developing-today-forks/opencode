@@ -994,15 +994,25 @@ export const observeProviderQuota = (
   }
 }
 
-let lastQuotaFeedAt = 0
+// The feed throttle is scoped per provider (#1339): a feed only refreshes the providers of
+// the resolution that ran it, so one process-global timestamp let the first route resolved
+// in a window starve every other route's providers. Callers that name a provider get that
+// provider's own window; the provider-less bucket keeps the legacy behaviour for them.
+const lastQuotaFeedAtByProvider = new Map<string, number>()
 
 export const resetQuotaFeed = () => {
-  lastQuotaFeedAt = 0
+  lastQuotaFeedAtByProvider.clear()
 }
 
-export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quotaGate.feedTtlMs) => {
+export const shouldFeedQuota = (
+  now = Date.now(),
+  ttlMs = currentConstants().quotaGate.feedTtlMs,
+  providerID?: string,
+) => {
+  const key = providerID ?? ""
+  const lastQuotaFeedAt = lastQuotaFeedAtByProvider.get(key) ?? 0
   if (now - lastQuotaFeedAt < ttlMs) return false
-  lastQuotaFeedAt = now
+  lastQuotaFeedAtByProvider.set(key, now)
   return true
 }
 
@@ -1184,7 +1194,7 @@ export const resetHealth = () => {
   quotaEvents.clear()
   continuity.clear()
   recentFailures.length = 0
-  lastQuotaFeedAt = 0
+  lastQuotaFeedAtByProvider.clear()
 }
 
 /** Per-route selection state: rotation counters for round-robin, sticky session choices, both

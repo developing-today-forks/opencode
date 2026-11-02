@@ -439,14 +439,22 @@ const refreshQuotaGate = (
   now: number,
 ) =>
   Effect.gen(function* () {
-    if (!ModelRoute.shouldFeedQuota(now)) return
+    // Only providers whose own feed window has elapsed are refreshed (#1339): a provider
+    // fed moments ago by another route is skipped here, and a provider no recent route
+    // covered is not starved by that other route's feed.
+    const targetProviders = new Set<string>(
+      targets
+        .map((target) => target.providerID)
+        .filter((providerID) => ModelRoute.shouldFeedQuota(now, undefined, providerID)),
+    )
+    if (targetProviders.size === 0) return
+    const dueTargets = targets.filter((target) => targetProviders.has(target.providerID))
     let plans: readonly ModelPlan.Plan[] = []
     try {
       plans = ModelPlan.readStore(dataDir).plans
     } catch {
       return
     }
-    const targetProviders = new Set<string>(targets.map((target) => target.providerID))
     const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID))
     if (relevantPlans.length === 0) return
 
@@ -465,7 +473,7 @@ const refreshQuotaGate = (
           if (rowsByWindow.has(key)) continue
           rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, QuotaSnapshot.usageSince(plan, window, now)))
         }
-        for (const target of targets) {
+        for (const target of dueTargets) {
           const activeCredentialID = credentialByProvider.get(target.providerID)
           // Held credentials keep being fed after failover activates a sibling: their fresh
           // balance observations are the only way a balance hold on an inactive credential

@@ -1527,6 +1527,20 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
   })
 
+  test("the quota feed throttle is scoped per provider, so disjoint routes do not starve each other (#1339)", () => {
+    ModelRoute.resetQuotaFeed()
+    // Route A (provider-a) feeds first inside the window.
+    expect(ModelRoute.shouldFeedQuota(1_000_000, 60_000, "provider-a")).toBe(true)
+    // Route B's disjoint provider is not throttled by route A's feed.
+    expect(ModelRoute.shouldFeedQuota(1_030_000, 60_000, "provider-b")).toBe(true)
+    // Each provider keeps its own 60s cost bound.
+    expect(ModelRoute.shouldFeedQuota(1_030_000, 60_000, "provider-a")).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, 60_000, "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, 60_000, "provider-b")).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_091_000, 60_000, "provider-b")).toBe(true)
+    ModelRoute.resetQuotaFeed()
+  })
+
   test("the escalation outcome window is configurable", () => {
     const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
     const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })
