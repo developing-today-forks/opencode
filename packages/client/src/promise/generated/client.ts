@@ -114,6 +114,10 @@ import type {
   ServerCompletionsResponsesInput,
   ServerCompletionsResponsesOutput,
   ServerCompletionsModelsOutput,
+  ServerCompletionsModelInput,
+  ServerCompletionsModelOutput,
+  ServerCompletionsModelRefInput,
+  ServerCompletionsModelRefOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -1236,6 +1240,28 @@ export function make(options: ClientOptions) {
       models: (requestOptions?: RequestOptions) =>
         request<ServerCompletionsModelsOutput>(
           { method: "GET", path: `/v1/models`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ),
+      model: (input: ServerCompletionsModelInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelOutput>(
+          {
+            method: "GET",
+            path: `/v1/models/${encodeURIComponent(input.id)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      modelRef: (input: ServerCompletionsModelRefInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelRefOutput>(
+          {
+            method: "GET",
+            path: `/v1/models/${encodeURIComponent(input.provider)}/${encodeURIComponent(input.model)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
           requestOptions,
         ),
     },

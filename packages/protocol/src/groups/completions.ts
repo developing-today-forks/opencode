@@ -48,6 +48,41 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
       }),
     ),
   )
+  .add(
+    // The id a caller names is a single path segment here: a bare route
+    // id from the models list (workhorse), or a full provider/model ref
+    // with its slash URL-encoded (opencode-route%2Fworkhorse,
+    // deepseek%2Fdeepseek-chat). The handler URL-decodes the segment.
+    HttpApiEndpoint.get("completions.model", "/v1/models/:id", {
+      params: { id: Schema.String },
+      success: Schema.Unknown,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.model",
+        summary: "Get a completion model (OpenAI-compatible)",
+        description:
+          "The single model the completions door serves under the given id — a route reference (opencode-route/workhorse, or the bare route id from the models list) or a concrete catalog provider/model ref — in the same shape as a models-list entry. Unknown ids answer 404 in the OpenAI error shape.",
+      }),
+    ),
+  )
+  .add(
+    // The same lookup for callers that send the id's slash raw instead
+    // of URL-encoding it: /v1/models/opencode-route/workhorse and
+    // /v1/models/deepseek/deepseek-chat. (A wildcard route cannot sit
+    // next to the exact /v1/models route in this router, so the raw
+    // two-segment form is its own endpoint; both share one handler.)
+    HttpApiEndpoint.get("completions.modelRef", "/v1/models/:provider/:model", {
+      params: { provider: Schema.String, model: Schema.String },
+      success: Schema.Unknown,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.modelRef",
+        summary: "Get a completion model by provider/model ref (OpenAI-compatible)",
+        description:
+          "The single model the completions door serves under the given provider/model ref — a route reference (opencode-route/workhorse) or a concrete catalog ref (deepseek/deepseek-chat) — in the same shape as a models-list entry. Unknown ids answer 404 in the OpenAI error shape.",
+      }),
+    ),
+  )
   .annotateMerge(
     OpenApi.annotations({
       title: "completions",

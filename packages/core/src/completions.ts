@@ -273,6 +273,31 @@ export const modelsBody = () => ({
   data: ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
 })
 
+/**
+ * One model by the id a caller names, in the same shape as a modelsBody
+ * entry, or undefined when the door does not serve that id. Route models
+ * are the finite advertised set: they answer to both the bare id the list
+ * carries (`workhorse`) and the prefixed ref callers use as a completion
+ * model (`opencode-route/workhorse`, answered with that id). Any other
+ * `provider/model` ref is a concrete catalog model: the door serves those
+ * by pass-through (parseChatRequest accepts any such ref and resolution
+ * happens at completion time), so the entry is echoed with the provider
+ * as owner. Bare names that are not advertised routes and malformed refs
+ * are unknown.
+ */
+export const modelBody = (id: string) => {
+  const listed = modelsBody().data.find((model) => model.id === id)
+  if (listed) return listed
+  if (id.startsWith("opencode-route/")) {
+    const route = id.slice("opencode-route/".length)
+    const entry = modelsBody().data.find((model) => model.id === route)
+    return entry ? { ...entry, id } : undefined
+  }
+  const slash = id.indexOf("/")
+  if (slash > 0 && slash < id.length - 1) return { id, object: "model", created: 0, owned_by: id.slice(0, slash) }
+  return undefined
+}
+
 export const errorBody = (message: string, type: string) => ({ error: { message, type } })
 
 export const errorFrame = (message: string) => `data: ${JSON.stringify(errorBody(message, "server_error"))}\n\n`

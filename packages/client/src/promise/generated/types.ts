@@ -6668,6 +6668,17 @@ export type ServerCompletionsResponsesOutput = any
 
 export type ServerCompletionsModelsOutput = any
 
+export type ServerCompletionsModelInput = { readonly id: { readonly id: string }["id"] }
+
+export type ServerCompletionsModelOutput = any
+
+export type ServerCompletionsModelRefInput = {
+  readonly provider: { readonly provider: string; readonly model: string }["provider"]
+  readonly model: { readonly provider: string; readonly model: string }["model"]
+}
+
+export type ServerCompletionsModelRefOutput = any
+
 export type ProviderListInput = {
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
 }

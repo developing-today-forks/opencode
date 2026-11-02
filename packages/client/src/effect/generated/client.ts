@@ -120,6 +120,10 @@ import type {
   ServerCompletionsResponsesInput,
   ServerCompletionsResponsesOutput,
   ServerCompletionsModelsOutput,
+  ServerCompletionsModelInput,
+  ServerCompletionsModelOutput,
+  ServerCompletionsModelRefInput,
+  ServerCompletionsModelRefOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -927,10 +931,25 @@ const EndpointServerCompletionsResponses =
 const EndpointServerCompletionsModels = (raw: RawClient["server.completions"]) => () =>
   preserveEffect<ServerCompletionsModelsOutput>()(raw["completions.models"]({}).pipe(Effect.mapError(mapClientError)))
 
+const EndpointServerCompletionsModel = (raw: RawClient["server.completions"]) => (input: ServerCompletionsModelInput) =>
+  preserveEffect<ServerCompletionsModelOutput>()(
+    raw["completions.model"]({ params: { id: input["id"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const EndpointServerCompletionsModelRef =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsModelRefInput) =>
+    preserveEffect<ServerCompletionsModelRefOutput>()(
+      raw["completions.modelRef"]({ params: { provider: input["provider"], model: input["model"] } }).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
 const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
   chat: EndpointServerCompletionsChat(raw),
   responses: EndpointServerCompletionsResponses(raw),
   models: EndpointServerCompletionsModels(raw),
+  model: EndpointServerCompletionsModel(raw),
+  modelRef: EndpointServerCompletionsModelRef(raw),
 })
 
 const EndpointProviderList = (raw: RawClient["server.provider"]) => (input?: ProviderListInput) =>

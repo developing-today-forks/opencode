@@ -112,5 +112,23 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           }).pipe(Effect.provide(services), locationErrors),
       )
     .handleRaw("completions.models", () => Effect.succeed(HttpServerResponse.jsonUnsafe(Completions.modelsBody())))
+    .handleRaw("completions.model", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
+    .handleRaw("completions.modelRef", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
   }),
 )
+
+// One model by id, shared by the :id endpoint (bare route id, or a full
+// provider/model ref URL-encoded as one segment) and the raw two-segment
+// :provider/:model endpoint: the id is the path suffix after /v1/models/,
+// URL-decoded. Unknown ids answer a loud 404 in the OpenAI error shape.
+const modelByIdResponse = (url: string) => {
+  const raw = new URL(url, "http://localhost").pathname.slice("/v1/models/".length)
+  let id = raw
+  try {
+    id = decodeURIComponent(raw)
+  } catch {
+    // A malformed escape is not a served id; it falls through to the 404.
+  }
+  const model = Completions.modelBody(id)
+  return model ? HttpServerResponse.jsonUnsafe(model) : errorResponse(404, `model not found: ${id}`, "invalid_request_error")
+}

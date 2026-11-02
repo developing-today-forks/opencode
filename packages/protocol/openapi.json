@@ -5573,6 +5573,112 @@
         "summary": "List completion models (OpenAI-compatible)"
       }
     },
+    "/v1/models/{id}": {
+      "get": {
+        "tags": ["completions"],
+        "operationId": "completions.model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The single model the completions door serves under the given id — a route reference (opencode-route/workhorse, or the bare route id from the models list) or a concrete catalog provider/model ref — in the same shape as a models-list entry. Unknown ids answer 404 in the OpenAI error shape.",
+        "summary": "Get a completion model (OpenAI-compatible)"
+      }
+    },
+    "/v1/models/{provider}/{model}": {
+      "get": {
+        "tags": ["completions"],
+        "operationId": "completions.modelRef",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "model",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The single model the completions door serves under the given provider/model ref — a route reference (opencode-route/workhorse) or a concrete catalog ref (deepseek/deepseek-chat) — in the same shape as a models-list entry. Unknown ids answer 404 in the OpenAI error shape.",
+        "summary": "Get a completion model by provider/model ref (OpenAI-compatible)"
+      }
+    },
     "/api/provider": {
       "get": {
         "tags": ["provider"],
