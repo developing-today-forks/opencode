@@ -9,9 +9,30 @@ const defaultSleepMs = 20_000
 const defaultPrintLimit = 50
 const positiveReactions = new Set(["THUMBS_UP", "HEART", "HOORAY", "ROCKET"])
 const cleanupLabel = "automated-pr-cleanup"
+const CLOSE_PRS_REQUEST_TIMEOUTS = {
+  ensureCleanupLabel: 30_000,
+  githubRequest: 30_000,
+}
+
+/** One 100-PR GraphQL page is schema-known JSON; 16 MiB leaves generous headroom. */
+export const CLOSE_PRS_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+/** Error bodies are only diagnostic excerpts, so stop after 64 KiB. */
+export const CLOSE_PRS_ERROR_BODY_MAX_BYTES = 64 * 1024
+
+type RequestOptions = {
+  repo: { owner: string; name: string }
+  headers: Record<string, string>
+  fetchImpl?: typeof fetch
+  timeouts?: Partial<typeof CLOSE_PRS_REQUEST_TIMEOUTS>
+}
+
+type RequestContext = Omit<RequestOptions, "fetchImpl" | "timeouts"> & {
+  fetchImpl: typeof fetch
+  timeouts: typeof CLOSE_PRS_REQUEST_TIMEOUTS
+}
 
 const { values } = parseArgs({
-  args: Bun.argv.slice(2),
+  args: import.meta.main ? Bun.argv.slice(2) : [],
   options: {
     execute: { type: "boolean", default: false },
     "dry-run": { type: "boolean", default: false },
@@ -25,7 +46,7 @@ const { values } = parseArgs({
   },
 })
 
-if (values.help) {
+if (import.meta.main && values.help) {
   console.log(`
 Usage: bun script/github/close-prs.ts [options]
 
@@ -55,12 +76,12 @@ Examples:
   process.exit(0)
 }
 
-if (values.execute && values["dry-run"]) {
+if (import.meta.main && values.execute && values["dry-run"]) {
   console.error("Use either --execute or --dry-run, not both")
   process.exit(1)
 }
 
-const token = await requireToken()
+const token = import.meta.main ? await requireToken() : ""
 const repo = requireRepo(values.repo)
 const threshold = requirePositiveInteger("threshold", values.threshold)
 const ageMonths = requirePositiveInteger("age-months", values["age-months"])
@@ -144,7 +165,8 @@ async function main() {
   console.log(`Cutoff: ${cutoff.toISOString()}`)
   console.log(`Threshold: fewer than ${threshold} positive reactions`)
 
-  const prs = await fetchOpenPullRequests()
+  const requestOptions = createRequestContext({ repo, headers })
+  const prs = await fetchOpenPullRequests(requestOptions)
   const recentCount = prs.filter((pr) => new Date(pr.createdAt) >= cutoff).length
   const matching = prs
     .map((pr) => ({ ...pr, positiveReactions: positiveReactionCount(pr) }))
@@ -172,23 +194,25 @@ async function main() {
     return
   }
 
-  await ensureCleanupLabel()
+  await ensureCleanupLabel(requestOptions)
 
   console.log(`\nCommenting and closing ${selected.length} PRs...`)
   for (const pr of selected) {
-    await closePullRequest(pr)
+    await closePullRequest(pr, requestOptions)
     if (sleepMs > 0) await sleep(sleepMs)
   }
   console.log(`Closed ${selected.length} PRs`)
 }
 
-async function fetchOpenPullRequests() {
+export async function fetchOpenPullRequests(input: RequestOptions) {
+  const context = createRequestContext(input)
   const prs: PullRequest[] = []
   let endCursor: string | null = null
 
   while (true) {
-    const page = await graphql({
-      query: `query($owner: String!, $name: String!, $endCursor: String) {
+    const page = await graphql(
+      {
+        query: `query($owner: String!, $name: String!, $endCursor: String) {
         rateLimit {
           cost
           remaining
@@ -221,11 +245,13 @@ async function fetchOpenPullRequests() {
         }
       }`,
       variables: {
-        owner: repo.owner,
-        name: repo.name,
+        owner: context.repo.owner,
+        name: context.repo.name,
         endCursor,
       },
-    })
+      },
+      context,
+    )
 
     prs.push(...page.repository.pullRequests.nodes)
     console.log(
@@ -243,67 +269,70 @@ async function fetchOpenPullRequests() {
   }
 }
 
-async function graphql(input: { query: string; variables: Record<string, string | null> }) {
-  const response = await githubRequest("/graphql", {
+async function graphql(input: { query: string; variables: Record<string, string | null> }, context: RequestContext) {
+  const { response, signal } = await githubRequest("/graphql", {
     method: "POST",
     body: JSON.stringify(input),
-  })
-  const body = (await response.json()) as GraphqlResponse
+  }, context)
+  const body = (await readBoundedJson(response, signal, "GitHub GraphQL")) as GraphqlResponse
   if (body.errors?.length)
     throw new Error(`GitHub GraphQL error: ${body.errors.map((error) => error.message).join(", ")}`)
   if (!body.data) throw new Error("GitHub GraphQL response did not include data")
   return body.data
 }
 
-async function closePullRequest(pr: CleanupCandidate) {
-  await githubRequest(`/repos/${repo.owner}/${repo.name}/issues/${pr.number}/comments`, {
+async function closePullRequest(pr: CleanupCandidate, context: RequestContext) {
+  await githubRequest(`/repos/${context.repo.owner}/${context.repo.name}/issues/${pr.number}/comments`, {
     method: "POST",
     body: JSON.stringify({ body: message }),
-  })
-  await githubRequest(`/repos/${repo.owner}/${repo.name}/pulls/${pr.number}`, {
+  }, context)
+  await githubRequest(`/repos/${context.repo.owner}/${context.repo.name}/pulls/${pr.number}`, {
     method: "PATCH",
     body: JSON.stringify({ state: "closed" }),
-  })
-  await githubRequest(`/repos/${repo.owner}/${repo.name}/issues/${pr.number}/labels`, {
+  }, context)
+  await githubRequest(`/repos/${context.repo.owner}/${context.repo.name}/issues/${pr.number}/labels`, {
     method: "POST",
     body: JSON.stringify({ labels: [cleanupLabel] }),
-  })
+  }, context)
   console.log(`Closed #${pr.number} positive=${pr.positiveReactions} ${pr.url}`)
 }
 
-async function ensureCleanupLabel() {
-  const response = await fetch(
-    `https://api.github.com/repos/${repo.owner}/${repo.name}/labels/${encodeURIComponent(cleanupLabel)}`,
+async function ensureCleanupLabel(context: RequestContext) {
+  const response = await context.fetchImpl(
+    `https://api.github.com/repos/${context.repo.owner}/${context.repo.name}/labels/${encodeURIComponent(cleanupLabel)}`,
     {
-      headers,
+      headers: context.headers,
+      signal: AbortSignal.timeout(context.timeouts.ensureCleanupLabel),
     },
   )
   if (response.ok) return
   if (response.status !== 404)
     throw new Error(`Failed to check cleanup label: ${response.status} ${response.statusText}`)
 
-  await githubRequest(`/repos/${repo.owner}/${repo.name}/labels`, {
+  await githubRequest(`/repos/${context.repo.owner}/${context.repo.name}/labels`, {
     method: "POST",
     body: JSON.stringify({
       name: cleanupLabel,
       color: "ededed",
       description: "PR was closed by automated cleanup",
     }),
-  })
+  }, context)
 }
 
-async function githubRequest(path: string, init: RequestInit, attempt = 0): Promise<Response> {
-  const response = await fetch(path.startsWith("https://") ? path : `https://api.github.com${path}`, {
+async function githubRequest(path: string, init: RequestInit, context: RequestContext, attempt = 0) {
+  const signal = AbortSignal.timeout(context.timeouts.githubRequest)
+  const response = await context.fetchImpl(path.startsWith("https://") ? path : `https://api.github.com${path}`, {
     ...init,
     headers: {
-      ...headers,
+      ...context.headers,
       ...init.headers,
     },
+    signal,
   })
 
-  if (response.ok) return response
+  if (response.ok) return { response, signal }
 
-  const body = await response.text()
+  const body = await readBoundedText(response, signal, "GitHub API error")
   const retryAfter = response.headers.get("retry-after")
   const reset = response.headers.get("x-ratelimit-reset")
   const retryMs = retryAfter
@@ -319,10 +348,85 @@ async function githubRequest(path: string, init: RequestInit, attempt = 0): Prom
   if ((response.status === 403 || response.status === 429 || response.status >= 500) && retryMs > 0 && attempt < 10) {
     console.warn(`GitHub request failed; sleeping ${Math.ceil(retryMs / 1000)}s before retry ${attempt + 1}`)
     await sleep(retryMs)
-    return githubRequest(path, init, attempt + 1)
+    return githubRequest(path, init, context, attempt + 1)
   }
 
   throw new Error(`GitHub request failed: ${response.status} ${response.statusText}\n${body}`)
+}
+
+function createRequestContext(input: RequestOptions): RequestContext {
+  return {
+    ...input,
+    fetchImpl: input.fetchImpl ?? fetch,
+    timeouts: { ...CLOSE_PRS_REQUEST_TIMEOUTS, ...input.timeouts },
+  }
+}
+
+async function readBoundedJson(response: Response, signal: AbortSignal, operation: string): Promise<unknown> {
+  return JSON.parse(
+    new TextDecoder().decode(
+      (await readBoundedBody(response, signal, operation, CLOSE_PRS_RESPONSE_MAX_BYTES)).bytes,
+    ),
+  )
+}
+
+async function readBoundedText(response: Response, signal: AbortSignal, operation: string): Promise<string> {
+  const body = await readBoundedBody(response, signal, operation, CLOSE_PRS_ERROR_BODY_MAX_BYTES, true)
+  return `${new TextDecoder().decode(body.bytes)}${body.truncated ? `\n[truncated after ${CLOSE_PRS_ERROR_BODY_MAX_BYTES} bytes]` : ""}`
+}
+
+async function readBoundedBody(
+  response: Response,
+  signal: AbortSignal,
+  operation: string,
+  maxBytes: number,
+  truncate = false,
+) {
+  if (!response.body) return { bytes: new Uint8Array(), truncated: false }
+  const declared = Number(response.headers.get("content-length"))
+  if (!truncate && Number.isFinite(declared) && declared > maxBytes) {
+    await response.body.cancel().catch(() => undefined)
+    throw new Error(`${operation} response exceeded ${maxBytes} bytes`)
+  }
+
+  const reader = response.body.getReader()
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
+  signal.addEventListener("abort", abort, { once: true })
+  if (signal.aborted) abort()
+  try {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    let truncatedBody = false
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      if (size + result.value.byteLength > maxBytes) {
+        if (!truncate) {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(`${operation} response exceeded ${maxBytes} bytes`)
+        }
+        const remaining = maxBytes - size
+        if (remaining > 0) chunks.push(result.value.subarray(0, remaining))
+        size = maxBytes
+        truncatedBody = true
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+      size += result.value.byteLength
+      chunks.push(result.value)
+    }
+    signal.throwIfAborted()
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return { bytes, truncated: truncatedBody }
+  } finally {
+    signal.removeEventListener("abort", abort)
+    reader.releaseLock()
+  }
 }
 
 function positiveReactionCount(pr: PullRequest) {
@@ -387,7 +491,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-void main().catch((error) => {
-  console.error("Error:", error)
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error("Error:", error)
+    process.exit(1)
+  })
+}
