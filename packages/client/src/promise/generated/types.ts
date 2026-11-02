@@ -6670,6 +6670,10 @@ export type ServerCompletionsEmbeddingsInput = { readonly payload: { readonly [x
 
 export type ServerCompletionsEmbeddingsOutput = any
 
+export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsMessagesOutput = any
+
 export type ServerCompletionsModelsOutput = any
 
 export type ServerCompletionsModelInput = { readonly id: { readonly id: string }["id"] }

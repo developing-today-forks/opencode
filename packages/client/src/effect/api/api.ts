@@ -1439,6 +1439,12 @@ export type ServerCompletionsEmbeddingsOperation<E = never> = (
   input: ServerCompletionsEmbeddingsInput,
 ) => Effect.Effect<ServerCompletionsEmbeddingsOutput, E>
 
+export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsMessagesOutput = unknown
+export type ServerCompletionsMessagesOperation<E = never> = (
+  input: ServerCompletionsMessagesInput,
+) => Effect.Effect<ServerCompletionsMessagesOutput, E>
+
 export type ServerCompletionsModelsOutput = unknown
 export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
 
@@ -1458,6 +1464,7 @@ export interface ServerCompletionsApi<E = never> {
   readonly chat: ServerCompletionsChatOperation<E>
   readonly responses: ServerCompletionsResponsesOperation<E>
   readonly embeddings: ServerCompletionsEmbeddingsOperation<E>
+  readonly messages: ServerCompletionsMessagesOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
   readonly model: ServerCompletionsModelOperation<E>
   readonly modelRef: ServerCompletionsModelRefOperation<E>

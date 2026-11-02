@@ -115,6 +115,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsMessagesInput,
+  ServerCompletionsMessagesOutput,
   ServerCompletionsModelsOutput,
   ServerCompletionsModelInput,
   ServerCompletionsModelOutput,
@@ -1244,6 +1246,18 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/v1/embeddings`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      messages: (input: ServerCompletionsMessagesInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsMessagesOutput>(
+          {
+            method: "POST",
+            path: `/v1/messages`,
             body: input["payload"],
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 503],

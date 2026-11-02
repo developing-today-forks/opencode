@@ -52,6 +52,20 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
     ),
   )
   .add(
+    HttpApiEndpoint.post("completions.messages", "/v1/messages", {
+      payload: Schema.Record(Schema.String, Schema.Unknown),
+      success: Schema.Unknown,
+      error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.messages",
+        summary: "Create a message (Anthropic-compatible)",
+        description:
+          "The universal door in the Anthropic Messages dialect: the same models the other doors serve — route references and direct catalog provider/model refs — resolved in-process through the server's own route and provider resolution; no session is created or stored. Answers in the Anthropic Messages wire format, streamed as typed SSE events (message_start, content_block_*, message_delta, message_stop) when the payload asks for it. Server authorization is the server's own, as on the other doors; no Anthropic-style x-api-key handling is added.",
+      }),
+    ),
+  )
+  .add(
     HttpApiEndpoint.get("completions.models", "/v1/models", {
       success: Schema.Unknown,
     }).annotateMerge(
