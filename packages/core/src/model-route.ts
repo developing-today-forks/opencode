@@ -2227,18 +2227,23 @@ export const nextTarget = (
      * below every non-demoted tier instead, keeping its weight order among the demoted, and still
      * serves as last resort. A group is demoted only when every door under it is. Other modes never
      * read this. */
+    /** Tier keys are rounded to 12 decimal places: a group's weight averages its leaves'
+     * adjusted weights, so (0.1 + 0.1 + 0.1) / 3 lands on 0.10000000000000002 while an
+     * equally-weighted leaf sits at exactly 0.1 — computation noise must not split one
+     * tier in two (#1421). */
+    const tierKey = (weight: number) => Math.round(weight * 1e12) / 1e12
     const tiers =
       node.selection === "round-robin"
         ? node.children.map((child, position) => {
             const base = node.weights[position] ?? 1
             if (child.leaf !== undefined)
               return {
-                weight: traces[position]?.adjustment ?? base,
+                weight: tierKey(traces[position]?.adjustment ?? base),
                 demoted: demoted(definition.targets[child.leaf], now, credentialOf?.(child.leaf)),
               }
             if (child.node !== undefined)
               return {
-                weight: base * factor(child.node, rules, nodePath, "adjustment"),
+                weight: tierKey(base * factor(child.node, rules, nodePath, "adjustment")),
                 demoted: allDemoted(child.node),
               }
             return { weight: base, demoted: false }

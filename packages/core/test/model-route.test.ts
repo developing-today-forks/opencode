@@ -1506,8 +1506,37 @@ describe("ModelRoute round-robin tiers (#1122)", () => {
     expect(ModelRoute.orderTargets(leafFirst, all, undefined, false)).toEqual([2, 0, 1])
   })
 
-  test("a group whose every door is demoted drops below the live tiers as one demoted member", () => {
-    const a = leaf("ga")
+  test("float-noise tier weights share one tier: an averaged group rotates with its equal leaf (#1421)", () => {
+    const targets = [leaf("a"), leaf("b"), leaf("c"), leaf("d")]
+    const route = {
+      id: "tier-float",
+      targets,
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        {
+          selection: "round-robin" as const,
+          weights: [1, 1],
+          schedules: [{ factor: 0.1 }],
+          children: [{ node: 1 }, { leaf: 3 }],
+        },
+        {
+          routeID: "inner",
+          selection: "round-robin" as const,
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    } as unknown as ModelRoute.Definition
+    const all = new Set([0, 1, 2, 3])
+    ModelRoute.resetSelection()
+    // The group averages (0.1 + 0.1 + 0.1) / 3 = 0.10000000000000002 while the
+    // direct leaf sits at exactly 0.1: computation noise must not split the tier.
+    const heads = ["f1", "f2", "f3", "f4", "f5", "f6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 3, 1, 3, 2, 3])
+  })
+
+  test("a group whose every door is demoted drops below the live tiers as one demoted member", () => {    const a = leaf("ga")
     const b = leaf("gb")
     const route = {
       id: "tier-group-demoted",
