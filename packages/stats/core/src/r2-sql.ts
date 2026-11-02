@@ -1,8 +1,14 @@
 import { Context, Effect, Layer, Schedule, Schema } from "effect"
 import { Resource } from "sst/resource"
+import { readBoundedResponseText } from "@opencode/util/http-body"
 
 const R2_SQL_MAX_ROWS = 10_000
 const R2_SQL_TIMEOUT_MS = 15 * 60_000
+// The row limit bounds count, not bytes. A page holds at most R2_SQL_MAX_ROWS
+// aggregate rows of short string/number values, so even a generous ~1 KiB per
+// row stays near 10 MiB; 16 MiB leaves headroom for wide rows while refusing
+// an unbounded or malformed body instead of buffering it whole.
+export const R2_SQL_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 const R2SqlValue = Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null])
 const R2SqlResponse = Schema.Struct({
   success: Schema.Boolean,
@@ -100,6 +106,26 @@ ORDER BY ${keys.join(", ")}
 LIMIT ${R2_SQL_MAX_ROWS}`
 }
 
+// Exported for tests: Bun.fetch is not stubbable (readonly, non-configurable),
+// so the bounded read is exercised directly instead of through fetchRows.
+export const readR2SqlResponseBody = (response: Response) =>
+  Effect.tryPromise({
+    try: () =>
+      readBoundedResponseText(
+        response,
+        R2_SQL_MAX_RESPONSE_BYTES,
+        () =>
+          new R2SqlQueryError({
+            message: `R2 SQL stats response exceeded the ${R2_SQL_MAX_RESPONSE_BYTES} byte limit`,
+            status: response.status,
+          }),
+      ),
+    catch: (cause) =>
+      cause instanceof R2SqlQueryError
+        ? cause
+        : new R2SqlQueryError({ message: "Failed to read R2 SQL stats response", status: response.status, cause }),
+  })
+
 const fetchRows = Effect.fn("R2Sql.fetchRows")(function* (query: string) {
   const startedAt = Date.now()
   const response = yield* Effect.tryPromise({
@@ -127,11 +153,7 @@ const fetchRows = Effect.fn("R2Sql.fetchRows")(function* (query: string) {
         cause,
       }),
   })
-  const body = yield* Effect.tryPromise({
-    try: () => response.text(),
-    catch: (cause) =>
-      new R2SqlQueryError({ message: "Failed to read R2 SQL stats response", status: response.status, cause }),
-  })
+  const body = yield* readR2SqlResponseBody(response)
   const decoded = yield* decodeResponse(body).pipe(
     Effect.mapError(
       (cause) =>
