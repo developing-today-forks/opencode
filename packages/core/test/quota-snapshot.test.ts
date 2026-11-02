@@ -269,6 +269,43 @@ describe("QuotaSnapshot", () => {
     expect(snapshots.every((snapshot) => snapshot.percent === 25)).toBe(true)
   })
 
+  test("gate derivation ignores ended plans: an expired plan's full smaller window does not gate (#1340)", () => {
+    // The composition refreshQuotaGate uses: only gate-feeding plans reach deriveAll.
+    // The expired/cancelled plans carry a tiny window that usage has completely filled;
+    // the active plan's larger window for the same provider is nearly empty.
+    const small = { ...window, limit: 10 }
+    const plans = [
+      { ...plan, id: "anthropic-current", quotas: [{ ...window, limit: 1000 }] },
+      { ...plan, id: "anthropic-expired", status: "expired", quotas: [small] },
+      { ...plan, id: "anthropic-cancelled", status: "cancelled", quotas: [small] },
+    ] as ModelPlan.Plan[]
+    const usage = (candidate: ModelPlan.Plan) => totals({ requests: 10 })
+    const snapshots = QuotaSnapshot.deriveAll(plans.filter(ModelPlan.feedsGate), usage, now, { now })
+    expect(snapshots.map((snapshot) => snapshot.planID)).toEqual(["anthropic-current"])
+    const gating = QuotaSnapshot.gatingSnapshot(snapshots, now)
+    expect(gating?.planID).toBe("anthropic-current")
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(false)
+    // Without the filter the ended plans would derive known-full snapshots of their own.
+    const unfiltered = QuotaSnapshot.deriveAll(plans, usage, now, { now })
+    expect(
+      unfiltered
+        .filter((snapshot) => snapshot.planID !== "anthropic-current")
+        .every((snapshot) => QuotaSnapshot.isKnownFull(snapshot, now)),
+    ).toBe(true)
+  })
+
+  test("a plan whose status is unknown still feeds the gate (#1340)", () => {
+    // `unknown` was never verified as ended, so it keeps gating until it is marked ended.
+    const plans = [{ ...plan, id: "anthropic-unverified", status: "unknown", quotas: [window] }] as ModelPlan.Plan[]
+    expect(plans.filter(ModelPlan.feedsGate).map((candidate) => candidate.id)).toEqual(["anthropic-unverified"])
+    const snapshots = QuotaSnapshot.deriveAll(plans.filter(ModelPlan.feedsGate), () => totals({ requests: 200 }), now, {
+      now,
+    })
+    const gating = QuotaSnapshot.gatingSnapshot(snapshots, now)
+    expect(gating?.planID).toBe("anthropic-unverified")
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(true)
+  })
+
   describe("isKnownFull (#6 gate)", () => {
     const snap = (overrides: Partial<QuotaSnapshot.Snapshot> = {}): QuotaSnapshot.Snapshot => ({
       planID: "anthropic-max",

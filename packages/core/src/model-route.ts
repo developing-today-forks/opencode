@@ -1086,6 +1086,44 @@ export const observeProviderQuota = (
   }
 }
 
+/** Reconciles retained gate state with the plans that still feed the gate (#1340): an
+ * ended plan derives no replacement snapshot, so without this step a known-full snapshot
+ * it produced would gate its credential/provider indefinitely on the feed paths that
+ * produce no new snapshot (every plan ended, or no gating snapshot derived). Only
+ * plan-derived state attributable to a plan outside `livePlanIDs` is cleared: reactive
+ * `attempt:` snapshots are attempt evidence, not plan capacity, and a durable balance
+ * baseline is removed only when its own grant's plan has also ended — a baseline whose
+ * grant is still live keeps blocking until a fresh snapshot releases it, so a genuinely
+ * exhausted credential is never re-admitted just because a neighbouring plan ended. */
+export const reconcileQuotaGate = (providerID: string, livePlanIDs: ReadonlySet<string>) => {
+  for (const [credentialID, state] of credentialQuota) {
+    if (state.target.providerID !== providerID) continue
+    if (state.snapshot.planID.startsWith("attempt:")) continue
+    if (livePlanIDs.has(state.snapshot.planID)) continue
+    credentialQuota.delete(credentialID)
+    const record = adjustments.find((item) => item.id === credentialBaselineID(credentialID))
+    const grantPlan = (state.balanceHold?.grant ?? record?.balanceGrant)?.split("\n")[0]
+    if (grantPlan !== undefined && !livePlanIDs.has(grantPlan)) removeAdjustment(credentialBaselineID(credentialID))
+    if (state.gated) logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  }
+  const state = providerQuota.get(providerID)
+  if (!state || state.snapshot.planID.startsWith("attempt:") || livePlanIDs.has(state.snapshot.planID)) return
+  providerQuota.delete(providerID)
+  const record = adjustments.find((item) => item.id === `quota:${providerID}`)
+  if (record) {
+    const grantPlan = record.balanceGrant?.split("\n")[0]
+    // The provider skip id is shared with the reactive gate, whose records carry an
+    // attempt-reported note: only the proactive plan-derived record is this gate's to clear.
+    if (
+      grantPlan !== undefined
+        ? !livePlanIDs.has(grantPlan)
+        : record.note?.startsWith("quota exhausted (proactive snapshot)")
+    )
+      removeAdjustment(record.id)
+  }
+  if (state.gated) logHealth(state.target, "quota-readmitted", `provider:${providerID}`)
+}
+
 let lastQuotaFeedAt = 0
 
 export const resetQuotaFeed = () => {
