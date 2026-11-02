@@ -26,16 +26,35 @@ permissions:
 jobs:
   main-gate:
     # Phase 3 release gate (code#1782): no publish step runs from a SHA
-    # whose main-gate is not green — see .github/ci-policy.md.
+    # whose main-gate is not green — see .github/ci-policy.md. The
+    # packaged code is the checked-out SHA (gated by the first check);
+    # the version it is published as comes from the newest vscode-v*
+    # tag (see sdks/vscode/script/publish), so that tag's peeled commit
+    # is gated too and the publish job pins the same tag.
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/main-gate
         with:
+          override: ${{ vars.MAIN_GATE_OVERRIDE }}
+      - run: git fetch --force --tags
+      - id: release-tag
+        run: |
+          tag="$(git tag --sort=committerdate | grep -E '^vscode-v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
+          if [ -z "$tag" ]; then echo "::error::main-gate: no vscode-v* release tag found to publish"; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse "$tag^{commit}")" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/main-gate
+        with:
+          sha: ${{ steps.release-tag.outputs.sha }}
           override: ${{ vars.MAIN_GATE_OVERRIDE }}
 
   publish:
@@ -59,7 +78,7 @@ jobs:
 
       - name: Publish
         run: |
-          ./script/publish
+          ./script/publish "${{ needs.main-gate.outputs.tag }}"
         working-directory: ./sdks/vscode
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

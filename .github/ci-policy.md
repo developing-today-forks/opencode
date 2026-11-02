@@ -72,7 +72,13 @@ publish (fail-closed). Enforcement is the reusable
 `.github/actions/main-gate` check: `publish.yml` gates its `version`
 job on it (every other job follows through `needs`), and
 `publish-vscode.yml` and `publish-github-action.yml` gate their
-`publish` jobs on it the same way. `release-github-action.yml` only
+`publish` jobs on it the same way, with one refinement: those
+publishers take their release from the newest `vscode-v*` /
+`github-v*` tag (by committer date), not from the run's SHA, so
+their gate jobs resolve that tag once, gate its peeled commit (for
+vscode, the checked-out code's SHA is gated as well), and pass the
+same tag to the publish script as a pinned argument — the gated
+commit is always the published one. `release-github-action.yml` only
 cuts the `github-v*` tag and publishes nothing itself; the publish it
 feeds is gated, so it carries no separate gate. Because the main tier
 runs concurrently with a push-triggered publish, a push whose gate
