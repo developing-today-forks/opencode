@@ -319,7 +319,20 @@ export function transformSession(input: TransformInput): TransformResult {
         if (subtasks.length > 0 && visible.length === 0 && files.length === 0 && agents.length === 0) return []
         const ordinary = visible.filter((part) => !part.synthetic)
         const synthetic = visible.filter((part) => part.synthetic)
-        const attachments = files.flatMap((part) => migrateFile(part))
+        const attachments = files.flatMap((part) => {
+          const migrated = migrateFile(part)
+          if (!migrated) return []
+          if ("_tag" in migrated) {
+            warnings.push({
+              reason: "invalid-file-data-url",
+              sessionID: input.session.id,
+              messageID: item.row.id,
+              partID: part.id,
+            })
+            return []
+          }
+          return [migrated]
+        })
         const unavailable = files.flatMap((part) => (!part.url.startsWith("data:") ? [unavailableFile(part)] : []))
         const text = owned
           .flatMap((part) => {
@@ -1037,26 +1050,33 @@ function normalizeFinish(finish: string | undefined) {
 }
 
 function migrateFile(part: SessionV1.FilePart) {
-  if (!part.url.startsWith("data:")) return []
+  if (!part.url.startsWith("data:")) return undefined
   const comma = part.url.indexOf(",")
-  if (comma < 0) return []
+  if (comma < 0) return undefined
   const header = part.url.slice(0, comma)
   const payload = part.url.slice(comma + 1)
   const data = header.endsWith(";base64")
     ? Buffer.from(payload, "base64").toString("base64")
-    : Buffer.from(decodeURIComponent(payload)).toString("base64")
-  return [
-    {
-      data,
-      mime: part.mime,
-      source:
-        part.source?.type === "resource" ? { type: "uri" as const, uri: part.source.uri } : { type: "inline" as const },
-      ...(part.filename ? { name: part.filename } : {}),
-      ...(part.source
-        ? { mention: { text: part.source.text.value, start: part.source.text.start, end: part.source.text.end } }
-        : {}),
-    },
-  ]
+    : decodeFilePayload(payload)
+  if (data === undefined) return { _tag: "invalid-data-url" } as const
+  return {
+    data,
+    mime: part.mime,
+    source:
+      part.source?.type === "resource" ? { type: "uri" as const, uri: part.source.uri } : { type: "inline" as const },
+    ...(part.filename ? { name: part.filename } : {}),
+    ...(part.source
+      ? { mention: { text: part.source.text.value, start: part.source.text.start, end: part.source.text.end } }
+      : {}),
+  }
+}
+
+function decodeFilePayload(payload: string) {
+  try {
+    return Buffer.from(decodeURIComponent(payload)).toString("base64")
+  } catch {
+    return undefined
+  }
 }
 
 function unavailableFile(part: SessionV1.FilePart) {
