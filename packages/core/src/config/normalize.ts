@@ -499,6 +499,15 @@ function normalizeExperimental(
         )
         if (value !== undefined) result.shell_timeout = value
       }
+      if (own(experimental, "model_route_demotion")) {
+        const value = decodeEncoded(
+          ConfigExperimental.Info.fields.model_route_demotion,
+          experimental.model_route_demotion,
+          ["experimental", "model_route_demotion"],
+          diagnostics,
+        )
+        if (value !== undefined) result.model_route_demotion = value
+      }
       // Routing config (#1140): the canonical shape is `experimental.routes.*`; the flat
       // `experimental.model_routes` / `provider_routes` / `model_route_*` keys are the
       // deprecated spellings of the same keys and fold into the nested shape here, so

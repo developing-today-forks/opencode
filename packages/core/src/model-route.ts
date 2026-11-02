@@ -728,6 +728,10 @@ const DEFAULT_SETTINGS: Settings = {
 
 let settings: Settings = DEFAULT_SETTINGS
 
+/** Sets the process-wide fallback layer of `Settings`. Since #1151 the demotion half of
+ * this is only a fallback: a Location's `experimental.model_route_demotion` config,
+ * registered per Location through `onDemotionConfig`, overrides it field by field for
+ * that Location's traffic, and the compiled defaults apply where neither is set. */
 export const configure = (
   next: Partial<{ escalation: Partial<Settings["escalation"]>; quota: Partial<Settings["quota"]> }>,
 ) => {
@@ -805,6 +809,84 @@ const activeSettings = (): Settings => {
 
 export const currentSettings = () => activeSettings()
 
+/** The quota demotion policy as config supplies it (#1151): `experimental.model_route_demotion
+ * { threshold, window_ms }` in the model-routes plugin's shape. Both fields are optional; an
+ * unset field keeps the layer below it. */
+export interface DemotionConfig {
+  readonly threshold?: number
+  readonly windowMs?: number
+}
+
+/** A demotion policy with every field resolved: the values `demoted` judges by. */
+export interface DemotionPolicy {
+  readonly threshold: number
+  readonly windowMs: number
+}
+
+/** The demotion defaults: today's hardcoded values, so an unconfigured Location behaves
+ * exactly as the machinery always has. */
+export const DEFAULT_DEMOTION_POLICY: DemotionPolicy = {
+  threshold: DEFAULT_SETTINGS.quota.demoteAfter,
+  windowMs: DEFAULT_SETTINGS.quota.windowMs,
+}
+
+/** Demotion policy readers keyed by Location directory (#1151, design §6 of the façades
+ * spec). The model-routes config plugin runs once per Location graph, so each registration
+ * belongs to that graph's Location alone: a module-global setter (the old shape of
+ * `ModelRoute.configure` for this policy) would let whichever Location loaded last rewrite
+ * every other Location's demotion behaviour. */
+const demotionReaders = new Map<string, () => DemotionConfig | undefined>()
+
+/** Registers where one Location's demotion policy comes from (the model-routes config
+ * plugin, keyed by that Location's directory). Read lazily at every use, so a config
+ * reload is honored without re-registering. The empty key is the unscoped registration
+ * (test seam and single-Location hosts). Returns the function that removes this
+ * registration again, for when the Location's graph closes. */
+export const onDemotionConfig = (read: () => DemotionConfig | undefined, location = "") => {
+  demotionReaders.set(location, read)
+  return () => {
+    if (demotionReaders.get(location) === read) demotionReaders.delete(location)
+  }
+}
+
+/** The demotion config in force for a Location. A caller that knows its Location gets
+ * exactly that Location's reader. An unscoped read serves the unscoped registration, or
+ * the single registered Location when there is only one; with several Locations an
+ * unscoped read cannot know which one it serves, so it gets no Location's config rather
+ * than another Location's policy. */
+const demotionConfig = (location?: string): DemotionConfig | undefined => {
+  if (location !== undefined) return demotionReaders.get(location)?.()
+  const unscoped = demotionReaders.get("")
+  if (unscoped) return unscoped()
+  if (demotionReaders.size === 1) return demotionReaders.values().next().value?.()
+  return undefined
+}
+
+/** The demotion policy in force for a Location: its `model_route_demotion` config over
+ * the fallback layer (`configure()` over the compiled defaults), field by field. */
+export const demotionPolicy = (location?: string): DemotionPolicy => {
+  const config = demotionConfig(location)
+  const fallback = activeSettings().quota
+  return {
+    threshold: config?.threshold ?? fallback.demoteAfter,
+    windowMs: config?.windowMs ?? fallback.windowMs,
+  }
+}
+
+/** The widest demotion window any registered Location judges by. Quota events are one
+ * shared history (the hot cache over the route_attempt ledger's failure records), so
+ * recording retains the union of windows; `demoted` applies the judging Location's own
+ * window over what is retained. With nothing configured this is exactly the fallback
+ * window, as before. */
+const retainedDemotionWindow = () => {
+  let window = activeSettings().quota.windowMs
+  for (const read of demotionReaders.values()) {
+    const configured = read()?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  return window
+}
+
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
  * target-level read would call a repeatedly failing credential steady forever. */
@@ -827,18 +909,20 @@ export const escalates = (target: Model.Ref, credentialID?: string) =>
 const quotaEvents = new Map<string, number[]>()
 
 /** True when a target has hit its quota errors often enough recently to be put last. With a
- * credentialID, only that credential's quota errors count: the demotion is per credential (#6). */
-export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string) => {
-  const quota = activeSettings().quota
+ * credentialID, only that credential's quota errors count: the demotion is per credential (#6).
+ * The threshold and window are the demotion policy for the target's Location (#1151) when
+ * the caller names one, resolved per Location in `demotionPolicy`. */
+export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: string, location?: string) => {
+  const policy = demotionPolicy(location)
   const recent = (quotaEvents.get(credentialID ? credentialKey(target, credentialID) : key(target)) ?? []).filter(
-    (at) => now - at <= quota.windowMs,
+    (at) => now - at <= policy.windowMs,
   )
-  return recent.length >= quota.demoteAfter
+  return recent.length >= policy.threshold
 }
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= activeSettings().quota.windowMs)
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
