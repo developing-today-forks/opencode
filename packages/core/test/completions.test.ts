@@ -3,7 +3,7 @@ import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { AISDK } from "@opencode/core/aisdk"
-import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
+import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, messagesBody, messagesErrorBody, messagesErrorFrame, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
 import { Integration } from "@opencode/core/integration"
 import { ModelResolver } from "@opencode/core/model-resolver"
@@ -427,6 +427,16 @@ describe("messages door translation", () => {
     const body = messagesBody({ id: "msg_x", model: "workhorse", response }) as any
     expect(body.stop_reason).toBe("max_tokens")
     expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 64 })
+  })
+
+  test("messages error body and frame use the Anthropic error envelope, not the OpenAI one", () => {
+    expect(messagesErrorBody("boom", "invalid_request_error")).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message: "boom" },
+    })
+    const frame = messagesErrorFrame("boom")
+    expect(frame).toContain("event: error")
+    expect(frame).toContain('"type":"error","error":{"type":"api_error","message":"boom"}')
   })
 
   test("messages stream translator emits the Anthropic event grammar in order", () => {

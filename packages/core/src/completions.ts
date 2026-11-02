@@ -1053,8 +1053,15 @@ const messagesFrame = (type: string, data: Record<string, unknown>) =>
 
 export const PING_FRAME = messagesFrame("ping", {})
 
+/**
+ * Anthropic error envelope for this door: `{type: "error", error:
+ * {type, message}}` — deliberately NOT the OpenAI-shaped `errorBody`
+ * the chat/responses doors use.
+ */
+export const messagesErrorBody = (message: string, type: string) => ({ type: "error", error: { type, message } })
+
 export const messagesErrorFrame = (message: string) =>
-  `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`
+  `event: error\ndata: ${JSON.stringify(messagesErrorBody(message, "api_error"))}\n\n`
 
 interface MessagesBlockSlot {
   readonly index: number

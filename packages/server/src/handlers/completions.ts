@@ -26,6 +26,15 @@ const serviceError = (error: Generate.Error) =>
     ? errorResponse(400, error.message, "invalid_request_error")
     : errorResponse(502, error.message, "server_error")
 
+const messagesErrorResponse = (status: number, message: string, type: string) =>
+  HttpServerResponse.jsonUnsafe(Completions.messagesErrorBody(message, type), { status })
+
+const messagesServiceError = (error: Generate.Error) =>
+  error._tag === "Generate.ModelSelectionError"
+    ? messagesErrorResponse(400, error.message, "invalid_request_error")
+    : messagesErrorResponse(502, error.message, "api_error")
+
+
 export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions", (handlers) =>
   Effect.gen(function* () {
     const global = yield* Global.Service
@@ -146,12 +155,12 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             yield* awaitPlugins
             const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
             const parsed = Completions.parseMessagesRequest(body)
-            if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+            if (!parsed.ok) return messagesErrorResponse(400, parsed.error, "invalid_request_error")
             const generate = yield* Generate.Service
             const meta = { id: Completions.messageId(), model: parsed.value.modelLabel }
             if (!parsed.value.stream) {
               const result = yield* Effect.result(generate.complete(parsed.value.input))
-              if (Result.isFailure(result)) return serviceError(result.failure)
+              if (Result.isFailure(result)) return messagesServiceError(result.failure)
               return HttpServerResponse.jsonUnsafe(Completions.messagesBody({ ...meta, response: result.success }))
             }
             const translator = new Completions.MessagesStreamTranslator(meta)

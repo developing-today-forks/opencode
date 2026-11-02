@@ -435,7 +435,8 @@ it.live("rejects an unsupported content block with a 400 naming the shape", () =
       ],
     })
     expect(res.status).toBe(400)
-    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    const body = (yield* Effect.promise(() => res.json())) as { type: string; error: { message: string; type: string } }
+    expect(body.type).toBe("error")
     expect(body.error.type).toBe("invalid_request_error")
     expect(body.error.message).toContain("document")
   }),
