@@ -367,3 +367,4 @@ services/www/script/generate-openapi.ts :: const stale = (await Promise.all(targ
 services/www/script/prepare-cloudflare.ts :: const config = await Bun.file("dist/server/wrangler.json").json() :: local file read via Bun.file (filesystem), not a network response body (#1394)
 services/www/script/validate-links.ts :: const html = await Bun.file(file).text() :: local file read via Bun.file (filesystem), not a network response body (#1394)
 services/www/script/validate-links.ts :: if ((await Bun.file(target).text()).includes(`id="${id}"`)) return :: local file read via Bun.file (filesystem), not a network response body (#1394)
+packages/desktop/src/main/extension/assets.test.ts :: body: await response.text(), :: test file: read of a locally constructed Response returned by the in-process extensionAsset handler over in-memory data — not a production outbound call
