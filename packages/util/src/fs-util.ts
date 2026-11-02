@@ -213,7 +213,12 @@ export namespace FSUtil {
         for (let hop = 0; hop < 8; hop++) {
           const link = yield* fs.readLink(target).pipe(Effect.orElseSucceed(() => undefined))
           if (link === undefined) break
-          target = yield* resolve(isAbsolute(link) ? link : join(dirname(target), link))
+          // A relative link is interpreted against the link's canonical
+          // parent, not the path it was reached through: the parent itself
+          // may be a symlink, and resolve() fell back to the uncanonicalised
+          // input for the dangling target.
+          const parent = yield* resolve(dirname(target))
+          target = yield* resolve(isAbsolute(link) ? link : join(parent, link))
         }
         // A chain longer than the walk (or a loop) leaves the target still a
         // link: fail rather than rename over it and destroy the link.

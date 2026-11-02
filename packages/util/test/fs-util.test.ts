@@ -300,6 +300,23 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     fs.rmSync(directory, { recursive: true, force: true })
   })
 
+  test("dangling relative link through a symlinked parent resolves against the canonical parent", async () => {
+    const root = await dir()
+    const realHome = path.join(root, "real", "home")
+    fs.mkdirSync(realHome, { recursive: true })
+    fs.symlinkSync(path.join("..", "config"), path.join(realHome, "config"))
+    const home = path.join(root, "home")
+    fs.symlinkSync(realHome, home)
+
+    await writeAtomic(path.join(home, "config"), "created")
+
+    expect(fs.readFileSync(path.join(root, "real", "config"), "utf8")).toBe("created")
+    expect(fs.existsSync(path.join(root, "config"))).toBe(false)
+    expect(fs.lstatSync(path.join(realHome, "config")).isSymbolicLink()).toBe(true)
+    expect(fs.lstatSync(home).isSymbolicLink()).toBe(true)
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
   test("a target basename near the component-length limit still replaces", async () => {
     const directory = await dir()
     const file = path.join(directory, `${"a".repeat(240)}.txt`)
@@ -323,8 +340,10 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     } finally {
       process.umask(previous)
     }
-    expect(await mode(fresh)).toBe(0o600)
-    expect(await mode(existing)).toBe(0o600)
+    if (process.platform !== "win32") {
+      expect(await mode(fresh)).toBe(0o600)
+      expect(await mode(existing)).toBe(0o600)
+    }
     fs.rmSync(directory, { recursive: true, force: true })
   })
 
@@ -335,7 +354,7 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     fs.chmodSync(file, 0o2750)
     await writeAtomic(file, "after", { preserveOwnership: true })
     expect(fs.readFileSync(file, "utf8")).toBe("after")
-    expect(fs.statSync(file).mode & 0o7777).toBe(0o2750)
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o7777).toBe(0o2750)
     fs.rmSync(directory, { recursive: true, force: true })
   })
 })
