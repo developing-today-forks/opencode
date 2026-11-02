@@ -206,21 +206,6 @@ export const quotaFailureClassification = (
   return reason._tag === "QuotaExceeded" || balanceExhaustionText.test(text) ? "balance-exhaustion" : "rate-limit"
 }
 
-/** Assistant messages that already switched credential for a provider (#6): at most one switch
- * per provider per assistant message, so a turn cannot cycle a provider's whole credential pool. */
-const credentialSwitches = new Set<string>()
-export const CREDENTIAL_SWITCH_LIMIT = 1_000
-
-const markCredentialSwitch = (key: string) => {
-  credentialSwitches.delete(key)
-  credentialSwitches.add(key)
-  while (credentialSwitches.size > CREDENTIAL_SWITCH_LIMIT)
-    credentialSwitches.delete(credentialSwitches.values().next().value!)
-}
-
-/** Test seam for the one-switch-per-provider-per-message guard. */
-export const credentialSwitchUsed = (key: string) => credentialSwitches.has(key)
-export const clearCredentialSwitch = (key: string) => credentialSwitches.delete(key)
 
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
@@ -593,21 +578,28 @@ export const make = Effect.gen(function* () {
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
+        // Failover is not gated on the retry hook: the hook decides whether the SAME target
+        // gets another request (sameTargetRetry / the Retry outcome below), not whether the
+        // route may move on. A declined retry therefore cascades instead of killing the turn
+        // while eligible candidates remain (#1014).
+        // Output already started keeps this gate closed on purpose: partial output is already
+        // published on this assistant message, so another model's output must not be appended
+        // to it. That case cascades through the Continue outcome below when a retry is
+        // authorized -- a new assistant message whose re-selection sees the target marked
+        // failed above; a hook that declines any further request ends the turn, as instructed.
         if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
-          if (!recorded.outputStarted && retry?.retry) {
+          if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
-            // same target. The guards are cumulative: quota-class only (isQuotaFailure), no
-            // output recorded (this branch), one switch per provider per assistant message.
-            const switchKey = `${input.assistantMessageID}|${input.model.routing.target.providerID}`
-            if (
-              isQuotaFailure(llmFailure) &&
-              input.model.routing.credentialFallback &&
-              !credentialSwitchUsed(switchKey)
-            ) {
+            // same target (proximity: credential -> leaf -> sibling plan -> next route). There
+            // is no per-message switch cap: each switched resolution carries its own
+            // credentialFallback excluding every credential this chain has already served,
+            // so repeated switches walk the provider's eligible credentials in order, try
+            // each at most once, and stop when none remain --
+            // only then does the route fallback below run.
+            if (isQuotaFailure(llmFailure) && input.model.routing.credentialFallback) {
               const switched = yield* Effect.result(input.model.routing.credentialFallback())
               if (Result.isSuccess(switched) && switched.success) {
-                markCredentialSwitch(switchKey)
                 const credentialID = switched.success.routing?.credentialID
                 failover = { model: switched.success, overTo: `credential:${credentialID ?? "unknown"}` }
                 yield* Effect.logInfo("credential failover", {
