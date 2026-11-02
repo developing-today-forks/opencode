@@ -19,6 +19,24 @@ const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
     : "completion failed"
 }
 
+/**
+ * The request body as raw text plus its parsed form. The raw text is the
+ * pass-through candidate (#1146): on a dialect match Generate forwards it
+ * byte-for-byte, so the door must not round-trip it through JSON first.
+ * Unparseable bodies parse to null and fail wire validation as before.
+ */
+const requestBody = (ctx: { request: { text: Effect.Effect<string, unknown> } }) =>
+  ctx.request.text.pipe(
+    Effect.catchCause(() => Effect.succeed("")),
+    Effect.map((raw) => {
+      try {
+        return { raw, body: JSON.parse(raw) as unknown }
+      } catch {
+        return { raw, body: null }
+      }
+    }),
+  )
+
 const errorResponse = (status: number, message: string, type: string, code?: string) =>
   HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type, code), { status })
 
@@ -47,9 +65,10 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            const { raw, body } = yield* requestBody(ctx)
             const parsed = Completions.parseChatRequest(body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+            const input = { ...parsed.value.input, dialect: "chat" as const, rawBody: raw }
             const generate = yield* Generate.Service
             const meta = {
               id: Completions.completionId(),
@@ -57,13 +76,13 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               model: parsed.value.modelLabel,
             }
             if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(parsed.value.input))
+              const result = yield* Effect.result(generate.complete(input))
               if (Result.isFailure(result)) return serviceError(result.failure)
               return HttpServerResponse.jsonUnsafe(Completions.completionBody({ ...meta, response: result.success }))
             }
             const translator = new Completions.ChatStreamTranslator(meta)
             const frames = generate
-              .stream(parsed.value.input)
+              .stream(input)
               .pipe(
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
                 Stream.catchCause((cause) =>
@@ -87,7 +106,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            const { raw, body } = yield* requestBody(ctx)
             const parsed = Completions.parseResponsesRequest(body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
             const generate = yield* Generate.Service
@@ -123,6 +142,16 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               if (!chained.ok) return errorResponse(400, chained.error, "invalid_request_error")
               input = chained.input
             }
+            // Pass-through (#1146, spec §3): an unchained request may forward
+            // its raw body on a dialect match. A chained request never does —
+            // its raw body names a façade-owned previous_response_id and
+            // carries only this turn's items, while the provider needs the
+            // history the chain resolution just materialized into `input`;
+            // the store records no native/translated provenance that would
+            // license forwarding the façade-owned id upstream.
+            const generateInput = parsed.value.previousResponseId
+              ? input
+              : { ...input, dialect: "responses" as const, rawBody: raw }
             // Every completed response — streamed or not — is persisted so
             // it can be chained from. A store failure must not lose an
             // answer the provider already produced: it is logged loudly,
@@ -149,7 +178,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
                   ),
                 )
             if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(input))
+              const result = yield* Effect.result(generate.complete(generateInput))
               if (Result.isFailure(result)) return serviceError(result.failure)
               const responseBody = Completions.responsesBody({
                 ...meta,
@@ -166,7 +195,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             const failedFrame = (message: string) =>
               `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { id: meta.id, object: "response", created_at: meta.created, model: meta.model, status: "failed", output: [], error: { message } } })}\n\n`
             const frames = generate
-              .stream(input)
+              .stream(generateInput)
               .pipe(
                 // On the finish event the translator has accumulated the
                 // full text and tool calls; persist before the terminal
@@ -224,19 +253,20 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            const { raw, body } = yield* requestBody(ctx)
             const parsed = Completions.parseMessagesRequest(body)
             if (!parsed.ok) return messagesErrorResponse(400, parsed.error, "invalid_request_error")
+            const input = { ...parsed.value.input, dialect: "messages" as const, rawBody: raw }
             const generate = yield* Generate.Service
             const meta = { id: Completions.messageId(), model: parsed.value.modelLabel }
             if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(parsed.value.input))
+              const result = yield* Effect.result(generate.complete(input))
               if (Result.isFailure(result)) return messagesServiceError(result.failure)
               return HttpServerResponse.jsonUnsafe(Completions.messagesBody({ ...meta, response: result.success }))
             }
             const translator = new Completions.MessagesStreamTranslator(meta)
             const frames = generate
-              .stream(parsed.value.input)
+              .stream(input)
               .pipe(
                 Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
                 Stream.catchCause((cause) => Stream.make(Completions.messagesErrorFrame(streamErrorMessage(cause)))),

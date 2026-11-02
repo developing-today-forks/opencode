@@ -67,6 +67,15 @@ export type RequestEncoding = Schema.Schema.Type<typeof RequestEncoding>
 
 export class HttpOptions extends Schema.Class<HttpOptions>("AI.HttpOptions")({
   body: Schema.optional(JsonSchema),
+  /**
+   * Pre-encoded JSON request body, forwarded byte-for-byte by the HTTP transport instead of the
+   * body the route's protocol would compile from the canonical request (the OpenAI façade's
+   * native-shape pass-through, #1146). Only the HTTP JSON transport honors it; when set it wins
+   * over `body` (the overlay is part of compilation, and a verbatim body is never overlaid).
+   * Callers must only set it when the body's dialect is the route protocol's own dialect: the
+   * response is still decoded by that protocol, exactly as for a compiled body.
+   */
+  rawBody: Schema.optional(Schema.String),
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   query: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   /** Time allowed for the whole request, from send until the response completes. Unbounded when unset. */
@@ -93,6 +102,7 @@ export namespace HttpOptions {
 
 export const mergeHttpOptions = (...items: ReadonlyArray<HttpOptions | undefined>): HttpOptions | undefined => {
   const body = mergeJsonRecords(...items.map((item) => item?.body))
+  const rawBody = items.findLast((item) => item?.rawBody !== undefined)?.rawBody
   const headers = mergeStringRecords(...items.map((item) => item?.headers))
   const query = mergeStringRecords(...items.map((item) => item?.query))
   const timeout = items.findLast((item) => item?.timeout !== undefined)?.timeout
@@ -101,6 +111,7 @@ export const mergeHttpOptions = (...items: ReadonlyArray<HttpOptions | undefined
   const encoding = items.findLast((item) => item?.encoding !== undefined)?.encoding
   if (
     !body &&
+    rawBody === undefined &&
     !headers &&
     !query &&
     timeout === undefined &&
@@ -109,7 +120,7 @@ export const mergeHttpOptions = (...items: ReadonlyArray<HttpOptions | undefined
     encoding === undefined
   )
     return undefined
-  return new HttpOptions({ body, headers, query, timeout, headerTimeout, chunkTimeout, encoding })
+  return new HttpOptions({ body, rawBody, headers, query, timeout, headerTimeout, chunkTimeout, encoding })
 }
 
 export class GenerationOptions extends Schema.Class<GenerationOptions>("LLM.GenerationOptions")({
