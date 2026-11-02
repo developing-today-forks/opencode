@@ -60,6 +60,11 @@ packages/cli/src/run/fetch.ts :: return fetch(request, { ...init, signal }) :: b
 packages/cli/src/services/updater.ts :: const text = await response.text() :: direct response body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127
 packages/cli/src/services/updater.ts :: fetch( :: bounded at the site: call options carry AbortSignal.timeout as the signal
 packages/cli/src/util/io.ts :: const body = await response.text() :: direct response body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127
+packages/console/app/script/dev-enterprise.ts :: new Response(child.stdout).text(), :: local subprocess stream read: sf CLI stdout piped from Bun.spawn, not a network response body (#1425)
+packages/console/app/script/dev-enterprise.ts :: new Response(child.stderr).text(), :: local subprocess stream read: sf CLI stderr piped from Bun.spawn, not a network response body (#1425)
+packages/console/app/script/dev-enterprise.ts :: async fetch(request) { :: fetch handler definition (Bun.serve entry point), not an outbound call
+packages/console/app/script/dev-enterprise.ts :: const response = await fetch(accountUrl, { :: bounded at the site: call options carry AbortSignal.timeout(8000) as the signal (localhost dev-tool lookup, #1425)
+packages/console/app/script/dev-enterprise.ts :: return z.object({ account: consoleAccountSchema.nullable() }).parse(await response.json()).account :: local dev-tool read: response of the localhost Console lookup above (deadline-bounded by AbortSignal.timeout(8000)), not a remote response body (#1425)
 packages/console/app/src/component/header.tsx :: const response = await fetch(svgPath) :: no signal in the call options — unbounded outbound fetch, remaining surface in this inventory under design #1127
 packages/console/app/src/component/header.tsx :: const svgText = await response.text() :: direct response body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127
 packages/console/app/src/lib/aws.test.ts :: body: await request.clone().text(), :: test file: read of the locally constructed request body inside the mock fetch handler - not a production response body read
