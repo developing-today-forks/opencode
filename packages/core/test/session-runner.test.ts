@@ -1139,7 +1139,7 @@ describe("SessionRunnerLLM", () => {
     expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
   })
 
-  scenario("switches credential at most once per provider in one assistant message", function* (s) {
+  scenario("keeps walking to the next credential on repeated quota failures in one assistant message", function* (s) {
     ModelRoute.resetHealth()
     const options = {
       capabilities: { tools: true, input: ["text"], output: ["text"] },
@@ -1176,16 +1176,17 @@ describe("SessionRunnerLLM", () => {
     yield* s.llm.push(
       TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "also out of quota" }) })),
     )
-    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.llm.push(TestLLM.text("from the third credential", "t1"))
     yield* s.resume
 
-    // One switch total: the second quota failure moves to the fallback target instead of
-    // cycling the provider's next credential in the same message.
-    expect(switches).toBe(1)
-    expect(fallbacks).toBe(1)
+    // Proximity order (#1014): the second quota failure tries the next credential on the
+    // same provider before moving to a different target; switches walk the eligible
+    // credentials and stop only when none remain.
+    expect(switches).toBe(2)
+    expect(fallbacks).toBe(0)
     expect(s.requests).toHaveLength(3)
-    expect(String(s.requests[2]?.model.id)).toBe("replacement")
-    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    expect(String(s.requests[2]?.model.id)).toBe("third-credential")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the third credential")
   })
 
   scenario("does not switch credential on a non-quota failure", function* (s) {
