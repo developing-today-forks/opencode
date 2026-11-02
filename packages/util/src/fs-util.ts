@@ -204,7 +204,17 @@ export namespace FSUtil {
         content: string | Uint8Array,
         options?: WriteAtomicOptions,
       ) {
-        const target = yield* resolve(path)
+        const resolved = yield* resolve(path)
+        // resolve() canonicalises a live symlink, but a dangling one falls back
+        // to the link's own path — renaming there would replace the link instead
+        // of creating its referent. Follow dangling links explicitly (bounded,
+        // like a path walk) so the link survives and the referent is created.
+        let target = resolved
+        for (let hop = 0; hop < 8; hop++) {
+          const link = yield* fs.readLink(target).pipe(Effect.orElseSucceed(() => undefined))
+          if (link === undefined) break
+          target = yield* resolve(isAbsolute(link) ? link : join(dirname(target), link))
+        }
         yield* ensureDir(dirname(target))
         // One stat carries the existing mode (and ownership, when preserving):
         // the temp file renamed over the target must take both.
@@ -216,13 +226,15 @@ export namespace FSUtil {
               ? 0o600
               : existingMode & 0o600
             : existingMode ?? options?.freshMode ?? 0o600
-        // The temp is private and unique: pid + random name, created
-        // exclusively (wx) at 0o600, so concurrent writers cannot consume
-        // each other's rename source and secret-bearing content is never
-        // briefly world-readable. Cleanup removes only a temp this
-        // invocation actually created — a wx collision leaves the other
-        // writer's file untouched.
-        const temp = `${target}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`
+        // The temp is private and unique: a short pid + random basename in
+        // the target's directory (its length never depends on the target's
+        // name, so a near-limit basename still fits), created exclusively
+        // (wx) at 0o600, so concurrent writers cannot consume each other's
+        // rename source and secret-bearing content is never briefly
+        // world-readable. Cleanup removes only a temp this invocation
+        // actually created — a wx collision leaves the other writer's
+        // file untouched.
+        const temp = join(dirname(target), `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`)
         let created = false
         const write = Effect.gen(function* () {
           yield* Effect.scoped(
@@ -232,12 +244,16 @@ export namespace FSUtil {
               yield* handle.writeAll(typeof content === "string" ? new TextEncoder().encode(content) : content)
             }),
           )
-          if (mode !== 0o600) yield* fs.chmod(temp, mode)
           if (options?.preserveOwnership && info !== undefined) {
             const uid = Option.getOrUndefined(info.uid)
             const gid = Option.getOrUndefined(info.gid)
             if (uid !== undefined && gid !== undefined) yield* fs.chown(temp, uid, gid)
           }
+          // The final mode is applied unconditionally, and after ownership:
+          // the creation mode is still cut by the process umask, and chown
+          // clears setuid/setgid bits, so only a last chmod makes the
+          // computed mode the file's actual mode.
+          yield* fs.chmod(temp, mode)
           yield* renameWithRetry(temp, target)
           created = false
         })

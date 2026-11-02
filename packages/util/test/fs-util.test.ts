@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Context, Effect, FileSystem, Layer } from "effect"
-import * as PlatformError from "effect/PlatformError"
+import { systemError } from "effect/PlatformError"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -53,7 +53,7 @@ async function mode(file: string) {
 }
 
 const transientRenameError = () =>
-  PlatformError.systemError({
+  systemError({
     _tag: "PermissionDenied",
     module: "FileSystem",
     method: "rename",
@@ -224,7 +224,7 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
       {
         rename: () =>
           Effect.fail(
-            PlatformError.systemError({
+            systemError({
               _tag: "Unknown",
               module: "FileSystem",
               method: "rename",
@@ -263,6 +263,62 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     await run((service) => service.writeJsonAtomic(file, { a: 1, nested: { b: [true, null] } }))
     expect(fs.readFileSync(file, "utf8")).toBe(JSON.stringify({ a: 1, nested: { b: [true, null] } }, null, 2))
     expect(fs.readdirSync(directory)).toEqual(["target.json"])
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
+  test("dangling symlinked target: link preserved, referent created", async () => {
+    const root = await dir()
+    const linkDir = path.join(root, "home")
+    fs.mkdirSync(linkDir)
+    const referent = path.join(root, "real", "config.txt")
+    const link = path.join(linkDir, "config.txt")
+    fs.symlinkSync(path.join("..", "real", "config.txt"), link)
+
+    await writeAtomic(link, "created")
+
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(fs.readlinkSync(link)).toBe(path.join("..", "real", "config.txt"))
+    expect(fs.readFileSync(referent, "utf8")).toBe("created")
+    expect(fs.readdirSync(linkDir)).toEqual(["config.txt"])
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  test("a target basename near the component-length limit still replaces", async () => {
+    const directory = await dir()
+    const file = path.join(directory, `${"a".repeat(240)}.txt`)
+    fs.writeFileSync(file, "before")
+    await writeAtomic(file, "after")
+    expect(fs.readFileSync(file, "utf8")).toBe("after")
+    expect(fs.readdirSync(directory)).toEqual([path.basename(file)])
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
+  test("the final mode survives a umask that strips owner bits at creation", async () => {
+    const directory = await dir()
+    const fresh = path.join(directory, "fresh.txt")
+    const existing = path.join(directory, "existing.txt")
+    fs.writeFileSync(existing, "before")
+    fs.chmodSync(existing, 0o600)
+    const previous = process.umask(0o277)
+    try {
+      await writeAtomic(fresh, "new")
+      await writeAtomic(existing, "after")
+    } finally {
+      process.umask(previous)
+    }
+    expect(await mode(fresh)).toBe(0o600)
+    expect(await mode(existing)).toBe(0o600)
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
+  test("preserveOwnership keeps setgid bits: ownership is carried before the final mode", async () => {
+    const directory = await dir()
+    const file = path.join(directory, "target.txt")
+    fs.writeFileSync(file, "before")
+    fs.chmodSync(file, 0o2750)
+    await writeAtomic(file, "after", { preserveOwnership: true })
+    expect(fs.readFileSync(file, "utf8")).toBe("after")
+    expect(fs.statSync(file).mode & 0o7777).toBe(0o2750)
     fs.rmSync(directory, { recursive: true, force: true })
   })
 })
