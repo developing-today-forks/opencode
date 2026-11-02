@@ -5,6 +5,33 @@ export function readStdin(beforeRead?: () => void) {
   return text(process.stdin)
 }
 
+/**
+ * Read stdin as text for auth import, failing as soon as the running byte
+ * total exceeds `maximumBytes` instead of buffering the whole stream
+ * unbounded the way `text(process.stdin)` does: past the ~512 MiB engine
+ * string ceiling an unbounded read dies with an opaque RangeError/OOM
+ * instead of this clear too-large error. Scoped to auth import - the
+ * other `readStdin` callers (run/mini piped prompts) keep the unbounded
+ * reader. The stream is a parameter so tests can feed a fake one.
+ */
+export async function readBoundedStdin(
+  maximumBytes: number,
+  stream: AsyncIterable<Uint8Array | string> = process.stdin,
+): Promise<string> {
+  const encoder = new TextEncoder()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of stream) {
+    const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk
+    size += bytes.byteLength
+    if (size > maximumBytes)
+      throw new Error(`Auth data too large: stdin exceeds the ${maximumBytes}-byte limit`)
+    chunks.push(bytes)
+  }
+  // TextDecoder strips a leading UTF-8 BOM, matching text(process.stdin).
+  return new TextDecoder().decode(Buffer.concat(chunks, size))
+}
+
 const tooLarge = (maximumBytes: number) =>
   new Error(`Session data too large: response body exceeds the ${maximumBytes}-byte limit`)
 
