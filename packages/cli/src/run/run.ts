@@ -11,6 +11,7 @@ import { runNonInteractivePrompt } from "./noninteractive"
 import { UI } from "./ui"
 import { Env } from "../env"
 import { errorMessage } from "../util/error"
+import { createRunFetch } from "./fetch"
 
 export type RunCommandInput = {
   server: ServerConnection.Resolved
@@ -92,9 +93,7 @@ async function execute(input: RunCommandInput, prepared: Prepared, endpoint: End
   const client = OpenCode.make({
     baseUrl: endpoint.url,
     headers: Service.headers(endpoint),
-    // Bun's default five-minute deadline terminates the event stream used by long-running sessions.
-    fetch: ((request: RequestInfo | URL, init?: RequestInit) =>
-      fetch(request, { ...init, timeout: false } as BunFetchRequestInit)) as typeof fetch,
+    fetch: createRunFetch(),
   })
   const explicit = parseRunModel(input.model)
   const target = await resolveSessionTarget({
