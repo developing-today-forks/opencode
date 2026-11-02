@@ -323,9 +323,35 @@ it.live("streams typed Responses events with no [DONE] sentinel", () =>
     expect(res.status).toBe(200)
     const text = yield* Effect.promise(() => res.text())
     expect(text).toContain("event: response.created")
+    expect(text).toContain("event: response.in_progress")
     expect(text).toContain("response.output_text.delta")
     expect(text).toContain("event: response.completed")
     expect(text).not.toContain("[DONE]")
+    // #1442: the full §5 sequence over the wire, monotonic sequence
+    // numbers, and response.completed carrying the full output.
+    const parsed = text
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>)
+    expect(parsed.map((data) => data.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(parsed.map((data) => data.sequence_number)).toEqual(parsed.map((_, index) => index))
+    const completed = parsed.at(-1)?.response as {
+      status: string
+      output: Array<{ content: Array<{ text: string }> }>
+      usage: unknown
+    }
+    expect(completed.status).toBe("completed")
+    expect(completed.output[0]?.content[0]?.text).toBe("Hello world")
+    expect(completed.usage).toEqual({ input_tokens: 5, output_tokens: 2, total_tokens: 7 })
   }),
 )
 
