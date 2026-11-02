@@ -2838,7 +2838,7 @@ export type ConfigEntry =
                 quotaCooldownCapMs?: number
               }
               demotion?: { after?: number; windowMs?: number; factor?: number }
-              quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number }
+              quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
               escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
               network?: { windowMs?: number; providers?: number; providerModels?: number }
               continuity?: { hedgeRequests?: number }
@@ -2907,7 +2907,7 @@ export type ConfigEntry =
               quotaCooldownCapMs?: number
             }
             demotion?: { after?: number; windowMs?: number; factor?: number }
-            quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number }
+            quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
             escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
             network?: { windowMs?: number; providers?: number; providerModels?: number }
             continuity?: { hedgeRequests?: number }

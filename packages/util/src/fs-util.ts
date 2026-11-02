@@ -1,8 +1,9 @@
-import path, { dirname, isAbsolute, join, relative, sep } from "path"
+import path, { dirname, isAbsolute, join, parse, relative, sep } from "path"
 import { realpathSync } from "fs"
 import { readdir } from "fs/promises"
 import { lookup } from "mime-types"
-import { Context, Effect, FileSystem, Layer, Schema } from "effect"
+import { randomBytes } from "crypto"
+import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./glob.js"
 import { serviceUse } from "./effect/service-use.js"
@@ -28,6 +29,17 @@ export namespace FSUtil {
     readonly type: "file" | "directory" | "symlink" | "other"
   }
 
+  export interface WriteAtomicOptions {
+    /** Mode policy for the replaced file (design #1345 rule 4). Default "preserve". */
+    readonly modePolicy?: "preserve" | "owner-capped"
+    /** Mode for a newly created file under "preserve". Default 0o600. Ignored under
+     * "owner-capped", whose fresh mode is always 0o600. */
+    readonly freshMode?: number
+    /** Carry the existing file's uid/gid onto the temp file before the rename
+     * (design #1345 rule 7, the uninstall writer's chown-before-rename). Default false. */
+    readonly preserveOwnership?: boolean
+  }
+
   export interface UpOptions {
     readonly targets: string[]
     readonly start: string
@@ -46,6 +58,12 @@ export namespace FSUtil {
     readonly writeJson: (path: string, data: unknown, mode?: number) => Effect.Effect<void, Error>
     readonly ensureDir: (path: string) => Effect.Effect<void, Error>
     readonly writeWithDirs: (path: string, content: string | Uint8Array, mode?: number) => Effect.Effect<void, Error>
+    readonly writeAtomic: (
+      path: string,
+      content: string | Uint8Array,
+      options?: WriteAtomicOptions,
+    ) => Effect.Effect<void, Error>
+    readonly writeJsonAtomic: (path: string, data: unknown, options?: WriteAtomicOptions) => Effect.Effect<void, Error>
     readonly readDirectoryEntries: (path: string) => Effect.Effect<DirEntry[], Error>
     readonly resolve: (path: string) => Effect.Effect<string>
     readonly findUp: (target: string, start: string, stop?: string) => Effect.Effect<string[], Error>
@@ -155,6 +173,194 @@ export namespace FSUtil {
         if (mode) yield* fs.chmod(path, mode)
       })
 
+
+      // Design #1345 (phase 1, #1346): the shared atomic-replace contract.
+      // Replace, never truncate: content lands in a temp file beside the
+      // resolved target and is renamed over it, so no partial file is ever
+      // observed and a symlinked target's link survives.
+      const renameRetryDelays = [10, 25, 50, 100]
+      const transientRenameTags = new Set(["PermissionDenied", "Busy"])
+
+      const isTransientRenameError = (error: PlatformError) => {
+        const reason = error.reason as { _tag?: string; cause?: unknown }
+        const code = (reason.cause as NodeJS.ErrnoException | undefined)?.code
+        if (code === "EPERM" || code === "EACCES" || code === "EBUSY") return true
+        // Node/Bun platform layers normalise EPERM/EACCES to PermissionDenied
+        // and EBUSY to Busy when no raw errno survives on the cause.
+        return reason._tag !== undefined && transientRenameTags.has(reason._tag)
+      }
+
+      const renameWithRetry = (from: string, to: string, attempt = 0): Effect.Effect<void, PlatformError> =>
+        fs.rename(from, to).pipe(
+          Effect.catch((error: PlatformError) => {
+            const delay = renameRetryDelays[attempt]
+            if (delay === undefined || !isTransientRenameError(error)) return Effect.fail(error)
+            return Effect.sleep(delay).pipe(Effect.flatMap(() => renameWithRetry(from, to, attempt + 1)))
+          }),
+        )
+
+      const writeAtomic = Effect.fn("FileSystem.writeAtomic")(function* (
+        path: string,
+        content: string | Uint8Array,
+        options?: WriteAtomicOptions,
+      ) {
+        // Symlinks are walked from the path as given, not from resolve():
+        // resolve()'s realpath collapses a destination's `..` lexically,
+        // which selects the wrong file when a component before the `..`
+        // is itself a symlink, and a dangling link falls back to the
+        // link's own path, where a rename would replace the link instead
+        // of creating its referent.
+        // The input path is rejected when a `..` in it traverses a
+        // symlinked component: resolve() collapses that `..` lexically
+        // before realpath runs, selecting a different file than
+        // filesystem semantics dictate.
+        // An absolute path's segments start after its root: the root is
+        // the walk's initial prefix, and re-joining its components (a
+        // Windows drive or UNC share) would check every component under
+        // a doubled root (PR #1355 Codex).
+        const inputRoot = isAbsolute(path) ? parse(path).root : ""
+        const inputSegments = (inputRoot === "" ? path : path.slice(inputRoot.length))
+          .split(/[\\/]/)
+          .filter((segment) => segment !== "" && segment !== ".")
+        // Relative inputs are anchored at the absolute CWD, not ".": a
+        // leading `..` must pop a real directory, and dirname(".") would
+        // stay "." forever, checking later components under the CWD
+        // instead of where the traversal actually lands (PR #1355 Codex).
+        // The absolute root comes from the platform's own parse, so a
+        // Windows drive or UNC root is preserved instead of collapsing
+        // to "/" and checking components under a nonexistent root
+        // (PR #1355 Codex).
+        let inputPrefix = inputRoot === "" ? process.cwd() : inputRoot
+        let inputUnsafe = false
+        for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
+          // A `..` applies to the prefix built so far (popping its last
+          // component) rather than being skipped: skipping it would check
+          // every later component at the wrong path and let a symlinked
+          // component hide behind an ordinary `..` (PR #1355 Codex).
+          if (inputSegments[index] === "..") {
+            inputPrefix = dirname(inputPrefix)
+            continue
+          }
+          inputPrefix = join(inputPrefix, inputSegments[index])
+          if (inputSegments.slice(index + 1).includes(".."))
+            inputUnsafe =
+              (yield* fs.readLink(inputPrefix).pipe(Effect.orElseSucceed(() => undefined))) !== undefined
+        }
+        if (inputUnsafe)
+          return yield* Effect.fail(
+            new FileSystemError({
+              method: "writeAtomic",
+              cause: new Error(`Path traverses a symbolic link: ${path}`),
+            }),
+          )
+        let target = yield* resolve(path)
+        if ((yield* fs.readLink(path).pipe(Effect.orElseSucceed(() => undefined))) !== undefined) {
+          let hopTarget: string = path
+          for (let hop = 0; hop < 8; hop++) {
+            const link = yield* fs.readLink(hopTarget).pipe(Effect.orElseSucceed(() => undefined))
+            if (link === undefined) break
+            // A relative destination is interpreted against the link's
+            // canonical parent, not the path it was reached through: the
+            // parent itself may be a symlink.
+            const parent = yield* resolve(dirname(hopTarget))
+            // A `..` in the destination applies through the filesystem,
+            // not lexically: when a component before a `..` is a symlink,
+            // the traversal belongs to that link's target directory.
+            // Such destinations cannot be resolved safely here, so
+            // reject them rather than write to a guessed referent.
+            const linkRoot = isAbsolute(link) ? parse(link).root : ""
+            const segments = (linkRoot === "" ? link : link.slice(linkRoot.length))
+              .split(/[\\/]/)
+              .filter((segment) => segment !== "" && segment !== ".")
+            let prefix = linkRoot === "" ? parent : linkRoot
+            let unsafe = false
+            for (let index = 0; index < segments.length && !unsafe; index++) {
+              // As in the input walk above, a `..` pops the prefix rather
+              // than being skipped, so later components are checked at
+              // their true filesystem path.
+              if (segments[index] === "..") {
+                prefix = dirname(prefix)
+                continue
+              }
+              prefix = join(prefix, segments[index])
+              if (segments.slice(index + 1).includes(".."))
+                unsafe = (yield* fs.readLink(prefix).pipe(Effect.orElseSucceed(() => undefined))) !== undefined
+            }
+            if (unsafe)
+              return yield* Effect.fail(
+                new FileSystemError({
+                  method: "writeAtomic",
+                  cause: new Error(`Symbolic link destination cannot be resolved safely: ${link}`),
+                }),
+              )
+            hopTarget = isAbsolute(link) ? link : join(parent, link)
+          }
+          // A chain longer than the walk (or a loop) leaves the target
+          // still a link: fail rather than rename over it and destroy it.
+          if ((yield* fs.readLink(hopTarget).pipe(Effect.orElseSucceed(() => undefined))) !== undefined)
+            return yield* Effect.fail(
+              new FileSystemError({
+                method: "writeAtomic",
+                cause: new Error(`Too many levels of symbolic links: ${path}`),
+              }),
+            )
+          target = yield* resolve(hopTarget)
+        }
+        yield* ensureDir(dirname(target))
+        // One stat carries the existing mode (and ownership, when preserving):
+        // the temp file renamed over the target must take both.
+        const info = yield* fs.stat(target).pipe(Effect.orElseSucceed(() => undefined))
+        const existingMode = info === undefined ? undefined : info.mode & 0o7777
+        const mode =
+          options?.modePolicy === "owner-capped"
+            ? existingMode === undefined
+              ? 0o600
+              : existingMode & 0o600
+            : existingMode ?? options?.freshMode ?? 0o600
+        // The temp is private and unique: a short pid + random basename in
+        // the target's directory (its length never depends on the target's
+        // name, so a near-limit basename still fits), created exclusively
+        // (wx) at 0o600, so concurrent writers cannot consume each other's
+        // rename source and secret-bearing content is never briefly
+        // world-readable. Cleanup removes only a temp this invocation
+        // actually created — a wx collision leaves the other writer's
+        // file untouched.
+        const temp = join(dirname(target), `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`)
+        let created = false
+        const write = Effect.gen(function* () {
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* fs.open(temp, { flag: "wx", mode: 0o600 })
+              created = true
+              yield* handle.writeAll(typeof content === "string" ? new TextEncoder().encode(content) : content)
+            }),
+          )
+          if (options?.preserveOwnership && info !== undefined) {
+            const uid = Option.getOrUndefined(info.uid)
+            const gid = Option.getOrUndefined(info.gid)
+            if (uid !== undefined && gid !== undefined) yield* fs.chown(temp, uid, gid)
+          }
+          // The final mode is applied unconditionally, and after ownership:
+          // the creation mode is still cut by the process umask, and chown
+          // clears setuid/setgid bits, so only a last chmod makes the
+          // computed mode the file's actual mode.
+          yield* fs.chmod(temp, mode)
+          yield* renameWithRetry(temp, target)
+          created = false
+        })
+        yield* write.pipe(
+          Effect.onError(() => (created ? fs.remove(temp, { force: true }).pipe(Effect.ignore) : Effect.void)),
+        )
+      })
+
+      const writeJsonAtomic = Effect.fn("FileSystem.writeJsonAtomic")(function* (
+        path: string,
+        data: unknown,
+        options?: WriteAtomicOptions,
+      ) {
+        yield* writeAtomic(path, JSON.stringify(data, null, 2), options)
+      })
+
       const scan = Effect.fn("FileSystem.scan")(function* (pattern: string, options?: Glob.Options) {
         return yield* Effect.tryPromise({
           try: () => Glob.scan(pattern, options),
@@ -219,6 +425,8 @@ export namespace FSUtil {
         writeJson,
         ensureDir,
         writeWithDirs,
+        writeAtomic,
+        writeJsonAtomic,
         findUp,
         up,
         globUp,

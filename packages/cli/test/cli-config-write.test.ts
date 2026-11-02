@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -16,6 +17,7 @@ function runConfig<A>(directory: string, effect: Effect.Effect<A, unknown, Confi
     effect.pipe(
       Effect.provide(Config.layer),
       Effect.provide(Global.layerWith({ config: directory, state: directory })),
+      Effect.provide(FSUtil.layer),
       Effect.provide(NodeFileSystem.layer),
     ),
   )

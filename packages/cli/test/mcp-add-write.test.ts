@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Effect } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { writeMcpConfig, writeTempFileExclusive } from "../src/commands/handlers/mcp/add"
+import { writeMcpConfig } from "../src/commands/handlers/mcp/add"
 
 const remote = { type: "remote", url: "https://example.com/mcp", headers: { Authorization: "Bearer secret" } }
 
@@ -11,12 +14,16 @@ async function mode(file: string) {
   return (await fs.stat(file)).mode & 0o777
 }
 
+function write(effect: ReturnType<typeof writeMcpConfig>) {
+  return Effect.runPromise(effect.pipe(Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer)))
+}
+
 describe("mcp add config write", () => {
   test("creates a fresh config owner-only via temp file and rename", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
     const config = path.join(directory, "opencode.json")
 
-    await writeMcpConfig(config, "example", remote)
+    await write(writeMcpConfig(config, "example", remote))
 
     const configObject = parse(await fs.readFile(config, "utf8")) as {
       mcp: { servers: Record<string, unknown> }
@@ -34,7 +41,7 @@ describe("mcp add config write", () => {
     await fs.writeFile(config, '{ // keep me\n  "theme": "opencode" }\n')
     await fs.chmod(config, 0o644)
 
-    await writeMcpConfig(config, "example", remote)
+    await write(writeMcpConfig(config, "example", remote))
 
     const text = await fs.readFile(config, "utf8")
     expect(text).toContain("// keep me")
@@ -53,7 +60,7 @@ describe("mcp add config write", () => {
     const config = path.join(directory, "opencode.json")
     await fs.symlink(target, config)
 
-    await writeMcpConfig(config, "example", remote)
+    await write(writeMcpConfig(config, "example", remote))
 
     expect((await fs.lstat(config)).isSymbolicLink()).toBe(true)
     const configObject = parse(await fs.readFile(target, "utf8")) as {
@@ -68,9 +75,9 @@ describe("mcp add config write", () => {
     const config = path.join(directory, "opencode.json")
 
     await Promise.all([
-      writeMcpConfig(config, "one", remote),
-      writeMcpConfig(config, "two", remote),
-      writeMcpConfig(config, "three", remote),
+      write(writeMcpConfig(config, "one", remote)),
+      write(writeMcpConfig(config, "two", remote)),
+      write(writeMcpConfig(config, "three", remote)),
     ])
 
     const configObject = parse(await fs.readFile(config, "utf8")) as {
@@ -80,33 +87,13 @@ describe("mcp add config write", () => {
     expect(await fs.readdir(directory)).toEqual(["opencode.json"])
   })
 
-  test("temp creation refuses a pre-existing file and leaves it intact", async () => {
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
-    const temporary = path.join(directory, "opencode.json.tmp-fixed")
-    await fs.writeFile(temporary, "sentinel\n")
-
-    await expect(writeTempFileExclusive(temporary, "replacement", 0o600)).rejects.toThrow()
-
-    expect(await fs.readFile(temporary, "utf8")).toBe("sentinel\n")
-  })
-
-  test("temp creation writes a fresh file with the requested mode", async () => {
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
-    const temporary = path.join(directory, "opencode.json.tmp-fixed")
-
-    await writeTempFileExclusive(temporary, "content\n", 0o600)
-
-    expect(await fs.readFile(temporary, "utf8")).toBe("content\n")
-    if (process.platform !== "win32") expect(await mode(temporary)).toBe(0o600)
-  })
-
   test("keeps a read-only existing config read-only", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mcp-add-"))
     const config = path.join(directory, "opencode.json")
     await fs.writeFile(config, "{}\n")
     await fs.chmod(config, 0o400)
 
-    await writeMcpConfig(config, "example", remote)
+    await write(writeMcpConfig(config, "example", remote))
 
     const configObject = parse(await fs.readFile(config, "utf8")) as {
       mcp: { servers: Record<string, unknown> }

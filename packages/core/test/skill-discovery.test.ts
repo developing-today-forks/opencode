@@ -27,7 +27,7 @@ const fixture = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest
       const url = new URL(request.url, base)
       state.requests.push(url.href)
-      if (url.pathname !== "/catalog/index.json" && state.responses[url.pathname]) return state.responses[url.pathname]
+      if (state.responses[url.pathname]) return state.responses[url.pathname]
       const body =
         url.pathname === "/catalog/index.json" ? JSON.stringify({ skills: state.skills }) : state.files[url.pathname]
       return HttpServerResponse.text(body ?? "Not Found", { status: body === undefined ? 404 : 200 })
@@ -214,6 +214,31 @@ describe("SkillDiscovery.pull", () => {
       )
       expect(streamed.directories).toEqual([])
       expect(streamed.requests).toContain(`${catalog.base}deploy/SKILL.md`)
+    }),
+  )
+
+  it.live(
+    "rejects an index over the size cap, declared or streamed",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      // Declared: the fixture server sends the true content-length for the
+      // JSON body, so an actually-oversized index pins the declared-size
+      // pre-check in collectBoundedResponseBody.
+      const declared = yield* catalog.pull([
+        { name: "x".repeat(SkillDiscovery.MAX_SKILL_INDEX_BYTES + 1), files: ["SKILL.md"] },
+      ])
+      expect(declared.directories).toEqual([])
+      expect(declared.requests).toEqual([`${catalog.base}index.json`])
+
+      // Streamed: no declared length, so the per-chunk bound is what stops it.
+      const streamed = yield* catalog.pull([], {}, {
+        "/catalog/index.json": HttpServerResponse.stream(
+          Stream.make(new Uint8Array(SkillDiscovery.MAX_SKILL_INDEX_BYTES + 1)),
+          { contentType: "application/json" },
+        ),
+      })
+      expect(streamed.directories).toEqual([])
+      expect(streamed.requests).toEqual([`${catalog.base}index.json`])
     }),
   )
 })

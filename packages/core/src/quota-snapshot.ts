@@ -128,9 +128,27 @@ export const derive = (input: Input, options: Options): Snapshot => {
  * start for a windowed quota, and the grant's own start (the plan record's creation) for a
  * non-windowed credit balance — spending before the grant existed is not consumption of it.
  * Anything else is accounted from the beginning of the route history.
+ *
+ * A windowed quota whose reset is derivable (a `daily HH:MM UTC` rule or an explicit
+ * `resetAt`) is a fixed-period window, not a rolling one (#1342): usage counts from the
+ * current period's start — the most recent reset instant — so the previous period's
+ * usage cannot re-gate the provider just after a reset. The period start is the next
+ * reset minus the window's length, or the recorded reset itself when it is already in
+ * the past; it never starts before the rolling lookback and never after `now`.
+ * A `rolling` rule is the exception: it stays rolling even when a next reset is
+ * recorded on the window — that `resetAt` is a recorded fact, not a period boundary,
+ * and period-aligning it would discard usage that still belongs to the rolling
+ * window (PR #1352 Codex finding).
  */
 export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, now: number): number => {
-  if (window.windowHours !== undefined) return now - window.windowHours * 3_600_000
+  if (window.windowHours !== undefined) {
+    const rolling = now - window.windowHours * 3_600_000
+    if (window.resetRule === "rolling") return rolling
+    const reset = resetAtOf(window, now)
+    if (reset === null) return rolling
+    const periodStart = reset <= now ? reset : reset - window.windowHours * 3_600_000
+    return Math.max(rolling, Math.min(periodStart, now))
+  }
   if (plan.coverage === "credits" && window.unit === "usd")
     return ModelRouteLimits.parseAbsoluteTime(plan.createdAt) ?? 0
   return 0
@@ -139,7 +157,9 @@ export const usageSince = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow, 
 /**
  * The one snapshot of a provider's set that gates a target: a known-full snapshot wins
  * (a known-dead balance first — it releases only on a balance increase, never on a
- * timer — otherwise latest reset first), then a balance snapshot, then the first.
+ * timer — otherwise latest reset first), then a known balance snapshot, then the
+ * latest-observed known snapshot, then (only when nothing is known) a balance
+ * snapshot or the first.
  * An expired credit grant
  * never wins over a live snapshot of the same provider — the plan store retains expired
  * grants as history, and letting one gate would make a funded replacement unable to
@@ -167,7 +187,19 @@ export const gatingSnapshot = (
   // would re-admit the credential at reset with the balance still exhausted.
   const deadBalance = full.find((snapshot) => snapshot.balance === true)
   const latestFull = full.sort((a, b) => (b.resetAt ?? 0) - (a.resetAt ?? 0))[0]
-  return deadBalance ?? latestFull ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
+  // The fallback must be evidence-based (#1341): an unknown snapshot selected
+  // here is discarded by the gate's known() guard, so returning the first
+  // snapshot when a later window carries the known reading strands an armed
+  // gate on the unknown reading forever — the gate can never clear. Prefer
+  // known evidence (a known balance first, as before; otherwise the
+  // latest-observed known snapshot); the historical order applies only when
+  // nothing in the pool is known.
+  const knownPool = pool.filter((snapshot) => known(snapshot))
+  const knownBalance = knownPool.find((snapshot) => snapshot.balance === true)
+  const latestKnown = knownPool.sort((a, b) => b.observedAt - a.observedAt)[0]
+  return (
+    deadBalance ?? latestFull ?? knownBalance ?? latestKnown ?? pool.find((snapshot) => snapshot.balance) ?? pool[0]
+  )
 }
 
 /** One snapshot per quota window of every plan, in plan then window order. */

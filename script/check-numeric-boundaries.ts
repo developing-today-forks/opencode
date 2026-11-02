@@ -10,16 +10,9 @@
  * garbage ("12abc" -> 12 via parseInt), or maps "" to 0, and each call
  * site invents its own answer. The blessed direction is the #993
  * primitives (pageLimit and friends) or an explicit local disposition.
- * This gate scans packages/core/src, packages/ai/src and
- * packages/cli/src (all three from day one), packages/server/src
- * (added by #1294, the network-boundary package) and
- * packages/console/app/src, packages/console/function/src and
- * packages/function/src (added by #1302, the public console and
- * function packages) and services/changelog/src, services/files/src
- * and services/update/src (added by #1308, the public Cloudflare
- * workers) and packages/plugin-github/src (added by #1318, the
- * GitHub API client / Copilot review-loop plugin) with the sweep
- * patterns —
+ * This gate scans every production `src` tree under packages/ and
+ * services/, matching check-bounded-http's explicit root inventory,
+ * with the sweep patterns —
  *   P-A: a `Number(` call. The pattern is deliberately line-shaped and
  *        word-bounded: `Number.isFinite(` / `Number.isNaN(` are
  *        internal arithmetic predicates, not conversions, and do not
@@ -49,17 +42,44 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
-  "packages/core/src",
   "packages/ai/src",
+  "packages/app/src",
+  "packages/client/src",
   "packages/cli/src",
-  "packages/server/src",
+  "packages/codemode/src",
   "packages/console/app/src",
   "packages/console/function/src",
+  "packages/core/src",
+  "packages/desktop/src",
   "packages/function/src",
+  "packages/gui-extensions/src",
+  "packages/http-recorder/src",
+  "packages/httpapi-codegen/src",
+  "packages/latex/src",
+  "packages/merman/src",
+  "packages/plugin/src",
+  "packages/plugin-browser/src",
+  "packages/plugin-github/src",
+  "packages/posts/src",
+  "packages/protocol/src",
+  "packages/schema/src",
+  "packages/script/src",
+  "packages/sdk/src",
+  "packages/server/src",
+  "packages/session-ui/src",
+  "packages/simulation/src",
+  "packages/stats/app/src",
+  "packages/stats/core/src",
+  "packages/stats/server/src",
+  "packages/theme/src",
+  "packages/tui/src",
+  "packages/ui/src",
+  "packages/util/src",
+  "packages/web/src",
   "services/changelog/src",
   "services/files/src",
   "services/update/src",
-  "packages/plugin-github/src",
+  "services/www/src",
 ]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"

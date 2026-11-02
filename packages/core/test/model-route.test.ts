@@ -1699,3 +1699,57 @@ describe("ModelRoute provider-route groups with no ready members", () => {
     })
   })
 })
+
+describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 5_000, quotaCooldownMs: 60_000 })
+  const leaves = [0, 1, 2].map((index) => ModelRoute.ref({ providerID: `pool-p${index}`, model: `m${index}` }))
+  const outside = ModelRoute.ref({ providerID: "pool-outside", model: "solo" })
+  // Root: the pool group (leaves 0-2, one nested route) plus one leaf that belongs to no pool.
+  const definition = {
+    id: "pool-route",
+    targets: [...leaves, outside],
+    targetVariants: [],
+    health: policy,
+    nodes: [
+      { selection: "ordered" as const, weights: [1, 1], children: [{ node: 1 }, { leaf: 3 }] },
+      { routeID: "pool-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
+    ],
+  } as unknown as ModelRoute.Definition
+
+  test("two distinct leaves answering quota in turn pull the whole pool; expiry re-admits it", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    expect(ModelRoute.poolIDOf(definition, 2)).toBe("pool-plan")
+    expect(ModelRoute.poolIDOf(definition, 3)).toBeUndefined()
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+
+    // One leaf's quota answer is leaf-shaped: the pool still serves through its other leaves.
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+
+    // A second distinct leaf answering quota is the pool-shaped signal: the remaining leaf
+    // is pulled with its pool instead of being spent next.
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+    expect(ModelRoute.poolQuotaExhausted(definition, 0, now)).toBe(true)
+    // A leaf outside the pool is never pulled by the pool's exhaustion.
+    expect(ModelRoute.poolQuotaExhausted(definition, 3, now)).toBe(false)
+
+    // Restoration is automatic: once the quota benches expire the pool re-enters rotation.
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now + 60_001)).toBe(false)
+    ModelRoute.resetHealth()
+  })
+
+  test("reactive quota gates on two leaves' providers exhaust the pool until the stated reset", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30 * 60_000
+    ModelRoute.observeQuotaFailure(leaves[0], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
+    ModelRoute.observeQuotaFailure(leaves[1], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+    // The pull-out holds until the reset the providers stated, then lifts by itself.
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 1)).toBe(false)
+    ModelRoute.resetHealth()
+  })
+})

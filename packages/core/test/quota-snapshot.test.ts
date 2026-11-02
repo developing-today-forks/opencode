@@ -142,9 +142,9 @@ describe("QuotaSnapshot", () => {
       const input = { plan: { ...plan, id } as ModelPlan.Plan, window, totals: totals({ requests: 50 }), observedAt }
       // An empty record and a JSON-parsed record naming other plans both lack an own entry for the plan.
       expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }).stale).toBe(true)
-      expect(
-        QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale,
-      ).toBe(true)
+      expect(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: JSON.parse('{"other-plan": 7200000}') }).stale).toBe(
+        true,
+      )
       expect(QuotaSnapshot.known(QuotaSnapshot.derive(input, { now, perPlanMaxAgeMs: {} }))).toBe(false)
     }
   })
@@ -494,5 +494,142 @@ describe("QuotaSnapshot balance classification and gating selection (#1014 fix p
     const gating = QuotaSnapshot.gatingSnapshot([requests, balance], now)
     expect(gating?.planID).toBe("mixed-plan")
     expect(gating?.balance).toBe(true)
+  })
+})
+
+describe("QuotaSnapshot usageSince fixed-reset periods (#1342)", () => {
+  const dailyWindow = {
+    name: "daily",
+    unit: "requests",
+    limit: 100,
+    windowHours: 24,
+    resetRule: "daily 00:00 UTC",
+  } as ModelPlan.QuotaWindow
+
+  test("a daily window reads usage from the current period's start, not a rolling 24h lookback", () => {
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    const since = QuotaSnapshot.usageSince(plan, dailyWindow, justAfterReset)
+    expect(since).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+    // The worked example from #1342: 100 requests at 23:55 the previous day
+    // fall before the period start and cannot re-gate the new period; usage
+    // at 00:01 is inside it.
+    expect(Date.parse("2026-10-26T23:55:00.000Z")).toBeLessThan(since)
+    expect(Date.parse("2026-10-27T00:01:00.000Z")).toBeGreaterThanOrEqual(since)
+  })
+
+  test("mid-period, a daily window's period start is the most recent reset", () => {
+    const midPeriod = Date.parse("2026-10-27T12:00:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, dailyWindow, midPeriod)).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+  })
+
+  test("an explicit future resetAt starts the period one window-length before it", () => {
+    const explicit = {
+      ...dailyWindow,
+      resetRule: undefined,
+      resetAt: "2026-10-28T00:00:00.000Z",
+    } as ModelPlan.QuotaWindow
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, explicit, justAfterReset)).toBe(Date.parse("2026-10-27T00:00:00.000Z"))
+  })
+
+  test("a rolling window keeps the rolling lookback", () => {
+    const rolling = { ...dailyWindow, resetRule: "rolling" } as ModelPlan.QuotaWindow
+    const justAfterReset = Date.parse("2026-10-27T00:05:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, rolling, justAfterReset)).toBe(justAfterReset - 24 * 3_600_000)
+  })
+
+  test("a rolling window with a recorded resetAt keeps the rolling lookback (PR #1352 Codex)", () => {
+    // plan-tracking records resetAt (the next known reset) on rolling windows too;
+    // it is a recorded fact, not a period boundary. At 12:00 with a five-hour
+    // window and a recorded reset at 13:00, the rolling start is 07:00 — usage
+    // from 07:00 to 08:00 still belongs to the window and must count.
+    const recorded = {
+      name: "5-hour",
+      unit: "requests",
+      limit: 100,
+      windowHours: 5,
+      resetRule: "rolling",
+      resetAt: "2026-10-27T13:00:00.000Z",
+    } as ModelPlan.QuotaWindow
+    const noon = Date.parse("2026-10-27T12:00:00.000Z")
+    expect(QuotaSnapshot.usageSince(plan, recorded, noon)).toBe(noon - 5 * 3_600_000)
+  })
+})
+
+describe("QuotaSnapshot gating fallback evidence (#1341)", () => {
+  const unknownWindow = { name: "monthly", unit: "requests" } as ModelPlan.QuotaWindow
+
+  test("the fallback returns a known later window instead of an unknown first snapshot", () => {
+    const unknown = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    expect(QuotaSnapshot.known(unknown)).toBe(false)
+    const known = QuotaSnapshot.derive({ plan, window, totals: totals({ requests: 50 }), observedAt: now }, { now })
+    expect(QuotaSnapshot.known(known)).toBe(true)
+    const gating = QuotaSnapshot.gatingSnapshot([unknown, known], now)
+    expect(gating?.window).toBe("5-hour")
+    expect(gating && QuotaSnapshot.known(gating)).toBe(true)
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(false)
+  })
+
+  test("a gate armed by a later window can clear: the cleared known reading is selected over an unknown first snapshot", () => {
+    const unknown = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    const full = QuotaSnapshot.derive({ plan, window, totals: totals({ requests: 200 }), observedAt: now }, { now })
+    expect(QuotaSnapshot.gatingSnapshot([unknown, full], now)?.window).toBe("5-hour")
+    expect(QuotaSnapshot.isKnownFull(full, now)).toBe(true)
+
+    const later = now + 60_000
+    const cleared = QuotaSnapshot.derive(
+      { plan, window, totals: totals({ requests: 50 }), observedAt: later },
+      { now: later },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([unknown, cleared], later)
+    expect(gating?.window).toBe("5-hour")
+    expect(gating && QuotaSnapshot.isKnownFull(gating, later)).toBe(false)
+  })
+
+  test("an all-unknown set selects no known evidence and never reads as full", () => {
+    const first = QuotaSnapshot.derive(
+      { plan, window: unknownWindow, totals: totals({ requests: 50 }), observedAt: now },
+      { now },
+    )
+    const second = QuotaSnapshot.derive(
+      {
+        plan,
+        window: { name: "yearly", unit: "requests" } as ModelPlan.QuotaWindow,
+        totals: totals(),
+        observedAt: now,
+      },
+      { now },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([first, second], now)
+    expect(gating?.window).toBe("monthly")
+    expect(gating && QuotaSnapshot.known(gating)).toBe(false)
+    expect(gating && QuotaSnapshot.isKnownFull(gating, now)).toBe(false)
+  })
+
+  test("a known balance snapshot still outranks a known windowed snapshot in the fallback", () => {
+    const creditPlan = { ...plan, coverage: "credits" } as ModelPlan.Plan
+    const balance = QuotaSnapshot.derive(
+      {
+        plan: creditPlan,
+        window: { name: "credits", unit: "usd", limit: 2 } as ModelPlan.QuotaWindow,
+        totals: totals({ costUsd: 0.5 }),
+        observedAt: now,
+      },
+      { now },
+    )
+    expect(balance.balance).toBe(true)
+    expect(QuotaSnapshot.known(balance)).toBe(true)
+    const windowed = QuotaSnapshot.derive(
+      { plan, window, totals: totals({ requests: 50 }), observedAt: now + 60_000 },
+      { now: now + 60_000 },
+    )
+    const gating = QuotaSnapshot.gatingSnapshot([windowed, balance], now + 60_000)
+    expect(gating?.window).toBe("credits")
   })
 })

@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, FileSystem } from "effect"
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, readlink, readdir, stat, symlink, writeFile } from "node:fs/promises"
@@ -30,7 +31,9 @@ describe("cleanShellConfig", () => {
 
 describe("writeShellConfig", () => {
   const write = (file: string, content: string) =>
-    Effect.runPromise(writeShellConfig(file, content).pipe(Effect.provide(NodeFileSystem.layer)))
+    Effect.runPromise(
+      writeShellConfig(file, content).pipe(Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer)),
+    )
 
   test("replaces a regular file's content and keeps its mode", async () => {
     await using directory = await tmpdir()
@@ -83,11 +86,17 @@ describe("writeShellConfig", () => {
       },
     })
 
-    await Effect.runPromise(writeShellConfig(file, "new\n").pipe(Effect.provideService(FileSystem.FileSystem, fs)))
+    await Effect.runPromise(
+      writeShellConfig(file, "new\n").pipe(
+        Effect.provide(FSUtil.layer),
+        Effect.provideService(FileSystem.FileSystem, fs),
+      ),
+    )
 
     expect(calls).toHaveLength(2)
-    const temp = calls[1].slice("rename:".length, calls[1].length - file.length - 1)
-    expect(temp.startsWith(`${file}.tmp-`)).toBe(true)
+    const temp = calls[0].slice("chown:".length, -(`:${target.uid}:${target.gid}`).length)
+    expect(path.dirname(temp)).toBe(directory.path)
+    expect(path.basename(temp)).toMatch(/^\.tmp-/)
     expect(calls[1]).toBe(`rename:${temp}:${file}`)
     expect(calls[0]).toBe(`chown:${temp}:${target.uid}:${target.gid}`)
     expect(await readFile(file, "utf8")).toBe("new\n")
@@ -108,7 +117,12 @@ describe("writeShellConfig", () => {
     })
 
     await expect(
-      Effect.runPromise(writeShellConfig(file, "new\n").pipe(Effect.provideService(FileSystem.FileSystem, fs))),
+      Effect.runPromise(
+        writeShellConfig(file, "new\n").pipe(
+          Effect.provide(FSUtil.layer),
+          Effect.provideService(FileSystem.FileSystem, fs),
+        ),
+      ),
     ).rejects.toThrow()
 
     expect(await readFile(file, "utf8")).toBe("old\n")
