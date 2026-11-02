@@ -1720,6 +1720,44 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.escalates(other)).toBe(false)
   })
 
+  test("settings readers are scoped per Location, in either activation order", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, factor: 0.5 }, bench: { maxCooldownMs: 5_000 }, escalation: { afterGiveUps: 4 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 9, factor: 0.9 }, bench: { maxCooldownMs: 9_000 }, escalation: { afterGiveUps: 7 } }),
+      "/loc/b",
+    )
+    try {
+      // B activated last: before #1423 its reader would have governed A too.
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(7)
+      expect(ModelRoute.currentConstants("/loc/a").bench.maxCooldownMs).toBe(5_000)
+      expect(ModelRoute.currentConstants("/loc/b").bench.maxCooldownMs).toBe(9_000)
+      expect(ModelRoute.currentConstants("/loc/a").demotion.factor).toBe(0.5)
+      // An unscoped read with two Locations registered cannot know which it serves:
+      // it must fall back to the defaults rather than leak either Location's config.
+      expect(ModelRoute.currentSettings().escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("a Location with no settings block gets defaults without disturbing others", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ escalation: { afterGiveUps: 4 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
   test("config feeds both layers at once, and behavior follows", () => {
     ModelRoute.onSettingsConfig(() => ({
       demotion: { after: 2, factor: 0.5 },

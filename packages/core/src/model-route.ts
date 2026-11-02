@@ -778,18 +778,42 @@ export interface SettingsConfig {
   }
 }
 
-let readSettingsConfig: (() => SettingsConfig | undefined) | undefined
+/** Settings readers keyed by Location directory (#1423). The model-routes config plugin
+ * runs once per Location graph, so each registration belongs to that graph's Location
+ * alone. Before this, a single module-global reader meant the last activated Location's
+ * settings (or its absence) governed every Location's routing machinery in the process. */
+const settingsReaders = new Map<string, () => SettingsConfig | undefined>()
 
-/** Registers where the config-derived settings come from (the model-routes config plugin,
- * mirroring ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
- * reload is honored without re-registering. */
-export const onSettingsConfig = (read: () => SettingsConfig | undefined) => {
-  readSettingsConfig = read
+/** The reader an unscoped call may use: config is only unambiguous when exactly one
+ * Location has registered. With several Locations an unscoped read cannot know which
+ * one it serves, so it gets no config reader (the configure()/compiled defaults) rather
+ * than another Location's settings. Callers that know their Location pass its directory. */
+const unscopedSettingsReader = (): (() => SettingsConfig | undefined) | undefined => {
+  if (settingsReaders.size !== 1) return undefined
+  return settingsReaders.values().next().value
 }
 
-/** The settings in force: what configure() set, with config over it. */
-const activeSettings = (): Settings => {
-  const config = readSettingsConfig?.()
+const settingsReaderFor = (location?: string) =>
+  location === undefined ? unscopedSettingsReader() : settingsReaders.get(location)
+
+/** Registers where one Location's config-derived settings come from (the model-routes
+ * config plugin, keyed by that Location's directory, mirroring
+ * ModelRouteLog.onCaptureErrorBodies). Read lazily at every use, so a config
+ * reload is honored without re-registering. An unkeyed registration is kept under the
+ * empty key (test seam and single-Location hosts). Returns the function that removes
+ * this registration again, for when the Location's graph closes. */
+export const onSettingsConfig = (read: () => SettingsConfig | undefined, location?: string) => {
+  const key = location ?? ""
+  settingsReaders.set(key, read)
+  return () => {
+    if (settingsReaders.get(key) === read) settingsReaders.delete(key)
+  }
+}
+
+/** The settings in force for a Location: what configure() set, with that Location's
+ * config over it. */
+const activeSettings = (location?: string): Settings => {
+  const config = settingsReaderFor(location)?.()
   if (!config) return settings
   return {
     escalation: {
@@ -803,7 +827,7 @@ const activeSettings = (): Settings => {
   }
 }
 
-export const currentSettings = () => activeSettings()
+export const currentSettings = (location?: string) => activeSettings(location)
 
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
@@ -2456,8 +2480,8 @@ export const configureConstants = (next: ConstantsPatch) => {
  * (experimental.routes.settings), in that order. The config groups are picked field by
  * field where config's grouping differs from this one: demotion.after / demotion.windowMs
  * and the escalation switch live in `Settings`, not here. */
-export const currentConstants = (): Constants => {
-  const config = readSettingsConfig?.()
+export const currentConstants = (location?: string): Constants => {
+  const config = settingsReaderFor(location)?.()
   if (!config) return constants
   return mergeConstants(constants, {
     ...(config.bench ? { bench: config.bench } : {}),

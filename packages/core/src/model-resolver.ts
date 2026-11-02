@@ -14,6 +14,7 @@ import { Npm } from "@opencode/util/npm"
 import { Provider } from "./provider.js"
 import { Config } from "./config.js"
 import { ModelAlias } from "./model-alias.js"
+import { Location } from "./location.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
@@ -437,6 +438,7 @@ const refreshQuotaGate = (
   credentialByProvider: Map<string, Credential.ID>,
   dataDir: string | undefined,
   now: number,
+  location?: string,
 ) =>
   Effect.gen(function* () {
     if (!ModelRoute.shouldFeedQuota(now)) return
@@ -499,13 +501,13 @@ const refreshQuotaGate = (
                   ),
                 ),
               now,
-              { now, balanceDeadThreshold: ModelRoute.currentConstants().quotaGate.balanceDeadThreshold },
+              { now, balanceDeadThreshold: ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold },
             )
             if (snapshots.length === 0) return
             const snapshot = QuotaSnapshot.gatingSnapshot(
               snapshots,
               now,
-              ModelRoute.currentConstants().quotaGate.balanceDeadThreshold,
+              ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold,
             )
             if (!snapshot) return
             if (credentialID) {
@@ -530,6 +532,11 @@ export const layer = Layer.effect(
     const integrations = yield* Integration.Service
     const npm = yield* Npm.Service
     const aisdk = yield* AISDK.Service
+    const location = yield* Effect.serviceOption(Location.Service)
+    const locationDirectory = Option.match(location, {
+      onNone: () => undefined,
+      onSome: (value) => value.directory as string,
+    })
     const config = yield* Effect.serviceOption(Config.Service)
     const global = yield* Effect.serviceOption(Global.Service)
     const dataDir = Option.match(global, { onNone: () => undefined, onSome: (g) => g.data })
@@ -636,7 +643,7 @@ export const layer = Layer.effect(
           )
           if (connection?.type === "credential") credentialByProvider.set(target.providerID, connection.id)
         }
-        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now)
+        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
         const makeResolved = (
           current: Resolved,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,

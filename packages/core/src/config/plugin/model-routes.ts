@@ -53,8 +53,14 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
-    // The route machinery's constants, from experimental.routes.settings.
-    ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
+    // The route machinery's constants, from experimental.routes.settings. Registered
+    // under this Location's directory (#1423) so another Location's activation cannot
+    // replace them, and removed again when this Location's graph closes.
+    const offSettingsConfig = ModelRoute.onSettingsConfig(
+      () => settingsConfig(configuredSettings(loaded.entries)),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offSettingsConfig))
 
     // Scheduled review of the routing history, off unless configured.
     yield* ModelRouteTuning.schedule(
