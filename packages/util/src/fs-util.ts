@@ -1,4 +1,4 @@
-import path, { dirname, isAbsolute, join, relative, sep } from "path"
+import path, { dirname, isAbsolute, join, parse, relative, sep } from "path"
 import { realpathSync } from "fs"
 import { readdir } from "fs/promises"
 import { lookup } from "mime-types"
@@ -219,7 +219,11 @@ export namespace FSUtil {
         // leading `..` must pop a real directory, and dirname(".") would
         // stay "." forever, checking later components under the CWD
         // instead of where the traversal actually lands (PR #1355 Codex).
-        let inputPrefix = isAbsolute(path) ? "/" : process.cwd()
+        // The absolute root comes from the platform's own parse, so a
+        // Windows drive or UNC root is preserved instead of collapsing
+        // to "/" and checking components under a nonexistent root
+        // (PR #1355 Codex).
+        let inputPrefix = isAbsolute(path) ? parse(path).root : process.cwd()
         let inputUnsafe = false
         for (let index = 0; index < inputSegments.length && !inputUnsafe; index++) {
           // A `..` applies to the prefix built so far (popping its last
@@ -257,8 +261,8 @@ export namespace FSUtil {
             // the traversal belongs to that link's target directory.
             // Such destinations cannot be resolved safely here, so
             // reject them rather than write to a guessed referent.
-            const segments = link.split("/").filter((segment) => segment !== "" && segment !== ".")
-            let prefix = isAbsolute(link) ? "/" : parent
+            const segments = link.split(/[\\/]/).filter((segment) => segment !== "" && segment !== ".")
+            let prefix = isAbsolute(link) ? parse(link).root : parent
             let unsafe = false
             for (let index = 0; index < segments.length && !unsafe; index++) {
               // As in the input walk above, a `..` pops the prefix rather
