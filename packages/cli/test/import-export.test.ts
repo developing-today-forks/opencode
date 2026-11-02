@@ -4,7 +4,9 @@ import os from "node:os"
 import path from "node:path"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
-import { readBoundedResponseBody } from "../src/util/io"
+import { Readable } from "node:stream"
+import { readBoundedResponseBody, readBoundedStdin } from "../src/util/io"
+import { readAuthLocal, MAX_AUTH_TRANSFER_BYTES } from "../src/commands/handlers/auth/import"
 import {
   fetchRemote,
   fetchServerLocation,
@@ -284,6 +286,49 @@ test("readLocal returns a file under the cap and rejects a file over it before r
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test("readAuthLocal returns a file under the cap and rejects a file over it before reading", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-auth-import-local-"))
+  const file = path.join(root, "auth.json")
+  try {
+    await fs.writeFile(file, "hello world")
+    await expect(readAuthLocal(file, 1024)).resolves.toBe("hello world")
+    await expect(readAuthLocal(file, 8)).rejects.toThrow(
+      "Auth data too large: file exceeds the 8-byte limit",
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("readBoundedStdin returns stdin under the cap and cuts a stream over it", async () => {
+  await expect(readBoundedStdin(1024, Readable.from(["hello ", "world"]))).resolves.toBe("hello world")
+  await expect(readBoundedStdin(8, Readable.from(["12345", "67890"]))).rejects.toThrow(
+    "Auth data too large: stdin exceeds the 8-byte limit",
+  )
+})
+
+test("auth import rejects a local file over the cap without reading it", async () => {
+  // A sparse file sized just over the cap: the import can only fail fast
+  // via the stat pre-check, since buffering 10 MiB of zeros would reach
+  // the credential decode instead and fail differently.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-auth-import-oversize-"))
+  const file = path.join(root, "auth.json")
+  await fs.writeFile(file, "")
+  await fs.truncate(file, MAX_AUTH_TRANSFER_BYTES + 1)
+
+  try {
+    const [stdout, stderr, exitCode] = await run(["auth", "import", file])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Auth data too large: file exceeds the ${MAX_AUTH_TRANSFER_BYTES}-byte limit`,
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
 
 test("import rejects a local file over the cap without reading it", async () => {
   // A sparse file sized just over the cap: the import can only fail fast
