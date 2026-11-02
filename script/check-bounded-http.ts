@@ -13,7 +13,9 @@
  * packages/core/src/tool/http-body.ts for Effect HttpClient sites).
  * This gate scans every `src` tree under packages/ and services/, and
  * (since #1394) every script tree (root `script/`, each package
- * script/scripts tree, and `services/www/script`), in
+ * script/scripts tree — including nested package trees such as
+ * `packages/console/app/script` and `packages/plugins/figma/script`
+ * (#1425) — and `services/www/script`), in
  * (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
  * patterns —
  *   P-A: a `fetch(` call site. The pattern is deliberately line-shaped:
@@ -54,7 +56,7 @@
  * Usage:
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
  */
-import { readdirSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative, sep } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
@@ -96,13 +98,17 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
-  // Script trees (#1394): root script/, every packages/*/script and
-  // packages/*/scripts, and services/*/script where present.
+  // Script trees (#1394, nested trees #1425): root script/, every
+  // packages/*/script and packages/*/scripts — at any nesting depth
+  // (console/app, plugins/figma) — and services/*/script where present.
+  // main() fails when a package script tree exists on disk but is not
+  // listed here (scriptTreesOnDisk), so this list cannot drift again.
   "script",
   "packages/ai/script",
   "packages/client/script",
   "packages/cli/script",
   "packages/codemode/script",
+  "packages/console/app/script",
   "packages/containers/script",
   "packages/core/script",
   "packages/desktop/scripts",
@@ -111,6 +117,7 @@ export const SCAN_ROOTS: string[] = [
   "packages/plugin/script",
   "packages/plugin-browser/script",
   "packages/plugin-github/script",
+  "packages/plugins/figma/script",
   "packages/posts/script",
   "packages/protocol/script",
   "packages/schema/script",
@@ -219,6 +226,45 @@ export function collect(root: string, dir: string, hits: Hit[]) {
   }
 }
 
+/**
+ * Every package script tree on disk under `root` (#1425): a directory
+ * named `script` or `scripts` that belongs to a package — its parent
+ * directory (the package root, at any nesting depth: packages/ai,
+ * packages/console/app, packages/plugins/figma) or the tree itself
+ * (packages/containers/script) carries a package.json — and that sits
+ * below the package-name level, so the `packages/script` package
+ * itself is not mistaken for a script tree. Skill asset folders
+ * (packages/plugins/figma/skills/.../scripts, no package.json at
+ * either level) are not package script trees and are excluded.
+ * Root `script/` is not returned: it is a standing SCAN_ROOTS entry,
+ * not a package tree.
+ */
+export function scriptTreesOnDisk(root: string): string[] {
+  const trees: string[] = []
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.name === "node_modules") continue
+      const path = join(dir, entry.name)
+      const rel = relative(root, path).split(sep).join("/")
+      if (
+        (entry.name === "script" || entry.name === "scripts") &&
+        rel.split("/").length >= 3 &&
+        (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
+      ) {
+        trees.push(rel)
+        continue
+      }
+      walk(path)
+    }
+  }
+  for (const top of ["packages", "services"]) if (existsSync(join(root, top))) walk(join(root, top))
+  return trees.toSorted()
+}
+
+/** Script trees present on disk but absent from `roots` — the #1425 escape, as a failing condition. */
+export const unscannedScriptTrees = (root: string, roots: string[] = SCAN_ROOTS) =>
+  scriptTreesOnDisk(root).filter((tree) => !roots.includes(tree))
+
 async function main() {
   const root = join(import.meta.dir, "..")
   const hits: Hit[] = []
@@ -226,7 +272,12 @@ async function main() {
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
   const unlisted = unlistedHits(hits, allowlist)
   const stale = staleEntries(hits, allowlist)
-  if (unlisted.length || stale.length) {
+  const unscanned = unscannedScriptTrees(root)
+  if (unlisted.length || stale.length || unscanned.length) {
+    for (const tree of unscanned)
+      console.error(
+        `Unscanned script tree on disk: ${tree}\n  Add it to SCAN_ROOTS in script/check-bounded-http.ts and disposition its hits in ${ALLOWLIST_PATH}.`,
+      )
     for (const hit of unlisted)
       console.error(
         `Unlisted bounded-http candidate at ${hit.file}:${hit.line}:\n  ${hit.text}\n  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to ${ALLOWLIST_PATH}.`,
