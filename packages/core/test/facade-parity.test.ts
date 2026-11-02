@@ -1296,9 +1296,16 @@ describe("door: claude-code (bin/claude-code-proxy.mjs :18749)", () => {
     // backend, keyed by the first user message — stable across a
     // conversation's full-history requests — so the resident-
     // process delta optimization still applies behind the façade;
-    // (c) two-turn context continuity was live-verified against
-    // the running door on the laptop 2026-11-02 (turn 2 recalled
-    // the turn-1 codeword; recorded on #1412). A caller that wants
+    // (c) the door's own stub suite proves the delta mechanics
+    // end-to-end (its stub log shows turn 2 arriving delta-only;
+    // run on the laptop 2026-11-02, 7/7 pass). A LIVE two-turn
+    // attempt against the running door the same day did NOT
+    // complete: door-spawned CLI children inherit the door's
+    // default sandbox egress proxy (hatch-egress-proxy), which
+    // does not resolve on the laptop, and a direct CLI probe
+    // answered that the organization has disabled Claude
+    // subscription access for Claude Code — so no live recall is
+    // claimed; the correction is recorded on #1412. A caller that wants
     // façade-side state instead uses /v1/responses +
     // previous_response_id (§4).
   })
