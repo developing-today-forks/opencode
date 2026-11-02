@@ -182,7 +182,6 @@ packages/stats/app/src/routes/api/newsletter.test.ts :: expect(await response.js
 packages/stats/app/src/routes/api/newsletter.ts :: const response = await fetch(`https://api.emailoctopus.com/lists/${listId}/contacts`, { :: bounded at the site: call options carry AbortSignal.timeout as the signal
 packages/stats/core/src/honeycomb-backfill.ts :: const text = await Bun.file(file).text() :: local file read via Bun.file (filesystem), not a network response body
 packages/stats/core/src/r2-sql.ts :: return Bun.fetch( :: bounded at the site: Bun.fetch called with the options object built above, which carries signal: AbortSignal.any([signal, AbortSignal.timeout(R2_SQL_TIMEOUT_MS)])
-packages/stats/core/src/r2-sql.ts :: try: () => response.text(), :: direct response body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127
 packages/stats/core/src/domain/catalog-identity.ts :: return fetch(CATALOG_URL, { signal }) :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
 packages/tui/src/component/prompt/local-attachment.ts :: const content = Buffer.from(await source.slice(0, maxBytes + 1).arrayBuffer()) :: local Blob/File slice read (user-selected local data, size-bounded by the slice), not a network response body
 packages/ui/src/theme/loader.ts :: const text = await response.text() :: tracked by #1081: renderer theme fetch/read with no deadline — remaining surface under design #1127

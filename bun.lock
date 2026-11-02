@@ -776,6 +776,7 @@
       "name": "@opencode/stats-core",
       "version": "2.0.30",
       "dependencies": {
+        "@opencode/util": "workspace:*",
         "@planetscale/database": "1.19.0",
         "drizzle-orm": "catalog:",
         "effect": "catalog:",
