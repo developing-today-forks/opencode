@@ -204,31 +204,56 @@ export namespace FSUtil {
         content: string | Uint8Array,
         options?: WriteAtomicOptions,
       ) {
-        const resolved = yield* resolve(path)
-        // resolve() canonicalises a live symlink, but a dangling one falls back
-        // to the link's own path — renaming there would replace the link instead
-        // of creating its referent. Follow dangling links explicitly (bounded,
-        // like a path walk) so the link survives and the referent is created.
-        let target = resolved
-        for (let hop = 0; hop < 8; hop++) {
-          const link = yield* fs.readLink(target).pipe(Effect.orElseSucceed(() => undefined))
-          if (link === undefined) break
-          // A relative link is interpreted against the link's canonical
-          // parent, not the path it was reached through: the parent itself
-          // may be a symlink, and resolve() fell back to the uncanonicalised
-          // input for the dangling target.
-          const parent = yield* resolve(dirname(target))
-          target = yield* resolve(isAbsolute(link) ? link : join(parent, link))
+        // Symlinks are walked from the path as given, not from resolve():
+        // resolve()'s realpath collapses a destination's `..` lexically,
+        // which selects the wrong file when a component before the `..`
+        // is itself a symlink, and a dangling link falls back to the
+        // link's own path, where a rename would replace the link instead
+        // of creating its referent.
+        let target = yield* resolve(path)
+        if ((yield* fs.readLink(path).pipe(Effect.orElseSucceed(() => undefined))) !== undefined) {
+          let hopTarget: string = path
+          for (let hop = 0; hop < 8; hop++) {
+            const link = yield* fs.readLink(hopTarget).pipe(Effect.orElseSucceed(() => undefined))
+            if (link === undefined) break
+            // A relative destination is interpreted against the link's
+            // canonical parent, not the path it was reached through: the
+            // parent itself may be a symlink.
+            const parent = yield* resolve(dirname(hopTarget))
+            // A `..` in the destination applies through the filesystem,
+            // not lexically: when a component before a `..` is a symlink,
+            // the traversal belongs to that link's target directory.
+            // Such destinations cannot be resolved safely here, so
+            // reject them rather than write to a guessed referent.
+            const segments = link.split("/").filter((segment) => segment !== "" && segment !== ".")
+            let prefix = isAbsolute(link) ? "/" : parent
+            let unsafe = false
+            for (let index = 0; index < segments.length && !unsafe; index++) {
+              if (segments[index] === "..") continue
+              prefix = join(prefix, segments[index])
+              if (segments.slice(index + 1).includes(".."))
+                unsafe = (yield* fs.readLink(prefix).pipe(Effect.orElseSucceed(() => undefined))) !== undefined
+            }
+            if (unsafe)
+              return yield* Effect.fail(
+                new FileSystemError({
+                  method: "writeAtomic",
+                  cause: new Error(`Symbolic link destination cannot be resolved safely: ${link}`),
+                }),
+              )
+            hopTarget = isAbsolute(link) ? link : join(parent, link)
+          }
+          // A chain longer than the walk (or a loop) leaves the target
+          // still a link: fail rather than rename over it and destroy it.
+          if ((yield* fs.readLink(hopTarget).pipe(Effect.orElseSucceed(() => undefined))) !== undefined)
+            return yield* Effect.fail(
+              new FileSystemError({
+                method: "writeAtomic",
+                cause: new Error(`Too many levels of symbolic links: ${path}`),
+              }),
+            )
+          target = yield* resolve(hopTarget)
         }
-        // A chain longer than the walk (or a loop) leaves the target still a
-        // link: fail rather than rename over it and destroy the link.
-        if ((yield* fs.readLink(target).pipe(Effect.orElseSucceed(() => undefined))) !== undefined)
-          return yield* Effect.fail(
-            new FileSystemError({
-              method: "writeAtomic",
-              cause: new Error(`Too many levels of symbolic links: ${path}`),
-            }),
-          )
         yield* ensureDir(dirname(target))
         // One stat carries the existing mode (and ownership, when preserving):
         // the temp file renamed over the target must take both.

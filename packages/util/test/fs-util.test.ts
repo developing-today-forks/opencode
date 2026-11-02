@@ -317,6 +317,26 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
+  test("a link destination with a symlink component before a traversal is rejected", async () => {
+    const root = await dir()
+    fs.mkdirSync(path.join(root, "real", "nested"), { recursive: true })
+    fs.symlinkSync(path.join(root, "real", "nested"), path.join(root, "alias"))
+    const link = path.join(root, "link.txt")
+    fs.symlinkSync("alias/../config.txt", link)
+    fs.writeFileSync(path.join(root, "config.txt"), "unrelated")
+
+    const outcome = await writeAtomic(link, "created").then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(fs.readFileSync(path.join(root, "config.txt"), "utf8")).toBe("unrelated")
+    expect(fs.existsSync(path.join(root, "real", "config.txt"))).toBe(false)
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
   test("a target basename near the component-length limit still replaces", async () => {
     const directory = await dir()
     const file = path.join(directory, `${"a".repeat(240)}.txt`)
