@@ -226,6 +226,20 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run check:numeric-boundaries
 
+      - name: Test workflow policy guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1406).
+        working-directory: script
+        run: bun test check-workflows.test.ts
+
+      - name: Check workflow policies are followed
+        # No workflow may trigger on pull_request/pull_request_target,
+        # every workflow must declare workflow_dispatch, and every
+        # non-reusable job must declare timeout-minutes, or the
+        # workflow policies stay convention only (#1406).
+        if: runner.os == 'Linux'
+        run: bun run check:workflows
+
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"
