@@ -10,6 +10,7 @@ import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
 import { Embeddings } from "@opencode/core/embeddings"
+import { SystemOne } from "@opencode/core/systemone"
 import { OpenAIFacadeResponse } from "@opencode/core/openai-facade-response"
 
 const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
@@ -246,6 +247,34 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
                 encodingFormat: parsed.value.encodingFormat,
               }),
             )
+          }).pipe(Effect.provide(services), locationErrors),
+      )
+      .handleRaw(
+        "completions.systemone",
+        (ctx) =>
+          Effect.gen(function* () {
+            yield* awaitPlugins
+            // The door's own error discipline (#690 in the door): a
+            // malformed body is a 400 in the plain {error} envelope,
+            // never a 500 from the upstream path, and an array body is
+            // refused before anything reaches upstream (#2938 guard).
+            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            if (body === null)
+              return HttpServerResponse.jsonUnsafe(SystemOne.errorBody("Invalid JSON body: not valid JSON"), { status: 400 })
+            const parsed = SystemOne.parseSystemOneRequest(body)
+            if (!parsed.ok) return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(parsed.error), { status: 400 })
+            const systemone = yield* SystemOne.Service
+            const result = yield* Effect.result(
+              systemone.evaluate({
+                model: parsed.value.model,
+                state: parsed.value.state,
+                questions: parsed.value.questions,
+                authHeader: ctx.request.headers.authorization,
+              }),
+            )
+            if (Result.isFailure(result))
+              return HttpServerResponse.jsonUnsafe(result.failure.body, { status: result.failure.status })
+            return HttpServerResponse.jsonUnsafe(SystemOne.answersBody(result.success.answers))
           }).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw(

@@ -35,6 +35,9 @@
  *   - route proxy (bin/opencode-route-proxy.mjs, :18750):
  *     PARITY-WITH-NAMED-DIFFS
  *   - codex (bin/codex-proxy.mjs, :18744): PARITY-WITH-NAMED-DIFFS
+ *   - clef (bin/clef-proxy.mjs, :18742) — systemone family (#1410):
+ *     PARITY-WITH-NAMED-DIFFS (both acceptable-by-design; see the
+ *     clef describe block)
  *   - muse (bin/muse-proxy.mjs, :18747): FAIL — the attestation case:
  *     the door answers shell/bash-tool requests with a 200 (tool names
  *     aliased upstream, calls translated back; a residual 403 falls
@@ -64,6 +67,13 @@ import {
   parseResponsesRequest,
   responsesBody,
 } from "@opencode/core/completions"
+import {
+  answersBody,
+  errorBody as systemOneErrorBody,
+  parseSystemOneRequest,
+  resolveModel,
+  upstreamFailureBody,
+} from "@opencode/core/systemone"
 
 // ------------------------------------------------------------ diff engine
 
@@ -206,7 +216,17 @@ describe("door: route proxy (bin/opencode-route-proxy.mjs :18750)", () => {
         owned_by: "opencode-route",
       })),
     }
-    expectDiffs(door, modelsBody(), [])
+    // Since #1410 the façade's shared list also carries the
+    // systemone family's Clef floor (a façade-only superset, like the
+    // embeddings entries the handler adds): the route set itself is
+    // unchanged, the list is longer by exactly those entries.
+    expectDiffs(door, modelsBody(), [
+      {
+        path: "data.length",
+        classification: "acceptable-by-design",
+        note: "façade-only superset: the systemone Clef models (#1410) share the /v1/models list",
+      },
+    ])
     expect(modelBody("workhorse")).toEqual(door.data[0])
   })
 
@@ -862,6 +882,154 @@ describe("door: muse — attestation case (shell/bash tools)", () => {
   })
 })
 
+
+// ------------------------------------------------------------ clef (systemone)
+
+describe("door: clef (bin/clef-proxy.mjs :18742) — systemone family (#1410)", () => {
+  // Recordings transcribed from developing-today/code
+  // bin/clef-proxy.mjs + bin/clef-proxy.test.mjs (the door's own stub
+  // fixtures, #690/#692/#2410/#2938 cases) and one live capture against
+  // the running door on 2026-11-02 (the probe below). The façade side
+  // is @opencode/core/systemone's translation layer; the HTTP-level
+  // pairs (status codes through the real handler, stub upstream) live
+  // in packages/server/test/facade-parity.test.ts.
+
+  const probeRequest = {
+    state: { request: "Which of these is a colour: blue or table?" },
+    questions: {
+      probe: {
+        type: "choice",
+        instructions: "Pick the word that names a colour.",
+        criteria: { blue: "A colour.", table: "A piece of furniture." },
+      },
+    },
+    model: "@cf/cloudflare/clef-flash",
+  }
+  // Live door capture (2026-11-02, no Authorization header — the
+  // door's file token served it): the typed probability answer shape.
+  const probeDoorAnswers = {
+    probe: { type: "choice", choice: "blue", probabilities: { blue: 0.8947, table: 0.1053 }, confidence: 0.6232 },
+  }
+
+  test("classification request parses and forwards only {state, questions} upstream", () => {
+    const parsed = parseSystemOneRequest(probeRequest)
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.model).toBe("@cf/cloudflare/clef-flash")
+    expect(parsed.value.state).toEqual(probeRequest.state)
+    expect(parsed.value.questions).toEqual(probeRequest.questions)
+    // The upstream payload the service builds is exactly {state,
+    // questions} (systemone.ts evaluate) — the door drops every other
+    // body field the same way.
+    expect(Object.keys({ state: parsed.value.state, questions: parsed.value.questions })).toEqual(["state", "questions"])
+  })
+
+  test("success shape is exactly {answers} — no diff from the door", () => {
+    // Door (stub fixture, clef-proxy.test.mjs happy path): 200
+    // {answers: <upstream result.answers>}. Façade: answersBody of the
+    // same upstream answers. The live capture's answer values are the
+    // canonical pair here.
+    expectDiffs({ answers: probeDoorAnswers }, answersBody(probeDoorAnswers), [])
+  })
+
+  test("noul (permission) question shape passes through verbatim", () => {
+    // OpenChamber's Jev permission request (routing/jev.js
+    // buildPermissionRequest): a noul question plus a choice question.
+    const body = {
+      state: { permission: { type: "bash", patterns: ["rm -rf /tmp/x"], metadata: {} } },
+      questions: {
+        ask: { type: "noul", instructions: "Should the agent stop and ask the user first?" },
+        kind: { type: "choice", instructions: "What is the most significant effect?", criteria: { deletes_data: "Deletes files." } },
+      },
+    }
+    const parsed = parseSystemOneRequest(body)
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.questions).toEqual(body.questions)
+    expect(parsed.value.model).toBe("@cf/cloudflare/clef-flash")
+  })
+
+  test("array and non-object bodies are a 400 with the door's exact message, before upstream (#2938)", () => {
+    // Door fixture: [] and [1,2] → 400 {error:"Invalid JSON body:
+    // expected an object"} and the stub upstream is never hit.
+    for (const raw of [[], [1, 2], null, "text", 42]) {
+      const parsed = parseSystemOneRequest(raw)
+      if (parsed.ok) throw new Error(`expected refusal for ${JSON.stringify(raw)}`)
+      expect(parsed.error).toBe("Invalid JSON body: expected an object")
+      expect(systemOneErrorBody(parsed.error)).toEqual({ error: "Invalid JSON body: expected an object" })
+    }
+  })
+
+  test("missing state/questions default to {} exactly as the door forwards them", () => {
+    const parsed = parseSystemOneRequest({})
+    if (!parsed.ok) throw new Error(parsed.error)
+    expect(parsed.value.state).toEqual({})
+    expect(parsed.value.questions).toEqual({})
+  })
+
+  test("model resolution matches the door's table, hostile models refused with the door's message (#2410)", () => {
+    const controls: Array<[unknown, string]> = [
+      [undefined, "@cf/cloudflare/clef-flash"],
+      ["clef", "@cf/cloudflare/clef"],
+      ["clef-flash", "@cf/cloudflare/clef-flash"],
+      ["@cf/cloudflare/clef", "@cf/cloudflare/clef"],
+      ["@cf/cloudflare/clef-omni", "@cf/cloudflare/clef-omni"],
+    ]
+    for (const [input, resolved] of controls) expect(resolveModel(input)).toBe(resolved)
+    const hostile = [
+      "@cf/meta/llama-3.1-8b-instruct",
+      "@cf/cloudflare/../../ai/models/search",
+      "clef/../../../../client/v4/accounts/OTHER/ai/run/x",
+      "@cf/cloudflare/clef?per_page=1#frag",
+      "my-clef-thing",
+    ]
+    for (const model of hostile) {
+      const parsed = parseSystemOneRequest({ state: {}, questions: {}, model })
+      if (parsed.ok) throw new Error(`expected refusal for ${model}`)
+      expect(parsed.error).toContain("Refused model")
+      expect(parsed.error).toContain("only Clef-family models (@cf/cloudflare/clef*) are served by this proxy")
+    }
+  })
+
+  test("error envelopes are the door's plain {error} shape, not the OpenAI shape", () => {
+    // Door: 401 {error:"Missing Cloudflare AI inference API token"};
+    // upstream failure {error:"Cloudflare Workers AI Clef execution
+    // failed", details:<upstream body>}; timeout 504 {error:"…
+    // timed out"}. The façade reproduces all three verbatim
+    // (systemone.ts); the OpenAI doors' {error:{message,type}} shape
+    // is NOT used here — that is the systemone standard's own envelope.
+    expect(systemOneErrorBody("Missing Cloudflare AI inference API token")).toEqual({ error: "Missing Cloudflare AI inference API token" })
+    expect(upstreamFailureBody({ success: false })).toEqual({ error: "Cloudflare Workers AI Clef execution failed", details: { success: false } })
+    expect(systemOneErrorBody("Cloudflare Workers AI Clef request timed out")).toEqual({ error: "Cloudflare Workers AI Clef request timed out" })
+  })
+
+  test("models floor: the door's static floor is advertised with the door's owned_by", () => {
+    const listed = modelsBody().data.filter((m) => m.owned_by === "cloudflare-workers-ai")
+    expect(listed.map((m) => m.id)).toEqual(["@cf/cloudflare/clef", "@cf/cloudflare/clef-flash"])
+  })
+
+  test("verdict: clef systemone family is PARITY with two named acceptable-by-design diffs", () => {
+    // Named diffs (both acceptable-by-design under Drew's rulings —
+    // neither changes a caller-visible contract for systemone
+    // clients):
+    //  1. /v1/models: the door serves the LIVE Cloudflare catalog
+    //     subset (5-min TTL + last-known-good); the façade advertises
+    //     the door's static floor in the shared models list. Callers
+    //     addressing a live-only model (clef-omni) still resolve —
+    //     model lookup passes provider/model refs through and the
+    //     systemone grammar accepts the whole Clef family.
+    //  2. GET /v1/systemone and /systemone// health aliases and the
+    //     door's non-/v1 /systemone POST alias are not reproduced:
+    //     the standard endpoint is POST /v1/systemone (Drew's §9.5
+    //     supersession for this family names /v1/systemone; the Jev
+    //     client only ever POSTs the configured /v1/systemone URL).
+    const outcome = {
+      door: "POST /v1/systemone (+ /systemone, / aliases), live /v1/models",
+      facade: "POST /v1/systemone, static-floor Clef entries in /v1/models",
+      classification: "acceptable-by-design" as Classification,
+    }
+    expect(outcome.classification).toBe("acceptable-by-design")
+  })
+})
+
 // ------------------------------------------------------------ verdict registry
 
 /** The per-door verdicts recorded on #1152 (and cross-referenced
@@ -890,10 +1058,18 @@ export const VERDICTS = {
       "chat streaming: façade adds role:\"assistant\" to the first chunk",
     ],
   },
+  clef: {
+    verdict: "PARITY-WITH-NAMED-DIFFS",
+    diffs: [
+      "/v1/models: door serves the live Cloudflare catalog subset; façade advertises the door's static floor (live-only models still resolve via pass-through + grammar)",
+      "health and non-/v1 aliases (GET /v1/systemone, /systemone, /) not reproduced — the standard endpoint is POST /v1/systemone",
+    ],
+  },
 } as const
 
 test("verdict registry is consistent with the recorded classifications", () => {
-  expect(Object.keys(VERDICTS).sort()).toEqual(["codex", "muse", "route"])
+  expect(Object.keys(VERDICTS).sort()).toEqual(["clef", "codex", "muse", "route"])
+  expect(VERDICTS.clef.verdict).toBe("PARITY-WITH-NAMED-DIFFS")
   expect(VERDICTS.muse.verdict).toBe("FAIL")
   expect(VERDICTS.muse.diffs[0]).toContain("ATTESTATION")
   expect(VERDICTS.route.verdict).toBe("PARITY-WITH-NAMED-DIFFS")

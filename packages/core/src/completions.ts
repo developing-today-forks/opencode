@@ -271,7 +271,17 @@ export const completionBody = (args: {
 
 export const modelsBody = () => ({
   object: "list",
-  data: ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+  data: [
+    ...ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+    // The systemone family's Clef models (#1410): the door's static
+    // floor, advertised so a caller browsing /v1/models finds the
+    // models POST /v1/systemone serves. The door additionally serves
+    // the live catalog subset (e.g. @cf/cloudflare/clef-omni); those
+    // resolve through modelBody's provider/model pass-through and the
+    // systemone grammar check, not this static list.
+    { id: "@cf/cloudflare/clef", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+    { id: "@cf/cloudflare/clef-flash", object: "model", created: 0, owned_by: "cloudflare-workers-ai" },
+  ],
 })
 
 /**

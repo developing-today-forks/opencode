@@ -9,6 +9,10 @@
  * status codes, error envelopes, SSE framing, and that tool names
  * reach generation verbatim (the muse attestation case, §9.1).
  *
+ * The clef/systemone family (#1410) is appended at the bottom:
+ * its recordings come from bin/clef-proxy.mjs + clef-proxy.test.mjs
+ * and one live capture against the running door (2026-11-02).
+ *
  * Door recordings cited per test are transcribed from
  * developing-today/code bin/ (opencode-route-proxy.mjs,
  * codex-proxy.mjs, muse-proxy.mjs) and their test files — see the
@@ -22,6 +26,7 @@ import { expect } from "bun:test"
 import { LLMEvent, LLMResponse } from "@opencode/ai"
 import { Generate, type CompletionInput } from "@opencode/core/generate"
 import { Embeddings } from "@opencode/core/embeddings"
+import { SystemOne } from "@opencode/core/systemone"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
@@ -250,5 +255,188 @@ it.live("model selection failure: 400 invalid_request_error", () =>
     const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
     expect(body.error.type).toBe("invalid_request_error")
     mode = "ok"
+  }),
+)
+
+// ------------------------------------------------------------ clef (systemone family, #1410)
+//
+// HTTP-level pairs for the systemone door: the recorded requests are
+// OpenChamber's Jev shapes (routing/jev.js buildProbeRequest /
+// buildPermissionRequest and the door's own test bodies), replayed
+// through the real handler with a fake SystemOne service. The fake's
+// failure modes are selected by a marker in `state`, standing in for
+// the recorded upstream outcomes in the door's stub fixtures.
+
+const fakeSystemOne = makeLocationNode({
+  service: SystemOne.Service,
+  layer: Layer.succeed(
+    SystemOne.Service,
+    SystemOne.Service.of({
+      evaluate: (input) => {
+        const marker = (input.state as { fake?: string } | undefined)?.fake
+        if (marker === "missing-token")
+          return Effect.fail(
+            new SystemOne.UnavailableError({
+              message: "Missing Cloudflare AI inference API token",
+              status: 401,
+              body: SystemOne.errorBody("Missing Cloudflare AI inference API token"),
+            }),
+          )
+        if (marker === "upstream-502")
+          return Effect.fail(
+            new SystemOne.UnavailableError({
+              message: "Cloudflare Workers AI Clef execution failed",
+              status: 502,
+              body: SystemOne.upstreamFailureBody(null),
+            }),
+          )
+        if (marker === "timeout")
+          return Effect.fail(
+            new SystemOne.UnavailableError({
+              message: "Cloudflare Workers AI Clef request timed out",
+              status: 504,
+              body: SystemOne.errorBody("Cloudflare Workers AI Clef request timed out"),
+            }),
+          )
+        return Effect.succeed({
+          answers: {
+            probe: { type: "choice", choice: "blue", probabilities: { blue: 0.8947, table: 0.1053 }, confidence: 0.6232 },
+          },
+        })
+      },
+    }),
+  ),
+  deps: [],
+})
+
+const setupSystemOne = Effect.gen(function* () {
+  const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-facade-parity-systemone-")))
+  const global = path.join(tmp.path, "global")
+  yield* Effect.promise(() => fs.mkdir(global, { recursive: true }))
+  yield* Effect.promise(() => fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })))
+  return yield* ServerFetch.make(
+    {
+      database: { path: ":memory:" },
+      config: { directory: global },
+      fs: { filewatcher: false },
+      models: { fetch: false },
+    },
+    { overrides: [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings), SystemOne.node.replace(fakeSystemOne)] },
+  )
+})
+
+const probeBody = {
+  state: { request: "Which of these is a colour: blue or table?" },
+  questions: {
+    probe: {
+      type: "choice",
+      instructions: "Pick the word that names a colour.",
+      criteria: { blue: "A colour.", table: "A piece of furniture." },
+    },
+  },
+  model: "@cf/cloudflare/clef-flash",
+}
+
+it.live("systemone: probe request answers 200 with exactly {answers} (the live door capture shape)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* post(handler, "http://opencode.local/v1/systemone", probeBody)
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as { answers: Record<string, unknown> }
+    // Door live capture (2026-11-02): {answers:{probe:{type:"choice",
+    // choice, probabilities, confidence}}} — nothing else on the wire.
+    expect(Object.keys(body)).toEqual(["answers"])
+    expect(body.answers.probe).toEqual({
+      type: "choice",
+      choice: "blue",
+      probabilities: { blue: 0.8947, table: 0.1053 },
+      confidence: 0.6232,
+    })
+  }),
+)
+
+it.live("systemone: array body is a 400 in the plain {error} envelope and never reaches the service (#2938)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/v1/systemone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "[1,2]",
+        }),
+      ),
+    )
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: string }
+    expect(body).toEqual({ error: "Invalid JSON body: expected an object" })
+  }),
+)
+
+it.live("systemone: malformed JSON is a 400, not a 500 (#690 discipline)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/v1/systemone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "not-json{",
+        }),
+      ),
+    )
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: string }
+    expect(body.error).toContain("Invalid JSON body")
+  }),
+)
+
+it.live("systemone: hostile model is a 400 with the door's refusal message (#2410)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* post(handler, "http://opencode.local/v1/systemone", {
+      ...probeBody,
+      model: "@cf/meta/llama-3.1-8b-instruct",
+    })
+    expect(res.status).toBe(400)
+    const body = (yield* Effect.promise(() => res.json())) as { error: string }
+    expect(body.error).toContain("Refused model")
+  }),
+)
+
+it.live("systemone: missing token answers the door's 401 envelope", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* post(handler, "http://opencode.local/v1/systemone", { ...probeBody, state: { fake: "missing-token" } })
+    expect(res.status).toBe(401)
+    const body = (yield* Effect.promise(() => res.json())) as { error: string }
+    expect(body).toEqual({ error: "Missing Cloudflare AI inference API token" })
+  }),
+)
+
+it.live("systemone: upstream failure answers the door's status + envelope; timeout is 504", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res502 = yield* post(handler, "http://opencode.local/v1/systemone", { ...probeBody, state: { fake: "upstream-502" } })
+    expect(res502.status).toBe(502)
+    const body502 = (yield* Effect.promise(() => res502.json())) as { error: string; details: unknown }
+    expect(body502.error).toBe("Cloudflare Workers AI Clef execution failed")
+    const res504 = yield* post(handler, "http://opencode.local/v1/systemone", { ...probeBody, state: { fake: "timeout" } })
+    expect(res504.status).toBe(504)
+    const body504 = (yield* Effect.promise(() => res504.json())) as { error: string }
+    expect(body504).toEqual({ error: "Cloudflare Workers AI Clef request timed out" })
+  }),
+)
+
+it.live("systemone: /v1/models carries the Clef floor alongside the route models", () =>
+  Effect.gen(function* () {
+    const handler = yield* setupSystemOne
+    const res = yield* Effect.promise(() => handler(new Request("http://opencode.local/v1/models")))
+    expect(res.status).toBe(200)
+    const body = (yield* Effect.promise(() => res.json())) as { data: Array<{ id: string; owned_by: string }> }
+    expect(body.data.filter((m) => m.owned_by === "cloudflare-workers-ai").map((m) => m.id)).toEqual([
+      "@cf/cloudflare/clef",
+      "@cf/cloudflare/clef-flash",
+    ])
   }),
 )
