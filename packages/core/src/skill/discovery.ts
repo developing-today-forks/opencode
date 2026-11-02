@@ -2,7 +2,7 @@ export * as SkillDiscovery from "./discovery.js"
 
 import path from "path"
 import { Context, Effect, Layer, Schedule, Schema } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -17,6 +17,18 @@ import { Hash } from "@opencode/util/hash"
  * bound for the same kind of content and is far above any real skill file.
  */
 export const MAX_SKILL_FILE_BYTES = 5 * 1024 * 1024
+
+/**
+ * Cap on the remote catalog index body. The index is a flat JSON list of
+ * {name, version?, files[]} entries fetched from the same untrusted source as
+ * the skill files, so it gets its own bound instead of an unbounded decode:
+ * even 10,000 skills at ~200 bytes per entry is ~2 MiB, and 8 MiB leaves
+ * generous headroom while still failing a hostile or broken catalog fast.
+ */
+export const MAX_SKILL_INDEX_BYTES = 8 * 1024 * 1024
+
+/** Deadline for the index fetch, matching WellKnown's manifest fetch bound. */
+const indexFetchTimeout = "15 seconds"
 
 const skillConcurrency = 4
 const fileConcurrency = 8
@@ -112,11 +124,26 @@ const layer = Layer.effect(
         const index = new URL("index.json", source).href
         const data = yield* HttpClientRequest.get(index).pipe(
           HttpClientRequest.acceptJson,
-          http.execute,
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Index)),
+          HttpClient.withScope(http).execute,
+          // Bounded read (#1376, the #923 residual): collect the body under the
+          // index cap first (declared-length pre-check plus in-flight bound),
+          // then decode the bounded bytes instead of schemaBodyJson on the raw
+          // response. Failure disposition unchanged: log and pull nothing.
+          Effect.flatMap((response) =>
+            collectBoundedResponseBody(
+              response,
+              MAX_SKILL_INDEX_BYTES,
+              () => new Error(`Skill index too large (exceeds ${MAX_SKILL_INDEX_BYTES} byte limit): ${index}`),
+            ),
+          ),
+          Effect.flatMap((body) => Schema.decodeUnknownEffect(Schema.fromJsonString(Index))(body.toString("utf8"))),
+          Effect.timeout(indexFetchTimeout),
           Effect.catch((error) =>
             Effect.logError("failed to fetch skill index", { url: index, error }).pipe(Effect.as(undefined)),
           ),
+          // Scoped (withScope above): closing the scope aborts a response the
+          // bounded collector rejected on its declared size, as in download().
+          Effect.scoped,
         )
         if (!data) return []
 
