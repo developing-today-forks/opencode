@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import crypto from "node:crypto"
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -75,11 +76,46 @@ describe("writeFileSyncAtomic", () => {
     writeFileSyncAtomic(file, '{"ready":true}')
     expect(readFileSync(file, "utf8")).toBe('{"ready":true}')
     expect(readdirSync(path.dirname(file))).toEqual(["state.json"])
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o600)
   })
 
-  test("a rename that keeps failing throws and leaves no temp file", () => {
+  test("preserves an existing mode and writes through a symlink", () => {
     const root = dir()
     const file = path.join(root, "state.json")
+    const link = path.join(root, "state-link.json")
+    fs.writeFileSync(file, "before")
+    fs.chmodSync(file, 0o640)
+    fs.symlinkSync(file, link)
+
+    writeFileSyncAtomic(link, "after")
+
+    expect(readFileSync(file, "utf8")).toBe("after")
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o640)
+    expect(readdirSync(root).sort()).toEqual(["state-link.json", "state.json"])
+  })
+
+  test("refuses a colliding exclusive temp without changing either file", () => {
+    const root = dir()
+    const file = path.join(root, "state.json")
+    const temporary = path.join(root, `.tmp-${process.pid}-616263646566`)
+    fs.writeFileSync(file, "before")
+    fs.writeFileSync(temporary, "sentinel")
+    const randomBytes = spyOn(crypto, "randomBytes").mockReturnValue(Buffer.from("abcdef"))
+
+    try {
+      expect(() => writeFileSyncAtomic(file, "after")).toThrow()
+      expect(readFileSync(file, "utf8")).toBe("before")
+      expect(readFileSync(temporary, "utf8")).toBe("sentinel")
+    } finally {
+      randomBytes.mockRestore()
+    }
+  })
+
+  test("a rename that keeps failing throws, preserves the target, and leaves no temp file", () => {
+    const root = dir()
+    const file = path.join(root, "state.json")
+    fs.writeFileSync(file, "before")
 
     const spy = spyOn(fs, "renameSync").mockImplementation(() => {
       throw transient("EPERM")
@@ -87,8 +123,9 @@ describe("writeFileSyncAtomic", () => {
 
     try {
       expect(() => writeFileSyncAtomic(file, "{}")).toThrow("rename failed: EPERM")
-      expect(existsSync(file)).toBe(false)
-      expect(readdirSync(root)).toEqual([])
+      expect(existsSync(file)).toBe(true)
+      expect(readFileSync(file, "utf8")).toBe("before")
+      expect(readdirSync(root)).toEqual(["state.json"])
     } finally {
       spy.mockRestore()
     }

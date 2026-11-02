@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -22,8 +23,42 @@ describe("ModelPlan store", () => {
       NOW,
     )
     ModelPlan.writeStore(store, root)
-    expect(fs.readdirSync(root).filter((file) => file.endsWith(".tmp"))).toEqual([])
+    expect(fs.readdirSync(root)).toEqual(["plans.json"])
+    if (process.platform !== "win32") expect(fs.statSync(path.join(root, "plans.json")).mode & 0o777).toBe(0o600)
     expect(ModelPlan.readStore(root).plans).toHaveLength(1)
+  })
+
+  test("writeStore replaces through a symlink and preserves the target mode", () => {
+    const root = dir()
+    const linked = dir()
+    const target = path.join(root, "plans.json")
+    fs.writeFileSync(target, JSON.stringify(ModelPlan.emptyStore()))
+    fs.chmodSync(target, 0o640)
+    fs.symlinkSync(target, path.join(linked, "plans.json"))
+
+    ModelPlan.writeStore(ModelPlan.emptyStore(), linked)
+
+    expect(fs.lstatSync(path.join(linked, "plans.json")).isSymbolicLink()).toBe(true)
+    expect(ModelPlan.readStore(root)).toEqual(ModelPlan.emptyStore())
+    if (process.platform !== "win32") expect(fs.statSync(target).mode & 0o777).toBe(0o640)
+    expect(fs.readdirSync(root)).toEqual(["plans.json"])
+  })
+
+  test("writeStore refuses a colliding exclusive temp without changing either file", () => {
+    const root = dir()
+    const target = path.join(root, "plans.json")
+    const temporary = path.join(root, `.tmp-${process.pid}-616263646566`)
+    fs.writeFileSync(target, JSON.stringify(ModelPlan.emptyStore()))
+    fs.writeFileSync(temporary, "sentinel")
+    const randomBytes = spyOn(crypto, "randomBytes").mockImplementation(() => Buffer.from("abcdef") as never)
+
+    try {
+      expect(() => ModelPlan.writeStore(ModelPlan.emptyStore(), root)).toThrow()
+      expect(fs.readFileSync(target, "utf8")).toBe(JSON.stringify(ModelPlan.emptyStore()))
+      expect(fs.readFileSync(temporary, "utf8")).toBe("sentinel")
+    } finally {
+      randomBytes.mockRestore()
+    }
   })
 
   test("a write retries a transient rename failure and lands", () => {
@@ -39,7 +74,7 @@ describe("ModelPlan store", () => {
       ModelPlan.writeStore(ModelPlan.emptyStore(), root)
       expect(calls).toBe(2)
       expect(ModelPlan.readStore(root)).toEqual(ModelPlan.emptyStore())
-      expect(fs.readdirSync(root).filter((file) => file.endsWith(".tmp"))).toEqual([])
+      expect(fs.readdirSync(root)).toEqual(["plans.json"])
     } finally {
       spy.mockRestore()
     }
@@ -47,6 +82,9 @@ describe("ModelPlan store", () => {
 
   test("a write whose rename keeps failing transiently throws and leaves no temporary file", () => {
     const root = dir()
+    const file = path.join(root, "plans.json")
+    const before = JSON.stringify(ModelPlan.emptyStore())
+    fs.writeFileSync(file, before)
     let calls = 0
     const spy = spyOn(fs, "renameSync").mockImplementation(() => {
       calls += 1
@@ -55,7 +93,8 @@ describe("ModelPlan store", () => {
     try {
       expect(() => ModelPlan.writeStore(ModelPlan.emptyStore(), root)).toThrow("operation not permitted")
       expect(calls).toBe(5)
-      expect(fs.readdirSync(root)).toEqual([])
+      expect(fs.readFileSync(file, "utf8")).toBe(before)
+      expect(fs.readdirSync(root)).toEqual(["plans.json"])
     } finally {
       spy.mockRestore()
     }

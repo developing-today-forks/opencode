@@ -1,5 +1,6 @@
 export * as ModelPlan from "./model-plan.js"
 
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { Global } from "@opencode/util/global"
@@ -131,10 +132,7 @@ function isTransientRenameError(error: unknown) {
   return typeof error.code === "string" && transientRenameCodes.has(error.code)
 }
 
-// On Windows, renaming over a destination another handle is reading fails
-// with EPERM and the update would be lost; retry briefly before giving up
-// (same fix as #85 for the TUI persistence helper, kept in sync with the
-// desktop copy in packages/desktop/src/main/atomic-write.ts).
+// Sync writers follow the atomic-replace contract in design #1345.
 function renameSyncWithRetry(source: string, destination: string) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -152,16 +150,70 @@ function renameSyncWithRetry(source: string, destination: string) {
 export const writeStore = (store: Store, dataDir?: string) => {
   const dir = directory(dataDir)
   fs.mkdirSync(dir, { recursive: true })
-  const file = path.join(dir, "plans.json")
+  const file = resolveAtomicTarget(path.join(dir, "plans.json"))
+  fs.mkdirSync(path.dirname(file), { recursive: true })
   const valid = Schema.decodeUnknownSync(Store)(store)
-  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  const temporary = path.join(path.dirname(file), `.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`)
+  const mode = fileMode(file)
+  let created = false
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(valid, null, 2)}\n`)
-    renameSyncWithRetry(temporary, file)
-  } catch (error) {
+    const descriptor = fs.openSync(temporary, "wx", 0o600)
+    created = true
     try {
-      fs.rmSync(temporary, { force: true })
-    } catch {}
+      fs.writeFileSync(descriptor, `${JSON.stringify(valid, null, 2)}\n`)
+    } finally {
+      fs.closeSync(descriptor)
+    }
+    fs.chmodSync(temporary, mode)
+    renameSyncWithRetry(temporary, file)
+    created = false
+  } catch (error) {
+    if (created) {
+      try {
+        fs.rmSync(temporary, { force: true })
+      } catch {}
+    }
+    throw error
+  }
+}
+
+function resolveAtomicTarget(file: string, remaining = 8): string {
+  const absolute = path.resolve(file)
+  try {
+    return fs.realpathSync(absolute)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+  }
+
+  let parent: string
+  try {
+    parent = fs.realpathSync(path.dirname(path.resolve(file)))
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+    parent = path.dirname(absolute)
+  }
+
+  const target = path.join(parent, path.basename(absolute))
+  let link: string
+  try {
+    link = fs.readlinkSync(target)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EINVAL") return target
+    throw error
+  }
+  if (remaining === 0) throw new Error(`Too many levels of symbolic links: ${file}`)
+  return resolveAtomicTarget(path.resolve(parent, link), remaining - 1)
+}
+
+function fileMode(file: string) {
+  // These stores use the contract's preserve policy: keep an existing mode, or use 0o600 for a new file.
+  try {
+    return fs.statSync(file).mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600
     throw error
   }
 }
