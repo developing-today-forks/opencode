@@ -870,6 +870,16 @@ const releasesHold = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot): bool
   return hold.benchedBalance === null || snapshot.remaining > hold.benchedBalance
 }
 
+/** Whether a snapshot shows its own grant was reclassified out of balance: it comes from
+ * the hold's exact grant (same plan + window) but is no longer balance-shaped -- e.g. the
+ * window gained `windowHours`, so derive() now reports a resetting usage window instead of
+ * a point-in-time balance (#1380). The grant the hold benches on no longer exists as a
+ * balance grant, so the hold is stale: the snapshot replaces it and gates (or not) as the
+ * window's normal timed gate. A non-balance snapshot from any OTHER grant is not evidence
+ * about this hold and never clears it. */
+const grantReclassified = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot): boolean =>
+  hold.grant !== undefined && grantIdentity(snapshot) === hold.grant && snapshot.balance !== true
+
 type QuotaGateState = {
   snapshot: QuotaSnapshot.Snapshot
   target: Model.Ref
@@ -924,17 +934,22 @@ const observeCredentialQuotaState = (
   // A balance hold restored from its durable baseline after a restart has no in-memory
   // state: the persisted baseline re-arms the hold, like the provider path (#1014).
   const restored = previous ? undefined : restoredCredentialHold(credentialID)
-  const hold = previous?.balanceHold ?? restored
+  let hold = previous?.balanceHold ?? restored
   if (hold && !releasesHold(hold, snapshot)) {
-    if (!previous)
-      credentialQuota.set(credentialID, {
-        snapshot,
-        target,
-        gated: true,
-        balanceHold: hold,
-        resetObservedAt: snapshot.observedAt,
-      })
-    return
+    // A reclassified grant (#1380) releases the stale hold by no longer being a balance
+    // grant: fall through and let this snapshot's normal timed gate replace it (the
+    // persist step below clears the durable baseline because `hold` is still set).
+    if (!grantReclassified(hold, snapshot)) {
+      if (!previous)
+        credentialQuota.set(credentialID, {
+          snapshot,
+          target,
+          gated: true,
+          balanceHold: hold,
+          resetObservedAt: snapshot.observedAt,
+        })
+      return
+    }
   }
   // Out-of-order delivery must not rewind the gate: an observation older than the retained
   // one carries no new information, even when it is still fresh — a below-limit reading
@@ -1036,7 +1051,7 @@ export const observeProviderQuota = (
         }
       : undefined)
   if (hold) {
-    if (!releasesHold(hold, snapshot)) {
+    if (!releasesHold(hold, snapshot) && !grantReclassified(hold, snapshot)) {
       if (!previous)
         providerQuota.set(target.providerID, {
           snapshot,
@@ -1047,6 +1062,8 @@ export const observeProviderQuota = (
         })
       return
     }
+    // A reclassified grant (#1380) falls through: processing below replaces the balance
+    // skip with this snapshot's normal timed gate (or removes it when not full).
   }
   if (previous && snapshot.observedAt < previous.snapshot.observedAt) return
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)
@@ -1106,8 +1123,29 @@ export const reconcileQuotaGate = (providerID: string, livePlanIDs: ReadonlySet<
     if (grantPlan !== undefined && !livePlanIDs.has(grantPlan)) removeAdjustment(credentialBaselineID(credentialID))
     if (state.gated) logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
   }
+  // Durable balance baselines restored after a restart may have no in-memory state at
+  // all (#1380): the loops above only see live gate state, so a deleted plan's baseline
+  // record would otherwise persist -- and keep blocking its credential via the restored
+  // hold -- indefinitely. Clear those whose grant's plan no longer feeds the gate; a
+  // baseline whose grant plan is still live is a still-applicable depleted balance plan
+  // and keeps its hold.
+  for (const item of [...adjustments]) {
+    if (item.providerID !== providerID || item.credentialID === undefined) continue
+    if (item.id !== credentialBaselineID(item.credentialID) || item.balanceBaseline === undefined) continue
+    if (credentialQuota.has(item.credentialID)) continue
+    const grantPlan = item.balanceGrant?.split("\n")[0]
+    if (grantPlan !== undefined && !livePlanIDs.has(grantPlan)) removeAdjustment(item.id)
+  }
   const state = providerQuota.get(providerID)
-  if (!state || state.snapshot.planID.startsWith("attempt:") || livePlanIDs.has(state.snapshot.planID)) return
+  if (!state) {
+    // Same restored-only gap on the provider scope: a balance skip record with no
+    // in-memory state whose grant's plan has ended is stale and clears here.
+    const record = adjustments.find((item) => item.id === `quota:${providerID}` && item.balanceBaseline !== undefined)
+    const grantPlan = record?.balanceGrant?.split("\n")[0]
+    if (record && grantPlan !== undefined && !livePlanIDs.has(grantPlan)) removeAdjustment(record.id)
+    return
+  }
+  if (state.snapshot.planID.startsWith("attempt:") || livePlanIDs.has(state.snapshot.planID)) return
   providerQuota.delete(providerID)
   const record = adjustments.find((item) => item.id === `quota:${providerID}`)
   if (record) {

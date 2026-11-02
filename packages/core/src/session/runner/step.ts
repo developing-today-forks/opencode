@@ -178,6 +178,35 @@ export const isQuotaFailure = (failure: AIError) => {
   return reason._tag === "RateLimit" && reason.http?.status === 429
 }
 
+/** Text reporting that some limit is spent. Broad on purpose: it only opens the quota-failure
+ * path (a timed gate); it does NOT by itself prove a balance was exhausted (#1380). */
+const exhaustionText = /insufficient credits|quota exhausted|usage limit exceeded|reached your .* limit/i
+
+/** Text that explicitly reports credits/a balance spent — the only text (besides the
+ * `QuotaExceeded` tag) that may classify a failure as balance exhaustion. Generic limit
+ * wording ("reached your rate limit", "usage limit exceeded", "quota exhausted") is a
+ * window/rate statement, not a balance statement (#1380). */
+const balanceExhaustionText =
+  /insufficient credits|insufficient balance|insufficient funds|out of credits|credits? exhausted|balance exhausted|credit balance is too low|no credits (?:left|remaining)/i
+
+/**
+ * How a quota-path failure gates its pool (#1014, #1380): "balance-exhaustion" may install
+ * an increase-only balance hold with no expiry, so it requires a `QuotaExceeded` tag or
+ * explicitly credit/balance-specific text. A failure that only matches the broad
+ * exhaustion wording — a plain HTTP 429 rate limit, say — classifies as "rate-limit" and
+ * keeps its timed recovery even when the pool's last snapshot was balance-shaped.
+ * Returns undefined when the failure does not enter the quota-failure path at all.
+ */
+export const quotaFailureClassification = (
+  failure: AIError,
+): "balance-exhaustion" | "rate-limit" | undefined => {
+  const reason = failure.reason as { _tag?: string; message?: string; body?: string }
+  const text = `${reason.message ?? ""} ${reason.body ?? ""}`
+  if (!isQuotaFailure(failure) && !exhaustionText.test(text) && !balanceExhaustionText.test(text)) return undefined
+  return reason._tag === "QuotaExceeded" || balanceExhaustionText.test(text) ? "balance-exhaustion" : "rate-limit"
+}
+
+
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
 const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not return a tool result" } as const
@@ -424,10 +453,8 @@ export const make = Effect.gen(function* () {
         // then stops spending attempts — and collecting 429s — on an exhausted pool. The
         // text check catches providers that report exhaustion without a quota tag
         // (commandcode's "insufficient credits" arrives as an unknown-provider error).
-        const exhaustionText = /insufficient credits|quota exhausted|usage limit exceeded|reached your .* limit/i
-        const reason = llmFailure?.reason as { _tag?: string; message?: string; body?: string } | undefined
-        const exhaustion = exhaustionText.test(`${reason?.message ?? ""} ${reason?.body ?? ""}`)
-        if (failed && llmFailure && (isQuotaFailure(llmFailure) || exhaustion)) {
+        const quotaClassification = failed && llmFailure ? quotaFailureClassification(llmFailure) : undefined
+        if (llmFailure && quotaClassification) {
           const hint = failureHint(llmFailure)
           ModelRoute.observeQuotaFailure(
             input.model.ref,
@@ -435,8 +462,8 @@ export const make = Effect.gen(function* () {
             hint.retryAfterMs === undefined ? undefined : Date.now() + hint.retryAfterMs,
             Date.now(),
             // Only a real exhaustion answer may install an increase-only balance hold; a
-            // plain HTTP 429 rate limit keeps its stated timed recovery (#1014).
-            reason?._tag === "QuotaExceeded" || exhaustion ? "balance-exhaustion" : "rate-limit",
+            // plain HTTP 429 rate limit keeps its stated timed recovery (#1014, #1380).
+            quotaClassification,
           )
         }
         // A success that advertised no limit headers replaces the serving credential's hold:
