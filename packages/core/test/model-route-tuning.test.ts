@@ -1,6 +1,11 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import type { ErrorBreakdown, TargetStats } from "@opencode/core/model-route-log"
+import { ModelRoute } from "@opencode/core/model-route"
 import { ModelRouteTuning } from "@opencode/core/model-route-tuning"
+
+afterEach(() => {
+  ModelRoute.configureConstants(ModelRoute.DEFAULT_CONSTANTS)
+})
 
 const stats = (modelID: string, over: Partial<TargetStats> = {}): TargetStats => ({
   providerID: "p",
@@ -161,6 +166,38 @@ describe("ModelRouteTuning predictions", () => {
         until: ceiling,
       })
     }
+  })
+
+  test("a non-default quota-gate ceiling moves the tuning prediction ceiling with it (#1424)", () => {
+    const at = Date.UTC(2026, 0, 1, 14)
+    ModelRoute.configureConstants({ quotaGate: { maxMs: 7 * 86_400_000 } })
+    expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 100000 days", at)).toBe(at + 7 * 86_400_000)
+    expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(7 * 86_400_000)
+    const errors = [
+      {
+        providerID: "q",
+        modelID: "n",
+        tag: "QuotaExceeded",
+        code: null,
+        status: 429,
+        count: 3,
+        lastTime: at,
+        lastMessage: "quota exceeded; try again in 100000 days",
+      },
+    ]
+    expect(ModelRouteTuning.predict({ hourly, errors, now: at })).toContainEqual({
+      target: "q/n",
+      state: "quota-reset",
+      detail: `provider message states a reset past the 7-day ceiling; predicting ${new Date(at + 7 * 86_400_000).toISOString()}`,
+      until: at + 7 * 86_400_000,
+    })
+    // Within the tighter ceiling the stated reset is honoured as written.
+    expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 3 hours", at)).toBe(at + 3 * 3_600_000)
+  })
+
+  test("the default tuning ceiling is the 30-day quota-gate default (#1424)", () => {
+    expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(ModelRoute.DEFAULT_CONSTANTS.quotaGate.maxMs)
+    expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(30 * 86_400_000)
   })
 })
 

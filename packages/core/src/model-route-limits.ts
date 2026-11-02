@@ -169,6 +169,13 @@ export const retryHintFromMessage = (message: string | undefined, now: number): 
   return at === undefined ? undefined : Math.max(0, at - now)
 }
 
+/** Deliberate invariants, not settings knobs (#1424): per-window rate-limit holds stay
+ * bounded by provider-window semantics, not by the quota-gate ceiling. MAX_WINDOW_MS caps how
+ * far one window's stated reset may hold a target (a day — windows roll over far sooner than
+ * quota grants), and UNKNOWN_RESET_MS is the assumed hold for an emptied window that states
+ * no reset (a minute — the next request may well fit, unlike the quota gate's 30-minute
+ * fallback for an exhaustion reading with no usable reset). Wiring either to
+ * quotaGate.maxMs/fallbackMs would conflate the two mechanisms. */
 const MAX_WINDOW_MS = 86_400_000
 /** With nothing said about when it resets, an emptied window is assumed to last this long. */
 const UNKNOWN_RESET_MS = 60_000

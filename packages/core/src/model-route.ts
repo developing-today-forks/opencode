@@ -1259,7 +1259,9 @@ export const shouldFeedQuota = (now = Date.now(), ttlMs = currentConstants().quo
 }
 
 /** The longest a single exhaustion reading may hold a gate: a stated reset further out than
- * this is capped rather than believed (mirrors ModelRouteTuning.MAX_QUOTA_RESET_MS). */
+ * this is capped rather than believed. This is the single source of truth for the quota-reset
+ * ceiling: ModelRouteTuning derives its prediction bound from the configured value
+ * (currentConstants().quotaGate.maxMs) instead of keeping a second constant in step by hand. */
 const QUOTA_GATE_MAX_MS = 30 * 86_400_000
 /** The hold when an exhaustion error states no usable reset: long enough to stop a 429 on
  * every turn, short enough that a recovered pool is retried promptly (mirrors the tuning
