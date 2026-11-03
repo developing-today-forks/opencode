@@ -739,7 +739,7 @@ export const layer = Layer.effect(
           const unavailable = new Map<number, string>()
           const overLimit = new Set<number>()
           // Pool-shaped pull-out (#1014 PR3): a leaf whose nested group (pool) has had two
-          // distinct leaves answer quota in turn is out with its pool, derived from the
+          // distinct quota evidence sources answer quota in turn is out with its pool, derived from the
           // leaves' live quota benches/gates at this moment.
           const poolExhausted = new Map<number, boolean>()
           for (const index of indexes)
