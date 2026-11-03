@@ -78,6 +78,14 @@ export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: 
 // tightened to the field allowlist probed against this endpoint 2026-10-30,
 // code#2825): the proto parser rejects any field name it does not know with
 // a hard 400, so schemas are reduced to the proto vocabulary.
+// One family split (opencode#1550, probed against the door 2026-11-03): for
+// Claude models the upstream re-serializes the proto Schema into an
+// Anthropic input_schema, and Anthropic's validator rejects `anyOf`
+// outright (any branch count, any position) while accepting oneOf/allOf;
+// Gemini models accept anyOf verbatim. So when the target is a Claude
+// model (the `anthropic` flag threaded from fromRequest), anyOf is emitted
+// as oneOf — tool unions are disjoint alternatives in practice, where
+// exactly-one is the faithful reading.
 // =============================================================================
 const SCHEMA_FIELDS = new Set([
   "type", "format", "title", "description", "nullable", "default", "enum",
@@ -134,7 +142,7 @@ const resolveSchemaRefs = (root: Record<string, unknown>): unknown => {
   return walk(root, [])
 }
 
-const convertSchemaNode = (node: unknown): Record<string, unknown> => {
+const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unknown> => {
   if (!isRecord(node)) return {}
   const out: Record<string, unknown> = {}
   let minimum = node.minimum
@@ -157,17 +165,26 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
     if (key === "properties") {
       if (isRecord(value)) {
         const props: Record<string, unknown> = {}
-        for (const [name, sub] of Object.entries(value)) props[name] = convertSchemaNode(sub)
+        for (const [name, sub] of Object.entries(value)) props[name] = convertSchemaNode(sub, anthropic)
         out.properties = props
       }
       continue
     }
     if (key === "anyOf" || key === "oneOf" || key === "allOf") {
-      if (Array.isArray(value)) out[key] = value.map(convertSchemaNode)
+      if (Array.isArray(value)) {
+        const branches = value.map((sub) => convertSchemaNode(sub, anthropic))
+        if (key === "allOf") out.allOf = branches
+        // anyOf folds into oneOf for Anthropic targets (#1550); a node
+        // carrying both keywords merges both branch sets into the single
+        // oneOf the Anthropic side accepts.
+        else if (key === "oneOf" || anthropic)
+          out.oneOf = Array.isArray(out.oneOf) ? [...out.oneOf, ...branches] : branches
+        else out.anyOf = branches
+      }
       continue
     }
     if (key === "not") {
-      out.not = convertSchemaNode(value)
+      out.not = convertSchemaNode(value, anthropic)
       continue
     }
     if (key === "type" || key === "required" || key === "minimum" || key === "maximum" || key === "items" || key === "prefixItems") continue
@@ -175,8 +192,9 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
   }
   if (minimum !== undefined) out.minimum = minimum
   if (maximum !== undefined) out.maximum = maximum
-  if (items !== undefined) out.items = convertSchemaNode(items)
-  if (prefixItems !== undefined) out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map(convertSchemaNode)
+  if (items !== undefined) out.items = convertSchemaNode(items, anthropic)
+  if (prefixItems !== undefined)
+    out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map((sub) => convertSchemaNode(sub, anthropic))
   let nullable = node.nullable === true
   if (Array.isArray(node.type)) {
     const types = node.type.filter((entry): entry is string => typeof entry === "string")
@@ -203,8 +221,8 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
 }
 
 /** Convert a client JSON Schema tool definition to the proto Schema the wire accepts. */
-export const convertSchema = (schema: unknown) => {
-  const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}))
+export const convertSchema = (schema: unknown, anthropic = false) => {
+  const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}), anthropic)
   if (converted.type === undefined) converted.type = "OBJECT"
   return converted
 }
@@ -342,10 +360,10 @@ const thoughtSignature = (metadata: ProviderMetadata | undefined, key: string) =
   return ProviderShared.isRecord(value) && typeof value.thoughtSignature === "string" ? value.thoughtSignature : undefined
 }
 
-const lowerTool = (tool: ToolDefinition) => ({
+const lowerTool = (tool: ToolDefinition, anthropic: boolean) => ({
   name: tool.name,
   description: tool.description ?? "",
-  parameters: convertSchema(tool.inputSchema ?? { type: "object", properties: {} }),
+  parameters: convertSchema(tool.inputSchema ?? { type: "object", properties: {} }, anthropic),
 })
 
 const lowerToolConfig = (toolChoice: NonNullable<LLMRequest["toolChoice"]>) =>
@@ -373,7 +391,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     const flattened = ProviderShared.flattenToolRequest(request)
     const lowered = flattened.request
     const options = yield* decodeOptions(request.providerOptions ?? {})
-    const { fullName } = resolveModelAndEffort(
+    const { base, fullName } = resolveModelAndEffort(
       String(request.model.id),
       options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
     )
@@ -484,7 +502,9 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     const inner: typeof InnerRequest.Type = {
       contents,
       systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,
-      tools: flattened.tools.length ? [{ functionDeclarations: flattened.tools.map(lowerTool) }] : undefined,
+      tools: flattened.tools.length
+        ? [{ functionDeclarations: flattened.tools.map((tool) => lowerTool(tool, base.startsWith("claude"))) }]
+        : undefined,
       toolConfig:
         flattened.tools.length && request.toolChoice ? yield* lowerToolConfig(request.toolChoice) : undefined,
       generationConfig: {
