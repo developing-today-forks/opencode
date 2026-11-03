@@ -166,7 +166,7 @@ async function turn(
   clearTimeout(timeout)
   if (exitCode !== 0)
     throw new Error(
-      `${providerID} smoke command failed (exit ${exitCode}, local OpenAI requests: ${mockRequests}): ${stderr.replaceAll("smoke-only", "<REDACTED>").slice(-2000)}`,
+      `${providerID} smoke command failed (exit ${exitCode}, local OpenAI requests: ${mockRequests}): ${stderr.replaceAll("smoke-only", "<REDACTED>").slice(-2000)}\n--- run events (tail) ---\n${stdout.replaceAll("smoke-only", "<REDACTED>").slice(-2000)}`,
     )
   const events = stdout
     .split(/\r?\n/)
