@@ -54,6 +54,23 @@
           imports = [ "${mcpx-src}/pkgs/mcpx/modules/${module}" ];
           services.mcpx.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.mcpx;
         };
+
+      # This flake's own service modules (opencode#1511): the
+      # standing server, authored here in nix/modules. Each imports
+      # the matching mcpx module above it in the cascade, so a
+      # consumer who imports only the opencode module gets the
+      # mcpx option set too — and services.opencode's own config
+      # enables the daemon by default (see nix/modules/common.nix).
+      opencodeModule =
+        module:
+        { lib, pkgs, ... }:
+        {
+          imports = [
+            (mcpxModule module)
+            ./nix/modules/${module}
+          ];
+          services.opencode.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.opencode;
+        };
     in
     {
       devShells = forEachSystem (pkgs: {
@@ -118,5 +135,9 @@
       nixosModules.mcpx = mcpxModule "nixos.nix";
       homeManagerModules.mcpx = mcpxModule "home-manager.nix";
       darwinModules.mcpx = mcpxModule "darwin.nix";
+
+      nixosModules.opencode = opencodeModule "nixos.nix";
+      homeManagerModules.opencode = opencodeModule "home-manager.nix";
+      darwinModules.opencode = opencodeModule "darwin.nix";
     };
 }
