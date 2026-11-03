@@ -1,6 +1,7 @@
 import { define } from "@opencode/plugin/effect/plugin"
 import { Clock, Deferred, Effect, Option, Schema } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
+import { decodeBoundedResponseJson, readBoundedResponseTextEffect } from "../../tool/http-body.js"
 import type { ServerResponse } from "node:http"
 import { Credential } from "../../credential.js"
 import { Integration } from "../../integration.js"
@@ -21,6 +22,12 @@ const decodeError = Schema.decodeUnknownOption(
     Schema.Struct({ error: Schema.optional(Schema.String), error_description: Schema.optional(Schema.String) }),
   ),
 )
+/**
+ * Token and error responses are small JSON structs (a few KB in practice);
+ * 64 KiB is generous headroom while keeping a misbehaving issuer host from
+ * buffering an unbounded body into memory during auth (#1029).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
 
 export const PoePlugin = define({
   id: "opencode.provider.poe",
@@ -142,7 +149,12 @@ function exchangeCode(http: HttpClient.HttpClient, input: { code: string; redire
       )
       .pipe(Effect.mapError(() => new Error("Poe token exchange request failed")))
     if (response.status < 200 || response.status >= 300) {
-      const error = Option.getOrUndefined(decodeError(yield* response.text.pipe(Effect.orElseSucceed(() => ""))))
+      const body = yield* readBoundedResponseTextEffect(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`Poe token error response exceeded ${oauthMaxResponseBytes} bytes`),
+      ).pipe(Effect.orElseSucceed(() => ""))
+      const error = Option.getOrUndefined(decodeError(body))
       const detail = error?.error_description || error?.error
       return yield* Effect.fail(
         new Error(
@@ -152,9 +164,11 @@ function exchangeCode(http: HttpClient.HttpClient, input: { code: string; redire
         ),
       )
     }
-    const token = yield* HttpClientResponse.schemaBodyJson(Token)(response).pipe(
-      Effect.mapError(() => new Error("Invalid Poe token response")),
-    )
+    const token = yield* decodeBoundedResponseJson(Token)(
+      response,
+      oauthMaxResponseBytes,
+      () => new Error(`Poe token response exceeded ${oauthMaxResponseBytes} bytes`),
+    ).pipe(Effect.mapError(() => new Error("Invalid Poe token response")))
     // An implausibly long lifetime (the classic millisecond-scale value) would store a
     // fabricated expiry the consumer trusts for weeks (#892): clamp it to the shared sane
     // bound from #879 instead of the JS Date maximum. An absent value keeps Poe's

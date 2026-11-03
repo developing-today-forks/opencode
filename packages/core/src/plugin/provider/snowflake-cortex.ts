@@ -2,7 +2,12 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { expiresInSeconds } from "./expires.js"
 import { Form } from "@opencode/schema/form"
 import { Clock, Deferred, Effect, Option, Schema, Stream } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
+import {
+  decodeBoundedResponseJson,
+  readBoundedResponseText,
+  readBoundedResponseTextEffect,
+} from "../../tool/http-body.js"
 import { App } from "../../app.js"
 import { Bus } from "../../bus.js"
 import { Credential } from "../../credential.js"
@@ -29,6 +34,12 @@ const Token = Schema.Struct({
   refresh_token: Schema.optional(Schema.String),
   expires_in: Schema.optional(Schema.Number),
 })
+/**
+ * Token and error responses are small JSON structs (a few KB in practice);
+ * 64 KiB is generous headroom while keeping a misbehaving issuer host from
+ * buffering an unbounded body into memory during auth (#1029).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
 const decodeError = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({ message: Schema.optional(Schema.Unknown), error: Schema.optional(Schema.Unknown) }),
@@ -61,11 +72,19 @@ export const SnowflakeCortexPlugin = define({
           HttpClientRequest.bodyUrlParams({ ...form, client_id: clientID }),
         ),
       )
-      if (response.status < 200 || response.status >= 300)
-        return yield* Effect.fail(
-          new Error(`Snowflake token request failed (${response.status}): ${yield* response.text}`),
-        )
-      const tokens = yield* HttpClientResponse.schemaBodyJson(Token)(response)
+      if (response.status < 200 || response.status >= 300) {
+        const detail = yield* readBoundedResponseTextEffect(
+          response,
+          oauthMaxResponseBytes,
+          () => new Error(`Snowflake token error response exceeded ${oauthMaxResponseBytes} bytes`),
+        ).pipe(Effect.orElseSucceed(() => ""))
+        return yield* Effect.fail(new Error(`Snowflake token request failed (${response.status}): ${detail}`))
+      }
+      const tokens = yield* decodeBoundedResponseJson(Token)(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`Snowflake token response exceeded ${oauthMaxResponseBytes} bytes`),
+      )
       const refresh = tokens.refresh_token || form.refresh_token
       if (!refresh) return yield* Effect.fail(new Error("Snowflake token response did not include refresh_token"))
       return Credential.OAuth.make({
@@ -226,7 +245,19 @@ export const SnowflakeCortexPlugin = define({
       "http.response",
       Effect.fn(function* (event) {
         if (event.response.status !== 400) return
-        const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text())))
+        const error = Option.getOrUndefined(
+          decodeError(
+            yield* Effect.promise(() =>
+              // The hook carries undici's Response; it is the same runtime shape as the
+              // global one the shared reader takes (the compiler just names two types here).
+              readBoundedResponseText(
+                event.response.clone() as unknown as Response,
+                oauthMaxResponseBytes,
+                () => new Error(`Snowflake error response exceeded ${oauthMaxResponseBytes} bytes`),
+              ).catch(() => ""),
+            ),
+          ),
+        )
         // oxlint-disable-next-line typescript-eslint/no-base-to-string -- Preserve V1's error-body coercion.
         const message = String(error?.message || error?.error || "")
         if (!message.toLowerCase().includes("conversation complete")) return

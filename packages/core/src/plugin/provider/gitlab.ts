@@ -2,7 +2,8 @@ import os from "os"
 import { App } from "../../app.js"
 import { expiresInSeconds } from "./expires.js"
 import { Clock, Deferred, Effect, Exit, Option, Schema, Semaphore, Stream } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
+import { decodeBoundedResponseJson, readBoundedResponseTextEffect } from "../../tool/http-body.js"
 import type { Server, ServerResponse } from "node:http"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Form } from "@opencode/schema/form"
@@ -43,6 +44,12 @@ const decodeError = Schema.decodeUnknownOption(
     Schema.Struct({ error: Schema.optional(Schema.String), error_description: Schema.optional(Schema.String) }),
   ),
 )
+/**
+ * Token and error responses are small JSON structs (a few KB in practice);
+ * 64 KiB is generous headroom while keeping a misbehaving or malicious
+ * instance from buffering an unbounded body into memory during auth (#1029).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
 const discoveryTimeout = "10 seconds"
 // GitLab rotates the refresh token on every refresh, so concurrent refreshes of the same
 // credential (e.g. discovery in several Locations plus a request) must share one exchange.
@@ -412,14 +419,21 @@ function exchange(
       )
       .pipe(Effect.mapError(() => new Error("GitLab token exchange request failed")))
     if (response.status < 200 || response.status >= 300) {
-      const parsed = Option.getOrUndefined(decodeError(yield* response.text.pipe(Effect.orElseSucceed(() => ""))))
+      const text = yield* readBoundedResponseTextEffect(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`GitLab token error response exceeded ${oauthMaxResponseBytes} bytes`),
+      ).pipe(Effect.orElseSucceed(() => ""))
+      const parsed = Option.getOrUndefined(decodeError(text))
       const detail = parsed?.error_description || parsed?.error || `HTTP ${response.status}`
       const rejected = parsed?.error === "invalid_grant" || parsed?.error === "invalid_client"
       return yield* Effect.fail(new Error(rejected ? describe(detail, clientID) : detail))
     }
-    return yield* HttpClientResponse.schemaBodyJson(Token)(response).pipe(
-      Effect.mapError(() => new Error("Invalid GitLab token response")),
-    )
+    return yield* decodeBoundedResponseJson(Token)(
+      response,
+      oauthMaxResponseBytes,
+      () => new Error(`GitLab token response exceeded ${oauthMaxResponseBytes} bytes`),
+    ).pipe(Effect.mapError(() => new Error("Invalid GitLab token response")))
   })
 }
 

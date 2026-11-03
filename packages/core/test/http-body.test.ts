@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Stream } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import { HttpClientResponse } from "effect/http"
-import { collectBoundedResponseBody, readBoundedResponseText } from "@opencode/core/tool/http-body"
+import {
+  collectBoundedResponseBody,
+  decodeBoundedResponseJson,
+  readBoundedResponseText,
+  readBoundedResponseTextEffect,
+} from "@opencode/core/tool/http-body"
 
 const tooLarge = () => new Error("response body too large")
 
@@ -59,9 +64,12 @@ describe("collectBoundedResponseBody (#1068)", () => {
     const chunk = new Uint8Array(512)
     const chunks = [chunk, chunk, chunk, chunk]
     let pulled = 0
-    await expect(collect(fakeResponse(chunks, {}, undefined, () => pulled++), 1024)).rejects.toThrow(
-      "response body too large",
-    )
+    await expect(
+      collect(
+        fakeResponse(chunks, {}, undefined, () => pulled++),
+        1024,
+      ),
+    ).rejects.toThrow("response body too large")
     expect(pulled).toBeLessThan(chunks.length)
   })
 
@@ -135,5 +143,36 @@ describe("readBoundedResponseText (#1068)", () => {
     expect(response.body).toBeNull()
     expect(big.length).toBeLessThan(max)
     await expect(readBoundedResponseText(response, max, tooLarge)).rejects.toThrow("response body too large")
+  })
+})
+
+describe("readBoundedResponseTextEffect / decodeBoundedResponseJson (#1029)", () => {
+  const text = (response: HttpClientResponse.HttpClientResponse, max = 64) =>
+    Effect.runPromise(readBoundedResponseTextEffect(response, max, tooLarge))
+  const decode = <A, I>(schema: Schema.Codec<A, I>) =>
+    decodeBoundedResponseJson(schema)(
+      fakeResponse([new TextEncoder().encode(JSON.stringify({ a: "x" }))]),
+      64,
+      tooLarge,
+    )
+
+  test("reads a small text body", async () => {
+    expect(await text(fakeResponse([new TextEncoder().encode("nope")]))).toBe("nope")
+  })
+
+  test("fails instead of buffering a body over the cap", async () => {
+    await expect(text(fakeResponse([new Uint8Array(128).fill(97)]), 64)).rejects.toThrow("response body too large")
+  })
+
+  test("decodes JSON under the cap", async () => {
+    const decoded = await Effect.runPromise(decode(Schema.Struct({ a: Schema.String })))
+    expect(decoded).toEqual({ a: "x" })
+  })
+
+  test("fails on invalid JSON", async () => {
+    const response = fakeResponse([new TextEncoder().encode("not json")])
+    await expect(
+      Effect.runPromise(decodeBoundedResponseJson(Schema.Struct({ a: Schema.String }))(response, 64, tooLarge)),
+    ).rejects.toThrow()
   })
 })

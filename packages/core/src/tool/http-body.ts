@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Option, Schema, Stream } from "effect"
 import { HttpClientResponse } from "effect/http"
 import { readBoundedResponseText } from "@opencode/util/http-body"
 
@@ -33,8 +33,35 @@ export const collectBoundedResponseBody = (
   })
 
 /**
- * The native fetch reader is the shared `@opencode/util` implementation
- * (design #1127 phase 1, #1128): one implementation per layer, never per
- * call site. It is re-exported here so existing core/cli call sites keep
- * importing it from this module, next to the Effect variant above.
+ * Effect-side counterpart of `readBoundedResponseText` (design #1127): the
+ * same deadline-and-cap contract, for call sites that hold an
+ * `HttpClientResponse` instead of a native fetch `Response`. Provider OAuth
+ * exchanges read small JSON structs and short error bodies, so callers pass
+ * a generous cap (64 KiB) and never buffer an unbounded issuer response
+ * (#1029).
  */
+export const readBoundedResponseTextEffect = (
+  response: HttpClientResponse.HttpClientResponse,
+  maximumBytes: number,
+  tooLarge: () => Error,
+) => Effect.map(collectBoundedResponseBody(response, maximumBytes, tooLarge), (body) => body.toString("utf8"))
+
+/**
+ * Bounded JSON read for Effect call sites: collect the body under the cap,
+ * then decode it with `schema`. A body over the cap fails with `tooLarge`;
+ * malformed or schema-invalid JSON fails with a plain error, which call sites
+ * map to their existing "invalid response" message.
+ */
+export const decodeBoundedResponseJson =
+  <A, I>(schema: Schema.Codec<A, I>) =>
+  (
+    response: HttpClientResponse.HttpClientResponse,
+    maximumBytes: number,
+    tooLarge: () => Error,
+  ): Effect.Effect<A, Error> =>
+    Effect.flatMap(readBoundedResponseTextEffect(response, maximumBytes, tooLarge), (text) => {
+      const decoded = Schema.decodeUnknownOption(Schema.fromJsonString(schema))(text)
+      return Option.isSome(decoded)
+        ? Effect.succeed(decoded.value)
+        : Effect.fail(new Error("Response body was not valid JSON for the expected schema"))
+    })

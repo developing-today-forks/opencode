@@ -127,7 +127,6 @@ packages/core/src/plugin/provider/gitlab.ts :: fetch(input, { ...init, signal: i
 packages/core/src/plugin/provider/openai.ts :: fetch(`http://localhost:${port}/cancel`, { :: bounded at the site: call options carry AbortSignal.timeout as the signal
 packages/core/src/plugin/provider/openai.ts :: fetch(`${issuer}/api/accounts/deviceauth/token`, { :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
 packages/core/src/plugin/provider/openai.ts :: const response = await fetch(url, { ...init, signal }) :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
-packages/core/src/plugin/provider/snowflake-cortex.ts :: const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text()))) :: direct body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127 (receiver: chained call)
 packages/core/src/plugin/provider/xai.ts :: try: (signal) => fetch(url, { ...init, signal }), :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
 packages/core/src/plugin/vcs/git.ts :: return (yield* run(args, opts)).text() :: direct body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127 (receiver: chained call)
 packages/core/src/plugin/vcs/git.ts :: const name = result.text().trim() :: subprocess result accessor: .text() on the local command-runner result object, not a fetch Response
