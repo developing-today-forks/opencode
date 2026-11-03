@@ -335,6 +335,35 @@ describe("GitLabPlugin OAuth", () => {
     }),
   )
 
+  it.effect("fails a refresh whose token response exceeds the OAuth body cap (#1029)", () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const oversized = () => new Response("x".repeat(70_000))
+      // Failures are not shared, so discovery and this resolve may each send one refresh.
+      test.replies.push(oversized(), oversized())
+      const saved = yield* test.credentials.create({
+        integrationID,
+        value: expired({ instanceUrl: "https://gitlab.com", clientID: bundledClientID }),
+      })
+      const error = yield* test.integrations.connection.resolve(connectionOf(saved)).pipe(Effect.flip)
+      expect(error.message).toContain("GitLab token response exceeded")
+    }),
+  )
+
+  it.effect("reports only the status when a token error body exceeds the OAuth body cap (#1029)", () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const oversized = () => new Response("x".repeat(70_000), { status: 400 })
+      test.replies.push(oversized(), oversized())
+      const saved = yield* test.credentials.create({
+        integrationID,
+        value: expired({ instanceUrl: "https://gitlab.com", clientID: bundledClientID }),
+      })
+      const error = yield* test.integrations.connection.resolve(connectionOf(saved)).pipe(Effect.flip)
+      expect(error.message).toBe("HTTP 400")
+    }),
+  )
+
   for (const invalid of [
     { params: { state: "" }, message: "Invalid OAuth state" },
     { params: { code: "" }, message: "Missing authorization code" },

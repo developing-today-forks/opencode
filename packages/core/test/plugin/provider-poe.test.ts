@@ -271,6 +271,35 @@ for (const response of [
   )
 }
 
+it.live("fails the login when the token response exceeds the OAuth body cap (#1029)", () =>
+  Effect.gen(function* () {
+    const test = yield* fixture
+    const login = yield* test.connect
+    test.replies.push(new Response("x".repeat(70_000)))
+    const page = yield* Effect.promise(() => fetch(login.callback, { headers: { Connection: "close" } }))
+    expect(page.status).toBe(400)
+    expect(yield* Effect.promise(() => page.text())).toContain("Poe token response exceeded")
+    expect(yield* test.status(login.attempt.attemptID)).toMatchObject({
+      status: "failed",
+      message: expect.stringContaining("Poe token response exceeded"),
+    })
+  }),
+)
+
+it.live("reports only the status when a token error body exceeds the OAuth body cap (#1029)", () =>
+  Effect.gen(function* () {
+    const test = yield* fixture
+    const login = yield* test.connect
+    test.replies.push(new Response("x".repeat(70_000), { status: 400 }))
+    const page = yield* Effect.promise(() => fetch(login.callback, { headers: { Connection: "close" } }))
+    expect(page.status).toBe(400)
+    expect(yield* test.status(login.attempt.attemptID)).toMatchObject({
+      status: "failed",
+      message: "Poe token exchange failed (400)",
+    })
+  }),
+)
+
 for (const cancel of [false, true]) {
   it.live(`waits for the token exchange and consumes the callback once (cancel: ${cancel})`, () =>
     Effect.gen(function* () {

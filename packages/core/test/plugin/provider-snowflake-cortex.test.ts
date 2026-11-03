@@ -165,6 +165,52 @@ it.live("browser OAuth supplies the native endpoint/token and refreshes a reject
   ),
 )
 
+it.live("fails the login when the token response exceeds the OAuth body cap (#1029)", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const attempt = yield* test.integrations.oauth.connect({
+        integrationID,
+        methodID,
+        answer: { account: endpoint },
+      })
+      const url = new URL(attempt.url)
+      const callback = new URL(url.searchParams.get("redirect_uri") ?? "")
+      callback.searchParams.set("state", url.searchParams.get("state") ?? "")
+      callback.searchParams.set("code", "auth-code")
+      test.replies.push(new Response("x".repeat(70_000)))
+      yield* Effect.promise(() => fetch(callback))
+      expect(yield* test.status(attempt.attemptID)).toMatchObject({
+        status: "failed",
+        message: expect.stringContaining("Snowflake token response exceeded"),
+      })
+    }),
+  ),
+)
+
+it.live("reports only the status when a token error body exceeds the OAuth body cap (#1029)", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const attempt = yield* test.integrations.oauth.connect({
+        integrationID,
+        methodID,
+        answer: { account: endpoint },
+      })
+      const url = new URL(attempt.url)
+      const callback = new URL(url.searchParams.get("redirect_uri") ?? "")
+      callback.searchParams.set("state", url.searchParams.get("state") ?? "")
+      callback.searchParams.set("code", "auth-code")
+      test.replies.push(new Response("x".repeat(70_000), { status: 401 }))
+      yield* Effect.promise(() => fetch(callback))
+      expect(yield* test.status(attempt.attemptID)).toMatchObject({
+        status: "failed",
+        message: "Snowflake token request failed (401): ",
+      })
+    }),
+  ),
+)
+
 it.live("manual PAT uses its account and native compatibility rather than an SDK request rewrite", () =>
   withEnv(env, () =>
     Effect.gen(function* () {
