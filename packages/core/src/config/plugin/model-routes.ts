@@ -106,86 +106,13 @@ export const Plugin = define({
       const models = Array.from(routes, ([id, route]) => {
         const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
-        const first = expanded[0].model
-        // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
-        const leafCeiling = (target: (typeof expanded)[number]) =>
-          Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
-        const leafContext = Math.min(...expanded.map(leafCeiling))
-        const health = ModelRoute.policy(route.health, ctx.location.directory)
-        const targetCacheFormats = expanded.map((target) =>
-          target.cacheFormat ? { cacheFormat: target.cacheFormat } : {},
-        )
-        const info = Model.Info.make({
-          ...Model.Info.default(ModelRoute.PROVIDER_ID, Model.ID.make(id)),
-          name: route.name?.trim() || id,
-          settings: {
-            [ModelRoute.SETTING]: {
-              id: Model.ID.make(id),
-              ...(route.system ? { system: route.system } : {}),
-              targets: expanded.map((target) => target.ref),
-              targetVariants: expanded.map((target) => ({
-                ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
-                ...(target.variantMap ? { map: target.variantMap } : {}),
-              })),
-              // Routes that declare no cache format keep their stored settings unchanged.
-              ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
-              health,
-              nodes,
-              ...(route.attempts !== undefined ? { attempts: route.attempts } : {}),
-              ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
-              ...(route.autonomy ? { autonomy: route.autonomy } : {}),
-              ...(route.limit?.context !== undefined ? { limit: { context: route.limit.context } } : {}),
-              budgets: expanded.map((target) => target.budget ?? {}),
-              // Parallel to targets: each leaf's effective ceiling, so selection can skip a leaf
-              // whose ceiling a request does not fit. Stored effective (with the model's own limit
-              // folded in) so eligibility needs nothing beyond the definition and the request size.
-              ...(expanded.some((target) => target.contextLimit !== undefined)
-                ? {
-                    targetLimits: expanded.map((target) => ({
-                      context: Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                    })),
-                  }
-                : {}),
-              ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
-            },
-          },
-          capabilities: {
-            tools: expanded.every((target) => target.model.capabilities.tools),
-            input: intersect(expanded.map((target) => target.model.capabilities.input)),
-            output: intersect(expanded.map((target) => target.model.capabilities.output)),
-          },
-          variants: routeVariants(expanded),
-          cost: first.cost,
-          status: "active",
-          limit: {
-            context: route.limit?.context !== undefined ? Math.min(route.limit.context, leafContext) : leafContext,
-            output: Math.min(...expanded.map((target) => target.model.limit.output)),
-            ...(expanded.every((target) => target.model.limit.input !== undefined)
-              ? {
-                  // The context cap applies to the presented input limit too: compaction
-                  // prefers limit.input over limit.context (calculateCeiling), so an uncapped
-                  // input would silently bypass the cap whenever targets define one.
-                  input:
-                    route.limit?.context !== undefined
-                      ? Math.min(
-                          route.limit.context,
-                          ...expanded.map((target) =>
-                            Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                          ),
-                        )
-                      : Math.min(
-                          ...expanded.map((target) =>
-                            Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                          ),
-                        ),
-                }
-              : {}),
-          },
-        })
-        return info
+        return routeModel(id, route, expanded, nodes, globalSchedules, ctx.location.directory)
       }).filter((model): model is Model.Info => model !== undefined)
 
-      if (models.length === 0) return
+      // The routes provider is registered even when no route could be built from
+      // definitions alone: a route whose targets are all transform-created (#1001)
+      // has no model yet, and the model transform below can only create it if this
+      // provider exists in the model editor's candidate set.
       providers.add({
         info: {
           ...Provider.Info.empty(ModelRoute.PROVIDER_ID),
@@ -233,9 +160,133 @@ export const Plugin = define({
             }))
         })
       }
+      // Routes the loop above could not retarget because the provider transform
+      // never built them: every target was transform-created, so no route model
+      // existed when transforms began (#1001). Build each missing route now,
+      // against the same current-model definitions a retarget uses. A route
+      // whose targets still resolve to no model is named in a warning instead
+      // of vanishing silently.
+      const built = new Set(models.list(ModelRoute.PROVIDER_ID).map((model) => String(model.id)))
+      const missing = Array.from(routes.keys()).filter((id) => !built.has(id))
+      if (missing.length > 0) {
+        const providerRoutes = configuredProviderRoutes(
+          loaded.entries,
+          new Set(models.provider.list().map((record) => record.provider.id)),
+          routes,
+        )
+        const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
+        for (const id of missing) {
+          const created = createRouteModel(
+            id,
+            routes,
+            models,
+            windows,
+            providerRoutes,
+            globalSchedules,
+            ctx.location.directory,
+          )
+          if (!created) {
+            console.warn(
+              `model route ${JSON.stringify(id)} names targets that resolve to no models after model transforms (experimental.routes.models); the route is not built`,
+            )
+            continue
+          }
+          models.update(ModelRoute.PROVIDER_ID, Model.ID.make(id), (draft) => {
+            Object.assign(draft, created)
+          })
+        }
+      }
     })
   }),
 })
+
+/** The route model for one route, built from its expanded leaves: the provider
+ * transform builds it from definition-stage leaves, and the model transform
+ * builds it the same way for a route whose leaves only exist after model
+ * transforms (#1001), so both stages produce the identical model shape. */
+function routeModel(
+  id: string,
+  route: ConfigModelRoutes.Route,
+  expanded: readonly SourceModel[],
+  nodes: ModelRoute.Node[],
+  globalSchedules: readonly ModelRoute.WeightRule[],
+  directory?: string,
+): Model.Info {
+  const first = expanded[0].model
+  // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
+  const leafCeiling = (target: (typeof expanded)[number]) =>
+    Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
+  const leafContext = Math.min(...expanded.map(leafCeiling))
+  const health = ModelRoute.policy(route.health, directory)
+  const targetCacheFormats = expanded.map((target) => (target.cacheFormat ? { cacheFormat: target.cacheFormat } : {}))
+  return Model.Info.make({
+    ...Model.Info.default(ModelRoute.PROVIDER_ID, Model.ID.make(id)),
+    name: route.name?.trim() || id,
+    settings: {
+      [ModelRoute.SETTING]: {
+        id: Model.ID.make(id),
+        ...(route.system ? { system: route.system } : {}),
+        targets: expanded.map((target) => target.ref),
+        targetVariants: expanded.map((target) => ({
+          ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
+          ...(target.variantMap ? { map: target.variantMap } : {}),
+        })),
+        // Routes that declare no cache format keep their stored settings unchanged.
+        ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
+        health,
+        nodes,
+        ...(route.attempts !== undefined ? { attempts: route.attempts } : {}),
+        ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
+        ...(route.autonomy ? { autonomy: route.autonomy } : {}),
+        ...(route.limit?.context !== undefined ? { limit: { context: route.limit.context } } : {}),
+        budgets: expanded.map((target) => target.budget ?? {}),
+        // Parallel to targets: each leaf's effective ceiling, so selection can skip a leaf
+        // whose ceiling a request does not fit. Stored effective (with the model's own limit
+        // folded in) so eligibility needs nothing beyond the definition and the request size.
+        ...(expanded.some((target) => target.contextLimit !== undefined)
+          ? {
+              targetLimits: expanded.map((target) => ({
+                context: Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY),
+              })),
+            }
+          : {}),
+        ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
+      },
+    },
+    capabilities: {
+      tools: expanded.every((target) => target.model.capabilities.tools),
+      input: intersect(expanded.map((target) => target.model.capabilities.input)),
+      output: intersect(expanded.map((target) => target.model.capabilities.output)),
+    },
+    variants: routeVariants(expanded),
+    cost: first.cost,
+    status: "active",
+    limit: {
+      context: route.limit?.context !== undefined ? Math.min(route.limit.context, leafContext) : leafContext,
+      output: Math.min(...expanded.map((target) => target.model.limit.output)),
+      ...(expanded.every((target) => target.model.limit.input !== undefined)
+        ? {
+            // The context cap applies to the presented input limit too: compaction
+            // prefers limit.input over limit.context (calculateCeiling), so an uncapped
+            // input would silently bypass the cap whenever targets define one.
+            input:
+              route.limit?.context !== undefined
+                ? Math.min(
+                    route.limit.context,
+                    ...expanded.map((target) =>
+                      Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
+                    ),
+                  )
+                : Math.min(
+                    ...expanded.map((target) =>
+                      Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
+                    ),
+                  ),
+          }
+        : {}),
+    },
+  })
+}
 
 function configuredTuning(entries: readonly Entry[]) {
   return entries
@@ -828,33 +879,28 @@ const sameVariants = (
   right: readonly { readonly id: Model.VariantID }[],
 ) => left.length === right.length && left.every((variant, index) => variant.id === right[index]?.id)
 
-/** Re-expands one route's stored definition against the models that exist after model
- * transforms have run: the union of provider-definition ids and current model ids
- * (#236). Transform-created models are resolved from the editor's current state;
- * their ids are enumerated with `ids()` so no catalog model is drafted just to list
- * it. Returns the replacement definition (undefined when the expanded target set is
- * unchanged) together with the variants the retargeted leaves can still produce, or
- * undefined when the expansion is still empty. A route the provider transform never
- * built — one whose targets were all transform-created — cannot be created here:
- * model edits cannot create a provider, so such a route still needs a
- * definition-visible target (a glob or a catalog sibling) to exist before it can be
- * retargeted. */
-export function retargetDefinition(
-  current: ModelRoute.Definition,
+/** The slice of the model editor that re-expansion reads: the immutable provider
+ * definitions plus the current, post-model-transform model state. */
+export type ModelCatalogEditor = {
+  readonly ids: (providerID: Provider.ID) => readonly string[]
+  readonly get: (providerID: Provider.ID, modelID: Model.ID) => Model.Info | undefined
+  readonly provider: {
+    readonly list: () => readonly {
+      readonly provider: { readonly id: Provider.ID }
+      readonly models: ReadonlyMap<string, Model.Info>
+    }[]
+  }
+}
+
+/** Provider definitions unioned with the models that exist after model transforms
+ * have run (#236): for every provider a route target names, the editor's current
+ * models are merged over the definition-stage catalog, so transform-created models
+ * resolve exactly as catalog models do. */
+function currentDefinitions(
+  editor: ModelCatalogEditor,
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
-  editor: {
-    readonly ids: (providerID: Provider.ID) => readonly string[]
-    readonly get: (providerID: Provider.ID, modelID: Model.ID) => Model.Info | undefined
-    readonly provider: {
-      readonly list: () => readonly {
-        readonly provider: { readonly id: Provider.ID }
-        readonly models: ReadonlyMap<string, Model.Info>
-      }[]
-    }
-  },
-  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
-  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
-): Retargeted | undefined {
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
+) {
   const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
     editor.provider.list().map((record) => [record.provider.id, record.models] as const),
   )
@@ -898,6 +944,53 @@ export function retargetDefinition(
     }
     definitions.set(providerID, merged)
   }
+  return definitions
+}
+
+/** Builds the route model for a route the provider transform never built — one
+ * whose targets were all transform-created (#1001) — from the models that exist
+ * after model transforms have run. Returns undefined when the route is unknown
+ * or its expansion is still empty, so the caller can name the route in a
+ * diagnostic instead of letting it vanish silently. */
+export function createRouteModel(
+  id: string,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  editor: ModelCatalogEditor,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+  globalSchedules: readonly ModelRoute.WeightRule[] = [],
+  directory?: string,
+): Model.Info | undefined {
+  const route = routes.get(id)
+  if (!route) return undefined
+  const { leaves, nodes } = expand(
+    id,
+    routes,
+    currentDefinitions(editor, routes, providerRoutes),
+    windows,
+    providerRoutes,
+  )
+  if (leaves.length === 0) return undefined
+  return routeModel(id, route, leaves, nodes, globalSchedules, directory)
+}
+
+/** Re-expands one route's stored definition against the models that exist after model
+ * transforms have run: the union of provider-definition ids and current model ids
+ * (#236). Transform-created models are resolved from the editor's current state;
+ * their ids are enumerated with `ids()` so no catalog model is drafted just to list
+ * it. Returns the replacement definition (undefined when the expanded target set is
+ * unchanged) together with the variants the retargeted leaves can still produce, or
+ * undefined when the expansion is still empty. A route the provider transform never
+ * built — one whose targets were all transform-created — has no stored definition
+ * to retarget; creating it is createRouteModel's job (#1001). */
+export function retargetDefinition(
+  current: ModelRoute.Definition,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  editor: ModelCatalogEditor,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+): Retargeted | undefined {
+  const definitions = currentDefinitions(editor, routes, providerRoutes)
   const { leaves, nodes } = expand(String(current.id), routes, definitions, windows, providerRoutes)
   if (leaves.length === 0) return undefined
   // The variants the route can still advertise, decided over the retargeted leaves by the
