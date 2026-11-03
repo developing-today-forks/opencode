@@ -86,7 +86,7 @@ const fetch = async (input: string | URL, init: Init = {}) => {
       entries: () => Object.entries(headers),
     },
     text: async () => text(),
-    json: async () => JSON.parse(text()) as unknown,
+    json: async () => JSON.parse(text()),
     bytes: async () => bytes,
   }
 }

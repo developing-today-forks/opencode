@@ -50,7 +50,7 @@ const requestBody = (ctx: { request: { text: Effect.Effect<string, unknown> } })
     Effect.catchCause(() => Effect.succeed("")),
     Effect.map((raw) => {
       try {
-        return { raw, body: JSON.parse(raw) as unknown }
+        return { raw, body: JSON.parse(raw) }
       } catch {
         return { raw, body: null }
       }
