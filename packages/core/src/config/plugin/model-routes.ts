@@ -8,6 +8,8 @@ import type { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Effect } from "effect"
 import { Config } from "../../config.js"
+import { ConfigProvider } from "@opencode/schema/config/provider"
+import { applyModelConfig } from "./provider.js"
 import { Model } from "../../model.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteExpansion } from "../../model-route-expansion.js"
@@ -175,6 +177,8 @@ export const Plugin = define({
           routes,
         )
         const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
+        const routeProviderItems = configuredRouteProviderItems(loaded.entries)
+        const routeProviderBaseURL = routeProviderItems.some((item) => item.settings?.baseURL !== undefined)
         for (const id of missing) {
           const created = createRouteModel(
             id,
@@ -194,6 +198,26 @@ export const Plugin = define({
           models.update(ModelRoute.PROVIDER_ID, Model.ID.make(id), (draft) => {
             Object.assign(draft, created)
           })
+          // The provider plugin's model transform applies configured overrides
+          // (disabled, hidden, limits, variants) to route models, but it ran
+          // before this route existed and skipped it. Apply the same overrides
+          // here so a created route honors the same config as a built one.
+          for (const item of routeProviderItems) {
+            const config = item.models?.[id]
+            if (!config) continue
+            applyModelConfig(
+              models,
+              item,
+              {
+                providerID: String(ModelRoute.PROVIDER_ID),
+                baseURL: routeProviderBaseURL,
+                models: new Map([[id, { inherit: false }]]),
+              },
+              String(ModelRoute.PROVIDER_ID),
+              id,
+              config,
+            )
+          }
         }
       }
     })
@@ -375,6 +399,17 @@ function configuredRoutes(entries: readonly Entry[]) {
       Object.entries(entry.info.experimental?.routes?.models ?? {}).forEach(([id, route]) => routes.set(id, route))
     })
   return routes
+}
+
+/** The configured provider entries for the routes provider itself, in document
+ * order: their per-model entries are the overrides the provider plugin applies
+ * to built routes, replayed here for routes created after its transform ran. */
+function configuredRouteProviderItems(entries: readonly Entry[]) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .flatMap((file) => Object.entries(file.info.providers ?? {}))
+    .filter(([id]) => id === String(ModelRoute.PROVIDER_ID))
+    .map(([, item]) => item as ConfigProvider.Info)
 }
 
 function configuredSchedules(entries: readonly Entry[]) {

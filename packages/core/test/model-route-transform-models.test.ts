@@ -426,10 +426,19 @@ it.effect("a route whose targets are all transform-created exists after the plug
     }
     yield* plugins.activate([source, creator])
     const raw = {
+      providers: {
+        "opencode-route": {
+          models: {
+            created: { disabled: true, name: "Created Route" },
+          },
+        },
+      },
       experimental: {
-        model_routes: {
-          created: { targets: ["azure/prod-mini"] },
-          ghost: { targets: ["azure/nope"] },
+        routes: {
+          models: {
+            created: { targets: [{ providerID: "azure", model: "prod-mini" }] },
+            ghost: { targets: [{ providerID: "azure", model: "nope" }] },
+          },
         },
       },
     }
@@ -444,6 +453,12 @@ it.effect("a route whose targets are all transform-created exists after the plug
     expect(created).toBeDefined()
     const definition = created ? ModelRoute.definition(created) : undefined
     expect(definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/prod-mini"])
+    // The provider plugin's override transform ran before this route existed and
+    // skipped it, so the routes plugin applies the configured overrides itself:
+    // the disabled flag and the display name from provider config land on the
+    // created route exactly as they would on a built one.
+    expect(created?.enabled).toEqual(false)
+    expect(created?.name).toEqual("Created Route")
     // A route whose targets never resolve is not built (and is named in a warning).
     expect(yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("ghost"))).toBeUndefined()
   }),
