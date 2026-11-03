@@ -476,7 +476,7 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       const cache = makeCache()
       writeCache(cache, fixture)
-      const state = yield* Ref.make({
+      const state = yield* Ref.make<MockState>({
         ...initialState,
         body: JSON.stringify(fixture2),
         headers: { "content-length": String(17 * 1024 * 1024) },
@@ -501,7 +501,7 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       const cache = makeCache()
       writeCache(cache, fixture)
-      const state = yield* Ref.make({ ...initialState, body: "", streamChunks: 64 })
+      const state = yield* Ref.make<MockState>({ ...initialState, body: "", streamChunks: 64 })
       const result = yield* provided(
         state,
         cache,
