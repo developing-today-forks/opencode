@@ -147,6 +147,15 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run lint:effect-simplifications
 
+      - name: Check Effect patterns
+        # The main ast-grep rules (script/ast-grep/rules) drifted to 32
+        # violations with nothing running the scan (#1496). This is the
+        # regression net: the vendored drizzle-effect adapter tree is excluded
+        # via --globs in the lint:effect-patterns script (upstream star-import
+        # style; rewriting it would diverge the vendored copy).
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-patterns
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root

@@ -5,6 +5,10 @@ import path from "path"
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm"
 import { Context, Duration, Effect, Layer, PubSub, Schema, Scope } from "effect"
 import type { ConfigMessaging } from "@opencode/schema/config/messaging"
+// Aliased import: `Messaging` is taken by this module's own self-namespace
+// export on line 1, and Contract is used ~25 times (types plus the
+// Contract.Event.Created value), so the schema namespace keeps its alias.
+// ast-grep-ignore: no-import-alias
 import { Messaging as Contract } from "@opencode/schema/messaging"
 import { TuiEvent } from "@opencode/schema/tui-event"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"

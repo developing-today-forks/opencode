@@ -10,7 +10,6 @@ import {
   StreamableHTTPClientTransport,
   UnauthorizedError,
   UnsupportedProtocolVersionError,
-  type CallToolResult as SdkCallToolResult,
   type ElicitRequestFormParams,
   type ElicitRequestParams,
   type ElicitRequestURLParams,
@@ -26,6 +25,9 @@ import {
   type Transport,
   type VersionNegotiationOptions,
 } from "@modelcontextprotocol/client"
+// Type-only alias: the local CallToolResult interface below collides with the
+// SDK's name, so the SDK type keeps its alias in a dedicated import type.
+import type { CallToolResult as SdkCallToolResult } from "@modelcontextprotocol/client"
 import { Cause, Clock, Duration, Effect, Exit, Schedule, Schema } from "effect"
 import { ConfigMCP } from "@opencode/schema/config/mcp"
 import type { Session } from "@opencode/schema/session"
