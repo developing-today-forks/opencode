@@ -783,6 +783,25 @@ describe("door-set targets (#637)", () => {
     expect(refs(leaves)).toEqual(["anthropic/deepseek-v4-flash"])
   })
 
+  test("a hidden catalog model still expands on its door (#230)", () => {
+    const withHidden = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>([
+      [anthropic, models(["deepseek-v4-flash"])],
+      [
+        go,
+        new Map([
+          [
+            "deepseek-v4-flash",
+            { ...Model.Info.default(go, Model.ID.make("deepseek-v4-flash")), hidden: true },
+          ] as const,
+        ]),
+      ],
+    ])
+    const { leaves } = expand("r", doorRoute([{ model: { providerID: "*", model: "deepseek-v4-flash" } }]), withHidden)
+    // Only `disabled` excludes a leaf from expansion; `hidden` is a picker-only
+    // state, so the hidden model remains a full pool member.
+    expect(refs(leaves)).toEqual(["anthropic/deepseek-v4-flash", "opencode-go/deepseek-v4-flash"])
+  })
+
   test("an enumerated target reached again by a door set appears once", () => {
     const { leaves } = expand(
       "r",

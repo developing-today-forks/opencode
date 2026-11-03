@@ -1093,9 +1093,14 @@ export const layer = Layer.effect(
         }
         if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
           cascade.chain.push({ definition: from, tried: fromTried })
+        // Fallback discovery is execution, not picker discovery (#230): a hidden
+        // parent route still cascades, so candidates are the enabled records.
         const available = yield* models
-          .available()
-          .pipe(Effect.catchCause(() => Effect.succeed([] as readonly Info[])))
+          .all()
+          .pipe(
+            Effect.map((list) => list.filter((model) => model.enabled)),
+            Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+          )
         const definitions = new Map<string, ModelRoute.Definition>()
         for (const candidate of available) {
           if (candidate.providerID !== ModelRoute.PROVIDER_ID) continue
@@ -1216,7 +1221,9 @@ export const layer = Layer.effect(
           const entries = yield* cfg.entries()
           const aliases = Config.latest(entries, "aliases")
           if (aliases) {
-            const availableModels = yield* models.available()
+            // Alias precedence is execution semantics (#230): a real model keeps
+            // precedence over an alias whether or not it is picker-hidden.
+            const availableModels = (yield* models.all()).filter((model) => model.enabled)
             const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
               availableModels.some((m) => m.providerID === providerID && m.id === modelID)
             const refStr = ModelAlias.refString(target)
