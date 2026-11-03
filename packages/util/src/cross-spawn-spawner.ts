@@ -1,6 +1,5 @@
 import { isArrayNonEmpty } from "effect/Array"
-import * as NodeSink from "@effect/platform-node/NodeSink"
-import * as NodeStream from "@effect/platform-node/NodeStream"
+import { NodeSink, NodeStream } from "@effect/platform-node"
 import { Deferred, Effect, Exit, FileSystem, Layer, Path, PlatformError, Predicate, Sink, Stream } from "effect"
 import type { Scope } from "effect"
 import { ChildProcess } from "effect/process"
