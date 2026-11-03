@@ -8,6 +8,7 @@ const compliant = [
   "  push:",
   "    branches: [main]",
   "  workflow_dispatch:",
+  "permissions: { contents: read }",
   "jobs:",
   "  test:",
   "    timeout-minutes: 15",
@@ -55,7 +56,7 @@ describe("sourceViolations", () => {
   test("flags a pull_request_target trigger (list form)", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",
-      ["on: [pull_request_target, workflow_dispatch]", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+      ["on: [pull_request_target, workflow_dispatch]", "permissions: { contents: read }", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["no-pr-trigger"])
   })
@@ -70,6 +71,7 @@ describe("sourceViolations", () => {
         "  pull_request_review_comment:",
         "    types: [created]",
         "  workflow_dispatch:",
+        "permissions: { contents: read }",
         "jobs:",
         "  opencode:",
         "    timeout-minutes: 60",
@@ -81,7 +83,7 @@ describe("sourceViolations", () => {
   test("flags a workflow with no workflow_dispatch", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",
-      ["on: [push]", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+      ["on: [push]", "permissions: { contents: read }", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["require-workflow-dispatch"])
   })
@@ -91,6 +93,7 @@ describe("sourceViolations", () => {
       ".github/workflows/example.yml",
       [
         "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
         "jobs:",
         "  test:",
         "    timeout-minutes: 15",
@@ -100,6 +103,49 @@ describe("sourceViolations", () => {
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["require-timeout-minutes"])
     expect(violations[0].job).toBe("lint")
+  })
+
+  test("flags a job with no applicable permissions declaration, naming the job (#118)", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      [
+        "on: [workflow_dispatch]",
+        "jobs:",
+        "  test:",
+        "    timeout-minutes: 15",
+        "    runs-on: ubuntu-24.04",
+      ].join("\n"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["require-permissions"])
+    expect(violations[0].job).toBe("test")
+  })
+
+  test("a job-level permissions declaration passes without a workflow-level one", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      [
+        "on: [workflow_dispatch]",
+        "jobs:",
+        "  test:",
+        "    timeout-minutes: 15",
+        "    permissions: { contents: read }",
+      ].join("\n"),
+    )
+    expect(violations).toEqual([])
+  })
+
+  test("a workflow-level permissions declaration covers jobs without one", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      [
+        "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
+        "jobs:",
+        "  test:",
+        "    timeout-minutes: 15",
+      ].join("\n"),
+    )
+    expect(violations).toEqual([])
   })
 
   test("a reusable-workflow job (job-level uses:) needs no timeout-minutes", () => {

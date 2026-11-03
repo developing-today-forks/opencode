@@ -15,6 +15,13 @@
  *      both times (#1326, #1184). Reusable-workflow callers cannot declare
  *      a timeout of their own, so only the called workflow owns timeouts;
  *      caller jobs are instead checked against GitHub's allowed-key list.
+ *   4. Every job runs with an applicable `permissions:` declaration —
+ *      either the workflow top level or the job itself declares the key
+ *      (presence only, any form: map, string, or empty). Without one,
+ *      the job silently runs with the repo-default token grants (#118).
+ *      Reusable-workflow callers run no steps, so like timeouts this
+ *      policy exempts caller jobs; `permissions` stays an allowed
+ *      (not required) caller key.
  *
  * Trigger matching is by exact key: `pull_request_review_comment` and
  * `issue_comment` are different events, not PR triggers — opencode.yml
@@ -127,6 +134,13 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
           job: name,
           detail: `job ${name} does not declare timeout-minutes; a hung job would run to the 360-minute platform default (#1326, #1184)`,
         })
+      if (!("permissions" in workflow) && !("permissions" in job))
+        violations.push({
+          file,
+          rule: "require-permissions",
+          job: name,
+          detail: `job ${name} has no applicable permissions declaration; declare permissions at the workflow level or on the job (#118)`,
+        })
     }
   }
   return violations
@@ -162,7 +176,7 @@ function main() {
       )
     process.exit(1)
   }
-  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers).`)
+  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, permissions covering every non-reusable job, allowlisted reusable-workflow callers).`)
 }
 
 if (import.meta.main) main()
