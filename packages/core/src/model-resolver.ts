@@ -454,7 +454,7 @@ const refreshQuotaGate = (
   location?: string,
 ) =>
   Effect.gen(function* () {
-    const targetProviders = new Set(
+    const targetProviders = new Set<string>(
       targets
         .map((target) => target.providerID)
         .filter((providerID) => ModelRoute.shouldFeedQuota(now, location, providerID)),

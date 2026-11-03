@@ -2616,11 +2616,11 @@ describe("ModelResolver routes", () => {
           )
           .run()
 
-        const route = (providers: [string, string], poolID: string) => {
+        const route = (providers: [string, string, string], poolID: string) => {
           const leaves = providers.map(leaf)
           return routed(leaves, {
             nodes: [
-              { selection: "ordered", weights: [1], children: [{ node: 1 }] },
+              { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
               {
                 routeID: poolID,
                 providerRoute: poolID,
@@ -2631,13 +2631,14 @@ describe("ModelResolver routes", () => {
             ],
           })
         }
-        const routeA = route(["quota-a1", "quota-a2"], "quota-pool-a")
-        const routeB = route(["quota-b1", "quota-b2"], "quota-pool-b")
+        const routeA = route(["quota-a1", "quota-a2", "quota-a-fallback"], "quota-pool-a")
+        const routeB = route(["quota-b1", "quota-b2", "quota-b-fallback"], "quota-pool-b")
         const definitionA = ModelRoute.definition(routeA)!
         const definitionB = ModelRoute.definition(routeB)!
+        const allProviders = [...providers, "quota-a-fallback", "quota-b-fallback"]
 
         yield* withResolver(
-          [...providers.map(leaf)],
+          allProviders.map(leaf),
           (resolver) =>
             Effect.gen(function* () {
               yield* resolver.resolveModel(routeA)
