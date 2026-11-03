@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { ErrorBreakdown, TargetStats } from "@opencode/core/model-route-log"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLimits } from "@opencode/core/model-route-limits"
 import { ModelRouteTuning } from "@opencode/core/model-route-tuning"
 
 afterEach(() => {
@@ -285,6 +286,29 @@ describe("ModelRouteTuning.parseQuotaReset", () => {
     expect(ModelRouteTuning.parseQuotaReset("available at 2026-01-02T00:00:00Z", at)).toBeUndefined()
     expect(ModelRouteTuning.parseQuotaReset("try in 5 minutes", at)).toBeUndefined()
     expect(ModelRouteTuning.parseQuotaReset(undefined, at)).toBeUndefined()
+  })
+
+  test("reads the same relative units as ModelRouteLimits over a shared case table (#996)", () => {
+    // Paired parity: both doors honour the same relative grammar — the tuning parser
+    // shares ModelRouteLimits.relativeMs, and this table pins the two entry points to
+    // identical results so a future grammar edit cannot drift them apart silently.
+    for (const [message, wait] of [
+      ["quota resets in 6d 13h", 6 * 86_400_000 + 13 * 3_600_000],
+      ["quota exhausted, resets in 3h", 3 * 3_600_000],
+      ["quota resets in 2d", 2 * 86_400_000],
+      ["quota resets in 30m", 1_800_000],
+      ["quota resets in 30min", 1_800_000],
+      ["quota resets in 30mins", 1_800_000],
+      ["quota resets in 45s", 45_000],
+      ["quota resets in 1 hour 30 minutes", 5_400_000],
+      ["quota resets in 1h30m", 5_400_000],
+      ["quota resets in 30ms", 30],
+    ] as const) {
+      expect(ModelRouteLimits.resetAtFromMessage(message, at)).toBe(at + wait)
+      expect(ModelRouteTuning.parseQuotaReset(message, at)).toBe(at + wait)
+    }
+    for (const message of ["quota, come back in 5 deals", "quota, come back in 2 homes", "quota, come back in 5 marks"])
+      expect(ModelRouteTuning.parseQuotaReset(message, at)).toBeUndefined()
   })
 
   test("scans past an unparseable first date to a later valid reset", () => {
