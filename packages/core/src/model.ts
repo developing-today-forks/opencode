@@ -227,7 +227,18 @@ const layer = Layer.effect(
         const all = Array.from(byProvider.values())
           .flatMap((models) => Array.from(models.values()))
           .sort((left, right) => right.time.released - left.time.released)
-        cached = freeze({ data, all, available: preferFree(all.filter((model) => model.enabled)), byProvider }, true)
+        cached = freeze(
+          {
+            data,
+            all,
+            // The picker list (#230): enabled and not hidden. Hidden models stay in
+            // `all` (and in route expansion, which filters on `enabled` only), so
+            // they remain fully routable while absent here.
+            available: preferFree(all.filter((model) => model.enabled && !model.hidden)),
+            byProvider,
+          },
+          true,
+        )
         return cached
       }
     })

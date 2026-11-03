@@ -1186,4 +1186,38 @@ describe("ConfigProviderPlugin.Plugin", () => {
       }),
     ),
   )
+
+  it.effect("carries the hidden overlay flag to the record and out of the picker list (#230)", () =>
+    Effect.gen(function* () {
+      const models = yield* Model.Service
+      const providerID = Provider.ID.make("custom")
+      yield* addPlugin([
+        new Document({
+          type: "document",
+          info: decode({
+            providers: {
+              custom: {
+                package: "native",
+                models: {
+                  listed: { name: "Listed" },
+                  pooled: { name: "Pooled", hidden: true },
+                  off: { name: "Off", disabled: true },
+                },
+              },
+            },
+          }),
+        }),
+      ])
+      const pooled = required(yield* models.get(providerID, Model.ID.make("pooled")))
+      // The flag lands on the record; the model itself stays enabled (routable).
+      expect(pooled.hidden).toBe(true)
+      expect(pooled.enabled).toBe(true)
+      const all = (yield* models.all()).filter((model) => model.providerID === providerID)
+      expect(all.map((model) => String(model.id)).sort()).toEqual(["listed", "off", "pooled"])
+      // The picker list keeps only listed models: hidden and disabled are both absent,
+      // for different reasons — disabled is not routable, hidden is.
+      const available = (yield* models.available()).filter((model) => model.providerID === providerID)
+      expect(available.map((model) => String(model.id))).toEqual(["listed"])
+    }),
+  )
 })

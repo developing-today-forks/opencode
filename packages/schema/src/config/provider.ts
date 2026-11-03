@@ -110,6 +110,10 @@ class Model extends Schema.Class<Model>("Config.Model")({
   }).pipe(Schema.Array, optional),
   cost: Schema.Union([Cost, Cost.pipe(Schema.Array)]).pipe(optional),
   disabled: Schema.Boolean.pipe(optional),
+  /** Hide this model from the picker while keeping it routable (#230): unlike
+   * `disabled`, a hidden model stays enabled for route pools and direct
+   * resolution; it is only absent from the picker list. */
+  hidden: Schema.Boolean.pipe(optional),
   limit: Limit.pipe(optional),
 }) {}
 

@@ -2481,6 +2481,7 @@ export type ModelInfo = {
   cost: Array<ModelCost>
   status: "alpha" | "beta" | "deprecated" | "active"
   enabled: boolean
+  hidden?: boolean
   limit: { context: number; input?: number; output: number }
 }
 
@@ -2757,6 +2758,7 @@ export type ConfigEntry =
                       cache?: { read?: MoneyUSDPerMillionTokens; write?: MoneyUSDPerMillionTokens }
                     }>
                 disabled?: boolean
+                hidden?: boolean
                 limit?: { context?: number; input?: number; output?: number }
               }
             }
