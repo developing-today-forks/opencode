@@ -94,7 +94,13 @@ export const layer = Layer.effect(
         model: input.model,
         system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
         messages: [Message.user(input.text)],
-      }).pipe(Effect.onInterrupt(() => Effect.sync(() => releaseProbeClaim(input.model))))
+      }).pipe(
+        // Interruption is not the only way preparation dies: a defect skips onInterrupt,
+        // so the claim is handed back on any failed exit (#1486, review follow-up).
+        Effect.onExit((exit) =>
+          exit._tag === "Failure" ? Effect.sync(() => releaseProbeClaim(input.model)) : Effect.void,
+        ),
+      )
       if (prepared.event.result !== undefined) {
         // A hook supplied the title: no request executed on this model, so its probe
         // claim (if any) goes back instead of settling.
@@ -143,6 +149,9 @@ export const layer = Layer.effect(
         Effect.onInterrupt(() =>
           Effect.sync(() => {
             interrupted = true
+            // Interrupting the stream unwinds the attempt before the settlement below
+            // can run, so the claim is handed back here (#1486, review follow-up).
+            releaseProbeClaim(input.model)
           }).pipe(Effect.andThen(recordUsage), Effect.asVoid),
         ),
       )

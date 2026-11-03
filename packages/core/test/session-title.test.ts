@@ -496,6 +496,57 @@ it.effect("releases the model's probe claim when preparation is interrupted (#14
   }),
 )
 
+it.effect("releases the model probe claim when the title stream is interrupted (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    yield* enableTitleAgent
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: plantedAt + 10,
+        stale: false,
+      },
+      plantedAt + 10,
+    )
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    // The stream starts but never emits; interrupt the attempt mid-stream.
+    let markStarted: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    titleStream = () => {
+      markStarted()
+      return Stream.never
+    }
+    const sessionID = Session.ID.make("ses_title_probe_stream_interrupt")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Interrupt this title during the stream")
+
+    const title = yield* SessionTitle.Service
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped)
+    yield* Effect.promise(() => started)
+    expect(requests).toHaveLength(1)
+    yield* Fiber.interrupt(fiber)
+    // The interrupted stream unwinds the attempt before its settlement can run, so the
+    // claim is handed back from the stream interruption handler instead.
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now())
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
 it.live("releases instead of benching on a context-overflow title failure (#1478)", () =>
   Effect.gen(function* () {
     ModelRoute.resetHealth()

@@ -854,6 +854,15 @@ export const failed = (
         prior.consecutiveFailures = 0
       }
     }
+    // The forgiveness above clears the states it can name; a probe scope of this pick it
+    // cannot (a snapshot credential that did not serve) is handed back instead of being
+    // stranded until the bench expires (#1486, review follow-up). Token-guarded: a scope
+    // forgiveness already cleared no-ops.
+    if (probeClaim) {
+      releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+      if (probeClaim.credentialID)
+        releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
+    }
     logHealth(target, "network-suspect", "transport failures across unrelated providers; target cooldowns cleared")
     return
   }

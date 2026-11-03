@@ -884,7 +884,16 @@ export const layer = Layer.effect(
               ? { claimedAt: now, token: probeToken, ...(probeCredential ? { credentialID: probeCredential } : {}) }
               : undefined
           const source = yield* models.get(target.providerID, target.id)
-          if (!source?.enabled) continue
+          if (!source?.enabled) {
+            // This pick spent a probe claim but will never be attempted: hand it back
+            // (#1486, review follow-up) instead of stranding it until the bench expires.
+            if (probeClaim) {
+              ModelRoute.releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+              if (probeClaim.credentialID)
+                ModelRoute.releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
+            }
+            continue
+          }
           const targetVariants = definition.targetVariants[index]
           // A requested route variant runs the target at its remap, else at the same variant when the
           // target has it natively: the route only offers variants every target can produce one of
