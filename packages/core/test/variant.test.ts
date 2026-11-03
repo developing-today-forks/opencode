@@ -525,6 +525,22 @@ test("spells reasoning variants for every bundled native package", () => {
   expect(missing).toEqual([])
 })
 
+test("spells Antigravity variants as thinking levels", () => {
+  const pkg = "@opencode/ai/providers/antigravity"
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "effort", values: ["low", "high"] }])).toEqual([
+    { id: "low", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } } },
+    { id: "high", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } } },
+  ])
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "effort" }])).toEqual([
+    { id: "low", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } } },
+    { id: "medium", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } } },
+    { id: "high", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } } },
+  ])
+  // The wire never lowers thinkingBudget, so budget and toggle supports spell nothing.
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "budget_tokens" }])).toEqual([])
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "toggle" }])).toEqual([])
+})
+
 test("spells Mantle variants for the API each model is routed through", () => {
   expect(
     resolve(model("@opencode/ai/providers/amazon-bedrock/mantle/messages", "anthropic.claude-opus-4-8"), [

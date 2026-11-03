@@ -416,6 +416,17 @@ const zaiMessages: Protocol = (model, support) => {
   }
 }
 
+// Antigravity's v1internal wire honors only thinkingLevel + includeThoughts: its
+// generationConfig carries exactly those two fields, and thinkingBudget is parsed
+// from provider options but never lowered — so unlike gemini there is no honest
+// budget or off spelling, and effort is the only variant axis.
+const antigravity: Protocol = (_, support) => {
+  if (support.type !== "effort") return []
+  return efforts(support.values ?? EFFORTS, (effort) => ({
+    settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: effort } },
+  }))
+}
+
 const gemini: Protocol = (model, support) => {
   switch (support.type) {
     case "effort":
@@ -680,6 +691,8 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/google/interactions": googleInteractions,
   "@opencode/ai/providers/google-vertex/interactions": googleInteractions,
   "@opencode/ai/providers/google-vertex-interactions": googleInteractions,
+
+  "@opencode/ai/providers/antigravity": antigravity,
 
   "@opencode/ai/providers/amazon-bedrock": bedrockConverse,
   "@opencode/ai/providers/cohere": cohere,
