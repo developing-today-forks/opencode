@@ -112,7 +112,11 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
       predictions,
       errors: errors.map((error) => ({ ...error, lastMessage: error.lastMessage?.slice(0, MESSAGE_LIMIT) ?? null })),
       suggestions,
-      adjustments: ModelRoute.activeAdjustments(now),
+      // Only adjustments that apply to this Location are in force for it (#1461):
+      // a tuning result computed under another Location's policy is not its rule.
+      adjustments: ModelRoute.activeAdjustments(now).filter(
+        (item) => item.location === undefined || item.location === source.location,
+      ),
       routes: ModelRouteReview.summarize({ attempts, decisions, configured: pools }),
       notes: [...source.notes],
       noDatabase: Option.isNone(read),
@@ -256,7 +260,9 @@ export const add = (editor: ToolEditor, permission: Permission.Interface, source
             predictions: report.predictions,
             errors: report.errors,
             suggestions: report.suggestions,
-            adjustments: ModelRoute.activeAdjustments(),
+            adjustments: ModelRoute.activeAdjustments().filter(
+              (item) => item.location === undefined || item.location === source().location,
+            ),
             routes: report.routes,
             notes: report.notes,
           },

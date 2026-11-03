@@ -1996,6 +1996,102 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("a restored threshold hold is judged by its latest judged balance, not its benched baseline (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeCredentialQuota(target, "judged-cred", balance, now, "/loc/a")
+      ModelRoute.observeCredentialQuota(
+        target,
+        "judged-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      const durable = ModelRoute.activeAdjustments(now + 1).find(
+        (item) => item.id === "quota-credential:judged-cred",
+      )
+      expect(durable?.balanceBaseline).toBe(0.5)
+      expect(durable?.balanceHoldBalance).toBe(0.03)
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/a")).toEqual({ until: null })
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("threshold-derived provider holds are judged under the requesting Location in skipped and pool pull-out (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const leafA = ModelRoute.ref({ providerID: "prov-hold", model: "m1" })
+      const leafB = ModelRoute.ref({ providerID: "prov-hold", model: "m2" })
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "prov-hold",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeProviderQuota(leafA, balance, now, "/loc/a")
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      const definition = {
+        id: "prov-hold-route",
+        targets: [leafA, leafB],
+        targetVariants: [],
+        health: ModelRoute.policy(),
+        nodes: [
+          { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+          {
+            routeID: "prov-hold-pool",
+            selection: "ordered" as const,
+            weights: [1, 1],
+            children: [{ leaf: 0 }, { leaf: 1 }],
+          },
+        ],
+      } as unknown as ModelRoute.Definition
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      const durable = ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:prov-hold")
+      expect(durable?.balanceHoldOrigin).toBe("threshold")
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
   test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
     const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
     const offB = ModelRoute.onSettingsConfig(
