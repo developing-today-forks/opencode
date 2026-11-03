@@ -444,7 +444,10 @@ export const layer = (options?: Options) =>
             ),
           catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
         })
-        yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+        // Atomic replace via the shared #1345 contract: a crash mid-write never
+        // leaves the user config truncated, a symlinked config keeps its link
+        // and its mode, and a fresh file is created at 0o600 (#998).
+        yield* fs.writeAtomic(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
       })
 
       const update = Effect.fn("Config.update")(
