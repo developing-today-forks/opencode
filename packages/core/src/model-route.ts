@@ -945,18 +945,19 @@ const demotionConfig = (location?: string): DemotionConfig | undefined => {
  * the fallback layer (`configure()` over the compiled defaults), field by field. */
 export const demotionPolicy = (location?: string): DemotionPolicy => {
   const config = demotionConfig(location)
-  const fallback = activeSettings().quota
+  const fallback = activeSettings(location).quota
   return {
     threshold: config?.threshold ?? fallback.demoteAfter,
     windowMs: config?.windowMs ?? fallback.windowMs,
   }
 }
 
-/** The widest demotion window any registered Location judges by. Quota events are one
- * shared history (the hot cache over the route_attempt ledger's failure records), so
- * recording retains the union of windows; `demoted` applies the judging Location's own
- * window over what is retained. With nothing configured this is exactly the fallback
- * window, as before. */
+/** The widest demotion window any registered Location judges by, from the
+ * `model_route_demotion` config layer. Quota events are one shared history (the hot
+ * cache over the route_attempt ledger's failure records), so recording retains the
+ * union of both config layers (see retainedQuotaWindowMs for the settings layer);
+ * `demoted` applies the judging Location's own window over what is retained. With
+ * nothing configured this is exactly the fallback window, as before. */
 const retainedDemotionWindow = () => {
   let window = activeSettings().quota.windowMs
   for (const read of demotionReaders.values()) {
@@ -1000,9 +1001,12 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= policy.threshold
 }
 
-// The quota-event history retained for a target: the widest demotion window any
-// registered Location evaluates with (the union-retention rule of retainedOutcomeWindow,
-// #1423); demoted() applies the judging Location's own window over what is retained.
+// The quota-event history retained for a target: the widest settings-layer demotion
+// window any registered Location evaluates with (the union-retention rule of
+// retainedOutcomeWindow, #1423); recordQuota retains the wider of this and
+// retainedDemotionWindow so a Location whose wide window comes from its routes
+// settings is not pruned by the demotion-config layer alone. demoted() applies the
+// judging Location's own window over what is retained.
 const retainedQuotaWindowMs = () => {
   let window = settings.quota.windowMs
   for (const read of settingsReaders.values()) {
@@ -1014,7 +1018,9 @@ const retainedQuotaWindowMs = () => {
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
+  const recent = (quotaEvents.get(id) ?? []).filter(
+    (at) => now - at <= Math.max(retainedDemotionWindow(), retainedQuotaWindowMs()),
+  )
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
