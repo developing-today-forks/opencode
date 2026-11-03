@@ -1,5 +1,23 @@
 {
   "nodes": {
+    "fleet": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1793665075,
+        "narHash": "sha256-xa5Wy5Y+Oag+7x5iq1SEfoT/8Cp+t9gNItErSr504HM=",
+        "owner": "dezren39",
+        "repo": "fleet",
+        "rev": "082bd9e78bcac374d0b3bec89ec1ee9acd4386d1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "dezren39",
+        "repo": "fleet",
+        "type": "github"
+      }
+    },
     "mcpx-src": {
       "flake": false,
       "locked": {
@@ -18,24 +36,28 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1793166571,
-        "narHash": "sha256-3+DlA8JY6abKt8G9hoZgTiSNLxdkGTn2a5MeiNDXmIc=",
+        "lastModified": 1793645915,
+        "narHash": "sha256-yRzh4uc8uxFv5+5TROEIH1rUL2FF1/cvfc+uq5JGGHY=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "fa45202b90a351983649116adb577827b2a9a679",
+        "rev": "f9887a8a434bfba06e20dfc77bc8e0628266af84",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
+        "rev": "f9887a8a434bfba06e20dfc77bc8e0628266af84",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
+        "fleet": "fleet",
         "mcpx-src": "mcpx-src",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": [
+          "fleet",
+          "nixpkgs"
+        ]
       }
     }
   },
