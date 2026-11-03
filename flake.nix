@@ -7,7 +7,7 @@
   # does not have. Public read; pushes are signed with the nix-cache-1
   # key, which is the key trusted here.
   nixConfig = {
-    extra-substituters = [ "https://nix-cache.developing-today-llc-domains-0.workers.dev" ];
+    extra-substituters = [ "https://nix-cache.developing-today.workers.dev" ];
     extra-trusted-public-keys = [ "nix-cache-1:x/kKZuzyQI3L0/twmOp3w2U68F2ZgM3WnH3ERYKrwf8=" ];
   };
 
