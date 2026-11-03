@@ -54,12 +54,14 @@ describe("upgrade command", () => {
     expect(result.stdout).toContain("already installed")
   })
 
+  // Windows CI has timed out this spawn-and-drain case at the 30s budget twice (#895);
+  // give the detection-failure path headroom without touching the assertion.
   test("requires an explicit method when detection fails", async () => {
     const result = await cli([], { UPGRADE_TEST_METHOD: "unknown" })
     expect(result.exitCode).toBe(1)
     expect(result.events).toEqual(["method"])
     expect(result.stdout).toContain("Pass --method")
-  })
+  }, 60_000)
 
   test("rejects unsupported methods before attempting an upgrade", async () => {
     const result = await cli(["--method", "apt"])
