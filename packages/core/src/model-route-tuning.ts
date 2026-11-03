@@ -209,20 +209,12 @@ export const parseQuotaReset = (
     const date = ModelRouteLimits.parseAbsoluteTime(absolute)
     if (date !== undefined) return Math.min(date, now + ceilingMs)
   }
-  // The relative form mirrors ModelRouteLimits: decimal amounts ("in 1.5 hours") and compound
-  // sequences ("in 1 hour 30 minutes", summed) both read as the total wait.
-  const part = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|s)s?(?![a-z])`
-  const sequence = new RegExp(String.raw`in\s+(${part}(?:[\s,]+(?:and\s+)?${part})*)`).exec(text)?.[1]
-  if (sequence) {
-    const unit = { second: 1_000, sec: 1_000, s: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 } as Record<
-      string,
-      number
-    >
-    let total = 0
-    for (const [, amount, name] of sequence.matchAll(/(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|s)s?(?![a-z])/g))
-      total += Number(amount) * (unit[name] ?? 1_000)
-    return Math.min(now + total, now + ceilingMs)
-  }
+  // The relative form shares ModelRouteLimits.relativeMs — grammar and summing live in
+  // one place so the two parsers cannot drift apart on units again (#996): decimal
+  // amounts ("in 1.5 hours"), compound sequences ("in 1 hour 30 minutes", summed), and
+  // the compact units ("in 6d 13h", "in 30m") all read the same here as there.
+  const relative = ModelRouteLimits.relativeMs(text)
+  if (relative !== undefined) return Math.min(now + relative, now + ceilingMs)
   return undefined
 }
 

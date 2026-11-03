@@ -258,6 +258,18 @@ describe("ModelRouteLimits.retryHintFromMessage", () => {
     // The letter units must not eat the head of a word: these state no wait at all.
     expect(ModelRouteLimits.resetAtFromMessage("come back in 5 deals", at)).toBeUndefined()
     expect(ModelRouteLimits.resetAtFromMessage("come back in 2 homes", at)).toBeUndefined()
+    expect(ModelRouteLimits.resetAtFromMessage("come back in 5 marks", at)).toBeUndefined()
+  })
+
+  test("reads compact minute units and adjacent compact compounds (#996)", () => {
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30m", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30min", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30mins", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 1h 30m", at)).toBe(at + 5_400_000)
+    // Adjacent compact parts sum too: "1h30m" is a 90-minute wait, not 1 hour.
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 1h30m", at)).toBe(at + 5_400_000)
+    // "ms" is not "m": a millisecond wait stays milliseconds.
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30ms", at)).toBe(at + 30)
   })
 
   test("reads every absolute-time keyword parseQuotaReset reads (paired with model-route-tuning)", () => {
