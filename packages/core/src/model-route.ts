@@ -574,21 +574,35 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
  * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
  * Balance holds count until a fresh balance increase releases them, so a pool held by a
  * balance gate stays out with no timer-based re-admission (#1014). */
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
+const quotaOutEvidence = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): readonly string[] => {
   if (credentialID) {
-    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
-    return credentialQuotaBlocked(credentialID, now, location) !== undefined
+    const evidence: string[] = []
+    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now))
+      evidence.push(`bench:${credentialKey(target, credentialID)}`)
+    if (credentialQuotaBlocked(credentialID, now, location) !== undefined) evidence.push(`credential:${credentialID}`)
+    return evidence
   }
-  if (quotaBench(health.get(key(target)), now)) return true
+  const evidence: string[] = []
+  if (quotaBench(health.get(key(target)), now)) evidence.push(`bench:${key(target)}`)
   const provider = providerQuota.get(target.providerID)
   if (
     provider &&
     (provider.balanceHold !== undefined ||
       QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold))
   )
-    return true
-  return activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip")
+    evidence.push(`provider:${target.providerID}`)
+  if (activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip"))
+    evidence.push(`provider:${target.providerID}`)
+  return evidence
 }
+
+const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean =>
+  quotaOutEvidence(target, credentialID, now, location).length > 0
 
 interface PoolMembership {
   readonly id: string
@@ -629,12 +643,17 @@ const poolOf = (definition: Definition, index: number): PoolMembership | undefin
 /** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
 export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
 
-/** Whether a leaf's pool is quota-exhausted: at least two distinct leaves of the pool are
- * currently quota-out, so the pool is pulled as a whole instead of spending attempts on its
- * remaining leaves one by one (#1014 PR3 dynamic pull-out). The verdict is derived from the
- * leaves' live quota state, so it lifts by itself when the benches reach their stated reset,
- * when a balance hold is released by a fresh increase, or when a benched leaf recovers — a
- * recovered pool re-enters rotation with no second producer. */
+/** Whether a leaf's pool is quota-exhausted: at least two distinct quota-evidence sources
+ * in the pool are currently quota-out, so the pool is pulled as a whole instead of spending
+ * attempts on its remaining leaves one by one (#1014 PR3 dynamic pull-out). The count is of
+ * evidence, not leaves (#1389): a leaf's own bench is per-leaf evidence, but a credential
+ * gate is one source for every leaf that credential serves and a provider gate/skip is
+ * one source for every leaf of that provider — two leaves out through one shared gate are
+ * a single quota answer, not the pool-shaped signal, and must not hard-exclude a healthy
+ * leaf from another provider. The verdict is derived from the leaves' live quota state,
+ * so it lifts by itself when the benches reach their stated reset, when a balance hold
+ * is released by a fresh increase, or when a benched leaf recovers — a recovered pool
+ * re-enters rotation with no second producer. */
 export const poolQuotaExhausted = (
   definition: Definition,
   index: number,
@@ -644,12 +663,13 @@ export const poolQuotaExhausted = (
 ): boolean => {
   const pool = poolOf(definition, index)
   if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
-  const out = new Set<number>()
+  const evidence = new Set<string>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
+    if (!target) continue
+    for (const item of quotaOutEvidence(target, credentialOf?.(leaf), now, location)) evidence.add(item)
   }
-  return out.size >= POOL_QUOTA_LEAVES
+  return evidence.size >= POOL_QUOTA_LEAVES
 }
 
 export const failed = (

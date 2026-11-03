@@ -2214,6 +2214,70 @@ describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
     ModelRoute.resetHealth()
   })
 
+  test("two leaves out through one shared credential gate are one quota answer, not a pool signal (#1389)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    // Leaves 0 and 1 sit behind different providers but are served by ONE credential:
+    // a balance snapshot judged known-full under that credential gates both leaves
+    // through the single credentialQuotaBlocked gate.
+    ModelRoute.observeCredentialQuota(
+      leaves[0],
+      "pool-shared-cred",
+      {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "pool-p0",
+        percent: 100,
+        remaining: 0,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      },
+      now,
+    )
+    const credentialOf = (leaf: number) => (leaf <= 1 ? "pool-shared-cred" : undefined)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now, credentialOf)).toBe(false)
+    // A second, independent quota answer — leaf 2's own provider gate — is the
+    // pool-shaped signal: two distinct evidence sources are now out.
+    ModelRoute.observeQuotaFailure(leaves[2], undefined, now + 30 * 60_000, now)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now, credentialOf)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
+  test("two leaves of one gated provider are one quota answer, not a pool signal (#1389)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30 * 60_000
+    // A pool whose first two leaves share one provider (and its reactive quota gate),
+    // with a healthy third leaf on another provider.
+    const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
+    const healthy = ModelRoute.ref({ providerID: "pool-healthy", model: "h" })
+    const sharedDefinition = {
+      id: "pool-shared-route",
+      targets: [...shared, healthy],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        {
+          routeID: "pool-shared-plan",
+          selection: "ordered" as const,
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    } as unknown as ModelRoute.Definition
+    ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
+    // Both shared leaves read out through the one provider gate, but that is a
+    // single evidence source: the healthy leaf's pool is not exhausted.
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(false)
+    // The healthy leaf's own provider answering quota too is a second source.
+    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
   test("reactive quota gates on two leaves' providers exhaust the pool until the stated reset", () => {
     ModelRoute.resetHealth()
     const now = Date.now()
