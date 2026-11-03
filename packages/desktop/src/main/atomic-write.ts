@@ -61,6 +61,70 @@ export function writeFileSyncAtomic(file: string, content: string) {
   }
 }
 
+// Async writers follow the same atomic-replace contract as the sync
+// writers above (design #1345), for call sites that must not block —
+// e.g. DesktopFiles.saveFile in the Electron main process.
+export async function renameWithRetry(source: string, destination: string) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.promises.rename(source, destination)
+
+      return
+    } catch (error) {
+      const delay = renameRetryDelays[attempt]
+
+      // SAFETY: a failed fs rename throws a NodeJS.ErrnoException whose code names the failure;
+      // a thrown value without one is not a rename failure and is rethrown as non-transient below.
+      const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined
+
+      if (delay === undefined || code === undefined || !transientRenameCodes.has(code)) throw error
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+}
+
+function existingMode(file: string) {
+  try {
+    return fs.statSync(file).mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+// Writes content to a temp file beside the destination, then renames it
+// over the destination. On failure the temp file is removed and the
+// original error propagates, so a failed or interrupted write leaves a
+// pre-existing destination byte-identical. Mode policy: an existing
+// file's mode is preserved across the rename; a file that does not
+// exist yet is a user-chosen save target, so it keeps the platform
+// default creation mode (0o666 before umask) rather than the stores'
+// owner-only 0o600.
+export async function writeFileAtomic(file: string, content: string) {
+  const absolute = path.resolve(file)
+  await fs.promises.mkdir(path.dirname(absolute), { recursive: true })
+  const target = resolveAtomicTarget(absolute)
+  await fs.promises.mkdir(path.dirname(target), { recursive: true })
+  const mode = existingMode(target)
+  const temporary = path.join(path.dirname(target), `.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`)
+  let attempted = false
+
+  try {
+    attempted = true
+    await fs.promises.writeFile(temporary, content, { flag: "wx", mode: 0o666 })
+    if (mode !== undefined) await fs.promises.chmod(temporary, mode)
+    await renameWithRetry(temporary, target)
+    attempted = false
+  } catch (error) {
+    if (attempted) {
+      try {
+        await fs.promises.rm(temporary, { force: true })
+      } catch {}
+    }
+    throw error
+  }
+}
+
 function resolveAtomicTarget(file: string, remaining = 8): string {
   try {
     return fs.realpathSync(file)
