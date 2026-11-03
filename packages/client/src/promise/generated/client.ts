@@ -322,6 +322,8 @@ export interface ClientOptions {
   readonly baseUrl: string
   readonly fetch?: typeof globalThis.fetch
   readonly headers?: RequestInit["headers"]
+  /** Deadline in milliseconds for a non-SSE request, composed with any caller signal (AbortSignal.any). Defaults to defaultRequestTimeoutMs; a non-finite, non-positive or absent value takes the default. SSE subscriptions carry no total deadline. */
+  readonly requestTimeout?: number
 }
 
 export interface RequestOptions {
@@ -350,11 +352,27 @@ const maxSseEventBytes = 16 * 1024 * 1024
 
 const maxJsonBodyBytes = 16 * 1024 * 1024
 
+/** Default deadline for a non-SSE request, in milliseconds (#1385): a stalled or slow-dripping server otherwise hangs a signal-less request forever. 120_000 matches this package's own bound for waiting on a service promise (service-timing.ts defaultEnsureTiming.promiseTimeout). The composed signal stays live through the body read, so the deadline covers headers and body alike. */
+const defaultRequestTimeoutMs = 120_000
+
 /** Files are user-sized, so the binary path allows a larger cap than a JSON body; it matches the app's media ingest limit. */
 const maxBinaryBodyBytes = 256 * 1024 * 1024
 
 export function make(options: ClientOptions) {
   const fetch = options.fetch ?? globalThis.fetch
+
+  const requestTimeout =
+    options.requestTimeout !== undefined && Number.isFinite(options.requestTimeout) && options.requestTimeout > 0
+      ? options.requestTimeout
+      : defaultRequestTimeoutMs
+
+  // Non-SSE requests only: the SSE path keeps no total deadline, so a healthy long-lived stream is never killed. A caller signal still aborts independently of the deadline.
+  const withDeadline = (requestOptions?: RequestOptions): RequestOptions => {
+    const timeout = AbortSignal.timeout(requestTimeout)
+    return Object.assign({}, requestOptions, {
+      signal: requestOptions?.signal ? AbortSignal.any([requestOptions.signal, timeout]) : timeout,
+    })
+  }
 
   const prepare = (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {
     // A leading slash would replace any path prefix on baseUrl, so join relative to it.
@@ -404,7 +422,7 @@ export function make(options: ClientOptions) {
   }
 
   const request = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {
-    const response = await execute(descriptor, requestOptions)
+    const response = await execute(descriptor, withDeadline(requestOptions))
     if (response.status !== descriptor.successStatus) return responseError(response, descriptor)
     if (descriptor.binary) return (await binary(response)) as A
     if (descriptor.empty) {

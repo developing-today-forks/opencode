@@ -1624,7 +1624,11 @@ test.each(["success", "failure", "cancel", "cancel-retry", "cancel-page", "join-
           return Response.json({ data: [messages[2], messages[1]], cursor: { next: "oldest" } })
         }
         if (cursor === "oldest") return Response.json({ data: [messages[0]], cursor: { next: "empty" } })
-        expect(init?.signal).toBe(requests.length === 4 ? controller.signal : undefined)
+        // #1385: every request now carries a signal - the caller's composed with the
+        // default deadline via AbortSignal.any - never the caller's signal itself or
+        // undefined. The cancel modes below prove the caller's signal still drives
+        // this gated request: aborting it settles the load.
+        expect(init?.signal).toBeInstanceOf(AbortSignal)
         await release.promise
         if (mode === "failure") return Response.json({ message: "offline" }, { status: 503 })
         return Response.json({ data: [], cursor: {} })
