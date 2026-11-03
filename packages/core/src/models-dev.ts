@@ -2,6 +2,7 @@ import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema, Sema
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { ModelsDev } from "@opencode/schema/models-dev"
 import { Money } from "@opencode/schema/money"
+import { collectBoundedResponseBody } from "./tool/http-body.js"
 import { App } from "./app.js"
 import { Hash } from "@opencode/util/hash"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -278,6 +279,13 @@ const Cache = Schema.Struct({
 })
 const defaultSource = "https://models.opencode.ai"
 
+/** The catalog fetch size bound (#1078): the real api.json passed 2 MB in Aug 2026
+ * and keeps growing, so the cap sits well above it — 16 MiB, the generated-client
+ * precedent (#1007) — while still bounding a hostile or broken source body in
+ * flight instead of buffering it whole. The source URL is configurable, so the
+ * body is not trusted just because the endpoint usually behaves. */
+const MAX_API_BYTES = 16 * 1024 * 1024
+
 // Bundled snapshot of https://models.opencode.ai/api.json, committed at
 // packages/core/src/models-dev/snapshot.txt and refreshed via
 // `bun run script/update-models-snapshot.ts`. Decoded and normalized once per
@@ -346,7 +354,10 @@ export const layer = (options?: Options) =>
         return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
           HttpClientRequest.setHeader("User-Agent", userAgent),
           http.execute,
-          Effect.flatMap((res) => res.text),
+          Effect.flatMap((res) =>
+            collectBoundedResponseBody(res, MAX_API_BYTES, () => new Error("models.dev catalog exceeded the size bound")),
+          ),
+          Effect.map((body) => new TextDecoder().decode(body)),
           Effect.timeout("10 seconds"),
         )
       })
