@@ -96,6 +96,7 @@ export function DialogModel(props: { providerID?: string }) {
             // for a hidden model (`provider/model`) must survive this stage,
             // not just the hidden filter above.
             reference: `${model.providerID}/${model.id}`,
+            qualifiedName: `${provider?.name ?? model.providerID}/${model.name}`,
             title: model.name,
             releaseDate: model.time.released,
             description: favorite ? "(Favorite)" : undefined,
@@ -126,7 +127,9 @@ export function DialogModel(props: { providerID?: string }) {
     if (needle) {
       return prioritizeFavorites(
         sortModelOptions(
-          fuzzysort.go(needle, modelOptions, { keys: ["title", "category", "reference"] }).map((item) => item.obj),
+          fuzzysort
+            .go(needle, modelOptions, { keys: ["title", "category", "reference", "qualifiedName"] })
+            .map((item) => item.obj),
           false,
         ),
         favoritePriority,
