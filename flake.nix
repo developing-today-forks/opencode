@@ -38,6 +38,22 @@
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       rev = self.shortRev or self.dirtyShortRev or "dirty";
+
+      # The mcpx daemon modules originate in developing-today/code
+      # (pkgs/mcpx/modules, code#4801); this flake re-exports them
+      # (opencode#1502) with the package defaulted to THIS flake's
+      # mcpx build — the same derivation as packages.<system>.mcpx,
+      # and the one opencode bundles — so a consumer enabling the
+      # daemon through here runs the identical mcpx this opencode
+      # carries. The option set itself never forks: it is imported
+      # from the pinned mcpx source tree.
+      mcpxModule =
+        module:
+        { lib, pkgs, ... }:
+        {
+          imports = [ "${mcpx-src}/pkgs/mcpx/modules/${module}" ];
+          services.mcpx.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.mcpx;
+        };
     in
     {
       devShells = forEachSystem (pkgs: {
@@ -98,5 +114,9 @@
           };
         }
       );
+
+      nixosModules.mcpx = mcpxModule "nixos.nix";
+      homeManagerModules.mcpx = mcpxModule "home-manager.nix";
+      darwinModules.mcpx = mcpxModule "darwin.nix";
     };
 }
