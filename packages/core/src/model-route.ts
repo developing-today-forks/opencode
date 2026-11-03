@@ -1020,18 +1020,6 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= policy.threshold
 }
 
-// The quota-event history retained for a target: the widest demotion window any
-// registered Location evaluates with (the union-retention rule of retainedOutcomeWindow,
-// #1423); demoted() applies the judging Location's own window over what is retained.
-const retainedQuotaWindowMs = () => {
-  let window = settings.quota.windowMs
-  for (const read of settingsReaders.values()) {
-    const configured = read()?.demotion?.windowMs
-    if (configured !== undefined && configured > window) window = configured
-  }
-  return window
-}
-
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
   const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
