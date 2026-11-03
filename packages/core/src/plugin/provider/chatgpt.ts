@@ -555,7 +555,7 @@ function request<A>(url: string, init: RequestInit) {
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
       return JSON.parse(
         await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
-      ) as A
+      )
     },
     catch: (cause) => cause,
   })
