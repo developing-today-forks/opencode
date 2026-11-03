@@ -355,6 +355,23 @@ export const layer = Layer.effect(
               return yield* Effect.fail(
                 new Error(`expected ${input.inputs.length} embeddings from ${baseURL}, got ${decoded.data.length}`),
               )
+            const seenIndices = new Set<number>()
+            for (const item of decoded.data) {
+              if (
+                !Number.isInteger(item.index) ||
+                item.index < 0 ||
+                item.index >= input.inputs.length ||
+                seenIndices.has(item.index)
+              )
+                return yield* Effect.fail(
+                  new Error(
+                    `embeddings backend returned an invalid index set for ${input.inputs.length} inputs from ${baseURL}: expected each index 0..${input.inputs.length - 1} exactly once, got [${decoded.data
+                      .map((entry) => entry.index)
+                      .join(", ")}]`,
+                  ),
+                )
+              seenIndices.add(item.index)
+            }
             const expected = input.dimensions ?? input.model.dimensions
             const vectors = decoded.data
               .toSorted((left, right) => left.index - right.index)
