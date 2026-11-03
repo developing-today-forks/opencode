@@ -573,7 +573,10 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
  * on the credential that serves it), a quota gate on its credential, or a quota gate on its
  * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
  * Balance holds count until a fresh balance increase releases them, so a pool held by a
- * balance gate stays out with no timer-based re-admission (#1014). */
+ * balance gate stays out with no timer-based re-admission (#1014).
+ * A bench whose half-open probe is due still counts here: the leaf itself stays out for
+ * ordinary candidacy (the resolver admits only the probe), but `poolQuotaExhausted` below
+ * carves due probes back out so the pool verdict does not defeat the recovery path (#1390). */
 const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
   if (credentialID) {
     if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
@@ -631,7 +634,11 @@ export const poolIDOf = (definition: Definition, index: number) => poolOf(defini
 
 /** Whether a leaf's pool is quota-exhausted: at least two distinct leaves of the pool are
  * currently quota-out, so the pool is pulled as a whole instead of spending attempts on its
- * remaining leaves one by one (#1014 PR3 dynamic pull-out). The verdict is derived from the
+ * remaining leaves one by one (#1014 PR3 dynamic pull-out). A leaf whose bench probe is due
+ * does not count toward the threshold: its bench still excludes ordinary candidacy, but the
+ * pool verdict must not defeat the half-open recovery the probe exists for (#1390). A claimed
+ * or not-yet-due bench keeps counting, because `probeDue` is false while a probe is
+ * outstanding and before its reset passes. The verdict is derived from the
  * leaves' live quota state, so it lifts by itself when the benches reach their stated reset,
  * when a balance hold is released by a fresh increase, or when a benched leaf recovers — a
  * recovered pool re-enters rotation with no second producer. */
@@ -647,7 +654,11 @@ export const poolQuotaExhausted = (
   const out = new Set<number>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
+    if (!target) continue
+    const credentialID = credentialOf?.(leaf)
+    if (!quotaOut(target, credentialID, now, location)) continue
+    if (probeDue(target, credentialID, now)) continue
+    out.add(leaf)
   }
   return out.size >= POOL_QUOTA_LEAVES
 }
@@ -980,18 +991,6 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
     (at) => now - at <= policy.windowMs,
   )
   return recent.length >= policy.threshold
-}
-
-// The quota-event history retained for a target: the widest demotion window any
-// registered Location evaluates with (the union-retention rule of retainedOutcomeWindow,
-// #1423); demoted() applies the judging Location's own window over what is retained.
-const retainedQuotaWindowMs = () => {
-  let window = settings.quota.windowMs
-  for (const read of settingsReaders.values()) {
-    const configured = read()?.demotion?.windowMs
-    if (configured !== undefined && configured > window) window = configured
-  }
-  return window
 }
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {

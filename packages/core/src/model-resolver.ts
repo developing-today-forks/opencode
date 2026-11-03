@@ -784,11 +784,16 @@ export const layer = Layer.effect(
             const credentialProbe =
               credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
             const isPoolExhausted = poolExhausted.get(index) ?? false
+            // A due half-open probe is the pool's recovery path, not more exhaustion
+            // evidence (#1390): the pool verdict (which already carves due probes out of
+            // its count) must not exclude the very leaf whose probe is due, e.g. a larger
+            // pool where two other leaves keep the verdict exhausted.
+            const poolProbe = targetProbe || credentialProbe
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
-            else if (isPoolExhausted)
+            else if (isPoolExhausted && !poolProbe)
               unavailable.set(index, `pool-quota-exhausted:${ModelRoute.poolIDOf(definition, index) ?? "pool"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, "user-skip")
@@ -798,7 +803,7 @@ export const layer = Layer.effect(
               (until <= now || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
-              !isPoolExhausted &&
+              (!isPoolExhausted || poolProbe) &&
               (limited <= now || kept) &&
               !isSkipped &&
               !isOverBudget &&
@@ -820,9 +825,24 @@ export const layer = Layer.effect(
           })
           // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
           // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
-          // route resolves nothing and the cascade looks elsewhere instead. When every
+          // route resolves nothing and the cascade looks elsewhere instead. A due half-open
+          // probe is the exception (#1390): the last resort still offers a leaf whose own
+          // probe is due, so recovery is possible even when the rest of the pool keeps the
+          // verdict exhausted. When every
           // usable target sits in an exhausted pool there is no last resort at all.
-          const nonPool = usable.filter((index) => !poolExhausted.get(index))
+          const nonPool = usable.filter((index) => {
+            if (!poolExhausted.get(index)) return true
+            const target = definition.targets[index]
+            const credentialID = credentialByProvider.get(definition.targets[index].providerID)
+            const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
+            const credentialUntil = credentialID
+              ? ModelRoute.credentialCooldownUntil(target, credentialID, now)
+              : 0
+            return (
+              (until > now && ModelRoute.probeDue(target, undefined, now)) ||
+              (credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now))
+            )
+          })
           const nonPoolNonFull = nonPool.filter((index) => nonFull.includes(index))
           const lastResort = nonPool.length === 0 ? [] : nonPoolNonFull.length > 0 ? nonPoolNonFull : nonPool
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
