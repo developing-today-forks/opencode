@@ -1,8 +1,23 @@
 {
   description = "OpenCode development flake";
 
+  # The fleet's own binary cache (developing-today/nix-cache: Nix on
+  # Cloudflare R2 + Workers) as an ADDED substituter — cache.nixos.org
+  # stays in place; this only covers fleet-built paths the public cache
+  # does not have. Public read; pushes are signed with the nix-cache-1
+  # key, which is the key trusted here.
+  nixConfig = {
+    extra-substituters = [ "https://nix-cache.developing-today-llc-domains-0.workers.dev" ];
+    extra-trusted-public-keys = [ "nix-cache-1:x/kKZuzyQI3L0/twmOp3w2U68F2ZgM3WnH3ERYKrwf8=" ];
+  };
+
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # The fleet repo carries the canonical nixpkgs pin for all fleet
+    # repos (dezren39/fleet, flake.nix): one rev, aligned everywhere,
+    # pinned to a nixpkgs-unstable channel tip so Hydra has the tree
+    # fully built. To move the pin, move it in fleet and re-lock here.
+    fleet.url = "github:dezren39/fleet";
+    nixpkgs.follows = "fleet/nixpkgs";
     # mcpx source: developing-today/code is the canonical home of mcpx
     # (pkgs/mcpx). Used as a plain source tree (flake = false) so this
     # flake does not evaluate that repo's flake-parts graph; the pin in
