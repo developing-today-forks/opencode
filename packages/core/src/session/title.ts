@@ -1,7 +1,7 @@
 export * as SessionTitle from "./title.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { AIError, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
+import { AIError, isContextOverflowFailure, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
 import { Context, DateTime, Effect, Layer, Stream } from "effect"
 import { Database } from "../database/database.js"
@@ -89,6 +89,7 @@ export const layer = Layer.effect(
         (snapshot) => ModelRoute.observeRateLimit(input.model.ref, snapshot, Date.now(), input.model.routing?.credentialID),
       )
       let error: unknown
+      let failureSource: unknown
       let interrupted = false
       const recordUsage = Effect.suspend(() =>
         usage
@@ -114,7 +115,10 @@ export const layer = Layer.effect(
       }
       yield* llm.stream(prepared.request, observed.options(prepared.options)).pipe(
         Stream.runForEach((event) => {
-          if (LLMEvent.is.providerError(event)) failed = true
+          if (LLMEvent.is.providerError(event)) {
+            failed = true
+            failureSource = event
+          }
           if (LLMEvent.is.textDelta(event)) {
             if (firstTextAt === undefined) firstTextAt = Date.now()
             chunks.push(event.text)
@@ -129,6 +133,7 @@ export const layer = Layer.effect(
           Effect.sync(() => {
             failed = true
             error = cause
+            failureSource = cause
           }),
         ),
         Effect.onInterrupt(() =>
@@ -155,7 +160,10 @@ export const layer = Layer.effect(
         // the failure's classification (quota / auth / retry-after / network), exactly
         // as the session runner settles its attempts (runner/step.ts failureHint).
         const locationDirectory = input.session.location.directory as string
-        if (!interrupted && failed)
+        // A context-overflow rejection is request-specific, not model ill-health: the
+        // runner excludes it from health accounting (runner/step.ts), so the title path
+        // does too — the claim is released below instead of benching a healthy target.
+        if (!interrupted && failed && !isContextOverflowFailure(failureSource))
           ModelRoute.failed(
             routing.target,
             routing.policy,

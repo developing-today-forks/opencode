@@ -6,6 +6,7 @@ import {
   LanguageModel,
   Message,
   SystemPart,
+  InvalidRequestError,
   QuotaExceededError,
   TransportError,
   type LLMRequest,
@@ -358,6 +359,37 @@ it.live("settles a failed title attempt with its failure classification (#1478)"
     const bench = ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")
     expect(bench?.reason).toBe("quota")
     expect(bench?.until).toBeGreaterThan(Date.now() + 60_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("releases instead of benching on a context-overflow title failure (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model rejects the oversized prompt as context overflow;
+    // the primary fallback succeeds. Overflow is a property of this request, not of
+    // the model, so the failed attempt must not bench the healthy target.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(
+            new AIError({
+              reason: new InvalidRequestError({ message: "prompt too long", classification: "context-overflow" }),
+            }),
+          )
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_overflow")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this oversized prompt")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    expect(ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")).toBeUndefined()
+    expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "test", model: "title-small" }), Date.now())).toBe(0)
     ModelRoute.resetHealth()
   }),
 )
