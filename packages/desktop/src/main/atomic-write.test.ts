@@ -3,7 +3,7 @@ import crypto from "node:crypto"
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { renameSyncWithRetry, writeFileSyncAtomic } from "./atomic-write"
+import { renameSyncWithRetry, renameWithRetry, writeFileAtomic, writeFileSyncAtomic } from "./atomic-write"
 
 const dir = () => mkdtempSync(path.join(tmpdir(), "opencode-atomic-write-"))
 
@@ -129,5 +129,75 @@ describe("writeFileSyncAtomic", () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe("renameWithRetry", () => {
+  test("retries EPERM, EACCES and EBUSY until the rename lands", async () => {
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      const root = dir()
+      const source = path.join(root, "source")
+      const destination = path.join(root, "destination")
+      fs.writeFileSync(source, "content")
+      const rename = fs.promises.rename
+      let calls = 0
+
+      const spy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+        calls += 1
+
+        if (calls < 3) throw transient(code)
+        await rename(from, to)
+      })
+
+      try {
+        await renameWithRetry(source, destination)
+        expect(calls).toBe(3)
+        expect(readFileSync(destination, "utf8")).toBe("content")
+      } finally {
+        spy.mockRestore()
+      }
+    }
+  })
+})
+
+describe("writeFileAtomic", () => {
+  test("replaces an existing file completely and leaves no temp file", async () => {
+    const root = dir()
+    const file = path.join(root, "export.txt")
+    fs.writeFileSync(file, "ORIGINAL-CONTENT")
+    await writeFileAtomic(file, "replacement content that is longer")
+    expect(readFileSync(file, "utf8")).toBe("replacement content that is longer")
+    expect(readdirSync(root)).toEqual(["export.txt"])
+  })
+
+  test("a write that fails partway leaves the previous content intact", async () => {
+    const root = dir()
+    const file = path.join(root, "export.txt")
+    fs.writeFileSync(file, "ORIGINAL-CONTENT")
+    const write = fs.promises.writeFile
+
+    const spy = spyOn(fs.promises, "writeFile").mockImplementation(async (target, data, options) => {
+      await write(target, "PARTIAL-", {})
+      throw Object.assign(new Error("write failed: EFBIG"), { code: "EFBIG" })
+    })
+
+    try {
+      await expect(writeFileAtomic(file, "replacement content")).rejects.toThrow("write failed: EFBIG")
+      expect(readFileSync(file, "utf8")).toBe("ORIGINAL-CONTENT")
+      expect(readdirSync(root)).toEqual(["export.txt"])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("preserves an existing file's mode across the replace", async () => {
+    if (process.platform === "win32") return
+    const root = dir()
+    const file = path.join(root, "export.txt")
+    fs.writeFileSync(file, "ORIGINAL-CONTENT")
+    fs.chmodSync(file, 0o640)
+    await writeFileAtomic(file, "new")
+    expect(readFileSync(file, "utf8")).toBe("new")
+    expect(fs.statSync(file).mode & 0o777).toBe(0o640)
   })
 })

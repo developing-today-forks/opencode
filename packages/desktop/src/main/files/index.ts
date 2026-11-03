@@ -4,6 +4,7 @@ import { execFile, spawn } from "node:child_process"
 import { clipboard, dialog, nativeImage, shell } from "electron"
 import { Context, Effect, FileSystem, Layer, Path } from "effect"
 import type { DirectoryPickerOptions, FilePickerOptions, SaveFilePickerOptions } from "../../shared/ipc-contract"
+import { writeFileAtomic } from "../atomic-write"
 import { scoped } from "../native/logging"
 import { nativeT } from "../native/translations"
 import { assertAttachmentBudget, createPickedFileAuthorizations, readAttachment } from "./attachment-picker"
@@ -81,7 +82,7 @@ function make(fs: FileSystem.FileSystem, path: Path.Path) {
       if (result.canceled) return false
 
       if (!result.filePath) return false
-      yield* fs.writeFile(result.filePath, new TextEncoder().encode(content))
+      yield* Effect.tryPromise(() => writeFileAtomic(result.filePath, content))
 
       return true
     }),
