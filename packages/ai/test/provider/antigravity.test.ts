@@ -314,6 +314,43 @@ it.effect("Antigravity lowers tool results as proto Structs, exactly like the do
   }),
 )
 
+it.effect("Antigravity history tool calls carry their ids for Claude targets only (#1550)", () =>
+  Effect.gen(function* () {
+    // For Claude models the upstream's v1internal->Anthropic conversion
+    // emits a tool_use per history functionCall and a tool_result per
+    // functionResponse, and Anthropic requires both ids
+    // ("messages.N.content.M.tool_use.id: Field required", then
+    // "tool_result.tool_use_id: Field required"), which 400'd every
+    // Claude session continuation carrying a tool call. The lowering
+    // must carry the parts' ids for Claude targets and stay id-less
+    // for Gemini, exactly like the door.
+    const history = [
+      Message.user("weather?"),
+      Message.assistant([ToolCallPart.make({ id: "call_1", name: "get_weather", input: { city: "Oslo" } })]),
+      Message.tool({ id: "call_1", name: "get_weather", result: '{"temp": 3}', resultType: "text" }),
+      Message.user("thanks"),
+    ]
+    const partsOf = (body: Record<string, never>) =>
+      ((body.request as Record<string, never>).contents as ReadonlyArray<Record<string, never>>).flatMap(
+        (content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [],
+      )
+    const claudeModel = Antigravity.configure({ accessToken: "fixture-token" }).model("claude-sonnet-5-5")
+    const claudeCompiled = yield* compileRequest(LLM.request({ model: claudeModel, messages: history }))
+    const claudeParts = partsOf(claudeCompiled.body as Record<string, never>)
+    const claudeCall = claudeParts.find((part) => "functionCall" in part) as Record<string, never>
+    const claudeResp = claudeParts.find((part) => "functionResponse" in part) as Record<string, never>
+    expect((claudeCall.functionCall as Record<string, never>).id).toBe("call_1")
+    expect((claudeResp.functionResponse as Record<string, never>).id).toBe("call_1")
+
+    const geminiCompiled = yield* compileRequest(LLM.request({ model, messages: history }))
+    const geminiParts = partsOf(geminiCompiled.body as Record<string, never>)
+    const geminiCall = geminiParts.find((part) => "functionCall" in part) as Record<string, never>
+    const geminiResp = geminiParts.find((part) => "functionResponse" in part) as Record<string, never>
+    expect("id" in (geminiCall.functionCall as Record<string, never>)).toBe(false)
+    expect("id" in (geminiResp.functionResponse as Record<string, never>)).toBe(false)
+  }),
+)
+
 it.effect("Antigravity stream: wrapped SSE events become text, reasoning, tool calls, usage", () =>
   Effect.gen(function* () {
     const response = yield* LLMClient.generate(LLM.request({ model, prompt: "weather?" })).pipe(

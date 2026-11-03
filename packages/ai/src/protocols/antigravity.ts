@@ -243,11 +243,11 @@ const PartFileData = Schema.Struct({
   fileData: Schema.Struct({ mimeType: Schema.String, fileUri: Schema.String }),
 })
 const PartFunctionCall = Schema.Struct({
-  functionCall: Schema.Struct({ name: Schema.String, args: Schema.optional(Schema.Unknown) }),
+  functionCall: Schema.Struct({ name: Schema.String, args: Schema.optional(Schema.Unknown), id: Schema.optional(Schema.String) }),
   thoughtSignature: optionalNull(Schema.String),
 })
 const PartFunctionResponse = Schema.Struct({
-  functionResponse: Schema.Struct({ name: Schema.String, response: Schema.Unknown }),
+  functionResponse: Schema.Struct({ name: Schema.String, response: Schema.Unknown, id: Schema.optional(Schema.String) }),
 })
 const ContentPart = Schema.Union([PartText, PartInlineData, PartFileData, PartFunctionCall, PartFunctionResponse])
 const Content = Schema.Struct({
@@ -395,6 +395,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
       String(request.model.id),
       options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
     )
+    const anthropic = base.startsWith("claude")
     const metadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
     const systemParts: Array<{ text: string }> = request.system.map((part) => ({ text: part.text }))
     const contents: Array<typeof Content.Type> = []
@@ -455,7 +456,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
           const args =
             ProviderShared.isRecord(part.input) && !Array.isArray(part.input) ? part.input : {}
           parts.push({
-            functionCall: { name: part.name, args },
+            functionCall: { name: part.name, args, ...(anthropic && part.id ? { id: part.id } : {}) },
             // The door stashes signatures server-side keyed by tool_call id;
             // fork sessions carry them in providerMetadata instead. When no
             // signature survives (stateless façade history), fall back to
@@ -485,7 +486,10 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
             response = { result: text }
           }
         }
-        contents.push({ role: "user", parts: [{ functionResponse: { name: part.name, response } }] })
+        contents.push({
+          role: "user",
+          parts: [{ functionResponse: { name: part.name, response, ...(anthropic && part.id ? { id: part.id } : {}) } }],
+        })
       }
     }
 
@@ -715,9 +719,12 @@ const step = (state: ParserState, event: Event) => {
     if ("functionCall" in rawPart && ProviderShared.isRecord(rawPart.functionCall)) {
       const call = rawPart.functionCall
       if (typeof call.name !== "string") continue
-      // The wire carries no call id; mint the door's shape so façade callers
-      // see the same id grammar the door produced.
-      const id = `call_${globalThis.crypto.randomUUID().replaceAll("-", "")}`
+      // The wire carries a call id for Claude tool_use interop (#1550);
+      // keep it when present so history replays the id Anthropic issued.
+      // Otherwise mint the door's shape so façade callers see the same id
+      // grammar the door produced.
+      const id =
+        typeof call.id === "string" && call.id ? call.id : `call_${globalThis.crypto.randomUUID().replaceAll("-", "")}`
       if (reasoningId !== undefined) {
         lifecycle = Lifecycle.reasoningEnd(
           lifecycle,
