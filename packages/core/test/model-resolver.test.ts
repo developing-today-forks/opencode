@@ -2096,13 +2096,74 @@ describe("ModelResolver routes", () => {
         // The owner hands the unattempted claim back: the probe is due again while the
         // bench itself is still in force, and the next resolution claims it afresh.
         const claim = probe.routing!.probeClaim!
-        expect(ModelRoute.releaseBenchProbe(targetA, claim.credentialID, claim.claimedAt)).toBe(true)
+        expect(ModelRoute.releaseBenchProbe(targetA, claim.credentialID, claim.claimedAt, claim.token)).toBe(true)
         expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
         expect(ModelRoute.cooldownUntil(targetA)).toBeGreaterThan(Date.now())
         const again = yield* resolver.resolveModel(route)
         expect(targetOf(again)).toBe("pa")
         expect(again.routing?.probeClaim?.claimedAt).toBeGreaterThanOrEqual(claim.claimedAt)
       }),
+    )
+  })
+
+  it.live("a load failure settles both probe scopes of the pick (#1486)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const cred = "cred-load"
+    const conn = {
+      type: "credential" as const,
+      id: Credential.ID.make(cred),
+      label: cred,
+      method: "key" as const,
+    }
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn] }),
+      connection: {
+        active: () => Effect.succeed(conn),
+        resolve: () => Effect.fail(new Error("credential boom")),
+        activate: () => Effect.void,
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const policy = ModelRoute.policy()
+          const now = Date.now()
+          for (let index = 0; index < 8; index++) {
+            ModelRoute.failed(targetA, policy, now + index, { quota: true })
+            ModelRoute.failed(targetA, policy, now + index, { quota: true }, cred)
+          }
+          const resetAt = now + 250
+          const snapshot = {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: now,
+            stale: false,
+          }
+          ModelRoute.observeProviderQuota(targetA, snapshot, now)
+          ModelRoute.observeCredentialQuota(targetA, cred, snapshot, now)
+          yield* Effect.sleep("400 millis")
+          expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
+          expect(ModelRoute.probeDue(targetA, cred)).toBe(true)
+          // The pick claims both scopes, then load fails on the credential.
+          const error = yield* resolver.resolveModel(route).pipe(Effect.flip)
+          expect(error).toBeDefined()
+          // Both scopes settled: benched with no outstanding claim left behind.
+          expect(ModelRoute.cooldownUntil(targetA)).toBeGreaterThan(Date.now())
+          expect(ModelRoute.credentialCooldownUntil(targetA, cred)).toBeGreaterThan(Date.now())
+          expect(ModelRoute.probeDue(targetA, undefined)).toBe(false)
+          expect(ModelRoute.probeDue(targetA, cred)).toBe(false)
+          expect(ModelRoute.activeBenches(Date.now()).some((bench) => bench.probeClaimed)).toBe(false)
+        }),
+      integration,
     )
   })
 
