@@ -69,6 +69,21 @@ export function DialogModel(props: { providerID?: string }) {
       models()
         .filter((model) => model.status !== "deprecated")
         .filter((model) => (props.providerID ? model.providerID === props.providerID : true))
+        // Hidden models (#230) are absent from the picker unless the search is
+        // the model's exact full name; favorites/recents above are explicit
+        // user choices and keep working either way.
+        .filter((model) => {
+          if (!model.hidden) return true
+          const search = needle.toLowerCase()
+          if (!search) return false
+          const provider = providers().get(model.providerID)
+          return [
+            model.name.toLowerCase(),
+            String(model.id).toLowerCase(),
+            `${model.providerID}/${model.id}`.toLowerCase(),
+            `${provider?.name ?? model.providerID}/${model.name}`.toLowerCase(),
+          ].includes(search)
+        })
         .map((model) => {
           const provider = providers().get(model.providerID)
           const key = modelPreferenceKey({ providerID: model.providerID, modelID: model.id })
