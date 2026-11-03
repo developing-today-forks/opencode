@@ -1,5 +1,8 @@
 export * as Observability from "./observability.js"
 
+// Star import: this module's own exported `layer()` below collides with the
+// module's `layer` value, and value aliases are banned, so the namespace stays.
+// ast-grep-ignore: no-star-import
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem"
 import { LayerNode } from "./effect/layer-node.js"
 import { Effect, Layer, Logger, References, Schema } from "effect"
