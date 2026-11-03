@@ -518,6 +518,25 @@ export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefi
   return true
 }
 
+/** Releases a probe claim whose owner resolved the target but never attempted a request on it
+ * (#1478): the bench stays in force and the probe is due again for the next real request.
+ * The release only lands when `claimedAt` still names the outstanding claim, so a claim that
+ * has since settled — or one a different resolution took afterwards — is never cleared by a
+ * stale owner. Releasing is not an outcome: no bench ends, no failure is recorded. */
+export const releaseBenchProbe = (target: Model.Ref, credentialID: string | undefined, claimedAt: number) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!state || state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) return false
+  state.probeClaimedAt = undefined
+  logHealth(
+    target,
+    "bench-probe-release",
+    `probe claim released without an outcome${credentialID ? ` credential:${credentialID}` : ""}`,
+    state.benchQuotaResetAt,
+    credentialID,
+  )
+  return true
+}
+
 /** One bench in force, as route diagnostics report it (#1123). */
 export interface ActiveBench {
   readonly providerID: string

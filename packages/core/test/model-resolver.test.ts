@@ -2061,6 +2061,51 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.live("stamps the probe claim it spends on the resolution, and a release hands it back (#1478)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], ordered)
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        const resetAt = Date.now() + 250
+        ModelRoute.observeProviderQuota(
+          targetA,
+          {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: Date.now(),
+            stale: false,
+          },
+          Date.now(),
+        )
+        yield* Effect.sleep("400 millis")
+        const probe = yield* resolver.resolveModel(route)
+        expect(targetOf(probe)).toBe("pa")
+        expect(probe.routing?.probeClaim).toBeDefined()
+        // An ordinary resolution spends no claim and carries none.
+        const ordinary = yield* resolver.resolveModel(route)
+        expect(targetOf(ordinary)).toBe("pb")
+        expect(ordinary.routing?.probeClaim).toBeUndefined()
+        // The owner hands the unattempted claim back: the probe is due again while the
+        // bench itself is still in force, and the next resolution claims it afresh.
+        const claim = probe.routing!.probeClaim!
+        expect(ModelRoute.releaseBenchProbe(targetA, claim.credentialID, claim.claimedAt)).toBe(true)
+        expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
+        expect(ModelRoute.cooldownUntil(targetA)).toBeGreaterThan(Date.now())
+        const again = yield* resolver.resolveModel(route)
+        expect(targetOf(again)).toBe("pa")
+        expect(again.routing?.probeClaim?.claimedAt).toBeGreaterThanOrEqual(claim.claimedAt)
+      }),
+    )
+  })
+
   it.effect("passes over a target whose provider reports a spent rate-limit window", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
