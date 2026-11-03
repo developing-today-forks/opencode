@@ -771,6 +771,24 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
   })
 
+  test("a released probe claim leaves the bench in force and the probe due again (#1478)", () => {
+    const now = 850_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    // A release naming a different claim is not this claim's owner: the claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    // The owner's release hands the probe back: bench and expiry unchanged, probe due again.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.cooldownUntil(target, resetAt)).toBe(now + 7 + day)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + 1)).toBe(true)
+  })
+
   test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
     const now = 900_000_000
     const resetAt = now + 5 * 3_600_000

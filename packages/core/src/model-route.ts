@@ -323,7 +323,8 @@ const logHealth = (
     | "rate-limit-window"
     | "quota-gated"
     | "quota-readmitted"
-    | "bench-probe",
+    | "bench-probe"
+    | "bench-probe-release",
   reason: string,
   until?: number,
   credentialID?: string,
@@ -512,6 +513,25 @@ export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefi
     target,
     "bench-probe",
     `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}`,
+    state.benchQuotaResetAt,
+    credentialID,
+  )
+  return true
+}
+
+/** Releases a probe claim whose owner resolved the target but never attempted a request on it
+ * (#1478): the bench stays in force and the probe is due again for the next real request.
+ * The release only lands when `claimedAt` still names the outstanding claim, so a claim that
+ * has since settled — or one a different resolution took afterwards — is never cleared by a
+ * stale owner. Releasing is not an outcome: no bench ends, no failure is recorded. */
+export const releaseBenchProbe = (target: Model.Ref, credentialID: string | undefined, claimedAt: number) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!state || state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) return false
+  state.probeClaimedAt = undefined
+  logHealth(
+    target,
+    "bench-probe-release",
+    `probe claim released without an outcome${credentialID ? ` credential:${credentialID}` : ""}`,
     state.benchQuotaResetAt,
     credentialID,
   )

@@ -6,6 +6,8 @@ import {
   LanguageModel,
   Message,
   SystemPart,
+  InvalidRequestError,
+  QuotaExceededError,
   TransportError,
   type LLMRequest,
 } from "@opencode/ai"
@@ -42,6 +44,7 @@ import { testEffect } from "./lib/effect"
 let requests: LLMRequest[] = []
 let selectedSmall: Model.Info | undefined
 let selections: Array<Session.Info["model"]> = []
+let probeClaims = false
 const model = LanguageModel.make({
   id: "title-model",
   provider: "test",
@@ -89,15 +92,32 @@ const client = Layer.mock(LLMClient.Service)({
   },
   generate: () => Effect.die("unused"),
 })
+// Simulates a routed resolution the way the real resolver behaves after #1478: picking a
+// target whose bench probe is due spends the claim and stamps it on the routing block.
+const probeRouting = (language: LanguageModel) => {
+  const target = ModelRoute.ref({ providerID: "test", model: language.id })
+  const claimedAt = Date.now()
+  const claimed = ModelRoute.claimBenchProbe(target, undefined, claimedAt)
+  return {
+    routeID: Model.ID.make("title-route"),
+    target,
+    policy: ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 }),
+    attempts: 1,
+    fallback: () => Effect.succeed(undefined),
+    ...(claimed ? { probeClaim: { claimedAt } } : {}),
+  }
+}
 const models = Layer.mock(SessionRunnerModel.Service)({
   resolve: (session) => {
     selections.push(session.model)
+    const language = session.model?.id === "title-small" ? smallModel : model
     return Effect.succeed(
-      SessionRunnerModel.resolved(session.model?.id === "title-small" ? smallModel : model, {
+      SessionRunnerModel.resolved(language, {
         capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
         cost,
         limit: { context: 200_000, output: 32_000 },
         variant: session.model?.variant,
+        ...(probeClaims ? { routing: probeRouting(language) } : {}),
       }),
     )
   },
@@ -187,6 +207,7 @@ beforeEach(() => {
   requests = []
   selectedSmall = undefined
   selections = []
+  probeClaims = false
   titleStream = successfulTitle
 })
 
@@ -257,6 +278,119 @@ it.live("counts a title request against its target's budget, and a restart resto
     const { db } = yield* Database.Service
     yield* ModelRouteLog.restoreUsageFrom(db)
     expect(ModelRoute.usageOf(target)).toEqual(live)
+  }),
+)
+
+it.live("settles the attempted model's probe claim and releases the unattempted primary's (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // Both title models sit on a quota bench whose known window reset has already passed,
+    // so each resolution spends that bench's single half-open probe claim.
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const primary = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const preferred = ModelRoute.ref({ providerID: "test", model: "title-small" })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    for (const target of [primary, preferred]) {
+      for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+      ModelRoute.observeProviderQuota(
+        target,
+        {
+          planID: "plan",
+          window: "five-hours",
+          providerID: "test",
+          percent: 100,
+          remaining: 0,
+          resetAt,
+          observedAt: plantedAt + 10,
+          stale: false,
+        },
+        plantedAt + 10,
+      )
+    }
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true)
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(true)
+
+    const sessionID = Session.ID.make("ses_title_probe_claim")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this with a probed model")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"])
+    // The attempted preferred model reported success: its bench ended outright.
+    expect(ModelRoute.cooldownUntil(preferred, Date.now())).toBe(0)
+    // The unattempted primary's claim was released: its bench is still in force and its
+    // probe is due again for the next real request.
+    expect(ModelRoute.cooldownUntil(primary, Date.now())).toBeGreaterThan(Date.now())
+    expect(ModelRoute.activeBenches(Date.now()).find((bench) => bench.modelID === "title-model")?.probeClaimed).toBe(
+      false,
+    )
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("settles a failed title attempt with its failure classification (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_failure_hint")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this despite a quota failure")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    // The failed attempt settles with the quota classification preserved: its bench is a
+    // quota bench on the quota cooldown, not an ordinary transient-failure bench.
+    const bench = ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")
+    expect(bench?.reason).toBe("quota")
+    expect(bench?.until).toBeGreaterThan(Date.now() + 60_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("releases instead of benching on a context-overflow title failure (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model rejects the oversized prompt as context overflow;
+    // the primary fallback succeeds. Overflow is a property of this request, not of
+    // the model, so the failed attempt must not bench the healthy target.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(
+            new AIError({
+              reason: new InvalidRequestError({ message: "prompt too long", classification: "context-overflow" }),
+            }),
+          )
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_overflow")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this oversized prompt")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    expect(ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")).toBeUndefined()
+    expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "test", model: "title-small" }), Date.now())).toBe(0)
+    ModelRoute.resetHealth()
   }),
 )
 
