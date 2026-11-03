@@ -153,6 +153,80 @@ it.effect("convertSchema ports the door's proto-schema rules", () =>
   }),
 )
 
+it.effect("convertSchema synthesizes items for bare array schemas (#1548)", () =>
+  Effect.sync(() => {
+    // The live failure: a tool property declared {type: "array"} with no
+    // items (legal JSON Schema — unconstrained elements). The proto
+    // validator rejects an ARRAY schema without items
+    // ("properties[paths].items: missing field"), so conversion
+    // synthesizes an unconstrained items.
+    expect(
+      convertSchema({
+        type: "object",
+        properties: { paths: { type: "array", description: "paths to collect" } },
+        required: ["paths"],
+      } as never),
+    ).toEqual({
+      type: "OBJECT",
+      properties: { paths: { type: "ARRAY", description: "paths to collect", items: {} } },
+      required: ["paths"],
+    })
+    // A nullable array union collapses to ARRAY + nullable and still
+    // gets its items.
+    expect(convertSchema({ type: ["array", "null"] } as never)).toEqual({
+      type: "ARRAY",
+      nullable: true,
+      items: {},
+    })
+    // Nested positions are covered by the same recursion: an array
+    // inside anyOf, and an array of arrays.
+    expect(
+      convertSchema({
+        type: "object",
+        properties: {
+          choice: { anyOf: [{ type: "array" }, { type: "string" }] },
+          matrix: { type: "array", items: { type: "array" } },
+        },
+      } as never),
+    ).toEqual({
+      type: "OBJECT",
+      properties: {
+        choice: { anyOf: [{ type: "ARRAY", items: {} }, { type: "STRING" }] },
+        matrix: { type: "ARRAY", items: { type: "ARRAY", items: {} } },
+      },
+    })
+    // An explicit items schema is never overwritten.
+    expect(convertSchema({ type: "array", items: { type: "string" } })).toEqual({
+      type: "ARRAY",
+      items: { type: "STRING" },
+    })
+    // Invariant sweep over the tricky shapes real tool sets carry:
+    // after conversion no ARRAY node anywhere lacks both items and
+    // prefixItems — the proto rejects that shape.
+    const assertArraysCarryItems = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(assertArraysCarryItems)
+      if (typeof node !== "object" || node === null) return
+      const record = node as Record<string, unknown>
+      if (record.type === "ARRAY")
+        expect(record.items !== undefined || record.prefixItems !== undefined).toBe(true)
+      Object.values(record).forEach(assertArraysCarryItems)
+    }
+    const shapes = [
+      { type: "object", properties: { paths: { type: "array" } } },
+      { type: "array", items: [{ type: "string" }, { type: "number" }] },
+      { type: "array", items: { type: "array", items: { type: "array" } } },
+      { type: "object", additionalProperties: { type: "string" } },
+      { anyOf: [{ type: "array" }, { type: "object", properties: { xs: { type: "array" } } }] },
+      {
+        type: "object",
+        $defs: { row: { type: "array" } },
+        properties: { rows: { type: "array", items: { $ref: "#/$defs/row" } } },
+      },
+    ]
+    for (const shape of shapes) assertArraysCarryItems(convertSchema(shape as never))
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(

@@ -188,6 +188,12 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
   }
   if (nullable) out.nullable = true
   if (out.type === undefined && out.properties) out.type = "OBJECT"
+  // The proto requires `items` on an ARRAY schema even when the client
+  // leaves the element type unconstrained ("properties[paths].items:
+  // missing field", #1548, probed live against the door 2026-11-03):
+  // synthesize an unconstrained items — omitted items in JSON Schema
+  // means any element.
+  if (out.type === "ARRAY" && out.items === undefined && out.prefixItems === undefined) out.items = {}
   if (Array.isArray(node.required)) {
     const declared = out.properties && isRecord(out.properties) ? new Set(Object.keys(out.properties)) : new Set<string>()
     const required = node.required.filter((name): name is string => typeof name === "string" && declared.has(name))
