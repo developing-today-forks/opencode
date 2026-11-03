@@ -62,6 +62,11 @@ export class InvalidDirectoryError extends Schema.TaggedError<InvalidDirectoryEr
   { directory: AbsolutePath },
 ) {}
 
+export class InvalidNameError extends Schema.TaggedError<InvalidNameError>()(
+  "Worktree.InvalidNameError",
+  { name: Schema.String },
+) {}
+
 export class StrategyUnavailableError extends Schema.TaggedError<StrategyUnavailableError>()(
   "Worktree.StrategyUnavailableError",
   { strategy: StrategyID },
@@ -72,6 +77,7 @@ export type Error =
   | Project.NotFoundError
   | SourceDirectoryNotFoundError
   | DestinationExistsError
+  | InvalidNameError
   | DirectoryUnavailableError
   | InvalidDirectoryError
   | StrategyUnavailableError
@@ -202,19 +208,40 @@ const layer = Layer.effect(
     })
 
     const create = Effect.fn("Worktree.create")(function* (input: CreateInput, current?: WorktreeStrategies.Interface) {
+      // The name is the one part of the destination the caller does not choose
+      // freely: it must be a single path segment, so a name with ../ segments
+      // (or a separator at all) can never escape the managed parent directory
+      // (#1004). Rejected before any directory is created or git is invoked.
+      // The CreateInput schema states the same contract for the HTTP door;
+      // this check covers the direct doors (the model's worktree_create tool
+      // and the plugin host), which reach the service without that schema.
+      const name = input.name ?? Slug.create()
+      if (
+        name.trim() === "" ||
+        name === "." ||
+        name === ".." ||
+        name.includes("/") ||
+        name.includes("\\") ||
+        name.includes("\0")
+      )
+        return yield* new InvalidNameError({ name })
       const row = yield* project(input.projectID)
       const settings = yield* load(row.worktree, current)
       const selected = yield* getStrategy(settings.selected, settings.strategies)
       const directory = input.directory ?? settings.directory
       const sourceDirectory = yield* source(input.projectID, input.from ?? row.worktree)
       yield* fs.makeDirectory(directory, { recursive: true }).pipe(Effect.orDie)
-      const name = input.name ?? Slug.create()
       let suffix = 1
       let worktreeDirectory = AbsolutePath.make(path.join(directory, name))
+      // Defence in depth: after joining (and after each suffix step) the
+      // destination must sit directly inside the parent directory.
+      const contained = (candidate: string) => path.dirname(path.resolve(candidate)) === path.resolve(directory)
+      if (!contained(worktreeDirectory)) return yield* new InvalidNameError({ name })
       while (yield* fs.existsSafe(worktreeDirectory)) {
         suffix++
         if (suffix > 10) return yield* new DestinationExistsError({ directory: worktreeDirectory })
         worktreeDirectory = AbsolutePath.make(path.join(directory, `${name}-${suffix}`))
+        if (!contained(worktreeDirectory)) return yield* new InvalidNameError({ name })
       }
 
       const created = yield* selected
