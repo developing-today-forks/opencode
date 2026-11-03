@@ -207,9 +207,12 @@ const layer = Layer.effect(
         const entries = yield* config.value.entries()
         const aliases = Config.latest(entries, "aliases")
         if (aliases) {
-          const available = yield* model.available()
+          // Same execution catalog as resolution below (#230): a hidden route
+          // keeps precedence over an alias here too, or the sizing preflight
+          // would follow the alias and skip the sized path.
+          const catalog = yield* model.catalog()
           const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
-            available.some((item) => item.providerID === providerID && item.id === modelID)
+            catalog.some((item) => item.providerID === providerID && item.id === modelID)
           try {
             const res = ModelAlias.resolveRef(aliases, ModelAlias.refString(selected), exists)
             effective = Model.Ref.make({

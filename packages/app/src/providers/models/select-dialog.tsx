@@ -462,6 +462,14 @@ function createModelSelectorController(input: {
       .filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
   )
 
+  // The provider-filtered catalog before visibility filtering (#230): exact
+  // hidden-model matches are evaluated against this list, so a hidden model
+  // the automatic visibility policy would age out can still be revealed by
+  // typing its full name.
+  const catalogModels = createMemo(() =>
+    model.list().filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
+  )
+
   return {
     all: () => model.list().filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
     models: (search: string) => {
@@ -470,7 +478,7 @@ function createModelSelectorController(input: {
       // Hidden models (#230) are absent from the picker unless the search is
       // the model's exact full name; every other model keeps fuzzy matching.
       const filtered = query
-        ? allModels().filter((item) =>
+        ? catalogModels().filter((item) =>
             item.hidden
               ? isExactModelName(query, [
                   item.name,
@@ -478,7 +486,8 @@ function createModelSelectorController(input: {
                   `${item.provider.id}/${item.id}`,
                   `${item.provider.name}/${item.name}`,
                 ])
-              : matchesModelSearch(query, [item.name, item.id, item.provider.name]),
+              : model.visible({ modelID: item.id, providerID: item.provider.id }) &&
+                matchesModelSearch(query, [item.name, item.id, item.provider.name]),
           )
         : allModels().filter((item) => !item.hidden)
 
