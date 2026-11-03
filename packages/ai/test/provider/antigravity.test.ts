@@ -227,6 +227,62 @@ it.effect("convertSchema synthesizes items for bare array schemas (#1548)", () =
   }),
 )
 
+it.effect("convertSchema folds anyOf to oneOf for Anthropic targets (#1550)", () =>
+  Effect.sync(() => {
+    // The live failure: for Claude models the upstream re-serializes the
+    // proto Schema into an Anthropic input_schema whose validator rejects
+    // anyOf outright ("tools.N.custom.input_schema: JSON schema is
+    // invalid. It must match JSON Schema draft 2020-12"), which 400'd
+    // workhorse sessions on antigravity-direct/claude-sonnet-5-5 all day
+    // 2026-11-03. With the anthropic flag the same shapes emit oneOf.
+    const unioned = {
+      type: "object",
+      properties: {
+        nullable_note: { anyOf: [{ type: "string" }, { type: "null" }] },
+        either: { anyOf: [{ type: "string" }, { type: "number" }] },
+        listed: { type: "array", items: { anyOf: [{ type: "string" }, { type: "boolean" }] } },
+        pick: { oneOf: [{ type: "string" }, { type: "number" }] },
+      },
+    }
+    expect(convertSchema(unioned as never, true)).toEqual({
+      type: "OBJECT",
+      properties: {
+        nullable_note: { oneOf: [{ type: "STRING" }, { type: "NULL" }] },
+        either: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+        listed: { type: "ARRAY", items: { oneOf: [{ type: "STRING" }, { type: "BOOLEAN" }] } },
+        pick: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+      },
+    })
+    // The Gemini default keeps anyOf verbatim — the fold is Claude-only.
+    expect(convertSchema(unioned as never)).toEqual({
+      type: "OBJECT",
+      properties: {
+        nullable_note: { anyOf: [{ type: "STRING" }, { type: "NULL" }] },
+        either: { anyOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+        listed: { type: "ARRAY", items: { anyOf: [{ type: "STRING" }, { type: "BOOLEAN" }] } },
+        pick: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+      },
+    })
+    // Invariant sweep: with the anthropic flag, no node anywhere in the
+    // converted output carries anyOf — Anthropic rejects it in any
+    // position.
+    const assertNoAnyOf = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(assertNoAnyOf)
+      if (typeof node !== "object" || node === null) return
+      const record = node as Record<string, unknown>
+      expect("anyOf" in record).toBe(false)
+      Object.values(record).forEach(assertNoAnyOf)
+    }
+    const shapes = [
+      unioned,
+      { anyOf: [{ type: "string" }] },
+      { type: "object", properties: { deep: { not: { anyOf: [{ type: "integer" }, { type: "null" }] } } } },
+      { allOf: [{ anyOf: [{ type: "string" }, { type: "number" }] }] },
+    ]
+    for (const shape of shapes) assertNoAnyOf(convertSchema(shape as never, true))
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
