@@ -454,14 +454,19 @@ const refreshQuotaGate = (
   location?: string,
 ) =>
   Effect.gen(function* () {
-    if (!ModelRoute.shouldFeedQuota(now, location)) return
+    const targetProviders = new Set(
+      targets
+        .map((target) => target.providerID)
+        .filter((providerID) => ModelRoute.shouldFeedQuota(now, location, providerID)),
+    )
+    if (targetProviders.size === 0) return
+    const dueTargets = targets.filter((target) => targetProviders.has(target.providerID))
     let plans: readonly ModelPlan.Plan[] = []
     try {
       plans = ModelPlan.readStore(dataDir).plans
     } catch {
       return
     }
-    const targetProviders = new Set<string>(targets.map((target) => target.providerID))
     // Only plans that still feed the gate (#1340): ended plans are store history, not capacity.
     const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID) && ModelPlan.feedsGate(plan))
     // Ended plans derive no replacement snapshot, so reconcile the retained gate state
@@ -488,7 +493,7 @@ const refreshQuotaGate = (
           if (rowsByWindow.has(key)) continue
           rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, QuotaSnapshot.usageSince(plan, window, now)))
         }
-        for (const target of targets) {
+        for (const target of dueTargets) {
           const activeCredentialID = credentialByProvider.get(target.providerID)
           // Held credentials keep being fed after failover activates a sibling: their fresh
           // balance observations are the only way a balance hold on an inactive credential

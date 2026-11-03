@@ -1766,6 +1766,17 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
   })
 
+  test("quota feeds are throttled per provider and location", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-b")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-a")).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-b", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-b")).toBe(false)
+    ModelRoute.resetQuotaFeed()
+  })
+
   test("the escalation outcome window is configurable", () => {
     const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
     const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })

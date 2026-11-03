@@ -7,17 +7,25 @@ import { Headers } from "effect/http"
 import { AISDKNative } from "@opencode/core/aisdk-native"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
+import { Database } from "@opencode/core/database/database"
 import { Compatibility, ID, Info, Model, VariantID } from "@opencode/core/model"
+import { ModelPlan } from "@opencode/core/model-plan"
 import { Provider } from "@opencode/core/provider"
 import { Variant } from "@opencode/core/variant"
 import { ModelResolver } from "@opencode/core/model-resolver"
 import { ModelRoute } from "@opencode/core/model-route"
 import type { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { RouteAttemptTable } from "@opencode/core/model-route-log/sql"
 import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { AISDK } from "@opencode/core/aisdk"
 import { Npm } from "@opencode/util/npm"
-import { it } from "./lib/effect"
+import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Global } from "@opencode/util/global"
+import { it, testEffect } from "./lib/effect"
+import { withTempDir } from "./fixture/tmpdir"
+
+const itWithRouteLog = testEffect(LayerNode.compile(LayerNode.group([ModelRouteLog.node, Database.node])))
 
 interface ModelOptions {
   readonly providerID?: Provider.ID
@@ -1641,6 +1649,7 @@ describe("ModelResolver routes", () => {
     leaves: ReadonlyArray<ReturnType<typeof leaf>>,
     run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
     integration?: unknown,
+    dataDir?: string,
   ) => {
     const provider = Provider.Info.make({
       ...Provider.Info.empty(leaves[0].providerID),
@@ -1665,6 +1674,7 @@ describe("ModelResolver routes", () => {
           ),
           Layer.mock(Npm.Service, {}),
           Layer.mock(AISDK.Service, {} as never),
+          Layer.succeed(Global.Service, Global.make(dataDir === undefined ? {} : { data: dataDir })),
         ),
       ),
     )
@@ -2565,6 +2575,85 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  itWithRouteLog.effect("quota snapshots from disjoint routes are both fed within one TTL (#1339)", () =>
+    withTempDir(({ path }) =>
+      Effect.gen(function* () {
+        ModelRoute.resetHealth()
+        ModelRoute.resetQuotaFeed()
+        const now = Date.now()
+        const providers = ["quota-a1", "quota-a2", "quota-b1", "quota-b2"]
+        const store = providers.reduce(
+          (current, providerID) =>
+            ModelPlan.upsertPlan(
+              current,
+              {
+                providerID,
+                label: providerID,
+                coverage: "subscription",
+                quotas: [{ name: "hour", unit: "requests", limit: 1, windowHours: 1 }],
+                status: "active",
+              },
+              new Date(now).toISOString(),
+            ).store,
+          ModelPlan.emptyStore(),
+        )
+        ModelPlan.writeStore(store, path)
+
+        const db = (yield* Database.Service).db
+        yield* db
+          .insert(RouteAttemptTable)
+          .values(
+            providers.map((providerID) => ({
+              time_started: now - 1,
+              time_ended: now,
+              session_id: `session-${providerID}`,
+              route_id: `route-${providerID}`,
+              provider_id: providerID,
+              model_id: "luna",
+              outcome: "success",
+              output_started: true,
+            })),
+          )
+          .run()
+
+        const route = (providers: [string, string], poolID: string) => {
+          const leaves = providers.map(leaf)
+          return routed(leaves, {
+            nodes: [
+              { selection: "ordered", weights: [1], children: [{ node: 1 }] },
+              {
+                routeID: poolID,
+                providerRoute: poolID,
+                selection: "ordered",
+                weights: [1, 1],
+                children: [{ leaf: 0 }, { leaf: 1 }],
+              },
+            ],
+          })
+        }
+        const routeA = route(["quota-a1", "quota-a2"], "quota-pool-a")
+        const routeB = route(["quota-b1", "quota-b2"], "quota-pool-b")
+        const definitionA = ModelRoute.definition(routeA)!
+        const definitionB = ModelRoute.definition(routeB)!
+
+        yield* withResolver(
+          [...providers.map(leaf)],
+          (resolver) =>
+            Effect.gen(function* () {
+              yield* resolver.resolveModel(routeA)
+              expect(ModelRoute.poolQuotaExhausted(definitionA, 0)).toBe(true)
+              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(false)
+
+              yield* resolver.resolveModel(routeB)
+              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(true)
+            }),
+          undefined,
+          path,
+        )
+      }).pipe(Effect.ensuring(Effect.sync(() => ModelRoute.resetHealth()))),
+    ),
+  )
+
   it.effect("a known-full active credential takes its target out of the route until a good read (#6)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
@@ -2676,4 +2765,3 @@ describe("ModelResolver routes", () => {
     )
   })
 })
-
