@@ -323,7 +323,8 @@ const logHealth = (
     | "rate-limit-window"
     | "quota-gated"
     | "quota-readmitted"
-    | "bench-probe",
+    | "bench-probe"
+    | "bench-probe-release",
   reason: string,
   until?: number,
   credentialID?: string,
