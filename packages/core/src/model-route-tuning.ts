@@ -42,9 +42,9 @@ export const MAX_QUOTA_RESET_MS = 30 * 86_400_000
 /** The quota-reset ceiling in force: an explicit override wins, otherwise the configured
  * quota-gate ceiling, which is the single source of truth both the gate and the tuning
  * predictions bound stated resets by. */
-export const quotaResetCeilingMs = (override?: number): number => {
+export const quotaResetCeilingMs = (override?: number, location?: string): number => {
   if (override !== undefined) return override
-  return ModelRoute.currentConstants().quotaGate.maxMs
+  return ModelRoute.currentConstants(location).quotaGate.maxMs
 }
 
 export const suggest = (input: Input): ModelRoute.Adjustment[] => {
@@ -124,11 +124,15 @@ export const predict = (input: {
   readonly minHourlySamples?: number
   /** Overrides the quota-reset ceiling; defaults to the configured quota-gate ceiling. */
   readonly maxResetMs?: number
+  /** The Location directory whose quota gate judges the ceiling (#1461): without it the
+   * unscoped read falls back to the defaults when several Locations are registered,
+   * instead of borrowing whichever Location registered last. */
+  readonly location?: string
 }): Prediction[] => {
   const minAttempts = input.minHourlyAttempts ?? 5
   const ratio = input.hourRatio ?? 2
   const minSamples = input.minHourlySamples ?? 3
-  const maxResetMs = quotaResetCeilingMs(input.maxResetMs)
+  const maxResetMs = quotaResetCeilingMs(input.maxResetMs, input.location)
   const hour = new Date(input.now).getUTCHours()
   const result: Prediction[] = []
   const byTarget = new Map<string, HourlyStat[]>()
@@ -189,8 +193,9 @@ export const parseQuotaReset = (
   message: string | undefined,
   now: number,
   maxResetMs?: number,
+  location?: string,
 ): number | undefined => {
-  const ceilingMs = quotaResetCeilingMs(maxResetMs)
+  const ceilingMs = quotaResetCeilingMs(maxResetMs, location)
   if (!message) return undefined
   const text = message.toLowerCase()
   if (!/(?:quota|limit|rate limit)/.test(text)) return undefined
@@ -254,6 +259,7 @@ export const noteAdjustments = (
   now: number,
   holdMs: number,
   maxResetMs?: number,
+  location?: string,
 ): ModelRoute.Adjustment[] =>
   notes.flatMap((note) => {
     const until = ModelRouteLimits.resetAtFromMessage(note.text, now)
@@ -264,7 +270,7 @@ export const noteAdjustments = (
         match: note.match,
         action: "skip" as const,
         // A user-stated reset can be days out; only a runaway value is bounded.
-        until: Math.min(until, now + quotaResetCeilingMs(maxResetMs)),
+        until: Math.min(until, now + quotaResetCeilingMs(maxResetMs, location)),
         note: note.text,
       },
     ]
@@ -282,6 +288,8 @@ export const review = (options: {
   readonly withoutPredictions?: boolean
   /** The least autonomy a route needs for the review's adjustments to apply to it. */
   readonly floor: ModelRouteAutonomy.Level
+  /** The Location directory whose quota gate judges this review's ceilings (#1461). */
+  readonly location?: string
 }) =>
   Effect.gen(function* () {
     const now = Date.now()
@@ -295,32 +303,39 @@ export const review = (options: {
     const readHourly = yield* ModelRouteLog.withDb((db) => ModelRouteLog.hourlyStats(db, since).pipe(Effect.orDie))
     const { stats, errors } = Option.getOrElse(read, () => ({ stats: [], errors: [] }))
     const hourly = Option.getOrElse(readHourly, () => [] as ModelRouteLog.HourlyStat[])
-    const predictions = options.withoutPredictions ? [] : predict({ hourly, errors, now })
+    const predictions = options.withoutPredictions ? [] : predict({ hourly, errors, now, location: options.location })
     const suggestions: ModelRoute.Adjustment[] = [
       ...suggest({ stats, errors, now, holdMs: options.holdMs }),
-      ...noteAdjustments(parseNotes(options.notes), now, options.holdMs),
-    ].map((item) => ({ ...item, requires: options.floor }))
+      ...noteAdjustments(parseNotes(options.notes), now, options.holdMs, undefined, options.location),
+    ].map((item) => ({
+      ...item,
+      id: options.location ? `${item.id}:${encodeURIComponent(options.location)}` : item.id,
+      requires: options.floor,
+      ...(options.location === undefined ? {} : { location: options.location }),
+    }))
     // A target that has been unreliable at this hour is down-weighted for a while, and one whose
     // message says when its quota returns is skipped until then. Only `predictive` routes apply these.
     for (const prediction of predictions) {
       if (prediction.state === "busy-hour")
         suggestions.push({
-          id: `auto-hourly:${prediction.target}`,
+          id: `auto-hourly:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "weight",
           factor: 0.5,
           until: now + options.holdMs,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
       else if (prediction.until !== undefined)
         suggestions.push({
-          id: `auto-quota:${prediction.target}`,
+          id: `auto-quota:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "skip",
           until: prediction.until,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
     }
     for (const item of suggestions) ModelRoute.addAdjustment(item, item.note)
@@ -333,6 +348,7 @@ export const review = (options: {
 export const schedule = (
   read: () => Settings | undefined,
   levels: () => readonly (ModelRouteAutonomy.Level | undefined)[] = () => [],
+  location?: string,
 ) =>
   Effect.gen(function* () {
     while (true) {
@@ -348,6 +364,7 @@ export const schedule = (
         windowHours: settings?.windowHours ?? DEFAULT_WINDOW_HOURS,
         // Long enough to bridge to the next review, so an adjustment does not flicker off in between.
         holdMs: Math.max(1, settings?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES) * 2 * 60_000,
+        location,
       }).pipe(Effect.catchCause(() => Effect.succeed([] as ModelRoute.Adjustment[])))
       if (applied.length > 0)
         yield* Effect.logInfo("model route tuning applied adjustments", {

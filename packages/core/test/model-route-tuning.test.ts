@@ -199,6 +199,57 @@ describe("ModelRouteTuning predictions", () => {
     expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(ModelRoute.DEFAULT_CONSTANTS.quotaGate.maxMs)
     expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(30 * 86_400_000)
   })
+
+  test("two Locations with divergent quotaGate.maxMs each judge tuning ceilings by their own gate (#1461)", () => {
+    const at = Date.UTC(2026, 0, 1, 14)
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { maxMs: 7 * 86_400_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { maxMs: 2 * 86_400_000 } }), "/loc/b")
+    try {
+      expect(ModelRouteTuning.quotaResetCeilingMs(undefined, "/loc/a")).toBe(7 * 86_400_000)
+      expect(ModelRouteTuning.quotaResetCeilingMs(undefined, "/loc/b")).toBe(2 * 86_400_000)
+      // An unscoped read with two Locations registered falls back to the defaults
+      // rather than borrowing whichever Location registered last.
+      expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(30 * 86_400_000)
+      expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 100000 days", at, undefined, "/loc/a")).toBe(
+        at + 7 * 86_400_000,
+      )
+      expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 100000 days", at, undefined, "/loc/b")).toBe(
+        at + 2 * 86_400_000,
+      )
+      const errors = [
+        {
+          providerID: "q",
+          modelID: "n",
+          tag: "QuotaExceeded",
+          code: null,
+          status: 429,
+          count: 3,
+          lastTime: at,
+          lastMessage: "quota exceeded; try again in 100000 days",
+        },
+      ]
+      expect(ModelRouteTuning.predict({ hourly: [], errors, now: at, location: "/loc/a" })).toContainEqual({
+        target: "q/n",
+        state: "quota-reset",
+        detail: `provider message states a reset past the 7-day ceiling; predicting ${new Date(at + 7 * 86_400_000).toISOString()}`,
+        until: at + 7 * 86_400_000,
+      })
+      expect(ModelRouteTuning.predict({ hourly: [], errors, now: at, location: "/loc/b" })).toContainEqual({
+        target: "q/n",
+        state: "quota-reset",
+        detail: `provider message states a reset past the 2-day ceiling; predicting ${new Date(at + 2 * 86_400_000).toISOString()}`,
+        until: at + 2 * 86_400_000,
+      })
+      // Notes are bounded by the judging Location's ceiling too: a reset stated
+      // three days out is honoured under A's 7-day ceiling, capped under B's 2-day one.
+      const note = [{ match: "q", text: "quota reset at 2026-01-04T14:00:00Z" }]
+      expect(ModelRouteTuning.noteAdjustments(note, at, 60_000, undefined, "/loc/a")[0]?.until).toBe(at + 3 * 86_400_000)
+      expect(ModelRouteTuning.noteAdjustments(note, at, 60_000, undefined, "/loc/b")[0]?.until).toBe(at + 2 * 86_400_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
 })
 
 describe("ModelRouteTuning.parseQuotaReset", () => {
