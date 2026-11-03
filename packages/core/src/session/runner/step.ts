@@ -298,7 +298,15 @@ export const make = Effect.gen(function* () {
               return
             }
             if (!event.classification)
-              ModelRoute.failed(input.model.routing.target, input.model.routing.policy, undefined, undefined, undefined, locationDirectory)
+              ModelRoute.failed(
+                input.model.routing.target,
+                input.model.routing.policy,
+                undefined,
+                undefined,
+                undefined,
+                locationDirectory,
+                input.model.routing.probeClaim,
+              )
           }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
@@ -584,6 +592,7 @@ export const make = Effect.gen(function* () {
             failureHint(llmFailure),
             input.model.routing.credentialID,
             locationDirectory,
+            input.model.routing.probeClaim,
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
@@ -708,6 +717,7 @@ export const make = Effect.gen(function* () {
             Date.now(),
             input.model.routing.credentialID,
             locationDirectory,
+            input.model.routing.probeClaim,
           )
           if (input.sessionID)
             ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
@@ -791,6 +801,21 @@ export const make = Effect.gen(function* () {
           next === undefined
             ? Effect.succeed(Option.none())
             : prepareFor(next).pipe(
+                // A preparation that fails or is interrupted never starts the hedge, so
+                // the claim the fallback resolution spent is handed back here instead of
+                // stranding until the bench expires (#1486, review follow-up). A hedge
+                // that does start keeps its claim: the race settles it (the winner via
+                // run(), the loser via ModelRoute.slow).
+                Effect.onExit((exit) =>
+                  exit._tag === "Success" || !next.routing?.probeClaim
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        const claim = next.routing!.probeClaim!
+                        ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
+                        if (claim.credentialID)
+                          ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
+                      }),
+                ),
                 Effect.map((prepared) => {
                   const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
                   // A hedge has begun: both targets are named before either answers, so the race

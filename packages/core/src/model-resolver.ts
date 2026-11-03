@@ -175,12 +175,14 @@ export interface Resolved {
     /** The half-open bench probe this resolution claimed at pick time (#1123), when it claimed
      * one (#1478): the claim is spent before any request runs, so a consumer that resolves a
      * model it never attempts must hand the claim back with
-     * `ModelRoute.releaseBenchProbe(target, credentialID, claimedAt)` — the credential named
+     * `ModelRoute.releaseBenchProbe(target, credentialID, claimedAt, token)` — the credential named
      * here is the one the claim was spent on, which may differ from the serving credential
      * above. A consumer that does attempt the model settles the claim through
-     * `ModelRoute.completed` / `ModelRoute.failed` like the session runner does. */
+     * `ModelRoute.completed` / `ModelRoute.failed` like the session runner does. The token
+     * names the pick's spend (#1486): every scope the pick claimed shares it. */
     readonly probeClaim?: {
       readonly claimedAt: number
+      readonly token: number
       readonly credentialID?: Credential.ID
     }
     /**
@@ -673,7 +675,7 @@ export const layer = Layer.effect(
           // The bench probe claim the pick spent (#1478), when it spent one: only the
           // resolution that walked away with the pick carries it — credential-fallback
           // re-resolutions of the same target spend no new claim and pass none.
-          probeClaim?: { readonly claimedAt: number; readonly credentialID?: Credential.ID },
+          probeClaim?: { readonly claimedAt: number; readonly token: number; readonly credentialID?: Credential.ID },
         ): Resolved => {
           const branch = {
             tried: new Set(triedTargets),
@@ -862,23 +864,36 @@ export const layer = Layer.effect(
           if (index === undefined) break
           triedTargets.add(index)
           const target = definition.targets[index]
+          const probeToken = ModelRoute.nextProbeClaimToken()
           // Spend a due bench's probe claim on the target selection actually picked (#1123):
           // exactly one resolution walks away with it, and its outcome (completed/failed in
           // the runner) is what ends or renews the bench. Claims on scopes that are not due
-          // — an ordinary eligible target — are refused and change nothing.
-          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now)
+          // — an ordinary eligible target — are refused and change nothing. One token
+          // names the pick's spend on every scope it claims (#1486).
+          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now, probeToken)
           const probeCredential = credentialByProvider.get(target.providerID)
-          const credentialClaimed = probeCredential ? ModelRoute.claimBenchProbe(target, probeCredential, now) : false
+          const credentialClaimed = probeCredential
+            ? ModelRoute.claimBenchProbe(target, probeCredential, now, probeToken)
+            : false
           // The claim this pick walked away with (#1478): stamped on the Resolved below so a
           // consumer that never attempts the model can release it, and one that does attempt
-          // it knows the claim is its to settle. The release is timestamp-guarded, so naming
+          // it knows the claim is its to settle. The release is token-guarded, so naming
           // both scopes is safe — a scope this pick did not claim does not match and no-ops.
           const probeClaim =
             targetClaimed || credentialClaimed
-              ? { claimedAt: now, ...(probeCredential ? { credentialID: probeCredential } : {}) }
+              ? { claimedAt: now, token: probeToken, ...(probeCredential ? { credentialID: probeCredential } : {}) }
               : undefined
           const source = yield* models.get(target.providerID, target.id)
-          if (!source?.enabled) continue
+          if (!source?.enabled) {
+            // This pick spent a probe claim but will never be attempted: hand it back
+            // (#1486, review follow-up) instead of stranding it until the bench expires.
+            if (probeClaim) {
+              ModelRoute.releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+              if (probeClaim.credentialID)
+                ModelRoute.releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
+            }
+            continue
+          }
           const targetVariants = definition.targetVariants[index]
           // A requested route variant runs the target at its remap, else at the same variant when the
           // target has it natively: the route only offers variants every target can produce one of
@@ -892,7 +907,9 @@ export const layer = Layer.effect(
             load(source, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
           )
           if (Result.isFailure(resolved)) {
-            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory)
+            // The pick's probe claim settles here too (#1486): the target scope benches as
+            // before, and a credential-scope claim from the same pick renews with it.
+            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory, probeClaim)
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.

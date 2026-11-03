@@ -789,6 +789,106 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + 1)).toBe(true)
   })
 
+  test("a stale token release cannot clear a same-millisecond re-claim (#1486)", () => {
+    const now = 950_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    const first = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    // A newer pick re-claims within the same millisecond: the timestamp alone collides.
+    const second = ModelRoute.nextProbeClaimToken()
+    expect(second).not.toBe(first)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    // The first pick's redundant release names the same millisecond but a stale token:
+    // the newer claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+  })
+
+  test("failed settles both probe scopes of one pick, even when the serving credential differs (#1486)", () => {
+    const now = 960_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+    const benchOf = (at: number, credentialID?: string) =>
+      ModelRoute.activeBenches(at).find(
+        (bench) => bench.modelID === "quota" && bench.credentialID === credentialID,
+      )
+
+    // Without the pick's claim, a serving-credential failure leaves both probe scopes stranded.
+    setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving")
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(true)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(true)
+
+    // With it, the same failure renews the target scope and the probe credential scope too,
+    // while the serving credential keeps its own health accounting.
+    const token = setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(false)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt + 1)).toBe(false)
+  })
+
+  test("completed ends a probe credential that differs from the serving one (#1486)", () => {
+    const now = 970_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+
+    // Without the pick's claim, success on the serving credential leaves the probe
+    // credential's bench (and its outstanding claim) in force.
+    setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(
+      ModelRoute.activeBenches(resetAt + 1).find((bench) => bench.credentialID === "cred-probe")?.probeClaimed,
+    ).toBe(true)
+
+    // With it, the same success ends the target scope and the probe credential scope too.
+    const token = setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBe(0)
+  })
+
   test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
     const now = 900_000_000
     const resetAt = now + 5 * 3_600_000
