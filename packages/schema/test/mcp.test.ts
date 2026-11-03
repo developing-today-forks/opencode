@@ -60,6 +60,7 @@ describe("Mcp timeouts (#1077)", () => {
         } catch (error) {
           message = String(error)
         }
+        expect(message).toContain(field)
         expect(message).toContain("2147483647")
       }
     },
@@ -75,4 +76,3 @@ describe("Mcp timeouts (#1077)", () => {
     ).toThrow()
   })
 })
-

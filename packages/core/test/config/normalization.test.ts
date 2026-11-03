@@ -641,6 +641,12 @@ describe("ConfigNormalize", () => {
     const v1 = normalized({ mcp: { legacy: { type: "local", command: ["legacy"], timeout: 2 ** 31 } } })
     expect(v1.encoded.mcp).toBeUndefined()
     expect(v1.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["mcp", "legacy"]]])
+
+    const v1AtCap = normalized({ mcp: { legacy: { type: "local", command: ["legacy"], timeout: cap } } })
+    expect(v1AtCap.diagnostics).toEqual([])
+    expect(v1AtCap.encoded.mcp).toMatchObject({
+      servers: { legacy: { timeout: { startup: cap, catalog: cap, execution: cap } } },
+    })
   })
 
   test("merges bounded compaction leaves and omits unsupported leaves", () => {
