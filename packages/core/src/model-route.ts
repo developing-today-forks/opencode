@@ -1557,15 +1557,18 @@ export const reconcileQuotaGate = (providerID: string, livePlanIDs: ReadonlySet<
   if (state.gated) logHealth(state.target, "quota-readmitted", `provider:${providerID}`)
 }
 
-let lastQuotaFeedAt = 0
+// A feed covers only one route's providers; keep its TTL independent per provider and location.
+const lastQuotaFeedAtByProvider = new Map<string, number>()
 
 export const resetQuotaFeed = () => {
-  lastQuotaFeedAt = 0
+  lastQuotaFeedAtByProvider.clear()
 }
 
-export const shouldFeedQuota = (now = Date.now(), location?: string) => {
+export const shouldFeedQuota = (now = Date.now(), location?: string, providerID?: string) => {
+  const key = JSON.stringify([location ?? null, providerID ?? null])
+  const lastQuotaFeedAt = lastQuotaFeedAtByProvider.get(key) ?? 0
   if (now - lastQuotaFeedAt < currentConstants(location).quotaGate.feedTtlMs) return false
-  lastQuotaFeedAt = now
+  lastQuotaFeedAtByProvider.set(key, now)
   return true
 }
 
@@ -1786,7 +1789,7 @@ export const resetHealth = () => {
   quotaEvents.clear()
   continuity.clear()
   recentFailures.length = 0
-  lastQuotaFeedAt = 0
+  lastQuotaFeedAtByProvider.clear()
 }
 
 /** Per-route selection state: rotation counters for round-robin, sticky session choices, both
