@@ -559,8 +559,8 @@ export const activeBenches = (now = Date.now()): ActiveBench[] => {
   return benches.toSorted((left, right) => left.until - right.until)
 }
 
-/** How many distinct leaves of one pool must be quota-out before the pool itself is pulled:
- * one leaf's quota answer can be leaf-specific, but a second distinct leaf of the same pool
+/** How many distinct quota evidence sources of one pool must be out before the pool itself is pulled:
+ * one leaf's quota answer can be leaf-specific, but a second distinct evidence source of the same pool
  * answering quota in turn is the pool-shaped signal (#1014 PR3). */
 const POOL_QUOTA_LEAVES = 2
 
@@ -569,25 +569,37 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
   state.cooldownUntil > now &&
   (state.benchReason === "quota" || state.benchReason === "quota retry-after")
 
-/** Whether one leaf is currently out for a quota-class reason: a quota bench on the leaf (or
- * on the credential that serves it), a quota gate on its credential, or a quota gate on its
- * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
- * Balance holds count until a fresh balance increase releases them, so a pool held by a
- * balance gate stays out with no timer-based re-admission (#1014). */
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
+/** One leaf's quota-out evidence, or undefined when the leaf is not quota-out: a quota
+ * bench on the leaf (or on the credential that serves it) counts per leaf, a quota gate
+ * on the credential counts once per credential, and a quota gate on the provider (a
+ * known-full snapshot, a balance hold, or the reactive attempt-reported skip) counts
+ * once per provider. Bench evidence takes priority over a shared gate on the same
+ * leaf, so two genuinely independent benches under one gate still count separately.
+ * Balance holds count until a fresh balance increase releases them, so a pool held by
+ * a balance gate stays out with no timer-based re-admission (#1014). */
+const quotaEvidence = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): string | undefined => {
   if (credentialID) {
-    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
-    return credentialQuotaBlocked(credentialID, now, location) !== undefined
+    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now))
+      return `bench:${credentialKey(target, credentialID)}`
+    if (credentialQuotaBlocked(credentialID, now, location) !== undefined) return `cred-gate:${credentialID}`
+    return undefined
   }
-  if (quotaBench(health.get(key(target)), now)) return true
+  if (quotaBench(health.get(key(target)), now)) return `bench:${key(target)}`
   const provider = providerQuota.get(target.providerID)
   if (
     provider &&
     (provider.balanceHold !== undefined ||
       QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold))
   )
-    return true
-  return activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip")
+    return `prov:${target.providerID}`
+  if (activeAdjustments(now).some((item) => item.id === `quota:${target.providerID}` && item.action === "skip"))
+    return `prov:${target.providerID}`
+  return undefined
 }
 
 interface PoolMembership {
@@ -629,12 +641,16 @@ const poolOf = (definition: Definition, index: number): PoolMembership | undefin
 /** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
 export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
 
-/** Whether a leaf's pool is quota-exhausted: at least two distinct leaves of the pool are
- * currently quota-out, so the pool is pulled as a whole instead of spending attempts on its
- * remaining leaves one by one (#1014 PR3 dynamic pull-out). The verdict is derived from the
- * leaves' live quota state, so it lifts by itself when the benches reach their stated reset,
- * when a balance hold is released by a fresh increase, or when a benched leaf recovers — a
- * recovered pool re-enters rotation with no second producer. */
+/** Whether a leaf's pool is quota-exhausted: at least two distinct quota evidence
+ * sources across the pool's leaves are currently out, so the pool is pulled as a whole
+ * instead of spending attempts on its remaining leaves one by one (#1014 PR3 dynamic
+ * pull-out). Evidence is deduplicated by identity — two leaves out only through one
+ * shared credential or provider gate count as one signal, so a single provider's quota
+ * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
+ * leaf's own quota bench always counts per leaf. The verdict is derived from the
+ * leaves' live quota state, so it lifts by itself when the benches reach their stated
+ * reset, when a balance hold is released by a fresh increase, or when a benched leaf
+ * recovers — a recovered pool re-enters rotation with no second producer. */
 export const poolQuotaExhausted = (
   definition: Definition,
   index: number,
@@ -644,12 +660,14 @@ export const poolQuotaExhausted = (
 ): boolean => {
   const pool = poolOf(definition, index)
   if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
-  const out = new Set<number>()
+  const evidence = new Set<string>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
+    if (!target) continue
+    const source = quotaEvidence(target, credentialOf?.(leaf), now, location)
+    if (source) evidence.add(source)
   }
-  return out.size >= POOL_QUOTA_LEAVES
+  return evidence.size >= POOL_QUOTA_LEAVES
 }
 
 export const failed = (

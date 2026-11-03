@@ -2226,4 +2226,50 @@ describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
     expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 1)).toBe(false)
     ModelRoute.resetHealth()
   })
+
+  test("one shared credential or provider gate counts once, so a healthy leaf keeps the pool open (#1389)", () => {
+    const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
+    const healthy = ModelRoute.ref({ providerID: "pool-healthy", model: "m2" })
+    const sharedDefinition = {
+      id: "pool-shared-route",
+      targets: [...shared, healthy],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        { routeID: "pool-shared-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
+      ],
+    } as unknown as ModelRoute.Definition
+    const now = Date.now()
+    const resetAt = now + 30 * 60_000
+
+    // Two leaves behind one gated credential are one quota signal, not two.
+    ModelRoute.resetHealth()
+    const sharedCredential = (index: number) =>
+      sharedDefinition.targets[index].providerID === "pool-shared" ? "cred-shared" : undefined
+    ModelRoute.observeQuotaFailure(shared[0], "cred-shared", resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 0, now, sharedCredential)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 1, now, sharedCredential)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(false)
+    // A second, genuinely distinct gate on the healthy leaf's provider still exhausts the pool.
+    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(true)
+
+    // Two credential-less leaves behind one gated provider are one quota signal, not two.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(false)
+    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(true)
+
+    // Two independent quota benches on distinct credentials still exhaust the pool.
+    ModelRoute.resetHealth()
+    const distinctCredential = (index: number) =>
+      sharedDefinition.targets[index].providerID === "pool-shared" ? `cred-${index}` : undefined
+    ModelRoute.failed(shared[0], policy, now, { quota: true }, "cred-0")
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(false)
+    ModelRoute.failed(shared[1], policy, now, { quota: true }, "cred-1")
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(true)
+    ModelRoute.resetHealth()
+  })
 })
