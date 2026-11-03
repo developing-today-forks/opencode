@@ -1,5 +1,5 @@
 import path from "path"
-import { mkdir, readFile, writeFile } from "fs/promises"
+import { chmod, lstat, mkdir, readFile, stat, symlink, writeFile } from "fs/promises"
 import { describe, expect } from "bun:test"
 import { Config } from "@opencode/core/config"
 import { Bus } from "@opencode/core/bus"
@@ -93,6 +93,80 @@ describe("config update write target", () => {
 
           const global = JSON.parse(yield* Effect.promise(() => readFile(globalFile, "utf8")))
           expect(global.shell).toBe("/bin/zsh")
+        }).pipe(Effect.provide(liveConfig(tmp.path))),
+      ),
+    ),
+  )
+})
+
+describe("config update write path (#998)", () => {
+  it.live("replaces the global config atomically, preserving its mode", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const globalFile = path.join(tmp.path, "global", "opencode.jsonc")
+          yield* Effect.promise(() => mkdir(path.dirname(globalFile), { recursive: true }))
+          yield* Effect.promise(() => writeFile(globalFile, "{}\n"))
+          yield* Effect.promise(() => chmod(globalFile, 0o640))
+          const before = yield* Effect.promise(() => stat(globalFile))
+
+          const config = yield* Config.Service
+          if (!config.update) return yield* Effect.die(new Error("Config updates are unavailable"))
+          yield* config.update({ shell: "/bin/zsh" })
+
+          const global = JSON.parse(yield* Effect.promise(() => readFile(globalFile, "utf8")))
+          expect(global.shell).toBe("/bin/zsh")
+          const after = yield* Effect.promise(() => stat(globalFile))
+          // Atomic replace: the file is a new inode (temp + rename), never a
+          // truncated in-place rewrite, and its permissions survive.
+          expect(after.ino).not.toBe(before.ino)
+          expect(after.mode & 0o777).toBe(0o640)
+        }).pipe(Effect.provide(liveConfig(tmp.path))),
+      ),
+    ),
+  )
+
+  it.live("creates a fresh global config at 0o600 when none exists", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const globalFile = path.join(tmp.path, "global", "opencode.jsonc")
+          yield* Effect.promise(() => mkdir(path.dirname(globalFile), { recursive: true }))
+
+          const config = yield* Config.Service
+          if (!config.update) return yield* Effect.die(new Error("Config updates are unavailable"))
+          yield* config.update({ shell: "/bin/zsh" })
+
+          const global = JSON.parse(yield* Effect.promise(() => readFile(globalFile, "utf8")))
+          expect(global.shell).toBe("/bin/zsh")
+          expect((yield* Effect.promise(() => stat(globalFile))).mode & 0o777).toBe(0o600)
+        }).pipe(Effect.provide(liveConfig(tmp.path))),
+      ),
+    ),
+  )
+
+  it.live("keeps a symlinked global config linked and updates its target", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const globalFile = path.join(tmp.path, "global", "opencode.jsonc")
+          const target = path.join(tmp.path, "dotfiles", "opencode.jsonc")
+          yield* Effect.promise(() => mkdir(path.dirname(globalFile), { recursive: true }))
+          yield* Effect.promise(() => mkdir(path.dirname(target), { recursive: true }))
+          yield* Effect.promise(() => writeFile(target, "{}\n"))
+          yield* Effect.promise(() => chmod(target, 0o640))
+          yield* Effect.promise(() => symlink(target, globalFile))
+
+          const config = yield* Config.Service
+          if (!config.update) return yield* Effect.die(new Error("Config updates are unavailable"))
+          yield* config.update({ shell: "/bin/zsh" })
+
+          // The link survives (not replaced by a regular file), the target
+          // carries the patch, and the target mode is preserved.
+          expect((yield* Effect.promise(() => lstat(globalFile))).isSymbolicLink()).toBe(true)
+          const updated = JSON.parse(yield* Effect.promise(() => readFile(target, "utf8")))
+          expect(updated.shell).toBe("/bin/zsh")
+          expect((yield* Effect.promise(() => stat(target))).mode & 0o777).toBe(0o640)
         }).pipe(Effect.provide(liveConfig(tmp.path))),
       ),
     ),
