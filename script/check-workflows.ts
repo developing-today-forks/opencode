@@ -12,9 +12,9 @@
  *   3. Every job declares `timeout-minutes`, so a hung job cannot burn a
  *      runner until the platform default (360 minutes) kills it. This
  *      half of the policy already regressed twice and was caught by hand
- *      both times (#1326, #1184). Reusable-workflow jobs (a job-level
- *      `uses:`) are exempt: the called workflow owns its timeouts and
- *      the caller cannot set `timeout-minutes` on such a job.
+ *      both times (#1326, #1184). Reusable-workflow callers cannot declare
+ *      a timeout of their own, so only the called workflow owns timeouts;
+ *      caller jobs are instead checked against GitHub's allowed-key list.
  *
  * Trigger matching is by exact key: `pull_request_review_comment` and
  * `issue_comment` are different events, not PR triggers — opencode.yml
@@ -41,6 +41,19 @@ export const WORKFLOWS_DIR = ".github/workflows"
 export const FORBIDDEN_TRIGGERS = ["pull_request", "pull_request_target"] as const
 
 export const REQUIRED_TRIGGER = "workflow_dispatch"
+
+export const REUSABLE_WORKFLOW_CALLER_KEYS = new Set([
+  "name",
+  "uses",
+  "with",
+  "secrets",
+  "strategy",
+  "needs",
+  "if",
+  "concurrency",
+  "permissions",
+  "cache-mode",
+])
 
 export interface Violation {
   readonly file: string
@@ -95,7 +108,18 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
   if (isRecord(workflow["jobs"])) {
     for (const [name, job] of Object.entries(workflow["jobs"])) {
       if (!isRecord(job)) continue
-      if ("uses" in job) continue
+      if ("uses" in job) {
+        for (const key of Object.keys(job)) {
+          if (REUSABLE_WORKFLOW_CALLER_KEYS.has(key)) continue
+          violations.push({
+            file,
+            rule: "reusable-workflow-caller-keys",
+            job: name,
+            detail: `job ${name} declares ${key}, which is not allowed on a reusable-workflow caller job`,
+          })
+        }
+        continue
+      }
       if (!("timeout-minutes" in job))
         violations.push({
           file,
@@ -138,7 +162,7 @@ function main() {
       )
     process.exit(1)
   }
-  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job).`)
+  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers).`)
 }
 
 if (import.meta.main) main()
