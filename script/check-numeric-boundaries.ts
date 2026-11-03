@@ -38,8 +38,8 @@
  * Usage:
  *   bun run script/check-numeric-boundaries.ts   # exit 1 listing unlisted/stale hits
  */
-import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { join, relative, sep } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
   "packages/ai/src",
@@ -164,6 +164,43 @@ function collect(root: string, dir: string, hits: Hit[]) {
   }
 }
 
+/**
+ * Every package `src` tree on disk under `root` (#1494): a directory named
+ * `src` that belongs to a package — its parent directory (the package root,
+ * at any nesting depth: packages/ai, packages/console/app,
+ * packages/stats/core) or the tree itself carries a package.json — and that
+ * sits below the package-name level. Asset folders named `src` with no
+ * package.json at either level are not package src trees and are excluded.
+ * The mirror of scriptTreesOnDisk for the src half of SCAN_ROOTS: before
+ * #1494 only script trees had this drift guard, so a new package's src tree
+ * silently escaped the scan while the gate still reported success.
+ */
+export function srcTreesOnDisk(root: string): string[] {
+  const trees: string[] = []
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.name === "node_modules") continue
+      const path = join(dir, entry.name)
+      const rel = relative(root, path).split(sep).join("/")
+      if (
+        entry.name === "src" &&
+        rel.split("/").length >= 3 &&
+        (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
+      ) {
+        trees.push(rel)
+        continue
+      }
+      walk(path)
+    }
+  }
+  for (const top of ["packages", "services"]) if (existsSync(join(root, top))) walk(join(root, top))
+  return trees.toSorted()
+}
+
+/** Src trees present on disk but absent from `roots` — the #1494 escape, as a failing condition. */
+export const unscannedSrcTrees = (root: string, roots: string[] = SCAN_ROOTS) =>
+  srcTreesOnDisk(root).filter((tree) => !roots.includes(tree))
+
 async function main() {
   const root = join(import.meta.dir, "..")
   const hits: Hit[] = []
@@ -171,7 +208,12 @@ async function main() {
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
   const unlisted = unlistedHits(hits, allowlist)
   const stale = staleEntries(hits, allowlist)
-  if (unlisted.length || stale.length) {
+  const unscannedSrc = unscannedSrcTrees(root)
+  if (unlisted.length || stale.length || unscannedSrc.length) {
+    for (const tree of unscannedSrc)
+      console.error(
+        `Unscanned src tree on disk: ${tree}\n  Add it to SCAN_ROOTS in script/check-numeric-boundaries.ts and disposition its hits in ${ALLOWLIST_PATH}.`,
+      )
     for (const hit of unlisted)
       console.error(
         `Unlisted numeric-boundary candidate at ${hit.file}:${hit.line}:\n  ${hit.text}\n  Convert it through the shared primitives (packages/core/src/util/number.ts, #993), or add its disposition to ${ALLOWLIST_PATH}.`,

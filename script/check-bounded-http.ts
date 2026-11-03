@@ -265,6 +265,43 @@ export function scriptTreesOnDisk(root: string): string[] {
 export const unscannedScriptTrees = (root: string, roots: string[] = SCAN_ROOTS) =>
   scriptTreesOnDisk(root).filter((tree) => !roots.includes(tree))
 
+/**
+ * Every package `src` tree on disk under `root` (#1494): a directory named
+ * `src` that belongs to a package — its parent directory (the package root,
+ * at any nesting depth: packages/ai, packages/console/app,
+ * packages/stats/core) or the tree itself carries a package.json — and that
+ * sits below the package-name level. Asset folders named `src` with no
+ * package.json at either level are not package src trees and are excluded.
+ * The mirror of scriptTreesOnDisk for the src half of SCAN_ROOTS: before
+ * #1494 only script trees had this drift guard, so a new package's src tree
+ * silently escaped the scan while the gate still reported success.
+ */
+export function srcTreesOnDisk(root: string): string[] {
+  const trees: string[] = []
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || entry.name === "node_modules") continue
+      const path = join(dir, entry.name)
+      const rel = relative(root, path).split(sep).join("/")
+      if (
+        entry.name === "src" &&
+        rel.split("/").length >= 3 &&
+        (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
+      ) {
+        trees.push(rel)
+        continue
+      }
+      walk(path)
+    }
+  }
+  for (const top of ["packages", "services"]) if (existsSync(join(root, top))) walk(join(root, top))
+  return trees.toSorted()
+}
+
+/** Src trees present on disk but absent from `roots` — the #1494 escape, as a failing condition. */
+export const unscannedSrcTrees = (root: string, roots: string[] = SCAN_ROOTS) =>
+  srcTreesOnDisk(root).filter((tree) => !roots.includes(tree))
+
 async function main() {
   const root = join(import.meta.dir, "..")
   const hits: Hit[] = []
@@ -273,10 +310,15 @@ async function main() {
   const unlisted = unlistedHits(hits, allowlist)
   const stale = staleEntries(hits, allowlist)
   const unscanned = unscannedScriptTrees(root)
-  if (unlisted.length || stale.length || unscanned.length) {
+  const unscannedSrc = unscannedSrcTrees(root)
+  if (unlisted.length || stale.length || unscanned.length || unscannedSrc.length) {
     for (const tree of unscanned)
       console.error(
         `Unscanned script tree on disk: ${tree}\n  Add it to SCAN_ROOTS in script/check-bounded-http.ts and disposition its hits in ${ALLOWLIST_PATH}.`,
+      )
+    for (const tree of unscannedSrc)
+      console.error(
+        `Unscanned src tree on disk: ${tree}\n  Add it to SCAN_ROOTS in script/check-bounded-http.ts and disposition its hits in ${ALLOWLIST_PATH}.`,
       )
     for (const hit of unlisted)
       console.error(
