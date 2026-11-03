@@ -1,3 +1,5 @@
+import { serverSeconds } from "../../util/number.js"
+
 /**
  * Validation for OAuth `expires_in` values (#879). Five providers computed
  * the stored credential expiry as `now + (tokens.expires_in ?? fallback)`,
@@ -14,6 +16,7 @@
  * DigitalOcean's string-spelling parser clamps to it too (#899).
  */
 
+
 /**
  * The longest lifetime stored verbatim, in seconds (30 days). Real OAuth
  * access-token lifetimes are far shorter; anything past this bound is a
@@ -27,8 +30,7 @@ export const MAX_EXPIRES_IN_SECONDS = 30 * 24 * 60 * 60
  * the provider's existing default lifetime.
  */
 export function expiresInSeconds(value: unknown, fallback: number): number {
-  const seconds = Number(value)
-  return Number.isFinite(seconds) && seconds > 0 && seconds <= MAX_EXPIRES_IN_SECONDS ? seconds : fallback
+  return serverSeconds(Number(value), { fallback, max: MAX_EXPIRES_IN_SECONDS, oversized: "fallback" })
 }
 
 /**
@@ -43,6 +45,5 @@ export function expiresInSeconds(value: unknown, fallback: number): number {
 export const MAX_DEVICE_LIFETIME_SECONDS = 10 * 60
 
 export function deviceLifetimeSeconds(value: unknown, fallback: number): number {
-  const seconds = Number(value)
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, MAX_DEVICE_LIFETIME_SECONDS) : fallback
+  return serverSeconds(Number(value), { fallback, max: MAX_DEVICE_LIFETIME_SECONDS, oversized: "clamp" })
 }

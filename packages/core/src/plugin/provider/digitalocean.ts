@@ -12,6 +12,7 @@ import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import type { PluginInternal } from "../internal.js"
 import { MAX_EXPIRES_IN_SECONDS } from "./expires.js"
+import { serverSeconds } from "../../util/number.js"
 
 const providerID = Provider.ID.make("digitalocean")
 const integrationID = Integration.ID.make("digitalocean")
@@ -47,7 +48,18 @@ const decodeCallback = Schema.decodeUnknownOption(
  * would fabricate an expiry the consumer trusts for weeks. */
 export const expiresInSeconds = (raw: string | undefined): number => {
   const text = (raw ?? "0").trim()
-  return /^\d+$/.test(text) ? Math.min(Number.parseInt(text, 10), MAX_EXPIRES_IN_SECONDS) : Number.NaN
+  // The spelling grammar stays here (#771): an invalid spelling yields NaN
+  // outright, because serverSeconds has a single fallback and this site's
+  // pinned returns differ per input class - NaN for an invalid spelling,
+  // 0 for a spelled "0" / absent value. A well-spelled value is normalised
+  // by serverSeconds (#994) with fallback 0, so "0" and absent still return
+  // 0, and an oversized (millisecond-scale) value clamps to the bound.
+  if (!/^\d+$/.test(text)) return Number.NaN
+  return serverSeconds(Number.parseInt(text, 10), {
+    fallback: 0,
+    max: MAX_EXPIRES_IN_SECONDS,
+    oversized: "clamp",
+  })
 }
 
 const oauth = {
