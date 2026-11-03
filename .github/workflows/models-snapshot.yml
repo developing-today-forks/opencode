@@ -36,11 +36,18 @@ jobs:
           persist-credentials: false
           ref: main
 
-      # The refresh script only needs `fetch`; skip the monorepo install.
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
+
+      # The refresh script imports @opencode/util/http-body (bounded fetch
+      # helpers, #1127), a workspace package: without an install Bun cannot
+      # resolve it and the script dies with Cannot find module
+      # @opencode/util/http-body (run 41582780561, #1488). The install is
+      # what links the workspace packages; it cannot be skipped any more.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       # The app token is preferred (its pushes trigger downstream workflows),
       # but on a repo where the app is not configured the token step fails
