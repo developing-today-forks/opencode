@@ -601,8 +601,6 @@ const quotaOutEvidence = (
   return evidence
 }
 
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean =>
-  quotaOutEvidence(target, credentialID, now, location).length > 0
 
 interface PoolMembership {
   readonly id: string
