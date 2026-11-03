@@ -77,6 +77,12 @@ const env = {
   ...process.env,
   OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   OPENCODE_CLI_CONFIG_CONTENT: undefined,
+  // Isolate config discovery: without these the server also loads the host user's
+  // config (and its provider policies), which filters the ad-hoc providers above out of
+  // the catalog and makes the Meta turn fail with provider.no-route before any request.
+  OPENCODE_CONFIG_DIR: path.join(directory, "config"),
+  OPENCODE_CONFIG: undefined,
+  OPENCODE_CONFIG_PROJECT_DISABLE: "true",
   OPENCODE_DB: path.join(directory, "opencode.db"),
   OPENCODE_PASSWORD: password,
   OPENCODE_DISABLE_FILEWATCHER: "true",
@@ -86,20 +92,28 @@ const headers = {
   authorization: `Basic ${btoa(`opencode:${password}`)}`,
   "x-opencode-directory": encodeURIComponent(root),
 }
+const serveLogPath = path.join(directory, "serve.log")
+const serveLog = await fs.open(serveLogPath, "w")
 const server = Bun.spawn(["bun", "run", "dev", "serve", "--hostname", "127.0.0.1", "--port", String(serverPort)], {
   cwd: root,
   env,
-  stdout: "ignore",
-  stderr: "ignore",
+  stdout: serveLog.fd,
+  stderr: serveLog.fd,
 })
 
 try {
   await ready(serverURL, headers, server)
   await turn("openai", "smoke-model", "openai-smoke-ok", serverURL, headers, env)
   if (!openAIOnly) await turn("meta", "muse-wonder-1.0", undefined, serverURL, headers, env)
+} catch (error) {
+  // The server's own diagnostics are the only way to see why a turn failed before any
+  // streaming started, so surface them instead of discarding them with the process.
+  const log = await fs.readFile(serveLogPath, "utf8").catch(() => "")
+  throw new Error(`${error instanceof Error ? error.message : String(error)}\n--- serve log (tail) ---\n${log.slice(-4000)}`)
 } finally {
   server.kill()
   await server.exited
+  await serveLog.close()
   mock.stop()
   await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
