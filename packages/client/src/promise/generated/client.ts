@@ -1281,7 +1281,13 @@ export function make(options: ClientOptions) {
         ),
       models: (requestOptions?: RequestOptions) =>
         request<ServerCompletionsModelsOutput>(
-          { method: "GET", path: `/v1/models`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          {
+            method: "GET",
+            path: `/v1/models`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
           requestOptions,
         ),
       model: (input: ServerCompletionsModelInput, requestOptions?: RequestOptions) =>
@@ -1290,7 +1296,7 @@ export function make(options: ClientOptions) {
             method: "GET",
             path: `/v1/models/${encodeURIComponent(input.id)}`,
             successStatus: 200,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404, 503],
             empty: false,
           },
           requestOptions,
@@ -1301,7 +1307,7 @@ export function make(options: ClientOptions) {
             method: "GET",
             path: `/v1/models/${encodeURIComponent(input.provider)}/${encodeURIComponent(input.model)}`,
             successStatus: 200,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404, 503],
             empty: false,
           },
           requestOptions,
