@@ -21,11 +21,11 @@
     "mcpx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793730610,
-        "narHash": "sha256-OdPFQoUH+THDYsYV5EQu+ppZGG86eotfTICgHAQgElE=",
+        "lastModified": 1793735966,
+        "narHash": "sha256-UeoH+e/9HREDUyV1n5vBjv9fSqhdf0i1vwmQ0FnAAK4=",
         "owner": "developing-today",
         "repo": "code",
-        "rev": "d51d7befb6f00781f7a24f36904fdae12451d38d",
+        "rev": "031cde20f71c2fafa068c47b69e68175b72994a5",
         "type": "github"
       },
       "original": {
