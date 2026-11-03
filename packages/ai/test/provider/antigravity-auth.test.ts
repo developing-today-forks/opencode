@@ -1,10 +1,13 @@
-import { afterAll, afterEach, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect } from "bun:test"
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Deferred, Effect, Fiber } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import { refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
+import { handlerLayer, observe } from "../lib/http.js"
+import { it } from "../lib/effect.js"
 
-const originalFetch = globalThis.fetch
 const originalAgyBin = process.env.AGY_BIN
 
 // refresh() extracts the OAuth client secret from the agy binary; point it
@@ -18,44 +21,79 @@ writeFileSync(
 chmodSync(fixtureBin, 0o755)
 process.env.AGY_BIN = fixtureBin
 
-afterEach(() => {
-  globalThis.fetch = originalFetch
-})
-
 afterAll(() => {
-  globalThis.fetch = originalFetch
   if (originalAgyBin === undefined) delete process.env.AGY_BIN
   else process.env.AGY_BIN = originalAgyBin
 })
 
 describe("Antigravity token refresh bounding (#1469)", () => {
-  test("refresh succeeds against a stubbed token endpoint and sends a deadline signal", async () => {
-    let seenSignal: AbortSignal | null | undefined
-    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      seenSignal = init?.signal
-      return Response.json({ access_token: "fresh-token", expires_in: 3600 })
-    }) as typeof fetch
-    const token = await refresh("refresh-fixture")
-    expect(token.accessToken).toBe("fresh-token")
-    expect(token.expiryMs).toBeGreaterThan(Date.now())
-    expect(seenSignal).toBeInstanceOf(AbortSignal)
-    expect(seenSignal?.aborted).toBe(false)
-  })
+  it.effect("refreshes through the Effect HTTP client", () =>
+    Effect.gen(function* () {
+      let observed: { method: string; url: string; body: string } | undefined
+      const layer = handlerLayer((input) =>
+        Effect.gen(function* () {
+          const { call } = yield* observe([], input)
+          observed = { method: call.method, url: call.url, body: call.body }
+          return input.respond(JSON.stringify({ access_token: "fresh-token", expires_in: 3600 }), {
+            headers: { "content-type": "application/json" },
+          })
+        }),
+      )
+      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
 
-  test("refresh rejects a token response body over the cap", async () => {
-    globalThis.fetch = (async () =>
-      new Response("x".repeat(TOKEN_REFRESH_MAX_RESPONSE_BYTES + 1024), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      })) as typeof fetch
-    await expect(refresh("refresh-fixture")).rejects.toThrow("exceeded")
-  })
+      expect(token.accessToken).toBe("fresh-token")
+      expect(token.expiryMs).toBeGreaterThan(Date.now())
+      expect(observed?.method).toBe("POST")
+      expect(observed?.url).toBe("https://oauth2.googleapis.com/token")
+      expect(new URLSearchParams(observed?.body).get("refresh_token")).toBe("refresh-fixture")
+    }),
+  )
 
-  test("refresh rejects when the token endpoint stalls past its deadline", async () => {
-    globalThis.fetch = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
-      })) as typeof fetch
-    await expect(refresh("refresh-fixture", 50)).rejects.toThrow()
-  })
+  it.effect("rejects a token response body over the cap", () =>
+    Effect.gen(function* () {
+      const layer = handlerLayer((input) =>
+        Effect.succeed(
+          input.respond("x".repeat(TOKEN_REFRESH_MAX_RESPONSE_BYTES + 1), {
+            headers: {
+              "content-type": "application/json",
+              "content-length": String(TOKEN_REFRESH_MAX_RESPONSE_BYTES + 1),
+            },
+          }),
+        ),
+      )
+      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
+
+      expect(error.message).toContain("exceeded")
+    }),
+  )
+
+  it.effect("rejects a stalled token response at the request deadline", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const layer = handlerLayer((input) =>
+        Effect.sync(() => {
+          Deferred.doneUnsafe(started, Effect.void)
+          return input.respond(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("{"))
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          )
+        }),
+      )
+      const fiber = yield* refresh("refresh-fixture", 50).pipe(
+        Effect.provide(layer),
+        Effect.flip,
+        Effect.forkChild({ startImmediately: true }),
+      )
+      yield* Deferred.await(started)
+      yield* Effect.yieldNow
+      yield* TestClock.adjust("50 millis")
+      const error = yield* Fiber.join(fiber)
+
+      expect(error.message).toContain("timed out")
+    }),
+  )
 })
