@@ -16,10 +16,9 @@ export const ModelHandler = HttpApiBuilder.group(Api, "server.model", (handlers)
           // hidden models stay in it so existing sessions and explicit selections
           // keep validating; clients filter hidden records out of their pickers
           // and reveal them only on an exact full-name search. Disabled models
-          // stay excluded, as before.
-          return yield* response(
-            models.all().pipe(Effect.map((list) => list.filter((model) => model.enabled))),
-          )
+          // stay excluded, as before, and the catalog keeps the picker list's
+          // preferred-free ordering so default selection is unchanged.
+          return yield* response(models.catalog())
         }),
       )
       .handle(

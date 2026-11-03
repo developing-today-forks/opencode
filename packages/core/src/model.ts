@@ -78,6 +78,11 @@ export interface Interface extends State.Transformable<Editor> {
   readonly get: (providerID: Provider.ID, modelID: ID) => Effect.Effect<Info | undefined>
   readonly all: () => Effect.Effect<readonly Info[]>
   readonly available: () => Effect.Effect<readonly Info[]>
+  /** The execution/validity catalog (#230): enabled models including hidden
+   * ones, in the picker list's preferred-free order. Execution paths —
+   * explicit session selection, client validity checks — read this list;
+   * only discovery/picker surfaces read `available`. */
+  readonly catalog: () => Effect.Effect<readonly Info[]>
   readonly default: () => Effect.Effect<Info | undefined>
   readonly small: (providerID: Provider.ID) => Effect.Effect<Info | undefined>
 }
@@ -176,6 +181,7 @@ const layer = Layer.effect(
           data: Data
           all: readonly Info[]
           available: readonly Info[]
+          catalog: readonly Info[]
           byProvider: ReadonlyMap<Provider.ID, ReadonlyMap<ID, Info>>
         }
       | undefined
@@ -235,6 +241,9 @@ const layer = Layer.effect(
             // `all` (and in route expansion, which filters on `enabled` only), so
             // they remain fully routable while absent here.
             available: preferFree(all.filter((model) => model.enabled && !model.hidden)),
+            // The execution/validity catalog (#230): every enabled model, hidden
+            // included, in the same preferred-free order as the picker list.
+            catalog: preferFree(all.filter((model) => model.enabled)),
             byProvider,
           },
           true,
@@ -277,6 +286,7 @@ const layer = Layer.effect(
       ),
       all: Effect.fn("Model.all")(() => read().pipe(Effect.map((value) => value.all))),
       available: Effect.fn("Model.available")(() => read().pipe(Effect.map((value) => value.available))),
+      catalog: Effect.fn("Model.catalog")(() => read().pipe(Effect.map((value) => value.catalog))),
       default: Effect.fn("Model.default")(function* () {
         const value = yield* read()
         const requested = value.data.defaultModel

@@ -1218,6 +1218,10 @@ describe("ConfigProviderPlugin.Plugin", () => {
       // for different reasons — disabled is not routable, hidden is.
       const available = (yield* models.available()).filter((model) => model.providerID === providerID)
       expect(available.map((model) => String(model.id))).toEqual(["listed"])
+      // The execution/validity catalog keeps the hidden model (existing sessions
+      // and explicit selections still validate) but not the disabled one.
+      const catalog = (yield* models.catalog()).filter((model) => model.providerID === providerID)
+      expect(catalog.map((model) => String(model.id)).sort()).toEqual(["listed", "pooled"])
     }),
   )
 })

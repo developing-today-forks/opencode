@@ -100,8 +100,10 @@ const layer = Layer.effect(
     const registry = yield* Tool.Service
     const vars = yield* MessagingVars.Service
 
+    // Explicit session selections are execution, not discovery (#230): resolve
+    // against the catalog so a session on a hidden model keeps working.
     const resolveModel = (session: SessionSchema.Info, requestTokens?: number) =>
-      models.resolve(session, model.available, requestTokens)
+      models.resolve(session, model.catalog, requestTokens)
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
