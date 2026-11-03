@@ -24,6 +24,16 @@ describe("readPipedStdin (code#1359)", () => {
     expect(await reading).toBe("hello world")
   })
 
+  test("a delayed first byte is preserved when the grace is unbounded (stdin is the only prompt source)", async () => {
+    const stream = fakeStdin()
+    const reading = readPipedStdin(undefined, stream, Number.POSITIVE_INFINITY)
+    setTimeout(() => {
+      stream.write("delayed prompt")
+      stream.end()
+    }, 75)
+    expect(await reading).toBe("delayed prompt")
+  })
+
   test("a pipe already at EOF resolves with its content, not the grace path", async () => {
     const stream = fakeStdin()
     const reading = readPipedStdin(undefined, stream, 5_000)

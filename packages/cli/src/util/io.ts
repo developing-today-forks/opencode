@@ -6,7 +6,10 @@ export function readStdin(beforeRead?: () => void) {
 }
 
 /** How long `readPipedStdin` waits for a piped stdin to show writer intent
- * (a first chunk, or EOF) before treating it as no piped input at all. */
+ * (a first chunk, or EOF) before treating it as no piped input at all.
+ * Callers whose stdin is the only prompt source pass an infinite grace:
+ * a slow producer's first byte is still writer intent, so that read waits
+ * for EOF however long the producer takes (Codex P2 on PR #1460). */
 export const STDIN_GRACE_MS = 1_000
 
 /**
@@ -30,15 +33,17 @@ export function readPipedStdin(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let intent = false
-    const timer = setTimeout(() => {
-      if (intent) return
-      cleanup()
-      stream.pause()
-      resolve(undefined)
-    }, graceMs)
-    timer.unref?.()
+    const timer = Number.isFinite(graceMs)
+      ? setTimeout(() => {
+          if (intent) return
+          cleanup()
+          stream.pause()
+          resolve(undefined)
+        }, graceMs)
+      : undefined
+    timer?.unref?.()
     const cleanup = () => {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       stream.off("data", onData)
       stream.off("end", onEnd)
       stream.off("error", onError)
