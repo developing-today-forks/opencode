@@ -3,7 +3,7 @@ import { OpenCode, type SessionMessageAssistantTool } from "@opencode/client/pro
 import { FSUtil } from "@opencode/util/fs-util"
 import { open } from "node:fs/promises"
 import path from "node:path"
-import { readStdin } from "../util/io"
+import { readPipedStdin } from "../util/io"
 import { ServerConnection } from "../services/server-connection"
 import { parseSessionTargetModel, resolveSessionTarget } from "../session-target"
 import { toolInlineInfo } from "@opencode/tui/mini/tool"
@@ -75,12 +75,21 @@ async function run(input: RunCommandInput, options: ExecutionOptions) {
   const root = options.root ?? process.env.PWD ?? process.cwd()
   const local = localDirectory(root)
   const directory = options.useServerDirectory ? undefined : (options.directory ?? local)
+  const supplied = formatMessage(input.message)
   const message = mergeInput(
-    formatMessage(input.message),
+    supplied,
     process.stdin.isTTY
       ? undefined
-      : await readStdin(() =>
-          input.log?.("Reading stdin until EOF; redirect from /dev/null when no piped input is intended"),
+      : await readPipedStdin(
+          () => input.log?.("Reading stdin until EOF; redirect from /dev/null when no piped input is intended"),
+          process.stdin,
+          // The grace bound exists for the #1359 shape: a message already on the
+          // command line plus an inherited idle pipe, where piped stdin is only
+          // supplementary context. When stdin is the ONLY prompt source it is
+          // the prompt, so the read waits for the producer however long its
+          // first byte takes (Codex P2 on PR #1460); omitting the positional
+          // message is the explicit way to wait for piped input.
+          supplied ? undefined : Number.POSITIVE_INFINITY,
         ),
   )
   if (!message?.trim()) fail("You must provide a message")
