@@ -16923,6 +16923,9 @@
           "disabled": {
             "type": "boolean"
           },
+          "hidden": {
+            "type": "boolean"
+          },
           "limit": {
             "type": "object",
             "properties": {
@@ -21531,6 +21534,9 @@
             "enum": ["alpha", "beta", "deprecated", "active"]
           },
           "enabled": {
+            "type": "boolean"
+          },
+          "hidden": {
             "type": "boolean"
           },
           "limit": {
