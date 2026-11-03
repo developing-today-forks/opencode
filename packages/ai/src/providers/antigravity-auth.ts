@@ -22,11 +22,24 @@
 // developing-today/code, which this module replaces.
 import { Effect } from "effect"
 import { Headers } from "effect/http"
+import { deadlineSignal, readBoundedResponseText } from "@opencode/util/http-body"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth, MissingCredentialError } from "../route/auth.js"
 
 const OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 const FALLBACK_UA = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
+
+/**
+ * Deadline + size cap for the token-refresh exchange (#1469). The token
+ * endpoint returns a small JSON struct (a few KB in practice); 64 KiB is
+ * generous headroom (mirrors core's oauthMaxResponseBytes, #1026) while
+ * keeping a misbehaving endpoint from buffering an unbounded body into
+ * memory. The 15s deadline matches the keyring exec timeout in this file:
+ * loadToken() shares one inflight promise, so a stalled refresh would
+ * otherwise wedge every Antigravity auth attempt process-wide.
+ */
+export const TOKEN_REFRESH_TIMEOUT_MS = 15_000
+export const TOKEN_REFRESH_MAX_RESPONSE_BYTES = 64 * 1024
 
 interface KeyringCreds {
   readonly accessToken?: string
@@ -162,7 +175,7 @@ const loadTokenEffect = Effect.tryPromise({
     ),
 })
 
-const refresh = async (refreshToken: string): Promise<TokenState> => {
+export const refresh = async (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_MS): Promise<TokenState> => {
   const { clientSecret } = await binaryIntel()
   if (!clientSecret) throw new Error("could not extract OAuth client secret from agy binary")
   const body = new URLSearchParams({
@@ -175,8 +188,13 @@ const refresh = async (refreshToken: string): Promise<TokenState> => {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(Buffer.byteLength(body)) },
     body,
+    signal: deadlineSignal(undefined, timeoutMs),
   })
-  const text = await response.text()
+  const text = await readBoundedResponseText(
+    response,
+    TOKEN_REFRESH_MAX_RESPONSE_BYTES,
+    () => new Error(`token endpoint response exceeded ${TOKEN_REFRESH_MAX_RESPONSE_BYTES} bytes`),
+  )
   if (response.status !== 200) throw new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`)
   const parsed = JSON.parse(text) as { access_token?: string; expires_in?: number }
   if (!parsed.access_token) throw new Error("token endpoint returned no access_token")
