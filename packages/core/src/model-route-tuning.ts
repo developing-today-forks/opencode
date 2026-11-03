@@ -307,28 +307,35 @@ export const review = (options: {
     const suggestions: ModelRoute.Adjustment[] = [
       ...suggest({ stats, errors, now, holdMs: options.holdMs }),
       ...noteAdjustments(parseNotes(options.notes), now, options.holdMs, undefined, options.location),
-    ].map((item) => ({ ...item, requires: options.floor }))
+    ].map((item) => ({
+      ...item,
+      id: options.location ? `${item.id}:${encodeURIComponent(options.location)}` : item.id,
+      requires: options.floor,
+      ...(options.location === undefined ? {} : { location: options.location }),
+    }))
     // A target that has been unreliable at this hour is down-weighted for a while, and one whose
     // message says when its quota returns is skipped until then. Only `predictive` routes apply these.
     for (const prediction of predictions) {
       if (prediction.state === "busy-hour")
         suggestions.push({
-          id: `auto-hourly:${prediction.target}`,
+          id: `auto-hourly:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "weight",
           factor: 0.5,
           until: now + options.holdMs,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
       else if (prediction.until !== undefined)
         suggestions.push({
-          id: `auto-quota:${prediction.target}`,
+          id: `auto-quota:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "skip",
           until: prediction.until,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
     }
     for (const item of suggestions) ModelRoute.addAdjustment(item, item.note)

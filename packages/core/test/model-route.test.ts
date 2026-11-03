@@ -1960,7 +1960,37 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       ])
       expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/a")).toEqual({ until: null })
       expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/b")).toBeUndefined()
+
+      // Expiration is known-full regardless of the numeric threshold, including after
+      // restoring the durable credential hold without a fresh quota feed.
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:expired-cred",
+          match: "credential:expired-cred",
+          action: "skip",
+          balanceBaseline: 5,
+          balanceGrant: "expired-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          balanceHoldExpired: true,
+          credentialID: "expired-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("expired-cred", now, "/loc/b")).toEqual({ until: null })
+
+      // A tuning result computed under A's policy must not leak to B.
+      ModelRoute.setAdjustments([
+        {
+          id: "auto-quota:location-scoped",
+          match: `${target.providerID}/${target.id}`,
+          action: "skip",
+          location: "/loc/a",
+        },
+      ])
+      expect(ModelRoute.skipped(target, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(target, now, { location: "/loc/b" })).toBe(false)
     } finally {
+      ModelRoute.setAdjustments([])
       offA()
       offB()
     }

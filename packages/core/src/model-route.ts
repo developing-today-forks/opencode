@@ -1014,6 +1014,8 @@ const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
 type BalanceHold = {
   readonly benchedBalance: number | null
   readonly grant?: string
+  /** Expiry is independent of the dead-balance threshold and must survive restoration. */
+  readonly expired?: boolean
   /** How this hold was installed (#1461): "threshold" holds are policy-derived -- a
    * snapshot judged known-full under the OBSERVING Location's balanceDeadThreshold --
    * so at read time they are judged under the JUDGING Location's threshold and do not
@@ -1053,6 +1055,7 @@ const grantReclassified = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot):
  * known-full under the judging Location's balanceDeadThreshold. */
 const holdBlocks = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot, now: number, location?: string): boolean => {
   if (hold.origin !== "threshold") return true
+  if (snapshot.expired === undefined && hold.expired === true) return true
   return QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
 }
 
@@ -1082,6 +1085,7 @@ const persistCredentialBalanceHold = (credentialID: string, hold: BalanceHold, p
     balanceBaseline: hold.benchedBalance,
     ...(hold.grant !== undefined ? { balanceGrant: hold.grant } : {}),
     ...(hold.origin !== undefined ? { balanceHoldOrigin: hold.origin } : {}),
+    ...(hold.expired !== undefined ? { balanceHoldExpired: hold.expired } : {}),
     credentialID,
     providerID,
     note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
@@ -1096,6 +1100,7 @@ const restoredCredentialHold = (credentialID: string): BalanceHold | undefined =
     benchedBalance: item.balanceBaseline ?? null,
     ...(item.balanceGrant !== undefined ? { grant: item.balanceGrant } : {}),
     ...(item.balanceHoldOrigin !== undefined ? { origin: item.balanceHoldOrigin } : {}),
+    ...(item.balanceHoldExpired !== undefined ? { expired: item.balanceHoldExpired } : {}),
   }
 }
 
@@ -1131,7 +1136,8 @@ const observeCredentialQuotaState = (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
-      )
+      ) {
+        const refreshedHold = snapshot.expired === undefined ? hold : { ...hold, expired: snapshot.expired }
         // Another Location feeding the same grant's balance corrects the gate too
         // (#1461): its fresher balance snapshot replaces the retained one, so later
         // judgements under any Location use the latest balance (one whose threshold
@@ -1143,9 +1149,11 @@ const observeCredentialQuotaState = (
           snapshot,
           target,
           gated: true,
-          balanceHold: hold,
+          balanceHold: refreshedHold,
           ...(resetAtTrusted ? { resetObservedAt: snapshot.observedAt } : {}),
         })
+        if (refreshedHold.expired !== hold.expired) persistCredentialBalanceHold(credentialID, refreshedHold, target.providerID)
+      }
       return
     }
   }
@@ -1156,7 +1164,12 @@ const observeCredentialQuotaState = (
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
-      ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot), origin: "threshold" as const }
+      ? {
+          benchedBalance: snapshot.remaining,
+          grant: grantIdentity(snapshot),
+          origin: "threshold" as const,
+          ...(snapshot.expired !== undefined ? { expired: snapshot.expired } : {}),
+        }
       : undefined
   const actualResetAt = resetAtTrusted
     ? snapshot.resetAt ?? undefined
@@ -1249,6 +1262,7 @@ export const observeProviderQuota = (
           benchedBalance: restoredItem.balanceBaseline ?? null,
           ...(restoredItem.balanceGrant !== undefined ? { grant: restoredItem.balanceGrant } : {}),
           ...(restoredItem.balanceHoldOrigin !== undefined ? { origin: restoredItem.balanceHoldOrigin } : {}),
+          ...(restoredItem.balanceHoldExpired !== undefined ? { expired: restoredItem.balanceHoldExpired } : {}),
         }
       : undefined)
   if (hold) {
@@ -1265,10 +1279,23 @@ export const observeProviderQuota = (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
-      )
+      ) {
+        const refreshedHold = snapshot.expired === undefined ? hold : { ...hold, expired: snapshot.expired }
         // Same Location correction as the credential path (#1461): keep the hold,
         // refresh the balance snapshot it will be judged from.
-        providerQuota.set(target.providerID, { ...previous, snapshot, target, gated: true, balanceHold: hold })
+        providerQuota.set(target.providerID, { ...previous, snapshot, target, gated: true, balanceHold: refreshedHold })
+        if (refreshedHold.expired !== hold.expired)
+          addAdjustment({
+            id: `quota:${target.providerID}`,
+            match: `${target.providerID}/`,
+            action: "skip",
+            balanceBaseline: refreshedHold.benchedBalance,
+            ...(refreshedHold.grant !== undefined ? { balanceGrant: refreshedHold.grant } : {}),
+            ...(refreshedHold.origin !== undefined ? { balanceHoldOrigin: refreshedHold.origin } : {}),
+            ...(refreshedHold.expired !== undefined ? { balanceHoldExpired: refreshedHold.expired } : {}),
+            note: "quota exhausted (proactive snapshot); held until the stated reset",
+          })
+      }
       return
     }
     // A reclassified grant (#1380) falls through: processing below replaces the balance
@@ -1278,7 +1305,12 @@ export const observeProviderQuota = (
   const full = QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   const balanceHold =
     snapshot.balance === true && full
-      ? { benchedBalance: snapshot.remaining, grant: grantIdentity(snapshot), origin: "threshold" as const }
+      ? {
+          benchedBalance: snapshot.remaining,
+          grant: grantIdentity(snapshot),
+          origin: "threshold" as const,
+          ...(snapshot.expired !== undefined ? { expired: snapshot.expired } : {}),
+        }
       : undefined
   providerQuota.set(target.providerID, {
     snapshot,
@@ -1303,6 +1335,7 @@ export const observeProviderQuota = (
             balanceBaseline: snapshot.remaining,
             balanceGrant: grantIdentity(snapshot),
             balanceHoldOrigin: "threshold" as const,
+            ...(snapshot.expired !== undefined ? { balanceHoldExpired: snapshot.expired } : {}),
           }
         : {}),
       note: "quota exhausted (proactive snapshot); held until the stated reset",
@@ -1428,6 +1461,7 @@ export const observeQuotaFailure = (
       benchedBalance: previous.snapshot.remaining,
       grant: grantIdentity(previous.snapshot),
       origin: "attempt",
+      ...(previous.snapshot.expired !== undefined ? { expired: previous.snapshot.expired } : {}),
     }
     if (credentialID) {
       credentialQuota.set(credentialID, { snapshot, target, gated: true, balanceHold })
@@ -1443,6 +1477,7 @@ export const observeQuotaFailure = (
       balanceBaseline: previous.snapshot.remaining,
       balanceGrant: grantIdentity(previous.snapshot),
       balanceHoldOrigin: "attempt",
+      ...(previous.snapshot.expired !== undefined ? { balanceHoldExpired: previous.snapshot.expired } : {}),
       note: "balance exhausted (attempt-reported); held until a fresh balance increase",
     })
     logHealth(target, "quota-gated", `provider:${target.providerID} balance-insufficient`)
@@ -1497,6 +1532,7 @@ export const credentialQuotaBlocked = (
     if (!restored) return undefined
     if (
       restored.origin === "threshold" &&
+      restored.expired !== true &&
       restored.benchedBalance !== null &&
       restored.benchedBalance > currentConstants(location).quotaGate.balanceDeadThreshold
     )
@@ -1957,6 +1993,9 @@ export interface Adjustment {
    * `origin`. A restored threshold-derived hold is judged under the judging Location's
    * balanceDeadThreshold; an attempt-reported one keeps its unconditional force. */
   readonly balanceHoldOrigin?: "threshold" | "attempt"
+  /** Whether a restored threshold-derived hold was armed by an expired grant, which is
+   * known-full regardless of the Location's balanceDeadThreshold. */
+  readonly balanceHoldExpired?: boolean
   /** Set on a credential's durable balance-baseline record (`quota-credential:<id>`): the
    * credential the baseline belongs to. Such records persist a credential gate across
    * restarts; they are never selection skips (their `match` names the credential). */
@@ -1968,6 +2007,8 @@ export interface Adjustment {
   /** Set on learned adjustments: the least autonomy a route needs before this one applies to it. Unset
    * means an operator or agent instruction, which applies wherever a route uses rules. */
   readonly requires?: ModelRouteAutonomy.Level
+  /** Tuning result computed from one Location's policy; unset is process-wide. */
+  readonly location?: string
 }
 
 let adjustments: readonly Adjustment[] = []
@@ -2068,10 +2109,19 @@ export const userSkipped = (target: Model.Ref, now = Date.now(), scope: ModelRou
 const appliesOn = (item: Adjustment, scope: ModelRouteOverrides.Scope) =>
   item.requires === undefined || ModelRouteAutonomy.reaches(scope.autonomy, item.requires)
 
+/** Tuning results are computed from Location-specific policy and only apply there. */
+const appliesLocation = (item: Adjustment, scope: { readonly location?: string }) =>
+  item.location === undefined || item.location === scope.location
+
 /** A target the route's learned adjustments skip. Only routes that let the tuner decide see these. */
-export const skipped = (target: Model.Ref, now = Date.now(), scope: ModelRouteOverrides.Scope = {}) =>
+export const skipped = (target: Model.Ref, now = Date.now(), scope: WeightScope = {}) =>
   activeAdjustments(now).some(
-    (item) => item.action === "skip" && adjustmentOn(item, now) && matches(item, target) && appliesOn(item, scope),
+    (item) =>
+      item.action === "skip" &&
+      adjustmentOn(item, now) &&
+      matches(item, target) &&
+      appliesOn(item, scope) &&
+      appliesLocation(item, scope),
   )
 
 /** Weight multiplier for a target demoted by quota errors. */
@@ -2159,7 +2209,13 @@ export const tracedWeightOf = (
   const afterPrefer = weight
   if (scope.fixed !== true) {
     for (const item of activeAdjustments(now)) {
-      if (item.action !== "weight" || !adjustmentOn(item, now) || !matches(item, target) || !appliesOn(item, scope))
+      if (
+        item.action !== "weight" ||
+        !adjustmentOn(item, now) ||
+        !matches(item, target) ||
+        !appliesOn(item, scope) ||
+        !appliesLocation(item, scope)
+      )
         continue
       if (item.weight !== undefined) weight = item.weight
       else weight *= item.factor ?? 1
