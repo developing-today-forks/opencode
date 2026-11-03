@@ -9,6 +9,8 @@ import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
+import { Model } from "@opencode/core/model"
+import { ModelRoute } from "@opencode/core/model-route"
 import { Embeddings } from "@opencode/core/embeddings"
 import { SystemOne } from "@opencode/core/systemone"
 import { OpenAIFacadeResponse } from "@opencode/core/openai-facade-response"
@@ -85,6 +87,20 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
     const global = yield* Global.Service
     const locations = yield* LocationServiceMap.Service
     const services = locations.get(Location.Ref.make({ directory: AbsolutePath.make(global.config) }))
+    // The routes /v1/models advertises (#1413, design §2): this
+    // Location's configured model_routes as the catalog presents them
+    // — the enabled models on the opencode-route provider, which is
+    // exactly the set the resolver can serve (a route whose targets
+    // have all left the catalog, or which config disables, never
+    // enters that set). Derived per request, so a config reload is
+    // reflected without a restart, and the list and the single-model
+    // lookup below are built from the same set and always agree.
+    const advertisedRoutes = Effect.gen(function* () {
+      yield* awaitPlugins
+      const models = yield* Model.Service
+      const available = yield* models.available()
+      return available.filter((model) => model.providerID === ModelRoute.PROVIDER_ID).map((model) => String(model.id))
+    })
     return handlers
       .handleRaw(
         "completions.chat",
@@ -358,15 +374,31 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           }).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw("completions.models", () =>
-        Effect.succeed(
-          HttpServerResponse.jsonUnsafe({
-            object: "list",
-            data: [...Completions.modelsBody().data, ...Embeddings.embeddingModelEntries()],
-          }),
+        advertisedRoutes.pipe(
+          Effect.map((routes) =>
+            HttpServerResponse.jsonUnsafe({
+              object: "list",
+              data: [...Completions.modelsBody(routes).data, ...Embeddings.embeddingModelEntries()],
+            }),
+          ),
+          Effect.provide(services),
+          locationErrors,
         ),
       )
-    .handleRaw("completions.model", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
-    .handleRaw("completions.modelRef", (ctx) => Effect.succeed(modelByIdResponse(ctx.request.url)))
+    .handleRaw("completions.model", (ctx) =>
+      advertisedRoutes.pipe(
+        Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
+        Effect.provide(services),
+        locationErrors,
+      ),
+    )
+    .handleRaw("completions.modelRef", (ctx) =>
+      advertisedRoutes.pipe(
+        Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
+        Effect.provide(services),
+        locationErrors,
+      ),
+    )
   }),
 )
 
@@ -374,7 +406,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
 // provider/model ref URL-encoded as one segment) and the raw two-segment
 // :provider/:model endpoint: the id is the path suffix after /v1/models/,
 // URL-decoded. Unknown ids answer a loud 404 in the OpenAI error shape.
-const modelByIdResponse = (url: string) => {
+const modelByIdResponse = (url: string, routes: readonly string[]) => {
   const raw = new URL(url, "http://localhost").pathname.slice("/v1/models/".length)
   let id = raw
   try {
@@ -382,6 +414,6 @@ const modelByIdResponse = (url: string) => {
   } catch {
     // A malformed escape is not a served id; it falls through to the 404.
   }
-  const model = Completions.modelBody(id)
+  const model = Completions.modelBody(id, routes)
   return model ? HttpServerResponse.jsonUnsafe(model) : errorResponse(404, `model not found: ${id}`, "invalid_request_error")
 }

@@ -114,6 +114,50 @@ describe("sourceViolations", () => {
     )
     expect(violations).toEqual([])
   })
+
+  test.each(["timeout-minutes", "runs-on", "steps", "env", "defaults"])(
+    "flags %s on a reusable-workflow caller job",
+    (key) => {
+      const violations = sourceViolations(
+        ".github/workflows/agents.yml",
+        [
+          "on: [workflow_dispatch]",
+          "jobs:",
+          "  scheduled:",
+          "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
+          `    ${key}: 60`,
+        ].join("\n"),
+      )
+      expect(violations).toHaveLength(1)
+      expect(violations[0]).toMatchObject({
+        rule: "reusable-workflow-caller-keys",
+        job: "scheduled",
+      })
+      expect(violations[0].detail).toContain(key)
+    },
+  )
+
+  test("allows GitHub's reusable-workflow caller keywords", () => {
+    const violations = sourceViolations(
+      ".github/workflows/agents.yml",
+      [
+        "on: [workflow_dispatch]",
+        "jobs:",
+        "  scheduled:",
+        "    name: Scheduled tasks",
+        "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
+        "    with: { schedule: daily }",
+        "    secrets: inherit",
+        "    strategy: { matrix: { task: [bolt] } }",
+        "    needs: prepare",
+        "    if: true",
+        "    concurrency: scheduled",
+        "    permissions: { contents: read }",
+        "    cache-mode: disabled",
+      ].join("\n"),
+    )
+    expect(violations).toEqual([])
+  })
 })
 
 describe("the current tree", () => {

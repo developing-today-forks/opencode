@@ -323,7 +323,8 @@ const logHealth = (
     | "rate-limit-window"
     | "quota-gated"
     | "quota-readmitted"
-    | "bench-probe",
+    | "bench-probe"
+    | "bench-probe-release",
   reason: string,
   until?: number,
   credentialID?: string,
@@ -518,6 +519,25 @@ export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefi
   return true
 }
 
+/** Releases a probe claim whose owner resolved the target but never attempted a request on it
+ * (#1478): the bench stays in force and the probe is due again for the next real request.
+ * The release only lands when `claimedAt` still names the outstanding claim, so a claim that
+ * has since settled — or one a different resolution took afterwards — is never cleared by a
+ * stale owner. Releasing is not an outcome: no bench ends, no failure is recorded. */
+export const releaseBenchProbe = (target: Model.Ref, credentialID: string | undefined, claimedAt: number) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!state || state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) return false
+  state.probeClaimedAt = undefined
+  logHealth(
+    target,
+    "bench-probe-release",
+    `probe claim released without an outcome${credentialID ? ` credential:${credentialID}` : ""}`,
+    state.benchQuotaResetAt,
+    credentialID,
+  )
+  return true
+}
+
 /** One bench in force, as route diagnostics report it (#1123). */
 export interface ActiveBench {
   readonly providerID: string
@@ -559,8 +579,8 @@ export const activeBenches = (now = Date.now()): ActiveBench[] => {
   return benches.toSorted((left, right) => left.until - right.until)
 }
 
-/** How many distinct leaves of one pool must be quota-out before the pool itself is pulled:
- * one leaf's quota answer can be leaf-specific, but a second distinct leaf of the same pool
+/** How many distinct quota evidence sources of one pool must be out before the pool itself is pulled:
+ * one leaf's quota answer can be leaf-specific, but a second distinct evidence source of the same pool
  * answering quota in turn is the pool-shaped signal (#1014 PR3). */
 const POOL_QUOTA_LEAVES = 2
 
@@ -569,11 +589,14 @@ const quotaBench = (state: HealthState | undefined, now: number) =>
   state.cooldownUntil > now &&
   (state.benchReason === "quota" || state.benchReason === "quota retry-after")
 
-/** Whether one leaf is currently out for a quota-class reason: a quota bench on the leaf (or
- * on the credential that serves it), a quota gate on its credential, or a quota gate on its
- * provider (a known-full snapshot, a balance hold, or the reactive attempt-reported skip).
- * Balance holds count until a fresh balance increase releases them, so a pool held by a
- * balance gate stays out with no timer-based re-admission (#1014). */
+/** Whether a balance is dead under a threshold, with the same floating-point tolerance
+ * QuotaSnapshot.isKnownFull applies to live snapshots (#1461): a balance a hair above the
+ * threshold from rounding (0.4 - 0.3 = 0.10000000000000003 against the 0.1 default) is
+ * still dead, so restored/durable judgements agree with live ones. */
+function deadBalance(balance: number, threshold: number): boolean {
+  return balance <= threshold + Number.EPSILON * Math.max(1, Math.abs(balance), Math.abs(threshold))
+}
+
 /** Whether a persisted provider quota skip blocks a judgement under `location` (#1461):
  * threshold-derived holds are judged under the judging Location's balanceDeadThreshold --
  * from the provider's live gate state when there is one, otherwise from the balance
@@ -589,28 +612,50 @@ const quotaSkipBlocks = (item: Adjustment, now: number, location?: string): bool
   if (item.balanceHoldExpired === true) return true
   const judged = item.balanceHoldBalance ?? item.balanceBaseline
   if (judged === null || judged === undefined) return true
-  return judged <= currentConstants(location).quotaGate.balanceDeadThreshold
+  return deadBalance(judged, currentConstants(location).quotaGate.balanceDeadThreshold)
 }
 
-const quotaOut = (target: Model.Ref, credentialID: string | undefined, now: number, location?: string): boolean => {
+/** One leaf's quota-out evidence, or undefined when the leaf is not quota-out: a quota
+ * bench on the leaf (or on the credential that serves it) counts per leaf, a quota gate
+ * on the credential counts once per credential, and a quota gate on the provider (a
+ * known-full snapshot, a balance hold, or the reactive attempt-reported skip) counts
+ * once per provider. Bench evidence takes priority over a shared gate on the same
+ * leaf, so two genuinely independent benches under one gate still count separately.
+ * Balance holds count until a fresh balance increase releases them, so a pool held by
+ * a balance gate stays out with no timer-based re-admission (#1014). */
+const quotaEvidence = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): string | undefined => {
   if (credentialID) {
-    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now)) return true
-    return credentialQuotaBlocked(credentialID, now, location) !== undefined
+    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now))
+      return `bench:${credentialKey(target, credentialID)}`
+    if (credentialQuotaBlocked(credentialID, now, location) !== undefined) return `cred-gate:${credentialID}`
+    return undefined
   }
-  if (quotaBench(health.get(key(target)), now)) return true
+  if (quotaBench(health.get(key(target)), now)) return `bench:${key(target)}`
   const provider = providerQuota.get(target.providerID)
-  // A provider balance hold's verdict is final for this provider's quota skip: when the
-  // judging Location's threshold admits the held balance, the persisted `quota:` skip
-  // (the same hold's durable record) must not re-block it through the fallthrough below.
-  if (provider?.balanceHold !== undefined) return holdBlocks(provider.balanceHold, provider.snapshot, now, location)
+  // A threshold balance hold is judged under the judging Location (#1461), but its
+  // verdict is not final for the provider's other skips: a timed attempt-reported
+  // `quota:` skip installed while the hold stands must still count. The fallthrough
+  // is safe for the hold's own durable record because quotaSkipBlocks re-judges
+  // threshold records, so an admitted threshold hold does not re-block through it.
+  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
+    return `prov:${target.providerID}`
   if (
     provider &&
     QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   )
-    return true
-  return activeAdjustments(now).some(
-    (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
+    return `prov:${target.providerID}`
+  if (
+    activeAdjustments(now).some(
+      (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
+    )
   )
+    return `prov:${target.providerID}`
+  return undefined
 }
 
 interface PoolMembership {
@@ -652,12 +697,16 @@ const poolOf = (definition: Definition, index: number): PoolMembership | undefin
 /** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
 export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
 
-/** Whether a leaf's pool is quota-exhausted: at least two distinct leaves of the pool are
- * currently quota-out, so the pool is pulled as a whole instead of spending attempts on its
- * remaining leaves one by one (#1014 PR3 dynamic pull-out). The verdict is derived from the
- * leaves' live quota state, so it lifts by itself when the benches reach their stated reset,
- * when a balance hold is released by a fresh increase, or when a benched leaf recovers — a
- * recovered pool re-enters rotation with no second producer. */
+/** Whether a leaf's pool is quota-exhausted: at least two distinct quota evidence
+ * sources across the pool's leaves are currently out, so the pool is pulled as a whole
+ * instead of spending attempts on its remaining leaves one by one (#1014 PR3 dynamic
+ * pull-out). Evidence is deduplicated by identity — two leaves out only through one
+ * shared credential or provider gate count as one signal, so a single provider's quota
+ * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
+ * leaf's own quota bench always counts per leaf. The verdict is derived from the
+ * leaves' live quota state, so it lifts by itself when the benches reach their stated
+ * reset, when a balance hold is released by a fresh increase, or when a benched leaf
+ * recovers — a recovered pool re-enters rotation with no second producer. */
 export const poolQuotaExhausted = (
   definition: Definition,
   index: number,
@@ -667,12 +716,14 @@ export const poolQuotaExhausted = (
 ): boolean => {
   const pool = poolOf(definition, index)
   if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
-  const out = new Set<number>()
+  const evidence = new Set<string>()
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
-    if (target && quotaOut(target, credentialOf?.(leaf), now, location)) out.add(leaf)
+    if (!target) continue
+    const source = quotaEvidence(target, credentialOf?.(leaf), now, location)
+    if (source) evidence.add(source)
   }
-  return out.size >= POOL_QUOTA_LEAVES
+  return evidence.size >= POOL_QUOTA_LEAVES
 }
 
 export const failed = (
@@ -1072,7 +1123,15 @@ const grantReclassified = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot):
 const holdBlocks = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot, now: number, location?: string): boolean => {
   if (hold.origin !== "threshold") return true
   if (snapshot.expired === undefined && hold.expired === true) return true
-  return QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+  if (QuotaSnapshot.known(snapshot))
+    return QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+  // An unknown snapshot (e.g. the first feed after a restart, a balance window whose
+  // limit is gone so its remaining is null) carries no evidence against the hold:
+  // judge by the hold's preserved judged/benched balance instead of admitting by
+  // default (#1461).
+  const judged = hold.judgedBalance ?? hold.benchedBalance
+  if (judged === null || judged === undefined) return true
+  return deadBalance(judged, currentConstants(location).quotaGate.balanceDeadThreshold)
 }
 
 type QuotaGateState = {
@@ -1081,6 +1140,10 @@ type QuotaGateState = {
   gated: boolean
   /** Balance gates need a fresh increase; wall-clock reset/fallback times are not recovery signals. */
   balanceHold?: BalanceHold
+  /** A reactive timed gate (an attempt-reported rate limit) retained alongside a
+   * threshold balance hold (#1461): it blocks every Location until its reset, even
+   * one whose threshold admits the held balance. */
+  timedGateUntil?: number
   actualResetAt?: number
   resetObservedAt?: number
 }
@@ -1144,7 +1207,7 @@ const observeCredentialQuotaState = (
     if (!grantReclassified(hold, snapshot)) {
       if (!previous) {
         const refreshedHold =
-          hold.origin === "threshold" && snapshot.balance === true
+          hold.origin === "threshold" && snapshot.balance === true && snapshot.remaining !== null
             ? {
                 ...hold,
                 judgedBalance: snapshot.remaining,
@@ -1160,6 +1223,22 @@ const observeCredentialQuotaState = (
         })
         if (refreshedHold.judgedBalance !== hold.judgedBalance || refreshedHold.expired !== hold.expired)
           persistCredentialBalanceHold(credentialID, refreshedHold, target.providerID)
+      }
+      else if (
+        snapshot.balance !== true &&
+        QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+      ) {
+        // A reactive timed gate (an attempt-reported rate limit, fed as a synthesized
+        // exhaustion snapshot) is independent of the balance hold (#1461): retain it
+        // alongside the hold instead of discarding it in this branch, so a Location
+        // that admits the held balance is still gated until the stated reset.
+        credentialQuota.set(credentialID, {
+          ...previous,
+          gated: true,
+          ...(snapshot.resetAt !== null && snapshot.resetAt !== undefined
+            ? { timedGateUntil: snapshot.resetAt }
+            : {}),
+        })
       }
       else if (
         hold.origin === "threshold" &&
@@ -1307,7 +1386,7 @@ export const observeProviderQuota = (
     if (!releasesHold(hold, snapshot) && !grantReclassified(hold, snapshot)) {
       if (!previous) {
         const refreshedHold =
-          hold.origin === "threshold" && snapshot.balance === true
+          hold.origin === "threshold" && snapshot.balance === true && snapshot.remaining !== null
             ? {
                 ...hold,
                 judgedBalance: snapshot.remaining,
@@ -1609,7 +1688,7 @@ export const credentialQuotaBlocked = (
       restored.origin === "threshold" &&
       restored.expired !== true &&
       judgedBalance !== null &&
-      judgedBalance > currentConstants(location).quotaGate.balanceDeadThreshold
+      !deadBalance(judgedBalance, currentConstants(location).quotaGate.balanceDeadThreshold)
     )
       return undefined
     return { until: null }
@@ -1618,7 +1697,13 @@ export const credentialQuotaBlocked = (
   // the retained snapshot known-full (#1461); attempt-reported holds block every
   // Location, as before. The gated flag is left alone on the admitting path: the
   // hold still blocks other Locations, so this is not a global re-admission.
-  if (state.balanceHold) return holdBlocks(state.balanceHold, state.snapshot, now, location) ? { until: null } : undefined
+  if (state.balanceHold) {
+    if (holdBlocks(state.balanceHold, state.snapshot, now, location)) return { until: null }
+    // A retained reactive timed gate blocks every Location until its reset, even
+    // one whose threshold admits the held balance (#1461).
+    if (state.timedGateUntil !== undefined && state.timedGateUntil > now) return { until: state.timedGateUntil }
+    return undefined
+  }
   if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
     state.gated = true
     return { until: state.snapshot.resetAt }

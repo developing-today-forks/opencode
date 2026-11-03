@@ -20,13 +20,30 @@
 // this client, so refreshing here never invalidates the CLI's stored
 // credential. This mirrors bin/antigravity-direct.mjs in
 // developing-today/code, which this module replaces.
-import { Effect } from "effect"
-import { Headers } from "effect/http"
+import { Duration, Effect, Schema, Stream } from "effect"
+import { FetchHttpClient, Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth, MissingCredentialError } from "../route/auth.js"
 
 const OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 const FALLBACK_UA = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
+
+/**
+ * Deadline + size cap for the token-refresh exchange (#1469). The token
+ * endpoint returns a small JSON struct (a few KB in practice); 64 KiB is
+ * generous headroom (mirrors core's oauthMaxResponseBytes, #1026) while
+ * keeping a misbehaving endpoint from buffering an unbounded body into
+ * memory. The 15s deadline matches the keyring exec timeout in this file:
+ * loadToken() shares one inflight promise, so a stalled refresh would
+ * otherwise wedge every Antigravity auth attempt process-wide.
+ */
+export const TOKEN_REFRESH_TIMEOUT_MS = 15_000
+export const TOKEN_REFRESH_MAX_RESPONSE_BYTES = 64 * 1024
+
+const TokenResponse = Schema.Struct({
+  access_token: Schema.optional(Schema.String),
+  expires_in: Schema.optional(Schema.Number),
+})
 
 interface KeyringCreds {
   readonly accessToken?: string
@@ -162,26 +179,65 @@ const loadTokenEffect = Effect.tryPromise({
     ),
 })
 
-const refresh = async (refreshToken: string): Promise<TokenState> => {
-  const { clientSecret } = await binaryIntel()
-  if (!clientSecret) throw new Error("could not extract OAuth client secret from agy binary")
-  const body = new URLSearchParams({
-    client_id: OAUTH_CLIENT_ID,
-    client_secret: clientSecret,
-    refresh_token: refreshToken,
-    grant_type: "refresh_token",
-  }).toString()
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(Buffer.byteLength(body)) },
-    body,
+const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientResponse) =>
+  Effect.gen(function* () {
+    const tooLarge = () => new Error(`token endpoint response exceeded ${TOKEN_REFRESH_MAX_RESPONSE_BYTES} bytes`)
+    const contentLength = response.headers["content-length"]
+    const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+    const declaredSize =
+      parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
+    if (declaredSize !== undefined && declaredSize > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return yield* Effect.fail(tooLarge())
+
+    let body = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, declaredSize || 64 * 1024))
+    let size = 0
+    yield* Stream.runForEach(response.stream, (chunk) => {
+      if (chunk.byteLength === 0) return Effect.void
+      if (size + chunk.byteLength > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return Effect.fail(tooLarge())
+      if (size + chunk.byteLength > body.byteLength) {
+        const grown = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)))
+        body.copy(grown, 0, 0, size)
+        body = grown
+      }
+      body.set(chunk, size)
+      size += chunk.byteLength
+      return Effect.void
+    })
+    return body.subarray(0, size).toString("utf8")
   })
-  const text = await response.text()
-  if (response.status !== 200) throw new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`)
-  const parsed = JSON.parse(text) as { access_token?: string; expires_in?: number }
-  if (!parsed.access_token) throw new Error("token endpoint returned no access_token")
-  return { accessToken: parsed.access_token, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
-}
+
+export const refresh = (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_MS) =>
+  Effect.gen(function* () {
+    const { clientSecret } = yield* Effect.tryPromise({
+      try: () => binaryIntel(),
+      catch: (cause) => cause,
+    })
+    if (!clientSecret) return yield* Effect.fail(new Error("could not extract OAuth client secret from agy binary"))
+    const body = new URLSearchParams({
+      client_id: OAUTH_CLIENT_ID,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }).toString()
+    const request = HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
+      HttpClientRequest.bodyText(body, "application/x-www-form-urlencoded"),
+    )
+    const exchange = Effect.gen(function* () {
+      const http = yield* HttpClient.HttpClient
+      const response = yield* HttpClient.withScope(http).execute(request)
+      const text = yield* readBoundedTokenResponse(response)
+      if (response.status !== 200) return yield* Effect.fail(new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`))
+      const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(TokenResponse))(text)
+      if (!parsed.access_token) return yield* Effect.fail(new Error("token endpoint returned no access_token"))
+      return { accessToken: parsed.access_token, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
+    }).pipe(
+      Effect.scoped,
+      Effect.timeoutOrElse({
+        duration: Duration.millis(timeoutMs),
+        orElse: () => Effect.fail(new Error(`token endpoint request timed out after ${timeoutMs}ms`)),
+      }),
+    )
+    return yield* exchange
+  })
 
 const loadToken = (): Promise<TokenState> => {
   if (cached && cached.expiryMs - Date.now() > 60_000) return Promise.resolve(cached)
@@ -193,7 +249,7 @@ const loadToken = (): Promise<TokenState> => {
         cached = { accessToken: creds.accessToken, expiryMs: creds.expiryMs }
         return cached
       }
-      cached = await refresh(creds.refreshToken)
+      cached = await Effect.runPromise(refresh(creds.refreshToken).pipe(Effect.provide(FetchHttpClient.layer)))
       return cached
     } finally {
       inflight = undefined

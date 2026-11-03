@@ -5,14 +5,76 @@ export function readStdin(beforeRead?: () => void) {
   return text(process.stdin)
 }
 
+/** How long `readPipedStdin` waits for a piped stdin to show writer intent
+ * (a first chunk, or EOF) before treating it as no piped input at all.
+ * Callers whose stdin is the only prompt source pass an infinite grace:
+ * a slow producer's first byte is still writer intent, so that read waits
+ * for EOF however long the producer takes (Codex P2 on PR #1460). */
+export const STDIN_GRACE_MS = 1_000
+
+/**
+ * Read piped stdin for the `run` command, without ever hanging on an open
+ * pipe nobody writes to (code#1359): an SSH session or automation harness
+ * that inherits an open, never-written, never-closed stdin pipe used to
+ * block `opencode run` forever at this read, even when the message was
+ * already given on the command line. Writer intent is observable — a real
+ * producer (`echo ... |`, a here-doc, a file redirect) delivers its first
+ * chunk or EOF immediately — so if neither arrives within `graceMs`, the
+ * stream is treated as no piped input and the command proceeds. A stream
+ * that shows intent is read to EOF exactly like `readStdin`. The stream
+ * is a parameter so tests can feed a fake one.
+ */
+export function readPipedStdin(
+  beforeRead?: () => void,
+  stream: NodeJS.ReadStream = process.stdin,
+  graceMs: number = STDIN_GRACE_MS,
+): Promise<string | undefined> {
+  beforeRead?.()
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let intent = false
+    const timer = Number.isFinite(graceMs)
+      ? setTimeout(() => {
+          if (intent) return
+          cleanup()
+          stream.pause()
+          resolve(undefined)
+        }, graceMs)
+      : undefined
+    timer?.unref?.()
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      stream.off("data", onData)
+      stream.off("end", onEnd)
+      stream.off("error", onError)
+    }
+    const onData = (chunk: Buffer) => {
+      intent = true
+      chunks.push(chunk)
+    }
+    const onEnd = () => {
+      cleanup()
+      // TextDecoder strips a leading UTF-8 BOM, matching text(process.stdin).
+      resolve(new TextDecoder().decode(Buffer.concat(chunks)))
+    }
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+    stream.on("data", onData)
+    stream.on("end", onEnd)
+    stream.on("error", onError)
+  })
+}
+
 /**
  * Read stdin as text for auth import, failing as soon as the running byte
  * total exceeds `maximumBytes` instead of buffering the whole stream
  * unbounded the way `text(process.stdin)` does: past the ~512 MiB engine
  * string ceiling an unbounded read dies with an opaque RangeError/OOM
  * instead of this clear too-large error. Scoped to auth import - the
- * other `readStdin` callers (run/mini piped prompts) keep the unbounded
- * reader. The stream is a parameter so tests can feed a fake one.
+ * other stdin readers stay as they are (mini's unbounded `readStdin`,
+ * run's grace-bounded `readPipedStdin`). The stream is a parameter so tests can feed a fake one.
  */
 export async function readBoundedStdin(
   maximumBytes: number,

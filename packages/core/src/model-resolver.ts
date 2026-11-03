@@ -172,6 +172,17 @@ export interface Resolved {
     readonly autonomy?: ModelRouteAutonomy.Level
     /** The active stored credential for the target's integration, when there is one (#6). */
     readonly credentialID?: Credential.ID
+    /** The half-open bench probe this resolution claimed at pick time (#1123), when it claimed
+     * one (#1478): the claim is spent before any request runs, so a consumer that resolves a
+     * model it never attempts must hand the claim back with
+     * `ModelRoute.releaseBenchProbe(target, credentialID, claimedAt)` — the credential named
+     * here is the one the claim was spent on, which may differ from the serving credential
+     * above. A consumer that does attempt the model settles the claim through
+     * `ModelRoute.completed` / `ModelRoute.failed` like the session runner does. */
+    readonly probeClaim?: {
+      readonly claimedAt: number
+      readonly credentialID?: Credential.ID
+    }
     /**
      * Activates the next eligible stored credential on the target's own integration and
      * re-resolves the same target on it (#6 credential failover). Eligibility is the Phase A
@@ -654,6 +665,10 @@ export const layer = Layer.effect(
           // even when undefined (an env connection served): the credentialByProvider
           // snapshot is only the ready filter's gate input, never serving attribution.
           servingCredentialID: Credential.ID | undefined,
+          // The bench probe claim the pick spent (#1478), when it spent one: only the
+          // resolution that walked away with the pick carries it — credential-fallback
+          // re-resolutions of the same target spend no new claim and pass none.
+          probeClaim?: { readonly claimedAt: number; readonly credentialID?: Credential.ID },
         ): Resolved => {
           const branch = {
             tried: new Set(triedTargets),
@@ -681,6 +696,7 @@ export const layer = Layer.effect(
             ...(definition.hedgeAfterMs ? { hedgeAfterMs: definition.hedgeAfterMs } : {}),
             autonomy: definition.autonomy,
             ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
+            ...(probeClaim ? { probeClaim } : {}),
             fallback: () => {
               // Branch-local cascade state (#1014 Codex P2): a fallback call is a
               // speculative branch as often as it is the primary's next step — a
@@ -739,7 +755,7 @@ export const layer = Layer.effect(
           const unavailable = new Map<number, string>()
           const overLimit = new Set<number>()
           // Pool-shaped pull-out (#1014 PR3): a leaf whose nested group (pool) has had two
-          // distinct leaves answer quota in turn is out with its pool, derived from the
+          // distinct quota evidence sources answer quota in turn is out with its pool, derived from the
           // leaves' live quota benches/gates at this moment.
           const poolExhausted = new Map<number, boolean>()
           for (const index of indexes)
@@ -845,9 +861,17 @@ export const layer = Layer.effect(
           // exactly one resolution walks away with it, and its outcome (completed/failed in
           // the runner) is what ends or renews the bench. Claims on scopes that are not due
           // — an ordinary eligible target — are refused and change nothing.
-          ModelRoute.claimBenchProbe(target, undefined, now)
+          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now)
           const probeCredential = credentialByProvider.get(target.providerID)
-          if (probeCredential) ModelRoute.claimBenchProbe(target, probeCredential, now)
+          const credentialClaimed = probeCredential ? ModelRoute.claimBenchProbe(target, probeCredential, now) : false
+          // The claim this pick walked away with (#1478): stamped on the Resolved below so a
+          // consumer that never attempts the model can release it, and one that does attempt
+          // it knows the claim is its to settle. The release is timestamp-guarded, so naming
+          // both scopes is safe — a scope this pick did not claim does not match and no-ops.
+          const probeClaim =
+            targetClaimed || credentialClaimed
+              ? { claimedAt: now, ...(probeCredential ? { credentialID: probeCredential } : {}) }
+              : undefined
           const source = yield* models.get(target.providerID, target.id)
           if (!source?.enabled) continue
           const targetVariants = definition.targetVariants[index]
@@ -989,7 +1013,7 @@ export const layer = Layer.effect(
                     cascade,
                   )
               : undefined
-          return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID)
+          return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID, probeClaim)
         }
         if (lastError) return yield* Effect.fail(lastError)
         return undefined
