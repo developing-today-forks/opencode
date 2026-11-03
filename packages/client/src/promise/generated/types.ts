@@ -2199,6 +2199,7 @@ export type CredentialKey = {
 export type ConfigModelRoutes = {
   [x: string]: {
     name?: string
+    system?: string
     targets: Array<ConfigModelRouteTarget>
     cache_format?: ModelCacheFormat
     health?: {
