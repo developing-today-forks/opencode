@@ -23,6 +23,13 @@ function request() {
   })
 }
 
+function abortableRequest(signal: AbortSignal) {
+  return new Request("https://opencode.ai/zen/v1/models", {
+    headers: { authorization: "Bearer test-key" },
+    signal,
+  })
+}
+
 function generationRequest() {
   return new Request("https://opencode.ai/zen/v1/chat/completions", {
     method: "POST",
@@ -83,6 +90,33 @@ describe("proxyInference headers deadline", () => {
     expect(response.status).toBe(503)
     expect(response.headers.get("cache-control")).toBe("no-store")
   })
+
+  test(
+    "aborts the upstream fetch when the incoming request aborts before headers",
+    async () => {
+      let seenSignal: AbortSignal | null | undefined
+      inferenceImpl = async (_request, init) => {
+        seenSignal = init?.signal
+        return new Promise<Response>((_resolve, reject) => {
+          const aborted = () => reject(new DOMException("aborted", "AbortError"))
+          if (init?.signal?.aborted) return aborted()
+          init?.signal?.addEventListener("abort", aborted)
+        })
+      }
+      const client = new AbortController()
+      const started = Date.now()
+      const pending = proxyInference(abortableRequest(client.signal))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      client.abort()
+      const response = await pending
+      expect(seenSignal).toBeInstanceOf(AbortSignal)
+      expect(seenSignal?.aborted).toBe(true)
+      expect(response.status).toBe(503)
+      // The incoming abort, not the 8s headers deadline, settled the fetch.
+      expect(Date.now() - started).toBeLessThan(INFERENCE_HEADERS_TIMEOUT_MS - 1_000)
+    },
+    INFERENCE_HEADERS_TIMEOUT_MS + 5_000,
+  )
 
   test("proxies a healthy upstream response unchanged", async () => {
     inferenceImpl = async () =>

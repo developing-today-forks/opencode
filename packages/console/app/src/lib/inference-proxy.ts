@@ -66,8 +66,14 @@ export async function proxyInference(request: Request) {
   const headersTimeoutMs =
     request.method === "GET" ? INFERENCE_HEADERS_TIMEOUT_MS : INFERENCE_GENERATION_HEADERS_TIMEOUT_MS
   const headersTimer = setTimeout(() => controller.abort(), headersTimeoutMs)
+  // An explicit init.signal replaces the signal a Request inherits, so passing
+  // only the headers-deadline controller dropped the client-disconnect
+  // cancellation the bare `.fetch(forwarded)` had (#1475). Compose both: an
+  // incoming abort still cancels the upstream call, and the headers timer
+  // still bounds a pre-headers stall.
+  const abortSignal = AbortSignal.any([forwarded.signal, controller.signal])
   const response = await (Resource.INFERENCE as { fetch: typeof fetch })
-    .fetch(forwarded, { redirect: "manual", signal: controller.signal })
+    .fetch(forwarded, { redirect: "manual", signal: abortSignal })
     .catch(() => undefined)
     .finally(() => clearTimeout(headersTimer))
   if (!response)
