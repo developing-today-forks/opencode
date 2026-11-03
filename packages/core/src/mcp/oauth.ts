@@ -23,6 +23,7 @@ import { Credential } from "../credential.js"
 import { OauthCallbackPage } from "../oauth/page.js"
 import type { Integration } from "../integration.js"
 import { ErrorSummary } from "../util/error-summary.js"
+import { serverSeconds } from "../util/number.js"
 import { readBoundedResponseText } from "../tool/http-body.js"
 
 /**
@@ -271,21 +272,6 @@ export const memoryStore = (): Store => {
 export const clientFromCredential = (credential: Credential.OAuth) =>
   credential.metadata?.client as StoredOAuthClientInformation | undefined
 
-/** Upper bound on a stored credential's lifetime, in seconds (30 days). A
- * millisecond-confused `expires_in` (e.g. 7_200_000 for a 2h token) would
- * otherwise store an ~83-day expiry, disabling refresh while the real token is
- * long dead (#885). */
-const MAX_EXPIRES_IN_SECONDS = 30 * 24 * 60 * 60
-
-/** Server-supplied `expires_in` seconds, validated before it becomes a stored
- * expiry (#885). A non-finite or non-positive value must not fabricate a
- * past expiry, so it collapses to 0 (the SDK's non-expiring sentinel); a value
- * beyond {@link MAX_EXPIRES_IN_SECONDS} is clamped to it. */
-const expiresInSeconds = (value: number | undefined): number => {
-  const seconds = Number(value)
-  if (!Number.isFinite(seconds) || seconds <= 0) return 0
-  return Math.min(seconds, MAX_EXPIRES_IN_SECONDS)
-}
 
 export const toCredential = (input: {
   readonly methodID: Integration.MethodID
@@ -293,7 +279,17 @@ export const toCredential = (input: {
   readonly tokens: StoredOAuthTokens
   readonly client: StoredOAuthClientInformation | undefined
 }) => {
-  const expiresIn = expiresInSeconds(input.tokens.expires_in)
+  // Server-supplied `expires_in` seconds, validated before it becomes a stored
+  // expiry (#885, #994): a non-finite or non-positive value must not fabricate a
+  // past expiry, so it collapses to 0 (the SDK's non-expiring sentinel); a
+  // millisecond-confused value beyond 30 days (e.g. 7_200_000 for a 2h token,
+  // an ~83-day stored expiry) is CLAMPED to 30 days, never to the fallback -
+  // the fallback here is 0, which would make the credential non-expiring.
+  const expiresIn = serverSeconds(input.tokens.expires_in, {
+    fallback: 0,
+    max: 30 * 24 * 60 * 60,
+    oversized: "clamp",
+  })
   return Credential.OAuth.make({
     type: "oauth",
     methodID: input.methodID,
