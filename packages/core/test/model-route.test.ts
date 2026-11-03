@@ -2781,4 +2781,82 @@ describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
     expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(true)
     ModelRoute.resetHealth()
   })
+
+  test("due bench probes do not pull their pool; claimed and not-yet-due benches still do (#1390)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30_000
+    const knownFullFor = (leaf: { providerID: string }, at: number, observedAt: number) => ({
+      planID: "plan",
+      window: "five-hours",
+      providerID: leaf.providerID,
+      percent: 100,
+      remaining: 0,
+      resetAt: at,
+      observedAt,
+      stale: false,
+    })
+
+    // Two distinct leaves answering quota pulls the pool.
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+
+    // A trustworthy window reset learned after the benches arms their half-open probes.
+    ModelRoute.observeProviderQuota(leaves[0], knownFullFor(leaves[0], resetAt, now + 10), now + 10)
+    ModelRoute.observeProviderQuota(leaves[1], knownFullFor(leaves[1], resetAt + 30_000, now + 10), now + 10)
+
+    // Before the reset no probe is due, so the pool exclusion still applies.
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt - 1)).toBe(false)
+    expect(ModelRoute.probeDue(leaves[1], undefined, resetAt - 1)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt - 1)).toBe(true)
+
+    // Once one reset passes, that due probe stays benched for ordinary candidacy but no
+    // longer counts toward the pool threshold, so the recovery path can run.
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(leaves[1], undefined, resetAt)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(false)
+
+    // A claimed probe counts again, alongside the other not-yet-due bench, so the pool
+    // exclusion applies while the half-open attempt is outstanding.
+    expect(ModelRoute.claimBenchProbe(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
+  test("a due probe behind an independent quota gate still counts toward its pool (#1390, Codex PR #1473)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30_000
+    const knownFullFor = (leaf: { providerID: string }, at: number, observedAt: number) => ({
+      planID: "plan",
+      window: "five-hours",
+      providerID: leaf.providerID,
+      percent: 100,
+      remaining: 0,
+      resetAt: at,
+      observedAt,
+      stale: false,
+    })
+
+    // Two distinct leaves answering quota pulls the pool.
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
+
+    // leaf0's bench learns the earlier reset, arming its probe; at the reset the
+    // ungated due probe is carved out and the pool verdict lifts.
+    ModelRoute.observeProviderQuota(leaves[0], knownFullFor(leaves[0], resetAt, now + 10), now + 10)
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(false)
+
+    // A fresher known-full snapshot gates leaf0's provider until a later reset.
+    // The bench keeps its earliest reset, so the probe is still due -- but the
+    // independent gate blocks recovery, so the leaf counts toward the pool again.
+    ModelRoute.observeProviderQuota(leaves[0], knownFullFor(leaves[0], resetAt + 60_000, resetAt + 10), resetAt + 10)
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt + 10)).toBe(true)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 10)).toBe(true)
+    ModelRoute.resetHealth()
+  })
 })
