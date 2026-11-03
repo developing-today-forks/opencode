@@ -26,8 +26,6 @@ import type { CompletionInput } from "./generate.js"
 import { Model } from "./model.js"
 import { randomBytes } from "node:crypto"
 
-export const ADVERTISED_MODELS = ["workhorse", "speed", "specialist", "summit", "scout", "workhorse-weighted"]
-
 export const completionId = () => `chatcmpl-${randomBytes(12).toString("hex")}`
 
 export const DONE_FRAME = "data: [DONE]\n\n"
@@ -269,10 +267,23 @@ export const completionBody = (args: {
   }
 }
 
-export const modelsBody = () => ({
+/**
+ * The /v1/models list. The route entries are supplied by the caller
+ * (the server handler), derived from the Location's configured
+ * model_routes — the same route definitions the resolver serves, as
+ * they appear in the catalog under the opencode-route provider —
+ * never a hardcoded list here (#1413, design §2): a configured,
+ * resolvable route is advertised (persona routes included), and a
+ * route that is not configured is not, so enumerating callers (e.g.
+ * the OpenClaw heartbeat lifeline probe) discover exactly the routes
+ * they can actually use. The entry shape is unchanged: the bare route
+ * id with owned_by "opencode-route"; callers address the same route
+ * as `opencode-route/<route-id>` (see modelBody).
+ */
+export const modelsBody = (routes: readonly string[]) => ({
   object: "list",
   data: [
-    ...ADVERTISED_MODELS.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
+    ...routes.map((id) => ({ id, object: "model", created: 0, owned_by: "opencode-route" })),
     // The systemone family's Clef models (#1410): the door's static
     // floor, advertised so a caller browsing /v1/models finds the
     // models POST /v1/systemone serves. The door additionally serves
@@ -287,21 +298,23 @@ export const modelsBody = () => ({
 /**
  * One model by the id a caller names, in the same shape as a modelsBody
  * entry, or undefined when the door does not serve that id. Route models
- * are the finite advertised set: they answer to both the bare id the list
- * carries (`workhorse`) and the prefixed ref callers use as a completion
- * model (`opencode-route/workhorse`, answered with that id). Any other
- * `provider/model` ref is a concrete catalog model: the door serves those
- * by pass-through (parseChatRequest accepts any such ref and resolution
- * happens at completion time), so the entry is echoed with the provider
- * as owner. Bare names that are not advertised routes and malformed refs
- * are unknown.
+ * are the configured set the caller supplies (the same set modelsBody
+ * advertises, so the list and the single-model lookup always agree):
+ * they answer to both the bare id the list carries (`workhorse`) and
+ * the prefixed ref callers use as a completion model
+ * (`opencode-route/workhorse`, answered with that id). Any other
+ * `provider/model` ref is a concrete catalog model: the door serves
+ * those by pass-through (parseChatRequest accepts any such ref and
+ * resolution happens at completion time), so the entry is echoed with
+ * the provider as owner. Bare names that are not configured routes and
+ * malformed refs are unknown.
  */
-export const modelBody = (id: string) => {
-  const listed = modelsBody().data.find((model) => model.id === id)
+export const modelBody = (id: string, routes: readonly string[]) => {
+  const listed = modelsBody(routes).data.find((model) => model.id === id)
   if (listed) return listed
   if (id.startsWith("opencode-route/")) {
     const route = id.slice("opencode-route/".length)
-    const entry = modelsBody().data.find((model) => model.id === route)
+    const entry = modelsBody(routes).data.find((model) => model.id === route)
     return entry ? { ...entry, id } : undefined
   }
   const slash = id.indexOf("/")

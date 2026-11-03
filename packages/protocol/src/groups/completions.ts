@@ -82,11 +82,12 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
   .add(
     HttpApiEndpoint.get("completions.models", "/v1/models", {
       success: Schema.Unknown,
+      error: [ServiceUnavailableError, LocationNotFoundError],
     }).annotateMerge(
       OpenApi.annotations({
         identifier: "completions.models",
         summary: "List completion models (OpenAI-compatible)",
-        description: "The route models the completions door serves, in the OpenAI models-list wire format.",
+        description: "The models the completions door serves, in the OpenAI models-list wire format: one entry per configured model route (derived from the Location's model_routes, #1413), the systemone family's Clef floor, and the registered embedding models.",
       }),
     ),
   )
@@ -98,6 +99,7 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
     HttpApiEndpoint.get("completions.model", "/v1/models/:id", {
       params: { id: Schema.String },
       success: Schema.Unknown,
+      error: [ServiceUnavailableError, LocationNotFoundError],
     }).annotateMerge(
       OpenApi.annotations({
         identifier: "completions.model",
@@ -116,6 +118,7 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
     HttpApiEndpoint.get("completions.modelRef", "/v1/models/:provider/:model", {
       params: { provider: Schema.String, model: Schema.String },
       success: Schema.Unknown,
+      error: [ServiceUnavailableError, LocationNotFoundError],
     }).annotateMerge(
       OpenApi.annotations({
         identifier: "completions.modelRef",
