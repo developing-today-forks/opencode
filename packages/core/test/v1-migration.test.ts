@@ -230,6 +230,30 @@ describe("V1Migration.transformSession", () => {
     ])
   })
 
+  test("keeps valid binary percent-escapes in non-base64 data URLs as bytes (#1529)", () => {
+    const message = user("msg_000000000054aaaaaaaaaaaaaa")
+    const result = transform(
+      [message],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, {
+          type: "file",
+          mime: "application/octet-stream",
+          url: "data:application/octet-stream,%FF%00%41",
+        }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain,caf%C3%A9 %E2%82%AC" }),
+      ],
+    )
+
+    // %FF%00%41 is stored as exactly those bytes (base64 /wBB), not dropped
+    // as an invalid data URL; valid UTF-8 escapes and literals round-trip.
+    expect(result.messages[0].data.files).toEqual([
+      { data: "/wBB", mime: "application/octet-stream", source: { type: "inline" } },
+      { data: Buffer.from("caf\u00e9 \u20ac", "utf8").toString("base64"), mime: "text/plain", source: { type: "inline" } },
+    ])
+    expect(result.warnings).toEqual([])
+  })
+
   test("rejects malformed base64 data URLs with a warning instead of storing stripped garbage (#1360)", () => {
     const message = user("msg_000000000052aaaaaaaaaaaaaa")
     const result = transform(
