@@ -16,7 +16,14 @@ export const CreateInput = Schema.Struct({
     description:
       "Parent directory for the new worktree. Uses the project's canonical configuration, then defaults to the server's data directory under worktree/<first six project ID characters>.",
   }),
-  name: optional(Schema.String),
+  // A single path segment: never empty, "." or "..", and no "/" or "\\" — the
+  // service enforces the same contract for callers that bypass this schema (#1004).
+  name: optional(
+    Schema.Trim.pipe(
+      Schema.check(Schema.isNonEmpty()),
+      Schema.check(Schema.isPattern(/^(?!\.{1,2}$)[^/\\\u0000]+$/u)),
+    ),
+  ),
 }).annotate({ identifier: "Worktree.CreateInput" })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 
