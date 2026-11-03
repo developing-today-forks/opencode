@@ -153,6 +153,136 @@ it.effect("convertSchema ports the door's proto-schema rules", () =>
   }),
 )
 
+it.effect("convertSchema synthesizes items for bare array schemas (#1548)", () =>
+  Effect.sync(() => {
+    // The live failure: a tool property declared {type: "array"} with no
+    // items (legal JSON Schema — unconstrained elements). The proto
+    // validator rejects an ARRAY schema without items
+    // ("properties[paths].items: missing field"), so conversion
+    // synthesizes an unconstrained items.
+    expect(
+      convertSchema({
+        type: "object",
+        properties: { paths: { type: "array", description: "paths to collect" } },
+        required: ["paths"],
+      } as never),
+    ).toEqual({
+      type: "OBJECT",
+      properties: { paths: { type: "ARRAY", description: "paths to collect", items: {} } },
+      required: ["paths"],
+    })
+    // A nullable array union collapses to ARRAY + nullable and still
+    // gets its items.
+    expect(convertSchema({ type: ["array", "null"] } as never)).toEqual({
+      type: "ARRAY",
+      nullable: true,
+      items: {},
+    })
+    // Nested positions are covered by the same recursion: an array
+    // inside anyOf, and an array of arrays.
+    expect(
+      convertSchema({
+        type: "object",
+        properties: {
+          choice: { anyOf: [{ type: "array" }, { type: "string" }] },
+          matrix: { type: "array", items: { type: "array" } },
+        },
+      } as never),
+    ).toEqual({
+      type: "OBJECT",
+      properties: {
+        choice: { anyOf: [{ type: "ARRAY", items: {} }, { type: "STRING" }] },
+        matrix: { type: "ARRAY", items: { type: "ARRAY", items: {} } },
+      },
+    })
+    // An explicit items schema is never overwritten.
+    expect(convertSchema({ type: "array", items: { type: "string" } })).toEqual({
+      type: "ARRAY",
+      items: { type: "STRING" },
+    })
+    // Invariant sweep over the tricky shapes real tool sets carry:
+    // after conversion no ARRAY node anywhere lacks both items and
+    // prefixItems — the proto rejects that shape.
+    const assertArraysCarryItems = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(assertArraysCarryItems)
+      if (typeof node !== "object" || node === null) return
+      const record = node as Record<string, unknown>
+      if (record.type === "ARRAY")
+        expect(record.items !== undefined || record.prefixItems !== undefined).toBe(true)
+      Object.values(record).forEach(assertArraysCarryItems)
+    }
+    const shapes = [
+      { type: "object", properties: { paths: { type: "array" } } },
+      { type: "array", items: [{ type: "string" }, { type: "number" }] },
+      { type: "array", items: { type: "array", items: { type: "array" } } },
+      { type: "object", additionalProperties: { type: "string" } },
+      { anyOf: [{ type: "array" }, { type: "object", properties: { xs: { type: "array" } } }] },
+      {
+        type: "object",
+        $defs: { row: { type: "array" } },
+        properties: { rows: { type: "array", items: { $ref: "#/$defs/row" } } },
+      },
+    ]
+    for (const shape of shapes) assertArraysCarryItems(convertSchema(shape as never))
+  }),
+)
+
+it.effect("convertSchema folds anyOf to oneOf for Anthropic targets (#1550)", () =>
+  Effect.sync(() => {
+    // The live failure: for Claude models the upstream re-serializes the
+    // proto Schema into an Anthropic input_schema whose validator rejects
+    // anyOf outright ("tools.N.custom.input_schema: JSON schema is
+    // invalid. It must match JSON Schema draft 2020-12"), which 400'd
+    // workhorse sessions on antigravity-direct/claude-sonnet-5-5 all day
+    // 2026-11-03. With the anthropic flag the same shapes emit oneOf.
+    const unioned = {
+      type: "object",
+      properties: {
+        nullable_note: { anyOf: [{ type: "string" }, { type: "null" }] },
+        either: { anyOf: [{ type: "string" }, { type: "number" }] },
+        listed: { type: "array", items: { anyOf: [{ type: "string" }, { type: "boolean" }] } },
+        pick: { oneOf: [{ type: "string" }, { type: "number" }] },
+      },
+    }
+    expect(convertSchema(unioned as never, true)).toEqual({
+      type: "OBJECT",
+      properties: {
+        nullable_note: { oneOf: [{ type: "STRING" }, { type: "NULL" }] },
+        either: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+        listed: { type: "ARRAY", items: { oneOf: [{ type: "STRING" }, { type: "BOOLEAN" }] } },
+        pick: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+      },
+    })
+    // The Gemini default keeps anyOf verbatim — the fold is Claude-only.
+    expect(convertSchema(unioned as never)).toEqual({
+      type: "OBJECT",
+      properties: {
+        nullable_note: { anyOf: [{ type: "STRING" }, { type: "NULL" }] },
+        either: { anyOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+        listed: { type: "ARRAY", items: { anyOf: [{ type: "STRING" }, { type: "BOOLEAN" }] } },
+        pick: { oneOf: [{ type: "STRING" }, { type: "NUMBER" }] },
+      },
+    })
+    // Invariant sweep: with the anthropic flag, no node anywhere in the
+    // converted output carries anyOf — Anthropic rejects it in any
+    // position.
+    const assertNoAnyOf = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(assertNoAnyOf)
+      if (typeof node !== "object" || node === null) return
+      const record = node as Record<string, unknown>
+      expect("anyOf" in record).toBe(false)
+      Object.values(record).forEach(assertNoAnyOf)
+    }
+    const shapes = [
+      unioned,
+      { anyOf: [{ type: "string" }] },
+      { type: "object", properties: { deep: { not: { anyOf: [{ type: "integer" }, { type: "null" }] } } } },
+      { allOf: [{ anyOf: [{ type: "string" }, { type: "number" }] }] },
+    ]
+    for (const shape of shapes) assertNoAnyOf(convertSchema(shape as never, true))
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
@@ -181,6 +311,43 @@ it.effect("Antigravity lowers tool results as proto Structs, exactly like the do
       .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
       .find((part) => "functionCall" in part) as Record<string, never>
     expect(firstCall.thoughtSignature).toBe("skip_thought_signature_validator")
+  }),
+)
+
+it.effect("Antigravity history tool calls carry their ids for Claude targets only (#1550)", () =>
+  Effect.gen(function* () {
+    // For Claude models the upstream's v1internal->Anthropic conversion
+    // emits a tool_use per history functionCall and a tool_result per
+    // functionResponse, and Anthropic requires both ids
+    // ("messages.N.content.M.tool_use.id: Field required", then
+    // "tool_result.tool_use_id: Field required"), which 400'd every
+    // Claude session continuation carrying a tool call. The lowering
+    // must carry the parts' ids for Claude targets and stay id-less
+    // for Gemini, exactly like the door.
+    const history = [
+      Message.user("weather?"),
+      Message.assistant([ToolCallPart.make({ id: "call_1", name: "get_weather", input: { city: "Oslo" } })]),
+      Message.tool({ id: "call_1", name: "get_weather", result: '{"temp": 3}', resultType: "text" }),
+      Message.user("thanks"),
+    ]
+    const partsOf = (body: Record<string, never>) =>
+      ((body.request as Record<string, never>).contents as ReadonlyArray<Record<string, never>>).flatMap(
+        (content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [],
+      )
+    const claudeModel = Antigravity.configure({ accessToken: "fixture-token" }).model("claude-sonnet-5-5")
+    const claudeCompiled = yield* compileRequest(LLM.request({ model: claudeModel, messages: history }))
+    const claudeParts = partsOf(claudeCompiled.body as Record<string, never>)
+    const claudeCall = claudeParts.find((part) => "functionCall" in part) as Record<string, never>
+    const claudeResp = claudeParts.find((part) => "functionResponse" in part) as Record<string, never>
+    expect((claudeCall.functionCall as Record<string, never>).id).toBe("call_1")
+    expect((claudeResp.functionResponse as Record<string, never>).id).toBe("call_1")
+
+    const geminiCompiled = yield* compileRequest(LLM.request({ model, messages: history }))
+    const geminiParts = partsOf(geminiCompiled.body as Record<string, never>)
+    const geminiCall = geminiParts.find((part) => "functionCall" in part) as Record<string, never>
+    const geminiResp = geminiParts.find((part) => "functionResponse" in part) as Record<string, never>
+    expect("id" in (geminiCall.functionCall as Record<string, never>)).toBe(false)
+    expect("id" in (geminiResp.functionResponse as Record<string, never>)).toBe(false)
   }),
 )
 

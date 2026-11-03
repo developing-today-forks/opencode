@@ -2,7 +2,7 @@ import os from "os"
 import { App } from "../../app.js"
 import { expiresInSeconds } from "./expires.js"
 import { Clock, Deferred, Effect, Exit, Option, Schema, Semaphore, Stream } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import type { Server, ServerResponse } from "node:http"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Form } from "@opencode/schema/form"
@@ -14,6 +14,7 @@ import { IntegrationConnection } from "../../integration/connection.js"
 import { Model } from "../../model.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
+import { collectBoundedResponseBody } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 
 const providerID = Provider.ID.gitlab
@@ -29,6 +30,10 @@ const bundledClientID = "fd180700a8f9c5d5557aca231632dd0611a1135a3bb510a741d5a98
 const legacyClientID = "1d89f9fdb23ee96d4e603201f6861dab6e143c5c3c00469a018a2d94bdc03d4e"
 const gitlabComHost = "gitlab.com"
 const oauthScope = "api"
+/** Cap on OAuth token/error response bodies (#1029): a token response is a few hundred bytes;
+ * a misbehaving or malicious instance must not stream unbounded data into login or refresh.
+ * Mirrors the #1026 bound the native-fetch providers apply via readBoundedResponseText. */
+export const oauthMaxResponseBytes = 64 * 1024
 const callbackHost = "127.0.0.1"
 const callbackPort = 8080
 const redirectURI = `http://${callbackHost}:${callbackPort}/callback`
@@ -412,12 +417,33 @@ function exchange(
       )
       .pipe(Effect.mapError(() => new Error("GitLab token exchange request failed")))
     if (response.status < 200 || response.status >= 300) {
-      const parsed = Option.getOrUndefined(decodeError(yield* response.text.pipe(Effect.orElseSucceed(() => ""))))
+      // Bounded read (#1029): collect the error body under the cap first, then decode the
+      // bounded bytes; an over-cap body reads as empty and the status line carries the failure.
+      const text = yield* Effect.scoped(
+        collectBoundedResponseBody(
+          response,
+          oauthMaxResponseBytes,
+          () => new Error(`GitLab token error response exceeded ${oauthMaxResponseBytes} bytes`),
+        ),
+      ).pipe(
+        Effect.map((body) => body.toString("utf8")),
+        Effect.orElseSucceed(() => ""),
+      )
+      const parsed = Option.getOrUndefined(decodeError(text))
       const detail = parsed?.error_description || parsed?.error || `HTTP ${response.status}`
       const rejected = parsed?.error === "invalid_grant" || parsed?.error === "invalid_client"
       return yield* Effect.fail(new Error(rejected ? describe(detail, clientID) : detail))
     }
-    return yield* HttpClientResponse.schemaBodyJson(Token)(response).pipe(
+    // Bounded read (#1029): collect the token body under the cap first, then decode the
+    // bounded bytes instead of schemaBodyJson on the raw response.
+    const raw = yield* Effect.scoped(
+      collectBoundedResponseBody(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`GitLab token response exceeded ${oauthMaxResponseBytes} bytes`),
+      ),
+    )
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Token))(raw.toString("utf8")).pipe(
       Effect.mapError(() => new Error("Invalid GitLab token response")),
     )
   })

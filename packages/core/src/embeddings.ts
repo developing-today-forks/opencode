@@ -13,6 +13,15 @@ export * as Embeddings from "./embeddings.js"
  * adding a registration; its dimension comes from the registration,
  * never from an assumption in this layer.
  *
+ * A registration also names its backend kind. The HTTP kind (the
+ * default, and the only kind the translation above describes) is
+ * served by an OpenAI-compatible sidecar; the native-onnx kind
+ * (#1554) runs the model's ONNX graph in this process instead (see
+ * embeddings-native.ts). The kinds are interchangeable to every
+ * layer above the service: same parse, same response shape, same
+ * ledger row. A registration flips kind deliberately, never by
+ * default.
+ *
  * Backends speak the OpenAI embeddings shape over HTTP, exactly like
  * the messaging embedding client: the service POSTs to
  * `<baseURL>/embeddings` and validates what comes back (count, order,
@@ -39,7 +48,34 @@ import { HttpClient, HttpClientRequest } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { ModelRouteLog } from "./model-route-log.js"
+import { embedNative } from "./embeddings-native.js"
 import { collectBoundedResponseBody } from "./tool/http-body.js"
+
+/** HTTP backend: the service POSTs the OpenAI embeddings shape to
+ * the registration's `baseURL` (a sidecar process). The default for
+ * every registration that names no backend. */
+export interface HttpEmbeddingBackend {
+  readonly kind: "http"
+}
+
+/** Native in-process backend (#1554): the server runs the model's
+ * ONNX graph itself — no sidecar, no HTTP hop. The snapshot is an
+ * HF model snapshot directory (tokenizer.json + the ONNX graph);
+ * loaded lazily on the first embed call, never at boot. */
+export interface NativeOnnxEmbeddingBackend {
+  readonly kind: "native-onnx"
+  /** HF snapshot directory holding `tokenizer.json` and the ONNX graph. */
+  readonly snapshotDir?: string
+  /** Environment variable that overrides `snapshotDir` when set. */
+  readonly snapshotEnv?: string
+  /** ONNX graph file inside the snapshot. Defaults to "onnx/model_int8.onnx". */
+  readonly onnxFile?: string
+  /** The model's token context. Longer inputs are rejected loudly by
+   * the backend, never silently truncated. */
+  readonly maxTokens: number
+}
+
+export type EmbeddingBackend = HttpEmbeddingBackend | NativeOnnxEmbeddingBackend
 
 export interface EmbeddingModel {
   /** Catalog ref the caller addresses: `provider/model`. */
@@ -58,6 +94,11 @@ export interface EmbeddingModel {
   /** Environment variable holding the backend's bearer key, when it needs one. */
   readonly apiKeyEnv?: string
   readonly ownedBy: string
+  /** Which backend serves this registration. Absent = the HTTP
+   * backend: every existing registration keeps its current behavior.
+   * The native in-process backend (#1554, step 2) becomes a
+   * registration's backend only by a deliberate flip (step 3). */
+  readonly backend?: EmbeddingBackend
 }
 
 /**
@@ -249,6 +290,27 @@ export const layer = Layer.effect(
         })
         const result = yield* Effect.result(
           Effect.gen(function* () {
+            if (input.model.backend?.kind === "native-onnx") {
+              const native = yield* Effect.tryPromise({
+                try: () =>
+                  embedNative({
+                    backend: input.model.backend as NativeOnnxEmbeddingBackend,
+                    inputs: input.inputs,
+                    ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
+                    nativeDimensions: input.model.dimensions,
+                  }),
+                catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+              })
+              const expected = input.dimensions ?? input.model.dimensions
+              for (const vector of native.vectors)
+                if (vector.length !== expected)
+                  return yield* Effect.fail(
+                    new Error(
+                      `embedding backend returned a ${vector.length}-dimensional vector for ${input.model.ref}; expected ${expected}`,
+                    ),
+                  )
+              return native
+            }
             const baseURL = (
               (input.model.baseURLEnv ? process.env[input.model.baseURLEnv] : undefined) ?? input.model.baseURL
             ).replace(/\/+$/, "")

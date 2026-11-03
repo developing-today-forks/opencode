@@ -23,6 +23,8 @@ import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { App } from "@opencode/core/app"
 import { Agent } from "@opencode/core/agent"
+import { Model } from "@opencode/core/model"
+import { ModelRoute } from "@opencode/core/model-route"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Money } from "@opencode/schema/money"
@@ -657,5 +659,92 @@ it.effect("forked session compaction reuses the fork root prompt cache key", () 
 
     expect(requests).toHaveLength(1)
     expect(requests[0]?.promptCacheKey).toBe(rootID)
+  }),
+)
+
+let claimedCompactionModel: SessionRunnerModel.Resolved | undefined
+const claimModels = Layer.mock(SessionRunnerModel.Service)({
+  resolve: () => Effect.succeed(claimedCompactionModel ?? resolved),
+})
+const itClaim = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      Bus.node,
+      Agent.node,
+      SessionProjector.node,
+      SessionStore.node,
+      SessionCompaction.node,
+      SessionModelRequest.node,
+      PluginHooks.node,
+    ]),
+    [
+      Bus.node.replace(Bus.configured({ persist: true })),
+      llmClient.replace(client),
+      Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+      SessionRunnerModel.node.replace(claimModels),
+    ],
+  ),
+)
+
+itClaim.live("manual compaction releases a fresh resolution's probe claim on nothing-to-compact (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    requests = []
+    const target = ModelRoute.ref({ providerID: "test", model: "summary-model" })
+    const policy = ModelRoute.policy()
+    const now = Date.now()
+    for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, now + index, { quota: true })
+    const resetAt = now + 250
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    yield* Effect.sleep("400 millis")
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    // The compaction agent resolves a different model, spending the bench's probe claim.
+    const claimedAt = Date.now()
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)).toBe(true)
+    claimedCompactionModel = SessionRunnerModel.resolved(model, {
+      capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+      cost,
+      limit: { context: 200_000, output: 32_000 },
+      routing: {
+        routeID: Model.ID.make("compaction-route"),
+        target,
+        policy,
+        attempts: 1,
+        fallback: () => Effect.succeed(undefined),
+        probeClaim: { claimedAt, token },
+      },
+    })
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) => {
+      editor.update(Agent.ID.make("compaction"), (agent) => {
+        agent.model = Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make("other-model") })
+      })
+    })
+    const session = yield* insertSession(Session.ID.make("ses_compaction_probe_release"))
+    expect(yield* compactManually(session, [])).toEqual({
+      status: "failed",
+      error: { type: "compaction.unavailable", message: "Nothing to compact yet" },
+    })
+    claimedCompactionModel = undefined
+    expect(requests).toHaveLength(0)
+    // The bench stands, but the probe is due again instead of stranded behind the claim.
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now())
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    ModelRoute.resetHealth()
   }),
 )

@@ -232,6 +232,19 @@ export const layer = Layer.effect(
         trigger.reason === "overflow" ? Math.min(cap, Math.floor(estimateContext(context) * SHRINK_STEPS[0])) : cap
 
       const selected = model === context.model ? trigger : { ...trigger, context: { ...context, model } }
+      // A compaction that resolves its own model spends that pick's probe claim (#1486), but
+      // compaction never settles health — success or failure here is not target evidence the
+      // way a runner attempt is — so the claim is handed back on every exit instead of
+      // settling. Attempted requests release rather than settle for the same reason: ending
+      // or renewing a bench from a summary request would change routing behavior beyond
+      // this fix. The release is token-guarded, so it no-ops when there is no claim.
+      const releaseFreshClaim = Effect.sync(() => {
+        const claim = model !== context.model ? model.routing?.probeClaim : undefined
+        if (!claim || !model.routing) return
+        ModelRoute.releaseBenchProbe(model.routing.target, undefined, claim.claimedAt, claim.token)
+        if (claim.credentialID)
+          ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+      })
       const compaction = native
         ? compactNatively(selected, budget, settings.keep)
         : summarize(selected, budget, settings.keep)
@@ -240,6 +253,7 @@ export const layer = Layer.effect(
           onSuccess: (result) => publish(selected, result),
           onFailure: (failure) => publish(selected, failure),
         }),
+        Effect.ensuring(releaseFreshClaim),
       )
     })
 

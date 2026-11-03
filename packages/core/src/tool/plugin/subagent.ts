@@ -91,7 +91,9 @@ export const Plugin = {
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const aliases = Config.latest(yield* config.entries(), "aliases")
-      const availableModels = yield* models.available()
+      // An explicit subagent model request is execution, not discovery (#230): a
+      // hidden model stays selectable here; only the picker list hides it.
+      const availableModels = (yield* models.all()).filter((model) => model.enabled)
       const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
         availableModels.some((m) => m.providerID === providerID && m.id === modelID)
       let resolved = input

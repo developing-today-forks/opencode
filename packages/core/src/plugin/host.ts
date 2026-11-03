@@ -262,7 +262,9 @@ export const make = Effect.fn("PluginHost.make")(function* (
         }),
     },
     model: {
-      list: () => response(models.available()),
+      // Execution-time surface (#230): prompt hooks look the executing model up
+      // here, so it serves the catalog (enabled incl. hidden), not the picker list.
+      list: () => response(models.catalog()),
       default: () => response(models.default()),
       reload: models.reload,
       transform: (callback) =>

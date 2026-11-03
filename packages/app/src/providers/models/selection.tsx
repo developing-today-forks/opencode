@@ -187,7 +187,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     const defaultModel = () => {
       for (const provider of providers.connected()) {
-        const first = Object.values(provider.models)[0]
+        // Implicit default (#230): prefer the first non-hidden model; a hidden
+        // model is only ever an explicit selection.
+        const values = Object.values(provider.models)
+        const first = values.find((item) => !item.hidden) ?? values[0]
 
         if (!first) continue
         const model = { providerID: provider.id, modelID: first.id }

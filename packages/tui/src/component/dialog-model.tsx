@@ -69,6 +69,21 @@ export function DialogModel(props: { providerID?: string }) {
       models()
         .filter((model) => model.status !== "deprecated")
         .filter((model) => (props.providerID ? model.providerID === props.providerID : true))
+        // Hidden models (#230) are absent from the picker unless the search is
+        // the model's exact full name; favorites/recents above are explicit
+        // user choices and keep working either way.
+        .filter((model) => {
+          if (!model.hidden) return true
+          const search = needle.toLowerCase()
+          if (!search) return false
+          const provider = providers().get(model.providerID)
+          return [
+            model.name.toLowerCase(),
+            String(model.id).toLowerCase(),
+            `${model.providerID}/${model.id}`.toLowerCase(),
+            `${provider?.name ?? model.providerID}/${model.name}`.toLowerCase(),
+          ].includes(search)
+        })
         .map((model) => {
           const provider = providers().get(model.providerID)
           const key = modelPreferenceKey({ providerID: model.providerID, modelID: model.id })
@@ -77,6 +92,11 @@ export function DialogModel(props: { providerID?: string }) {
             value: { providerID: model.providerID, modelID: model.id },
             providerID: model.providerID,
             providerName: provider?.name ?? model.providerID,
+            // The full reference is a fuzzy key too (#230): an exact-name search
+            // for a hidden model (`provider/model`) must survive this stage,
+            // not just the hidden filter above.
+            reference: `${model.providerID}/${model.id}`,
+            qualifiedName: `${provider?.name ?? model.providerID}/${model.name}`,
             title: model.name,
             releaseDate: model.time.released,
             description: favorite ? "(Favorite)" : undefined,
@@ -107,7 +127,9 @@ export function DialogModel(props: { providerID?: string }) {
     if (needle) {
       return prioritizeFavorites(
         sortModelOptions(
-          fuzzysort.go(needle, modelOptions, { keys: ["title", "category"] }).map((item) => item.obj),
+          fuzzysort
+            .go(needle, modelOptions, { keys: ["title", "category", "reference", "qualifiedName"] })
+            .map((item) => item.obj),
           false,
         ),
         favoritePriority,

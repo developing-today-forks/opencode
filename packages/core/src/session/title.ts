@@ -56,8 +56,8 @@ export const layer = Layer.effect(
     const releaseProbeClaim = (model: SessionRunnerModel.Resolved) => {
       const claim = model.routing?.probeClaim
       if (!claim || !model.routing) return
-      ModelRoute.releaseBenchProbe(model.routing.target, undefined, claim.claimedAt)
-      if (claim.credentialID) ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt)
+      ModelRoute.releaseBenchProbe(model.routing.target, undefined, claim.claimedAt, claim.token)
+      if (claim.credentialID) ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
     }
 
     const attempt = Effect.fn("SessionTitle.attempt")(function* (input: {
@@ -74,6 +74,41 @@ export const layer = Layer.effect(
       // count replaces this when the response reports usage.
       const promptText = [input.agent.system ?? "", input.text].join("\n")
       const estimate = Math.ceil(promptText.length / 4) || undefined
+      let error: unknown
+      let failureSource: unknown
+      let interrupted = false
+      const recordUsage = Effect.suspend(() =>
+        usage
+          ? bus.publish(SessionEvent.UsageRecorded, {
+              sessionID: input.session.id,
+              source: "title",
+              ...usage,
+            })
+          : Effect.void,
+      )
+      // Request preparation runs plugin hooks and can outlive the attempt: an interruption
+      // here never reaches the stream below, so the claim is handed back here (#1486).
+      const prepared = yield* context.request.title({
+        session: input.session,
+        agent: input.agent.id,
+        model: input.model,
+        system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
+        messages: [Message.user(input.text)],
+      }).pipe(
+        // Interruption is not the only way preparation dies: a defect skips onInterrupt,
+        // so the claim is handed back on any failed exit (#1486, review follow-up).
+        Effect.onExit((exit) =>
+          exit._tag === "Failure" ? Effect.sync(() => releaseProbeClaim(input.model)) : Effect.void,
+        ),
+      )
+      if (prepared.event.result !== undefined) {
+        // A hook supplied the title: no request executed on this model, so its probe
+        // claim (if any) goes back instead of settling.
+        releaseProbeClaim(input.model)
+        return prepared.event.result
+      }
+      // The attempt clock starts when the request is ready to send, so preparation time
+      // (plugin hooks) never lands in the health samples (#1486), mirroring the runner.
       const startedAt = Date.now()
       const observed = ModelRouteLog.observer(
         {
@@ -88,31 +123,6 @@ export const layer = Layer.effect(
         },
         (snapshot) => ModelRoute.observeRateLimit(input.model.ref, snapshot, Date.now(), input.model.routing?.credentialID),
       )
-      let error: unknown
-      let failureSource: unknown
-      let interrupted = false
-      const recordUsage = Effect.suspend(() =>
-        usage
-          ? bus.publish(SessionEvent.UsageRecorded, {
-              sessionID: input.session.id,
-              source: "title",
-              ...usage,
-            })
-          : Effect.void,
-      )
-      const prepared = yield* context.request.title({
-        session: input.session,
-        agent: input.agent.id,
-        model: input.model,
-        system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
-        messages: [Message.user(input.text)],
-      })
-      if (prepared.event.result !== undefined) {
-        // A hook supplied the title: no request executed on this model, so its probe
-        // claim (if any) goes back instead of settling.
-        releaseProbeClaim(input.model)
-        return prepared.event.result
-      }
       yield* llm.stream(prepared.request, observed.options(prepared.options)).pipe(
         Stream.runForEach((event) => {
           if (LLMEvent.is.providerError(event)) {
@@ -139,6 +149,9 @@ export const layer = Layer.effect(
         Effect.onInterrupt(() =>
           Effect.sync(() => {
             interrupted = true
+            // Interrupting the stream unwinds the attempt before the settlement below
+            // can run, so the claim is handed back here (#1486, review follow-up).
+            releaseProbeClaim(input.model)
           }).pipe(Effect.andThen(recordUsage), Effect.asVoid),
         ),
       )
@@ -171,6 +184,7 @@ export const layer = Layer.effect(
             error instanceof AIError ? SessionStep.failureHint(error) : undefined,
             routing.credentialID,
             locationDirectory,
+            routing.probeClaim,
           )
         else if (!interrupted && usage && firstTextAt !== undefined)
           ModelRoute.completed(
@@ -185,6 +199,7 @@ export const layer = Layer.effect(
             endedAt,
             routing.credentialID,
             locationDirectory,
+            routing.probeClaim,
           )
         else releaseProbeClaim(input.model)
       }

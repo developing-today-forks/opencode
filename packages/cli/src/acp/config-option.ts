@@ -29,7 +29,11 @@ export function configOptions(catalog: Catalog, selection: Selection): SessionCo
       category: "model",
       type: "select",
       currentValue: advertisedModel(model),
+      // Hidden models (#230) stay in the catalog for validation but are not
+      // advertised as picker options — except the current selection itself,
+      // which the select must be able to display.
       options: catalog.models
+        .filter((item) => !item.hidden || (item.providerID === model.providerID && item.id === model.id))
         .toSorted((a, b) => Order.String(a.providerID, b.providerID) || a.name.localeCompare(b.name))
         .map((item) => ({ value: advertisedModel(item), name: `${item.providerID}/${item.name}` })),
     },

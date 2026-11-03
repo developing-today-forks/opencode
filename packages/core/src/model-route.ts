@@ -242,7 +242,10 @@ export const ref = (target: { providerID: string; model: string; variant?: strin
 /** One target's (or one credential's) failure-health state. `benchReason` / `benchQuotaResetAt`
  * describe the bench in force: why it was planted, and the trustworthy quota window reset it is
  * bounded by when one is known (#1123). `probeClaimedAt` marks the single half-open probe a bench
- * admits at that reset while the bench itself still stands. */
+ * admits at that reset while the bench itself still stands. `probeClaimToken` is the claim's unique
+ * identity (#1486): the millisecond alone collides when a claim settles and another is spent
+ * within the same millisecond, so every spend stamps a fresh token and every settle/release
+ * lands only when its token still names the outstanding claim. */
 interface HealthState {
   samples: boolean[]
   outcomes: boolean[]
@@ -251,7 +254,15 @@ interface HealthState {
   benchReason?: string
   benchQuotaResetAt?: number
   probeClaimedAt?: number
+  probeClaimToken?: number
 }
+
+/** Monotonic identity stamped on every probe claim (#1486). Process-local like health. */
+let probeClaimSeq = 0
+
+/** Mints the identity one pick spends on the scopes it claims: a single token names every
+ * scope of the pick, so a same-millisecond re-claim after a settle can never collide. */
+export const nextProbeClaimToken = () => ++probeClaimSeq
 
 const health = new Map<string, HealthState>()
 
@@ -354,6 +365,7 @@ const recover = (
   state.benchReason = undefined
   state.benchQuotaResetAt = undefined
   state.probeClaimedAt = undefined
+  state.probeClaimToken = undefined
   // Credential expirations are tagged so restart replay ends that credential's restored
   // cooldown, never the target's (#870).
   logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired", undefined, credentialID)
@@ -463,6 +475,7 @@ const bench = (
   state.benchReason = reason
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
   state.probeClaimedAt = undefined
+  state.probeClaimToken = undefined
   logHealth(
     target,
     "cooldown-start",
@@ -504,11 +517,20 @@ export const probeDue = (target: Model.Ref, credentialID: string | undefined, no
  * outstanding the bench keeps excluding ordinary candidacy, a probe success ends the bench
  * (see completed()), and a probe failure re-benches through failed() on the escalated ladder,
  * bounded by the next known reset when there is one. A claim that never reports an outcome
- * stops mattering when the bench itself expires. */
-export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) => {
+ * stops mattering when the bench itself expires.
+ *
+ * `token` names this spend (#1486): pass one token per pick so every scope the pick claims
+ * shares the pick's identity. Omitted, a fresh token is minted for the scope. */
+export const claimBenchProbe = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  token = nextProbeClaimToken(),
+) => {
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
   if (!state || !probeDueState(state, now)) return false
   state.probeClaimedAt = now
+  state.probeClaimToken = token
   logHealth(
     target,
     "bench-probe",
@@ -521,13 +543,22 @@ export const claimBenchProbe = (target: Model.Ref, credentialID: string | undefi
 
 /** Releases a probe claim whose owner resolved the target but never attempted a request on it
  * (#1478): the bench stays in force and the probe is due again for the next real request.
- * The release only lands when `claimedAt` still names the outstanding claim, so a claim that
- * has since settled — or one a different resolution took afterwards — is never cleared by a
- * stale owner. Releasing is not an outcome: no bench ends, no failure is recorded. */
-export const releaseBenchProbe = (target: Model.Ref, credentialID: string | undefined, claimedAt: number) => {
+ * The release only lands when `claimedAt` still names the outstanding claim — and, when the
+ * owner passes the pick's `token` (#1486), when the token matches too — so a claim that
+ * has since settled, or one a different resolution took afterwards (including within the
+ * same millisecond), is never cleared by a stale owner. Releasing is not an outcome:
+ * no bench ends, no failure is recorded. */
+export const releaseBenchProbe = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  claimedAt: number,
+  token?: number,
+) => {
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
   if (!state || state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) return false
+  if (token !== undefined && state.probeClaimToken !== token) return false
   state.probeClaimedAt = undefined
+  state.probeClaimToken = undefined
   logHealth(
     target,
     "bench-probe-release",
@@ -726,6 +757,58 @@ export const poolQuotaExhausted = (
   return evidence.size >= POOL_QUOTA_LEAVES
 }
 
+/** The half-open bench probe claim a routed pick spent (#1478, #1486): the token names the
+ * pick's spend across every scope it claimed, so settlement lands only on scopes whose
+ * outstanding claim is still this pick's. The credential is the snapshot credential at pick
+ * time, which may differ from the credential that served the attempt. */
+export interface ProbeClaim {
+  readonly claimedAt: number
+  readonly token: number
+  readonly credentialID?: string
+}
+
+/** Whether this pick still owns the outstanding claim on the scope: the scope is claimed
+ * and its token is still the pick's. A settled or re-claimed scope no longer matches. */
+const probeClaimMatches = (state: HealthState | undefined, claim: ProbeClaim) =>
+  state !== undefined && state.probeClaimedAt === claim.claimedAt && state.probeClaimToken === claim.token
+
+/** Re-benches a probe scope the pick claimed when its attempt failed (#1486): the bench the
+ * probe was admitted by renews on the escalated ladder, bounded by the next known reset.
+ * Scopes the pick did not claim (or that have since settled) are left alone. */
+const benchProbeScope = (
+  target: Model.Ref,
+  policy: Policy,
+  now: number,
+  hint: FailureHint | undefined,
+  credentialID: string | undefined,
+  claim: ProbeClaim,
+  location?: string,
+) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!probeClaimMatches(state, claim) || !state) return
+  bench(
+    target,
+    state,
+    policy,
+    now,
+    hint,
+    credentialID,
+    hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
+    location,
+  )
+}
+
+/** Ends a probe scope's bench when the pick's attempt succeeded (#1486): the probe was
+ * admitted to learn whether the scope serves again, and it does. Like the release, this
+ * only lands while the scope's outstanding claim is still the pick's. */
+const endProbeScope = (target: Model.Ref, now: number, credentialID: string | undefined, claim: ProbeClaim) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (!probeClaimMatches(state, claim) || !state) return
+  state.outcomes = pushOutcome(state.outcomes, true)
+  state.consecutiveFailures = 0
+  endBench(target, state, now, credentialID)
+}
+
 export const failed = (
   target: Model.Ref,
   policy: Policy,
@@ -733,6 +816,7 @@ export const failed = (
   hint?: FailureHint,
   credentialID?: string,
   location?: string,
+  probeClaim?: ProbeClaim,
 ) => {
   // Quota, rate-limit and provider HTTP errors are not evidence of an internet outage.
   if (hint?.quota) recordQuota(target, now, credentialID)
@@ -765,9 +849,19 @@ export const failed = (
           prior.benchReason = undefined
           prior.benchQuotaResetAt = undefined
           prior.probeClaimedAt = undefined
+          prior.probeClaimToken = undefined
         }
         prior.consecutiveFailures = 0
       }
+    }
+    // The forgiveness above clears the states it can name; a probe scope of this pick it
+    // cannot (a snapshot credential that did not serve) is handed back instead of being
+    // stranded until the bench expires (#1486, review follow-up). Token-guarded: a scope
+    // forgiveness already cleared no-ops.
+    if (probeClaim) {
+      releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+      if (probeClaim.credentialID)
+        releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
     }
     logHealth(target, "network-suspect", "transport failures across unrelated providers; target cooldowns cleared")
     return
@@ -785,6 +879,14 @@ export const failed = (
       hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
       location,
     )
+    // The pick may also have claimed the target scope and a different probe credential (#1486):
+    // each renews on the same ladder while its outstanding claim is still this pick's.
+    // Serving-credential accounting above is unchanged.
+    if (probeClaim) {
+      benchProbeScope(target, policy, now, hint, undefined, probeClaim, location)
+      if (probeClaim.credentialID && probeClaim.credentialID !== credentialID)
+        benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location)
+    }
     return
   }
   bench(
@@ -797,6 +899,8 @@ export const failed = (
     hint?.quota ? quotaResetAt(target, undefined, now, location) : undefined,
     location,
   )
+  // A credential-scope claim from the same pick settles here too (#1486).
+  if (probeClaim?.credentialID) benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location)
 }
 
 /** Counts a request that was given up on for being slow, so a target that keeps losing hedges
@@ -813,6 +917,7 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now()) => {
     state.benchReason = "slow"
     state.benchQuotaResetAt = undefined
     state.probeClaimedAt = undefined
+    state.probeClaimToken = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
   }
 }
@@ -1731,6 +1836,7 @@ const endBench = (target: Model.Ref, state: HealthState, now: number, credential
   state.benchReason = undefined
   state.benchQuotaResetAt = undefined
   state.probeClaimedAt = undefined
+  state.probeClaimToken = undefined
   logHealth(
     target,
     "cooldown-end",
@@ -1747,6 +1853,7 @@ export const completed = (
   now = Date.now(),
   credentialID?: string,
   location?: string,
+  probeClaim?: ProbeClaim,
 ) => {
   // A success clears the serving credential's failure count and bench (#6); the target-level
   // accounting below is unchanged, since the target did serve the request.
@@ -1754,12 +1861,20 @@ export const completed = (
     const credentialState = credentialEntry(target, credentialID)
     credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
-    endBench(target, credentialState, now, credentialID)
+    if (!probeClaim || credentialState.probeClaimedAt === undefined || credentialState.probeClaimToken === probeClaim.token)
+      endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
-  endBench(target, state, now)
+  // A stale completion (an older pick's late success after a newer pick re-claimed) must not
+  // end the newer claim's bench (#1486): the outstanding token no longer names this pick.
+  if (!probeClaim || state.probeClaimedAt === undefined || state.probeClaimToken === probeClaim.token)
+    endBench(target, state, now)
+  // The pick may have claimed a different probe credential than the serving one (#1486):
+  // its bench ends here too, while serving-credential accounting above is unchanged.
+  if (probeClaim?.credentialID && probeClaim.credentialID !== credentialID)
+    endProbeScope(target, now, probeClaim.credentialID, probeClaim)
   if (state.cooldownUntil > now) return
   const slow =
     (typeof policy.firstTokenTimeoutMs === "number" && sample.firstTokenMs > policy.firstTokenTimeoutMs) ||
@@ -1773,6 +1888,7 @@ export const completed = (
     state.benchReason = "slow"
     state.benchQuotaResetAt = undefined
     state.probeClaimedAt = undefined
+    state.probeClaimToken = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
   }
 }
@@ -1790,6 +1906,7 @@ export const resetHealth = () => {
   continuity.clear()
   recentFailures.length = 0
   lastQuotaFeedAtByProvider.clear()
+  probeClaimSeq = 0
 }
 
 /** Per-route selection state: rotation counters for round-robin, sticky session choices, both

@@ -12,6 +12,7 @@ import { discoverPluginRuntimeSpecifiers, pluginRuntimeLoaderCode } from "@openc
 import { buildAppArchive } from "./app-assets"
 import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
 import { resolveOpencodePty } from "./opencode-pty"
+import { BUN_DOWNLOAD_TIMEOUT_MS, verifyAndExtractBunArchive } from "./bun-archive"
 import { NativeArch } from "../../../script/native-arch"
 
 const dir = path.resolve(import.meta.dirname, "..")
@@ -241,32 +242,41 @@ async function compileExecutable(item: (typeof allTargets)[number]) {
     .join("-")
   const cache = path.join(outdir, ".bun", release)
   const executable = path.join(cache, name, item.os === "win32" ? "bun.exe" : "bun")
-  if (await Bun.file(executable).exists()) return executable
+  const verified = path.join(cache, name, ".verified")
+  if ((await Bun.file(executable).exists()) && (await Bun.file(verified).exists())) return executable
 
   await mkdir(cache, { recursive: true })
   const archive = path.join(cache, `${name}.zip`)
   const assets = await compileReleaseAssets(release)
   const url = assets.get(`${name}.zip`)
   if (!url) throw new Error(`Bun release ${release} does not include ${name}.zip`)
+  const checksumsUrl = assets.get("SHASUMS256.txt")
+  if (!checksumsUrl) throw new Error(`Bun release ${release} does not include SHASUMS256.txt`)
   const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
-  const response = await fetch(url, {
-    headers: { Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-  })
+  const headers = { Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+  const [checksumsResponse, response] = await Promise.all([
+    fetch(checksumsUrl, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+    fetch(url, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+  ])
+  if (!checksumsResponse.ok)
+    throw new Error(`Failed to download Bun release checksums ${release}: ${checksumsResponse.status}`)
   if (!response.ok) throw new Error(`Failed to download ${name} from Bun release ${release}: ${response.status}`)
-  // Stream to disk instead of `Bun.write(archive, response)`: passing the Response object
-  // hangs forever if it gets GC'd mid-download (https://github.com/oven-sh/bun/issues/40278).
-  const sink = Bun.file(archive).writer()
-  for await (const chunk of response.body!) await sink.write(chunk)
-  await sink.end()
-  await $`unzip -oq ${archive} -d ${cache}`
+  const [data, checksums] = await Promise.all([response.arrayBuffer(), checksumsResponse.text()])
+  const expected = await verifyAndExtractBunArchive(new Uint8Array(data), checksums, `${name}.zip`, async () => {
+    await Bun.write(archive, data)
+    await $`unzip -oq ${archive} -d ${cache}`
+  })
   await rm(archive)
+  await Bun.write(verified, `${expected}\n`)
   return executable
 }
 
 function compileReleaseAssets(release: string) {
   const existing = releaseAssets.get(release)
   if (existing) return existing
-  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`)
+  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, {
+    signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS),
+  })
     .then(async (response) => {
       if (!response.ok) throw new Error(`Failed to resolve Bun release ${release}: ${response.status}`)
       const data: unknown = await response.json()

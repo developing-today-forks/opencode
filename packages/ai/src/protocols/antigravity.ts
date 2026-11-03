@@ -78,6 +78,14 @@ export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: 
 // tightened to the field allowlist probed against this endpoint 2026-10-30,
 // code#2825): the proto parser rejects any field name it does not know with
 // a hard 400, so schemas are reduced to the proto vocabulary.
+// One family split (opencode#1550, probed against the door 2026-11-03): for
+// Claude models the upstream re-serializes the proto Schema into an
+// Anthropic input_schema, and Anthropic's validator rejects `anyOf`
+// outright (any branch count, any position) while accepting oneOf/allOf;
+// Gemini models accept anyOf verbatim. So when the target is a Claude
+// model (the `anthropic` flag threaded from fromRequest), anyOf is emitted
+// as oneOf — tool unions are disjoint alternatives in practice, where
+// exactly-one is the faithful reading.
 // =============================================================================
 const SCHEMA_FIELDS = new Set([
   "type", "format", "title", "description", "nullable", "default", "enum",
@@ -134,7 +142,7 @@ const resolveSchemaRefs = (root: Record<string, unknown>): unknown => {
   return walk(root, [])
 }
 
-const convertSchemaNode = (node: unknown): Record<string, unknown> => {
+const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unknown> => {
   if (!isRecord(node)) return {}
   const out: Record<string, unknown> = {}
   let minimum = node.minimum
@@ -157,17 +165,26 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
     if (key === "properties") {
       if (isRecord(value)) {
         const props: Record<string, unknown> = {}
-        for (const [name, sub] of Object.entries(value)) props[name] = convertSchemaNode(sub)
+        for (const [name, sub] of Object.entries(value)) props[name] = convertSchemaNode(sub, anthropic)
         out.properties = props
       }
       continue
     }
     if (key === "anyOf" || key === "oneOf" || key === "allOf") {
-      if (Array.isArray(value)) out[key] = value.map(convertSchemaNode)
+      if (Array.isArray(value)) {
+        const branches = value.map((sub) => convertSchemaNode(sub, anthropic))
+        if (key === "allOf") out.allOf = branches
+        // anyOf folds into oneOf for Anthropic targets (#1550); a node
+        // carrying both keywords merges both branch sets into the single
+        // oneOf the Anthropic side accepts.
+        else if (key === "oneOf" || anthropic)
+          out.oneOf = Array.isArray(out.oneOf) ? [...out.oneOf, ...branches] : branches
+        else out.anyOf = branches
+      }
       continue
     }
     if (key === "not") {
-      out.not = convertSchemaNode(value)
+      out.not = convertSchemaNode(value, anthropic)
       continue
     }
     if (key === "type" || key === "required" || key === "minimum" || key === "maximum" || key === "items" || key === "prefixItems") continue
@@ -175,8 +192,9 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
   }
   if (minimum !== undefined) out.minimum = minimum
   if (maximum !== undefined) out.maximum = maximum
-  if (items !== undefined) out.items = convertSchemaNode(items)
-  if (prefixItems !== undefined) out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map(convertSchemaNode)
+  if (items !== undefined) out.items = convertSchemaNode(items, anthropic)
+  if (prefixItems !== undefined)
+    out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map((sub) => convertSchemaNode(sub, anthropic))
   let nullable = node.nullable === true
   if (Array.isArray(node.type)) {
     const types = node.type.filter((entry): entry is string => typeof entry === "string")
@@ -188,6 +206,12 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
   }
   if (nullable) out.nullable = true
   if (out.type === undefined && out.properties) out.type = "OBJECT"
+  // The proto requires `items` on an ARRAY schema even when the client
+  // leaves the element type unconstrained ("properties[paths].items:
+  // missing field", #1548, probed live against the door 2026-11-03):
+  // synthesize an unconstrained items — omitted items in JSON Schema
+  // means any element.
+  if (out.type === "ARRAY" && out.items === undefined && out.prefixItems === undefined) out.items = {}
   if (Array.isArray(node.required)) {
     const declared = out.properties && isRecord(out.properties) ? new Set(Object.keys(out.properties)) : new Set<string>()
     const required = node.required.filter((name): name is string => typeof name === "string" && declared.has(name))
@@ -197,8 +221,8 @@ const convertSchemaNode = (node: unknown): Record<string, unknown> => {
 }
 
 /** Convert a client JSON Schema tool definition to the proto Schema the wire accepts. */
-export const convertSchema = (schema: unknown) => {
-  const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}))
+export const convertSchema = (schema: unknown, anthropic = false) => {
+  const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}), anthropic)
   if (converted.type === undefined) converted.type = "OBJECT"
   return converted
 }
@@ -219,11 +243,11 @@ const PartFileData = Schema.Struct({
   fileData: Schema.Struct({ mimeType: Schema.String, fileUri: Schema.String }),
 })
 const PartFunctionCall = Schema.Struct({
-  functionCall: Schema.Struct({ name: Schema.String, args: Schema.optional(Schema.Unknown) }),
+  functionCall: Schema.Struct({ name: Schema.String, args: Schema.optional(Schema.Unknown), id: Schema.optional(Schema.String) }),
   thoughtSignature: optionalNull(Schema.String),
 })
 const PartFunctionResponse = Schema.Struct({
-  functionResponse: Schema.Struct({ name: Schema.String, response: Schema.Unknown }),
+  functionResponse: Schema.Struct({ name: Schema.String, response: Schema.Unknown, id: Schema.optional(Schema.String) }),
 })
 const ContentPart = Schema.Union([PartText, PartInlineData, PartFileData, PartFunctionCall, PartFunctionResponse])
 const Content = Schema.Struct({
@@ -336,10 +360,10 @@ const thoughtSignature = (metadata: ProviderMetadata | undefined, key: string) =
   return ProviderShared.isRecord(value) && typeof value.thoughtSignature === "string" ? value.thoughtSignature : undefined
 }
 
-const lowerTool = (tool: ToolDefinition) => ({
+const lowerTool = (tool: ToolDefinition, anthropic: boolean) => ({
   name: tool.name,
   description: tool.description ?? "",
-  parameters: convertSchema(tool.inputSchema ?? { type: "object", properties: {} }),
+  parameters: convertSchema(tool.inputSchema ?? { type: "object", properties: {} }, anthropic),
 })
 
 const lowerToolConfig = (toolChoice: NonNullable<LLMRequest["toolChoice"]>) =>
@@ -367,10 +391,11 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     const flattened = ProviderShared.flattenToolRequest(request)
     const lowered = flattened.request
     const options = yield* decodeOptions(request.providerOptions ?? {})
-    const { fullName } = resolveModelAndEffort(
+    const { base, fullName } = resolveModelAndEffort(
       String(request.model.id),
       options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
     )
+    const anthropic = base.startsWith("claude")
     const metadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
     const systemParts: Array<{ text: string }> = request.system.map((part) => ({ text: part.text }))
     const contents: Array<typeof Content.Type> = []
@@ -431,7 +456,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
           const args =
             ProviderShared.isRecord(part.input) && !Array.isArray(part.input) ? part.input : {}
           parts.push({
-            functionCall: { name: part.name, args },
+            functionCall: { name: part.name, args, ...(anthropic && part.id ? { id: part.id } : {}) },
             // The door stashes signatures server-side keyed by tool_call id;
             // fork sessions carry them in providerMetadata instead. When no
             // signature survives (stateless façade history), fall back to
@@ -461,7 +486,10 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
             response = { result: text }
           }
         }
-        contents.push({ role: "user", parts: [{ functionResponse: { name: part.name, response } }] })
+        contents.push({
+          role: "user",
+          parts: [{ functionResponse: { name: part.name, response, ...(anthropic && part.id ? { id: part.id } : {}) } }],
+        })
       }
     }
 
@@ -478,7 +506,9 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     const inner: typeof InnerRequest.Type = {
       contents,
       systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,
-      tools: flattened.tools.length ? [{ functionDeclarations: flattened.tools.map(lowerTool) }] : undefined,
+      tools: flattened.tools.length
+        ? [{ functionDeclarations: flattened.tools.map((tool) => lowerTool(tool, base.startsWith("claude"))) }]
+        : undefined,
       toolConfig:
         flattened.tools.length && request.toolChoice ? yield* lowerToolConfig(request.toolChoice) : undefined,
       generationConfig: {
@@ -689,9 +719,12 @@ const step = (state: ParserState, event: Event) => {
     if ("functionCall" in rawPart && ProviderShared.isRecord(rawPart.functionCall)) {
       const call = rawPart.functionCall
       if (typeof call.name !== "string") continue
-      // The wire carries no call id; mint the door's shape so façade callers
-      // see the same id grammar the door produced.
-      const id = `call_${globalThis.crypto.randomUUID().replaceAll("-", "")}`
+      // The wire carries a call id for Claude tool_use interop (#1550);
+      // keep it when present so history replays the id Anthropic issued.
+      // Otherwise mint the door's shape so façade callers see the same id
+      // grammar the door produced.
+      const id =
+        typeof call.id === "string" && call.id ? call.id : `call_${globalThis.crypto.randomUUID().replaceAll("-", "")}`
       if (reasoningId !== undefined) {
         lifecycle = Lifecycle.reasoningEnd(
           lifecycle,
