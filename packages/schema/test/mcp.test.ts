@@ -35,3 +35,44 @@ describe("Mcp resources", () => {
     })
   })
 })
+
+describe("Mcp timeouts (#1077)", () => {
+  const cap = 2_147_483_647
+
+  test("decodes timeouts at and just under the setTimeout cap", () => {
+    const value = Schema.decodeUnknownSync(Mcp.TimeoutConfig)({
+      startup: cap,
+      catalog: cap - 1,
+      execution: cap,
+    })
+    expect(value.startup).toEqual(cap)
+    expect(value.catalog).toEqual(cap - 1)
+    expect(value.execution).toEqual(cap)
+  })
+
+  test.each(["startup", "catalog", "execution"] as const)(
+    "rejects a %s timeout over the cap, naming the maximum",
+    (field) => {
+      for (const over of [2 ** 31, 10 ** 15]) {
+        let message = ""
+        try {
+          Schema.decodeUnknownSync(Mcp.TimeoutConfig)({ [field]: over })
+        } catch (error) {
+          message = String(error)
+        }
+        expect(message).toContain("2147483647")
+      }
+    },
+  )
+
+  test("rejects an oversized timeout in a server config", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(Mcp.ServerConfig)({
+        type: "local",
+        command: ["server"],
+        timeout: { execution: 2 ** 31 },
+      }),
+    ).toThrow()
+  })
+})
+

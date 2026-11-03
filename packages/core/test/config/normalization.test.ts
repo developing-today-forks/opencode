@@ -582,6 +582,67 @@ describe("ConfigNormalize", () => {
     expect(unknown.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["mcp", "timeout"]]])
   })
 
+  test("bounds MCP timeouts at the setTimeout cap on every decode path (#1077)", () => {
+    const cap = 2_147_483_647
+    // Just under the cap and at the cap pass unchanged on the legacy and structured paths.
+    expect(normalized({ experimental: { mcp_timeout: cap } }).encoded.mcp).toEqual({
+      timeout: { catalog: cap, execution: cap },
+    })
+    expect(normalized({ mcp: { timeout: { startup: cap - 1 } } }).encoded.mcp).toEqual({
+      timeout: { startup: cap - 1 },
+    })
+
+    // Over the cap, the legacy value is rejected with a diagnostic naming the field.
+    const legacy = normalized({ experimental: { mcp_timeout: 2 ** 31 } })
+    expect(legacy.encoded.mcp).toBeUndefined()
+    expect(legacy.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["experimental", "mcp_timeout"]],
+    ])
+    const legacyFar = normalized({ experimental: { mcp_timeout: 10 ** 15 } })
+    expect(legacyFar.encoded.mcp).toBeUndefined()
+    expect(legacyFar.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["experimental", "mcp_timeout"]],
+    ])
+
+    // Structured leaves recover per leaf: only the oversized leaf is dropped.
+    const structured = normalized({ mcp: { timeout: { startup: 2 ** 31, catalog: 2000, execution: 10 ** 15 } } })
+    expect(structured.encoded.mcp).toEqual({ timeout: { catalog: 2000 } })
+    expect(structured.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "timeout", "startup"]],
+      ["invalid", ["mcp", "timeout", "execution"]],
+    ])
+
+    // A bare numeric mcp.timeout expands to every phase, so one oversized value drops all three.
+    const numeric = normalized({ mcp: { timeout: 2 ** 31 } })
+    expect(numeric.encoded.mcp).toBeUndefined()
+    expect(numeric.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "timeout", "startup"]],
+      ["invalid", ["mcp", "timeout", "catalog"]],
+      ["invalid", ["mcp", "timeout", "execution"]],
+    ])
+
+    // Server-level forms: bare numeric and structured timeouts are both bounded.
+    const serverNumeric = normalized({
+      mcp: { servers: { local: { type: "local", command: ["local"], timeout: 2 ** 31 } } },
+    })
+    expect(serverNumeric.encoded.mcp).toBeUndefined()
+    expect(serverNumeric.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "servers", "local"]],
+    ])
+    const serverStructured = normalized({
+      mcp: { servers: { local: { type: "local", command: ["local"], timeout: { execution: 2 ** 31 } } } },
+    })
+    expect(serverStructured.encoded.mcp).toBeUndefined()
+    expect(serverStructured.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "servers", "local"]],
+    ])
+
+    // A legacy V1 server timeout is bounded before migration, not after.
+    const v1 = normalized({ mcp: { legacy: { type: "local", command: ["legacy"], timeout: 2 ** 31 } } })
+    expect(v1.encoded.mcp).toBeUndefined()
+    expect(v1.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["mcp", "legacy"]]])
+  })
+
   test("merges bounded compaction leaves and omits unsupported leaves", () => {
     const result = normalized({
       compaction: {
