@@ -6,6 +6,7 @@ import {
   LanguageModel,
   Message,
   SystemPart,
+  QuotaExceededError,
   TransportError,
   type LLMRequest,
 } from "@opencode/ai"
@@ -329,6 +330,34 @@ it.live("settles the attempted model's probe claim and releases the unattempted 
       false,
     )
     expect(ModelRoute.probeDue(primary, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("settles a failed title attempt with its failure classification (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_failure_hint")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this despite a quota failure")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    // The failed attempt settles with the quota classification preserved: its bench is a
+    // quota bench on the quota cooldown, not an ordinary transient-failure bench.
+    const bench = ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")
+    expect(bench?.reason).toBe("quota")
+    expect(bench?.until).toBeGreaterThan(Date.now() + 60_000)
     ModelRoute.resetHealth()
   }),
 )

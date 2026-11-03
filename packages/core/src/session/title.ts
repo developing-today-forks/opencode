@@ -1,7 +1,7 @@
 export * as SessionTitle from "./title.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
+import { AIError, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
 import { Context, DateTime, Effect, Layer, Stream } from "effect"
 import { Database } from "../database/database.js"
@@ -13,6 +13,7 @@ import { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
 import { SessionHistory } from "./history.js"
 import type { SessionRunnerModel } from "./runner/model.js"
+import { SessionStep } from "./runner/step.js"
 import { SessionSchema } from "./schema.js"
 import { ModelRoute } from "../model-route.js"
 import { ModelRouteLog } from "../model-route-log.js"
@@ -150,8 +151,19 @@ export const layer = Layer.effect(
       if (input.model.routing) {
         const routing = input.model.routing
         const endedAt = Date.now()
+        // Settlement is scoped to the owning session's Location and, on failure, keeps
+        // the failure's classification (quota / auth / retry-after / network), exactly
+        // as the session runner settles its attempts (runner/step.ts failureHint).
+        const locationDirectory = input.session.location.directory as string
         if (!interrupted && failed)
-          ModelRoute.failed(routing.target, routing.policy, endedAt, undefined, routing.credentialID)
+          ModelRoute.failed(
+            routing.target,
+            routing.policy,
+            endedAt,
+            error instanceof AIError ? SessionStep.failureHint(error) : undefined,
+            routing.credentialID,
+            locationDirectory,
+          )
         else if (!interrupted && usage && firstTextAt !== undefined)
           ModelRoute.completed(
             routing.target,
@@ -164,6 +176,7 @@ export const layer = Layer.effect(
             },
             endedAt,
             routing.credentialID,
+            locationDirectory,
           )
         else releaseProbeClaim(input.model)
       }
