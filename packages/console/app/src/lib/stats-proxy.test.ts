@@ -1,9 +1,6 @@
-import { describe, expect, mock, spyOn, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 
-mock.module("@opencode/console-resource", () => ({
-  Resource: { App: { stage: "dev" } },
-  waitUntil: (promise: Promise<unknown>) => promise,
-}))
+// @opencode/console-resource is provided by the shared preload fixture (test/preload.ts, #1522).
 
 const { statsProxy, STATS_HTML_MAX_BYTES } = await import("./stats-proxy")
 

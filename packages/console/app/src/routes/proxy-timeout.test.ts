@@ -1,9 +1,7 @@
-import { describe, expect, mock, spyOn, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import type { APIEvent } from "@solidjs/start/server"
 
-mock.module("@opencode/console-resource", () => ({
-  Resource: { App: { stage: "dev" } },
-}))
+// @opencode/console-resource is provided by the shared preload fixture (test/preload.ts, #1522).
 
 const docsIndex = await import("./docs/index")
 const docsPath = await import("./docs/[...path]")

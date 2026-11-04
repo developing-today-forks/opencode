@@ -1,14 +1,6 @@
-import { describe, expect, mock, spyOn, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 
-// Mock the Resource module outright (the stats-proxy.test.ts pattern):
-// SST Resource values freeze process-wide on first access, so setting
-// env vars here would lose to whichever test file touches Resource first.
-mock.module("@opencode/console-resource", () => ({
-  Resource: {
-    CONSOLE_CRM_LOOKUP_URL: { value: "https://crm.example.test/lookup" },
-    CONSOLE_CRM_TOKEN: { value: "local-test-token" },
-  },
-}))
+// @opencode/console-resource is provided by the shared preload fixture (test/preload.ts, #1522).
 
 const { lookupConsoleAccount, CONSOLE_ACCOUNT_LOOKUP_MAX_BYTES } = await import("./console-account")
 
