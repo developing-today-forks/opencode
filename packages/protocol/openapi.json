@@ -16325,7 +16325,7 @@
                             "type": "integer",
                             "exclusiveMinimum": 0,
                             "maximum": 50,
-                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                           },
                           "outcomeWindow": {
                             "type": "integer",
@@ -16548,7 +16548,7 @@
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "maximum": 50,
-                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                       },
                       "outcomeWindow": {
                         "type": "integer",
