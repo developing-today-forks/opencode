@@ -3,12 +3,13 @@ import path from "path"
 import { createServer } from "node:http"
 import { describe, expect } from "bun:test"
 import { NodeHttpServer } from "@effect/platform-node"
-import { Effect } from "effect"
+import { Deferred, Duration, Effect } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Global } from "@opencode/util/global"
 import { SkillDiscovery } from "@opencode/core/skill/discovery"
+import { TestClock } from "effect/testing"
 import { tmpdir } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 
@@ -126,6 +127,39 @@ describe("SkillDiscovery.pull", () => {
       expect(result.directories).toEqual([])
       expect(result.requests).toContain(`${catalog.base}deploy/SKILL.md`)
       expect(result.requests).toContain(`${catalog.base}deploy/missing.md`)
+    }),
+  )
+
+  it.effect(
+    "settles a download whose body never completes as failed once the download deadline passes",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const started = yield* Deferred.make<void>()
+      const completed = yield* Deferred.make<{ directories: string[]; requests: string[] }>()
+      const stalled = Stream.concat(
+        Stream.fromEffect(
+          Effect.as(Deferred.succeed(started, undefined), new Uint8Array([0x23])),
+        ),
+        Stream.never,
+      )
+      yield* catalog
+        .pull(
+          [{ name: "deploy", files: ["SKILL.md"] }],
+          {},
+          { "/catalog/deploy/SKILL.md": HttpServerResponse.stream(stalled) },
+        )
+        .pipe(
+          Effect.tap((value) => Deferred.succeed(completed, value)),
+          Effect.forkChild({ startImmediately: true }),
+        )
+      // The index fetch uses real I/O, so measure only after the response body signals its start.
+      yield* Deferred.await(started)
+      yield* TestClock.adjust(Duration.subtract(SkillDiscovery.downloadTimeout, Duration.seconds(1)))
+      expect(yield* Deferred.isDone(completed)).toBe(false)
+      yield* TestClock.adjust(Duration.seconds(2))
+      const result = yield* Deferred.await(completed)
+      expect(result.directories).toEqual([])
+      expect(result.requests).toContain(`${catalog.base}deploy/SKILL.md`)
     }),
   )
 

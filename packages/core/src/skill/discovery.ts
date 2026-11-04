@@ -1,7 +1,7 @@
 export * as SkillDiscovery from "./discovery.js"
 
 import path from "path"
-import { Context, Effect, Layer, Schedule, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Schedule, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
@@ -29,6 +29,17 @@ export const MAX_SKILL_INDEX_BYTES = 8 * 1024 * 1024
 
 /** Deadline for the index fetch, matching WellKnown's manifest fetch bound. */
 const indexFetchTimeout = "15 seconds"
+
+/**
+ * Deadline for one skill file download, bounding the whole transfer
+ * including the HttpClient's transient retries: a per-attempt bound would
+ * let retryTransient re-enter a stalled source indefinitely. Sized against
+ * MAX_SKILL_FILE_BYTES: a full 5 MiB file still completes on a link as slow
+ * as ~85 KiB/s, while a source that stalls or slow-drips past any plausible
+ * transfer settles through download()'s failure path instead of hanging
+ * pull() - and with it plugin/skill loading - forever (#1381).
+ */
+export const downloadTimeout = Duration.seconds(60)
 
 const skillConcurrency = 4
 const fileConcurrency = 8
@@ -97,6 +108,8 @@ const layer = Layer.effect(
 
     const download = Effect.fn("SkillDiscovery.download")(function* (url: string, destination: string) {
       if (yield* fs.exists(destination).pipe(Effect.orDie)) return true
+      // Keep the published file intact if the deadline interrupts the write.
+      const temp = path.join(path.dirname(destination), ".skill-download-" + crypto.randomUUID() + ".tmp")
       return yield* HttpClientRequest.get(url).pipe(
         HttpClient.withScope(http).execute,
         Effect.flatMap((response) =>
@@ -106,8 +119,11 @@ const layer = Layer.effect(
             () => new Error(`Skill file too large (exceeds ${MAX_SKILL_FILE_BYTES} byte limit): ${url}`),
           ),
         ),
-        Effect.flatMap((body) => fs.writeWithDirs(destination, new Uint8Array(body))),
+        Effect.flatMap((body) => fs.writeWithDirs(temp, new Uint8Array(body))),
+        Effect.flatMap(() => fs.rename(temp, destination)),
         Effect.as(true),
+        Effect.timeout(downloadTimeout),
+        Effect.ensuring(fs.remove(temp, { recursive: true, force: true }).pipe(Effect.ignore)),
         Effect.catch((error) =>
           Effect.logError("failed to download skill file", { url, error }).pipe(Effect.as(false)),
         ),
