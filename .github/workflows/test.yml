@@ -147,6 +147,14 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run lint:effect-simplifications
 
+      - name: Check Effect patterns
+        # The pattern scan itself (no-star-import, no-json-parse-cast,
+        # no-effect-die-string, no-import-alias) was never wired into CI —
+        # only its rule tests ran — so violations accumulated unchecked
+        # (#1496).
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-patterns
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root
@@ -191,8 +199,9 @@ jobs:
         run: bun test check-proto-reads.test.ts
 
       - name: Check prototype-chain reads are dispositioned
-        # Every P-A/P-C sweep hit in packages/core/src must be guarded by
-        # ownValue/ownOr or listed with a disposition in the allowlist, or
+        # Every P-A/P-C sweep hit in packages/core/src and packages/ai/src
+        # must be guarded by ownValue/ownOr or listed with a disposition
+        # in the allowlist, or
         # the prototype-chain class regrows one bare read at a time (#865).
         if: runner.os == 'Linux'
         run: bun run check:proto-reads

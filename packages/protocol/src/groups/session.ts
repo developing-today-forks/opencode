@@ -219,6 +219,9 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     )
     .add(
       HttpApiEndpoint.post("session.create", "/api/session", {
+        query: Schema.Struct({
+          directory: AbsolutePath.pipe(Schema.optional),
+        }),
         payload: Schema.Struct({
           id: Session.ID.pipe(Schema.optional),
           parentID: Session.ID.pipe(Schema.optional),
@@ -237,7 +240,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.create",
           summary: "Create session",
           description:
-            "Create a session at the requested location. A parentID creates a linked child session at its parent's location.",
+            "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location.",
         }),
       ),
     )

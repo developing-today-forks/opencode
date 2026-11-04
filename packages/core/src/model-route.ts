@@ -1227,7 +1227,12 @@ const grantReclassified = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot):
  * known-full under the judging Location's balanceDeadThreshold. */
 const holdBlocks = (hold: BalanceHold, snapshot: QuotaSnapshot.Snapshot, now: number, location?: string): boolean => {
   if (hold.origin !== "threshold") return true
-  if (snapshot.expired === undefined && hold.expired === true) return true
+  // A hold benched on an expired grant blocks while it stands (#1552): expiration is
+  // known-full regardless of the numeric threshold (the restored-hold judgement below
+  // agrees), and a same-grant re-read below the benched balance does not release the
+  // hold (releasesHold), so it must not re-admit it here either. Only a fresh increase,
+  // a funded replacement grant, or a reclassification ends an expired grant's hold.
+  if (hold.expired === true) return true
   if (QuotaSnapshot.known(snapshot))
     return QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
   // An unknown snapshot (e.g. the first feed after a restart, a balance window whose
@@ -1316,7 +1321,7 @@ const observeCredentialQuotaState = (
             ? {
                 ...hold,
                 judgedBalance: snapshot.remaining,
-                ...(snapshot.expired === undefined ? {} : { expired: snapshot.expired }),
+                ...(snapshot.expired === true ? { expired: true } : {}),
               }
             : hold
         credentialQuota.set(credentialID, {
@@ -1353,7 +1358,7 @@ const observeCredentialQuotaState = (
         const refreshedHold = {
           ...hold,
           judgedBalance: snapshot.remaining,
-          ...(snapshot.expired === undefined ? {} : { expired: snapshot.expired }),
+          ...(snapshot.expired === true ? { expired: true } : {}),
         }
         // Another Location feeding the same grant's balance corrects the gate too
         // (#1461): its fresher balance snapshot replaces the retained one, so later
@@ -1495,7 +1500,7 @@ export const observeProviderQuota = (
             ? {
                 ...hold,
                 judgedBalance: snapshot.remaining,
-                ...(snapshot.expired === undefined ? {} : { expired: snapshot.expired }),
+                ...(snapshot.expired === true ? { expired: true } : {}),
               }
             : hold
         providerQuota.set(target.providerID, {
@@ -1528,7 +1533,7 @@ export const observeProviderQuota = (
         const refreshedHold = {
           ...hold,
           judgedBalance: snapshot.remaining,
-          ...(snapshot.expired === undefined ? {} : { expired: snapshot.expired }),
+          ...(snapshot.expired === true ? { expired: true } : {}),
         }
         // Same Location correction as the credential path (#1461): keep the hold,
         // refresh the balance snapshot it will be judged from.

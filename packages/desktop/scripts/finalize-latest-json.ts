@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 
 import { $ } from "bun"
+import { createWriteStream } from "node:fs"
 import path from "node:path"
+import { Readable } from "node:stream"
+import { pipeline } from "node:stream/promises"
 import { parseArgs } from "node:util"
 
 const { values } = parseArgs({
@@ -35,7 +38,55 @@ const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
 
 if (!token) throw new Error("GH_TOKEN or GITHUB_TOKEN is required")
 
+const RELEASE_FETCH_TIMEOUT_MS = 30_000
+
+const ASSET_DOWNLOAD_TIMEOUT_MS = 600_000
+
+const RELEASE_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+
+async function readBoundedJson(response: Response, signal: AbortSignal, operation: string): Promise<unknown> {
+  if (!response.body) throw new Error(`${operation} response had no body`)
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > RELEASE_RESPONSE_MAX_BYTES) {
+    await response.body.cancel().catch(() => undefined)
+    throw new Error(`${operation} response exceeded ${RELEASE_RESPONSE_MAX_BYTES} bytes`)
+  }
+
+  const reader = response.body.getReader()
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
+  signal.addEventListener("abort", abort, { once: true })
+  if (signal.aborted) abort()
+  try {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      size += result.value.byteLength
+      if (size > RELEASE_RESPONSE_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(`${operation} response exceeded ${RELEASE_RESPONSE_MAX_BYTES} bytes`)
+      }
+      chunks.push(result.value)
+    }
+    signal.throwIfAborted()
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return JSON.parse(new TextDecoder().decode(bytes))
+  } finally {
+    signal.removeEventListener("abort", abort)
+    reader.releaseLock()
+  }
+}
+
+const releaseSignal = AbortSignal.timeout(RELEASE_FETCH_TIMEOUT_MS)
+
 const rel = await fetch(`https://api.github.com/repos/${repo}/releases/${releaseId}`, {
+  signal: releaseSignal,
   headers: {
     Authorization: `token ${token}`,
     Accept: "application/vnd.github+json",
@@ -55,7 +106,7 @@ type Release = {
   assets?: Asset[]
 }
 
-const assets = ((await rel.json()) as Release).assets ?? []
+const assets = ((await readBoundedJson(rel, releaseSignal, "GitHub release")) as Release).assets ?? []
 
 const amap = new Map(assets.map((item) => [item.name, item]))
 
@@ -131,6 +182,7 @@ async function sign(url: string, key: string) {
   const asset = amap.get(name)
 
   const res = await fetch(asset?.url ?? url, {
+    signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
     headers: {
       Authorization: `token ${token}`,
       ...(asset ? { Accept: "application/octet-stream" } : {}),
@@ -143,7 +195,8 @@ async function sign(url: string, key: string) {
 
   const tmp = process.env.RUNNER_TEMP ?? "/tmp"
   const file = path.join(tmp, name)
-  await Bun.write(file, await res.arrayBuffer())
+  if (!res.body) throw new Error(`Failed to fetch file ${name}: response had no body`)
+  await pipeline(Readable.fromWeb(res.body), createWriteStream(file))
   await $`bunx @tauri-apps/cli signer sign ${file}`
   const sigFile = Bun.file(`${file}.sig`)
 

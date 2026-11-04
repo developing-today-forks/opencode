@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   SCAN_ROOTS,
   isScannedFile,
   parseAllowlist,
   scanSource,
+  srcTreesOnDisk,
   staleEntries,
   unlistedHits,
+  unscannedSrcTrees,
 } from "./check-numeric-boundaries"
 
 describe("scanSource", () => {
@@ -142,5 +147,32 @@ describe("allowlist accounting", () => {
 
   test("a malformed allowlist line throws", () => {
     expect(() => parseAllowlist("f.ts :: no disposition")).toThrow("Malformed allowlist line")
+  })
+})
+
+describe("src trees (#1494)", () => {
+  test("srcTreesOnDisk finds package src trees and unscannedSrcTrees diffs against SCAN_ROOTS", () => {
+    const root = mkdtempSync(join(tmpdir(), "numeric-boundaries-src-trees-"))
+    try {
+      const tree = (rel: string, pkg: boolean) => {
+        mkdirSync(join(root, rel), { recursive: true })
+        if (pkg) writeFileSync(join(root, rel, "..", "package.json"), "{}\n")
+      }
+      tree("packages/ai/src", true)
+      tree("packages/console/app/src", true)
+      tree("services/update/src", true)
+      tree("packages/plugins/figma/skills/example/src", false)
+      expect(srcTreesOnDisk(root)).toEqual(["packages/ai/src", "packages/console/app/src", "services/update/src"])
+      expect(unscannedSrcTrees(root, ["packages/ai/src", "services/update/src"])).toEqual([
+        "packages/console/app/src",
+      ])
+      expect(unscannedSrcTrees(root, SCAN_ROOTS)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("no src tree on disk in this repo is unscanned", () => {
+    expect(unscannedSrcTrees(join(import.meta.dir, ".."))).toEqual([])
   })
 })

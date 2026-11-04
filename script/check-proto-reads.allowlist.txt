@@ -1,8 +1,8 @@
 # Prototype-chain read allowlist (#865; audit on #833).
 # Every line matching the P-A / P-C / P-D sweep patterns in packages/core/src
-# must appear here with its disposition, or script/check-proto-reads.ts fails.
-# Accounting is occurrence-aware (#1086): a line that appears N times in a
-# file needs N entries here, one per occurrence.
+# (and packages/ai/src, #912) must appear here with its disposition, or
+# script/check-proto-reads.ts fails. Accounting is occurrence-aware (#1086): a
+# line that appears N times in a file needs N entries here, one per occurrence.
 # Format: file :: exact trimmed source line :: disposition
 # Dispositions: guarded at the site, safe by construction (with the reason),
 # internal-only keys, vendored code, or tracked by an open issue.
@@ -51,3 +51,30 @@ packages/core/src/tool/plugin/route-usage.ts :: rows: (history?.windowSessionTar
 packages/core/src/util/slug.ts :: ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)], :: safe: numeric random index into an array
 packages/core/src/util/slug.ts :: NOUNS[Math.floor(Math.random() * NOUNS.length)], :: safe: numeric random index into an array
 packages/core/src/variant.ts :: ? PROTOCOLS[model.package] :: guarded: Object.hasOwn ternary at the same site (#862)
+packages/ai/src/protocols/anthropic-messages.ts :: name: SERVER_TOOL_RESULT_NAMES[block.type], :: guarded: isServerToolResultType Object.hasOwn type guard immediately above rejects non-own keys before this read (#856)
+packages/ai/src/protocols/bedrock-converse.ts :: const redactedChunks = state.reasoningRedactedContent[index] ?? [] :: safe: numeric index into the reasoningRedactedContent array
+packages/ai/src/protocols/cartesia-speech.ts :: const container = Object.hasOwn(CONTAINERS, format) ? CONTAINERS[format] : undefined :: guarded: Object.hasOwn ternary at the same site (#907)
+packages/ai/src/protocols/cohere-chat.ts :: tool_choice: TOOL_CHOICE[request.toolChoice?.type ?? "auto"], :: safe: toolChoice.type is the schema-validated closed literal union auto|none|required|tool (ToolChoice Literals), internal only
+packages/ai/src/protocols/deepgram-speech.ts :: request.format === undefined || !Object.hasOwn(FORMATS, request.format) ? undefined : FORMATS[request.format] :: guarded: Object.hasOwn ternary at the same site (#907)
+packages/ai/src/protocols/deepgram-speech.ts :: const headerless = Object.hasOwn(HEADERLESS_ENCODINGS, headerlessKey) ? HEADERLESS_ENCODINGS[headerlessKey] : undefined :: guarded: Object.hasOwn ternary at the same site (#917)
+packages/ai/src/protocols/elevenlabs-speech.ts :: (Object.hasOwn(OUTPUT_FORMATS, requested) ? OUTPUT_FORMATS[requested] : undefined) :: guarded: Object.hasOwn ternary at the same site (#907)
+packages/ai/src/protocols/elevenlabs-speech.ts :: const encoding = Object.hasOwn(PCM_CODECS, codec) ? PCM_CODECS[codec] : undefined :: guarded: Object.hasOwn ternary at the same site (#917)
+packages/ai/src/protocols/gemini.ts :: ProviderShared.sumTokens(...requests.map((usage) => usage[field] ?? undefined)) :: safe: field is keyof GeminiUsage and is passed only closed-union literals by internal callers
+packages/ai/src/protocols/meta-responses.ts :: if (!done.item || completedItems.has(done.item.id) || completedItems.has(state.outputItems[index] ?? "")) continue :: safe: numeric index (entries() position) into the outputItems array
+packages/ai/src/protocols/open-responses.ts :: event.output_index === undefined ? event.item_id : (state.outputItems[event.output_index] ?? event.item_id) :: safe: numeric provider output_index into the outputItems array
+packages/ai/src/protocols/open-responses.ts :: Object.hasOwn(ITEM_ID_PREFIX, type) ? (ITEM_ID_PREFIX[type] ?? "item") : "item" :: guarded: Object.hasOwn ternary at the same site (#908)
+packages/ai/src/protocols/openai-chat.ts :: const fallbackTool = tools[fallback] ?? pendingTools[fallback] :: safe: fallback is a numeric tool index (batch position or latestToolIndex) into arrays
+packages/ai/src/protocols/replicate-images.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])] :: safe: key is a regex capture constrained to month-name prefixes (same disposition as the identical core lines, #833)
+packages/ai/src/protocols/replicate-images.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])] :: safe: key is a regex capture constrained to month-name prefixes (same disposition as the identical core lines, #833)
+packages/ai/src/protocols/utils/bedrock-media.ts :: const imageFormat = Object.hasOwn(IMAGE_FORMATS, mime) ? IMAGE_FORMATS[mime as keyof typeof IMAGE_FORMATS] : undefined :: guarded: Object.hasOwn ternary at the same site (#916)
+packages/ai/src/protocols/utils/bedrock-media.ts :: const documentFormat = Object.hasOwn(DOCUMENT_FORMATS, mime) ? DOCUMENT_FORMATS[mime as keyof typeof DOCUMENT_FORMATS] : undefined :: guarded: Object.hasOwn ternary at the same site (#916)
+packages/ai/src/protocols/utils/speech-stream.ts :: items: texts.map((text, index) => ({ text, startSeconds: starts[index] ?? 0, endSeconds: ends[index] ?? 0 })), :: safe: numeric index into the starts/ends arrays
+packages/ai/src/protocols/utils/speech-stream.ts :: mediaType: Object.hasOwn(CONTAINER_MEDIA_TYPES, format) ? CONTAINER_MEDIA_TYPES[format] : undefined, :: guarded: Object.hasOwn ternary at the same site (#917)
+packages/ai/src/protocols/utils/speech-stream.ts :: mediaType: mediaType ?? (Object.hasOwn(PCM_MEDIA_TYPES, encoding) ? PCM_MEDIA_TYPES[encoding] : undefined), :: guarded: Object.hasOwn ternary at the same site (#917)
+packages/ai/src/route/executor.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])] :: safe: key is a regex capture constrained to month-name prefixes (same disposition as the identical core lines, #833)
+packages/ai/src/route/executor.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])] :: safe: key is a regex capture constrained to month-name prefixes (same disposition as the identical core lines, #833)
+packages/ai/src/route/media-protocol.ts :: ? new FAILURES[failure]({ message, body, http }) :: safe: failure is the closed union Failure = keyof typeof FAILURES, set only by internal callers and the ProviderInternal default
+packages/ai/src/schema/events.ts :: const current = state.toolInputs[event.id] ?? { name: event.name, namespace: event.namespace, text: "" } :: internal: state map keyed by provider tool-call ids and written by own code before any read
+packages/ai/src/schema/events.ts :: const current = state.toolInputs[event.id] ?? { name: event.name, namespace: event.namespace, text: "" } :: internal: state map keyed by provider tool-call ids and written by own code before any read (second occurrence: reduceToolInputEnd, identical disposition)
+packages/ai/src/utils/media-type.ts :: return Object.hasOwn(EXTENSIONS, extension) ? EXTENSIONS[extension] : undefined :: guarded: Object.hasOwn ternary at the same site (#906)
+packages/ai/src/utils/media-type.ts :: (Object.hasOwn(EXTENSION_ALIASES, type) ? EXTENSION_ALIASES[type] : undefined) ?? :: guarded: Object.hasOwn ternary at the same site (#906)

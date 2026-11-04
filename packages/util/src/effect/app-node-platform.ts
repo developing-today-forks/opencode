@@ -1,6 +1,8 @@
 // Deep imports: the @effect/platform-node barrel eagerly pulls in undici,
 // ioredis, and node:sqlite, which runtimes such as workerd cannot load.
+// ast-grep-ignore: no-star-import
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem"
+// ast-grep-ignore: no-star-import
 import * as NodePath from "@effect/platform-node/NodePath"
 import { FileSystem, Path } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/http"

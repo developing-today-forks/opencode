@@ -7,8 +7,8 @@
  * supplied key like "constructor" resolves to an inherited member instead
  * of missing, and a `?? fallback` never fires because inherited members are
  * not nullish. The blessed fix is `ownValue`/`ownOr` from
- * packages/core/src/util/record.ts. This gate scans packages/core/src with
- * the two sweep patterns pinned on #833 —
+ * packages/core/src/util/record.ts. This gate scans packages/core/src and
+ * packages/ai/src (#912) with the two sweep patterns pinned on #833 —
  *   P-A: an uppercase plain-object table read by a variable key
  *   P-C: a bracket read with a `??` fallback (the most dangerous shape)
  *   P-D: a bracket read whose key is a computed expression (contains a
@@ -28,7 +28,9 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join, relative, sep } from "node:path"
 
-export const SCAN_ROOT = "packages/core/src"
+export const SCAN_ROOTS = ["packages/core/src", "packages/ai/src"] as const
+/** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
+export const SCAN_ROOT = SCAN_ROOTS[0]
 export const ALLOWLIST_PATH = "script/check-proto-reads.allowlist.txt"
 
 export const PATTERNS: RegExp[] = [/\b[A-Z][A-Z_0-9]{2,}\[[a-zA-Z_]/, /\[[a-zA-Z_.]+\] \?\?/, /\[[^\]]*\([^\]]*\] \?\?/]
@@ -105,7 +107,7 @@ export function collect(root: string, dir: string, hits: Hit[]) {
 async function main() {
   const root = join(import.meta.dir, "..")
   const hits: Hit[] = []
-  collect(root, join(root, SCAN_ROOT), hits)
+  for (const scanRoot of SCAN_ROOTS) collect(root, join(root, scanRoot), hits)
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
   const unlisted = unlistedHits(hits, allowlist)
   const stale = staleEntries(hits, allowlist)
@@ -118,7 +120,7 @@ async function main() {
       console.error(`Stale allowlist entry (the line no longer matches a sweep pattern): ${key}`)
     process.exit(1)
   }
-  console.log(`All ${hits.length} prototype-chain read candidates in ${SCAN_ROOT} are dispositioned in ${ALLOWLIST_PATH}.`)
+  console.log(`All ${hits.length} prototype-chain read candidates in ${SCAN_ROOTS.join(", ")} are dispositioned in ${ALLOWLIST_PATH}.`)
 }
 
 if (import.meta.main) await main()

@@ -1895,6 +1895,32 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.escalates(other)).toBe(false)
   })
 
+  test("a valid pair at a small configured window escalates exactly at the effective threshold (#1163)", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const off = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 2, outcomeWindow: 2 } }),
+      "/loc/small-window",
+    )
+    try {
+      ModelRoute.resetHealth()
+      // One give-up in the window of 2: below the threshold of 2.
+      ModelRoute.failed(target, policy, 1_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A success pushes the give-up out of the small window: give-up, success, give-up
+      // leaves only one give-up in the last 2 outcomes, so still no escalation. (Under the
+      // default window of 5 the count would be 2 and this would already escalate.)
+      ModelRoute.completed(target, policy, ok, 2_000, undefined, "/loc/small-window")
+      ModelRoute.failed(target, policy, 3_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A second consecutive give-up fills the window at the threshold exactly
+      // (afterGiveUps == outcomeWindow): escalation fires, so the equality pair is not inert.
+      ModelRoute.failed(target, policy, 4_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(true)
+    } finally {
+      off()
+    }
+  })
+
   test("settings readers are scoped per Location, in either activation order", () => {
     const offA = ModelRoute.onSettingsConfig(
       () => ({ demotion: { after: 2, factor: 0.5 }, bench: { maxCooldownMs: 5_000 }, escalation: { afterGiveUps: 4 } }),
