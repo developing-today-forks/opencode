@@ -28,6 +28,9 @@
  *      GitHub's side, so new code declares permissions once, at the top.
  *      Exceptions are ratcheted: one whose grant or job block has been
  *      removed is itself a violation, so the baseline only shrinks.
+ *   5. Workflow `uses:` entries cannot load actions remotely from
+ *      developing-today/code. Those actions must be checked out under
+ *      `.pm-central` and referenced locally to avoid runner staging errors.
  *
  * Trigger matching is by exact key: `pull_request_review_comment` and
  * `issue_comment` are different events, not PR triggers — opencode.yml
@@ -90,6 +93,8 @@ export const PERMISSION_SCOPES = new Set([
 ])
 
 export const PERMISSION_LEVELS = new Set(["read", "write", "none"])
+
+const REMOTE_CODE_ACTION_PREFIX = "developing-today/code/.github/actions/"
 
 /** The one scope any workflow may hold at `write` without an exception. */
 export const WRITE_PERMITTED_SCOPES = new Set(["contents"])
@@ -165,9 +170,25 @@ export function triggerNames(workflow: Parsed): string[] {
   return []
 }
 
+function remoteCodeActionUses(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(remoteCodeActionUses)
+  if (!isRecord(value)) return []
+  return Object.entries(value).flatMap(([key, entry]) => {
+    if (key === "uses" && typeof entry === "string" && entry.toLowerCase().startsWith(REMOTE_CODE_ACTION_PREFIX))
+      return [entry]
+    return remoteCodeActionUses(entry)
+  })
+}
+
 /** Every policy violation in one parsed workflow, in rule order. */
 export function workflowViolations(file: string, workflow: Parsed): Violation[] {
   const violations: Violation[] = []
+  for (const action of remoteCodeActionUses(workflow))
+    violations.push({
+      file,
+      rule: "no-remote-code-actions",
+      detail: `uses remote action ${action}; check out developing-today/code at .pm-central and reference it locally`,
+    })
   const triggers = triggerNames(workflow)
   for (const trigger of FORBIDDEN_TRIGGERS) {
     if (triggers.includes(trigger))
@@ -341,7 +362,7 @@ function main() {
       )
     process.exit(1)
   }
-  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers, top-level least-privilege permissions mapping).`)
+  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers, top-level least-privilege permissions mapping, no remote developing-today/code actions).`)
 }
 
 if (import.meta.main) main()

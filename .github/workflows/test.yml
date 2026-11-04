@@ -524,7 +524,18 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: developing-today/code/.github/actions/pm-dispatch-ci-fix@main
+      # This wrapper loads pm-dispatch-task from .pm-central, which in turn
+      # loads its sibling actions there. A remote action download can fail in
+      # `_staging` before the continue-on-error step is reached.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - uses: ./.pm-central/.github/actions/pm-dispatch-ci-fix
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
