@@ -239,13 +239,16 @@ describe("field descriptions beyond model-routes (#650)", () => {
           "formatter",
           "update",
           "share",
+          "policies",
+          "skills",
+          "instructions",
         ],
       ],
       [ConfigMessaging.Info, ["embedding"]],
       [ConfigMessaging.Search, ["match", "model"]],
       [ConfigMessaging.Embedding, ["tier", "pooling", "gpu_layers"]],
       [ConfigMessaging.Remote, ["key"]],
-      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "routes"]],
+      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "policies", "routes"]],
       [ConfigExperimental.Routes, ["schedules"]],
       [ConfigAlias.Info, ["providers", "models", "variants"]],
       [ConfigWarming.Info, ["prompt"]],
@@ -266,6 +269,14 @@ describe("field descriptions beyond model-routes (#650)", () => {
     )
     expect(described(Messaging.Writer).children).toContain("Also allow its descendants")
     expect(described(Config.Info).shell).toContain("Default shell to use")
+    expect(described(Config.Info)).toMatchObject({
+      policies: "Ordered policies controlling access to providers, tools, and integrations",
+      skills: "Additional paths or URLs to discover skills from",
+      instructions: "Additional paths or URLs supplying ambient instructions",
+    })
+    expect(described(ConfigExperimental.Info).policies).toBe(
+      "Deprecated: use top-level policies. Ordered policies controlling access to configured resources",
+    )
   })
 })
 

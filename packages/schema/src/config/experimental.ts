@@ -83,9 +83,11 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
     description:
       "Default timeout in milliseconds for foreground shell commands. 0 disables the timeout. Defaults to 120000.",
   }).pipe(optional),
-  policies: ConfigPolicy.Info.pipe(Schema.Array, optional).annotate({
-    description: "Deprecated: use top-level policies. Ordered policies controlling access to configured resources",
-  }),
+  policies: Schema.Array(ConfigPolicy.Info)
+    .annotate({
+      description: "Deprecated: use top-level policies. Ordered policies controlling access to configured resources",
+    })
+    .pipe(optional),
   model_route_demotion: ModelRouteDemotion.annotate({
     description:
       "Quota-error demotion policy for model routes: how many quota failures within window_ms demote a target. Defaults to threshold 3 within 14400000ms (4h).",
