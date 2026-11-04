@@ -208,7 +208,8 @@ services/www/src/pages/install.astro :: const response = await fetch("https://ra
 # Script-tree extension (#1394): dispositions for the 24 script roots added to
 # SCAN_ROOTS. Spot unbounded network sites are tracked by #1395
 # (recording-cost-report.ts) and #1396 (finalize-latest-json.ts); the
-# packages/cli/script/build.ts sites are tracked by #1159.
+# packages/cli/script/build.ts sites were tracked by #1159 (closed);
+# their post-rewrite dispositions are recorded under #1606.
 script/changelog.ts :: ? await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]) :: local subprocess stdout/stderr read, not a network response body (#1394)
 script/changelog.ts :: if (values.print) process.stdout.write(await Bun.file(file).text()) :: local file read via Bun.file (filesystem), not a network response body (#1394)
 script/check-bounded-http.test.ts :: "const a = await fetch(url)", :: gate test fixture: pattern/allowlist string literal, not an executed outbound call or response read (#1394)
@@ -267,9 +268,11 @@ packages/cli/script/build-node.ts :: fetch(`${base}/${filename}`, { signal: Abor
 packages/cli/script/build-node.ts :: fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS) }), :: bounded at the site: fetch carries AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS = 600_000) (#1394)
 packages/cli/script/build-node.ts :: const data = new Uint8Array(await response.arrayBuffer()) :: bounded at the site: body read of the Node.js archive fetched with AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS = 600_000); the bytes are sha256-verified against SHASUMS256.txt before use (#1394)
 packages/cli/script/build-node.ts :: const expected = (await sums.text()) :: bounded at the site: body read of the SHASUMS256.txt fetched with AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS = 600_000) (#1394)
-packages/cli/script/build.ts :: const response = await fetch(url, { :: remaining surface: Bun release archive download fetch with no deadline (the body is streamed to disk below, not buffered), tracked by #1159 (site named in #1394) (#1394)
-packages/cli/script/build.ts :: const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`) :: remaining surface: GitHub Bun release metadata fetch with no deadline, tracked by #1159 (#1394)
-packages/cli/script/build.ts :: const data: unknown = await response.json() :: remaining surface: unbounded .json() read of the GitHub Bun release metadata response, tracked by #1159 (#1394)
+packages/cli/script/build.ts :: fetch(checksumsUrl, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }), :: bounded at the site: fetch carries AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS = 600_000) as the signal; its SHASUMS256.txt body is read at the combined body-read site below (#1606)
+packages/cli/script/build.ts :: fetch(url, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }), :: bounded at the site: fetch carries AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS = 600_000) as the signal; the archive bytes are SHA-256-verified against SHASUMS256.txt in verifyAndExtractBunArchive before extraction or use (#1606)
+packages/cli/script/build.ts :: const [data, checksums] = await Promise.all([response.arrayBuffer(), checksumsResponse.text()]) :: whole-archive read by design: both fetches carry AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS = 600_000); the archive is consumed whole (SHA-256-verified against SHASUMS256.txt before extraction), so buffering it via arrayBuffer() is intentional, and the checksums body is the small SHASUMS256.txt release file (#1606)
+packages/cli/script/build.ts :: const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, { :: bounded at the site: the call options on the following line carry AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS = 600_000) as the signal (#1606)
+packages/cli/script/build.ts :: const data: unknown = await response.json() :: body read of the GitHub Bun release metadata response fetched with AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS = 600_000) (see the pending fetch above); the metadata JSON is consumed whole to enumerate the release assets (#1606)
 packages/cli/script/publish-aur.ts :: const pkg: { name: string; version: string } = await Bun.file(path.join(directory, "package.json")).json() :: local file read via Bun.file (filesystem), not a network response body (#1394)
 packages/cli/script/publish-aur.ts :: const sha256 = new Bun.CryptoHasher("sha256").update(await archive.arrayBuffer()).digest("hex") :: local file read via Bun.file (filesystem), not a network response body (#1394)
 packages/cli/script/publish-aur.ts :: `sha256sums=('${new Bun.CryptoHasher("sha256").update(await license.arrayBuffer()).digest("hex")}' '${new Bun.CryptoHasher("sha256").update(shim).digest("hex")}')`, :: local file read via Bun.file (filesystem), not a network response body (#1394)
