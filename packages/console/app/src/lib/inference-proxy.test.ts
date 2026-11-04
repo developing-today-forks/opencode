@@ -1,18 +1,14 @@
-import { describe, expect, mock, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { inferenceStub } from "../../test/preload"
 
-// Mock the Resource module outright (the stats-proxy.test.ts pattern): the
-// INFERENCE binding is a service-binding fetch, stubbed per test below.
+// The INFERENCE binding is a service-binding fetch, stubbed per test below.
 let inferenceImpl: (request: Request, init?: RequestInit) => Promise<Response> = async () =>
   new Response(null, { status: 200 })
 
-mock.module("@opencode/console-resource", () => ({
-  Resource: {
-    ConsoleMigration: { inferenceUrl: "https://inference.example.test" },
-    INFERENCE: {
-      fetch: (request: Request, init?: RequestInit) => inferenceImpl(request, init),
-    },
-  },
-}))
+// @opencode/console-resource is provided by the shared preload fixture
+// (test/preload.ts, #1522); its INFERENCE binding delegates to the
+// per-test implementation above through this bridge.
+inferenceStub.impl = (request, init) => inferenceImpl(request, init)
 
 const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS, INFERENCE_GENERATION_HEADERS_TIMEOUT_MS } =
   await import("./inference-proxy")
