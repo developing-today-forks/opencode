@@ -518,6 +518,9 @@ function normalizeExperimental(
       // name the same key, the nested value wins and the conflict is diagnosed, per key.
       const routesInput = isRecord(experimental.routes) ? experimental.routes : undefined
       if (own(experimental, "routes") && !routesInput) invalid(["experimental", "routes"], diagnostics)
+      // A typo'd container key (routes.modles) would otherwise drop silently: the fold below
+      // only reads the seven known fields, so enumerate the rest by name like tuning/log do.
+      if (routesInput) unknownKeys(routesInput, ConfigExperimental.Routes.fields, ["experimental", "routes"], diagnostics)
       const routes: Record<string, unknown> = {}
       const routeSources = <T>(
         flatKey: string,
@@ -571,9 +574,10 @@ function normalizeExperimental(
       if (tuning !== undefined) routes.tuning = tuning
       const log = routeSources("model_route_log", "log", logValue)
       if (log !== undefined) routes.log = log
-      const settings = routeSources("model_route_settings", "settings", (value, path) =>
-        decodeEncoded(ConfigExperimental.Routes.fields.settings, value, path, diagnostics),
-      )
+      const settings = routeSources("model_route_settings", "settings", (value, path) => {
+        unknownKeys(value, ConfigModelRoutes.Settings.fields, path, diagnostics)
+        return decodeEncoded(ConfigExperimental.Routes.fields.settings, value, path, diagnostics)
+      })
       if (settings !== undefined) routes.settings = settings
       if (own(experimental, "aliases") && !encoded.aliases) {
         const value = decodeEncoded(

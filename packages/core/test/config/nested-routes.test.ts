@@ -229,10 +229,43 @@ describe("nested routes conversion (#1140)", () => {
     ])
   })
 
-  test("an unknown key at the routes level is ignored, like an unknown flat experimental key", () => {
-    const nested = normalized({ experimental: { routes: { bogus: 1 } } })
-    const flat = normalized({ experimental: { bogus: 1 } })
-    expect(nested.diagnostics).toEqual(flat.diagnostics)
+  test("an unknown key at the routes level is diagnosed by name, while known siblings still fold", () => {
+    const nested = normalized({
+      experimental: { routes: { modles: { pool: { targets: ["openai/gpt-6-luna"] } }, tuning: { enabled: true } } },
+    })
+    expect(nested.diagnostics).toContainEqual({
+      kind: "invalid",
+      path: ["experimental", "routes", "modles"],
+      message: "omitted unknown setting",
+    })
+    expect(routesOf({ experimental: { routes: { tuning: { enabled: true } } } })?.tuning).toEqual({ enabled: true })
+    // The routes container is diagnosed; an unknown flat experimental key is still ignored.
+    expect(normalized({ experimental: { bogus: 1 } }).diagnostics).toEqual([])
+  })
+
+  test("an unknown key under routes.settings is diagnosed by name in both spellings, known settings still decode", () => {
+    const nested = normalized({
+      experimental: { routes: { settings: { bench: { multiplier: 3 }, bogus: 1 } } },
+    })
+    expect(nested.diagnostics).toContainEqual({
+      kind: "invalid",
+      path: ["experimental", "routes", "settings", "bogus"],
+      message: "omitted unknown setting",
+    })
+    expect(routesOf({ experimental: { routes: { settings: { bench: { multiplier: 3 } } } } })?.settings).toEqual({
+      bench: { multiplier: 3 },
+    })
+    const flat = normalized({
+      experimental: { model_route_settings: { bench: { multiplier: 3 }, bogus: 1 } },
+    })
+    expect(flat.diagnostics).toContainEqual({
+      kind: "invalid",
+      path: ["experimental", "model_route_settings", "bogus"],
+      message: "omitted unknown setting",
+    })
+    expect(routesOf({ experimental: { model_route_settings: { bench: { multiplier: 3 } } } })?.settings).toEqual({
+      bench: { multiplier: 3 },
+    })
   })
 
   test("empty containers keep their presence in both spellings", () => {
