@@ -214,7 +214,7 @@ const ScheduleWindow = Schema.Union([Window, Schema.String]).annotate({
 
 /** A time-bound weight change inside one route. `factor` scales a target's weight; `weight` replaces
  * it. Everything is unchanged outside the window. */
-export class Schedule extends Schema.Class<Schedule>("Config.ModelRoute.Schedule")({
+class ScheduleClass extends Schema.Class<ScheduleClass>("Config.ModelRoute.Schedule")({
   id: Schema.String.annotate({ description: "Name for the schedule, shown in decisions and editors." }).pipe(optional),
   targets: Schema.Array(Schema.String)
     .annotate({
@@ -234,8 +234,26 @@ export class Schedule extends Schema.Class<Schedule>("Config.ModelRoute.Schedule
   note: Schema.String.annotate({ description: "Why the schedule exists, kept for review." }).pipe(optional),
 }) {}
 
+/** Schedule as it decodes: exactly one of `factor` and `weight` must be set (#1589). The
+ * fields are each optional, so the rule lives in this cross-field check, in the shape of
+ * the Escalation check below (#1163). With both set, core's scheduled() interpreter
+ * silently lets `weight` win and discards `factor`; with neither, the schedule matches
+ * its window and targets and then changes nothing — either way the operator believes
+ * a weight change is in force that routing does not perform. */
+export const Schedule = ScheduleClass.check(
+  Schema.makeFilter((schedule: ScheduleClass) =>
+    (schedule.factor === undefined) !== (schedule.weight === undefined)
+      ? undefined
+      : "a schedule must set exactly one of factor and weight",
+  ),
+  // The check wrapper drops the class identifier from the encoded JSON
+  // schema (the struct inlines at every use site instead of registering
+  // as a named definition); restating it keeps the OpenAPI shape stable.
+).annotate({ identifier: "Config.ModelRoute.Schedule" })
+export type Schedule = ScheduleClass
+
 /** A scheduled weight change that applies across routes, optionally scoped to some of them. */
-export class GlobalSchedule extends Schema.Class<GlobalSchedule>("Config.ModelRoute.GlobalSchedule")({
+class GlobalScheduleClass extends Schema.Class<GlobalScheduleClass>("Config.ModelRoute.GlobalSchedule")({
   id: Schema.String.pipe(optional),
   providers: Schema.Array(Schema.String)
     .annotate({
@@ -266,6 +284,20 @@ export class GlobalSchedule extends Schema.Class<GlobalSchedule>("Config.ModelRo
   }).pipe(optional),
   note: Schema.String.pipe(optional),
 }) {}
+
+/** GlobalSchedule as it decodes: the same exactly-one rule as Schedule (#1589), for the
+ * same reason — core's scheduled() interpreter applies this class through the same
+ * weight-wins path, so a both-set global schedule silently discards its `factor` and a
+ * neither-set one is silently inert. */
+export const GlobalSchedule = GlobalScheduleClass.check(
+  Schema.makeFilter((schedule: GlobalScheduleClass) =>
+    (schedule.factor === undefined) !== (schedule.weight === undefined)
+      ? undefined
+      : "a global schedule must set exactly one of factor and weight",
+  ),
+  // See Schedule: restating the identifier keeps the encoded definition.
+).annotate({ identifier: "Config.ModelRoute.GlobalSchedule" })
+export type GlobalSchedule = GlobalScheduleClass
 
 export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
   name: Schema.String.pipe(optional),
