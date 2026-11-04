@@ -283,6 +283,59 @@ it.effect("convertSchema folds anyOf to oneOf for Anthropic targets (#1550)", ()
   }),
 )
 
+it.effect("convertSchema expands multi-valued type unions into branches (#1556)", () =>
+  Effect.sync(() => {
+    // A type array with two or more concrete members is a branch set:
+    // anyOf for Gemini, oneOf for Anthropic (the #1550 fold), at a
+    // property and at the root. Collapsing it to the first member
+    // silently narrowed the tool's declared parameter schema.
+    const unioned = { type: "object", properties: { mode: { type: ["string", "integer"] } } }
+    expect(convertSchema(unioned as never)).toEqual({
+      type: "OBJECT",
+      properties: { mode: { anyOf: [{ type: "STRING" }, { type: "INTEGER" }] } },
+    })
+    expect(convertSchema(unioned as never, true)).toEqual({
+      type: "OBJECT",
+      properties: { mode: { oneOf: [{ type: "STRING" }, { type: "INTEGER" }] } },
+    })
+    expect(convertSchema({ type: ["string", "integer"] } as never)).toEqual({
+      anyOf: [{ type: "STRING" }, { type: "INTEGER" }],
+    })
+    expect(convertSchema({ type: ["string", "integer"] } as never, true)).toEqual({
+      oneOf: [{ type: "STRING" }, { type: "INTEGER" }],
+    })
+    // "null" still folds to nullable alongside the branches, and the
+    // single-concrete cases stay byte-identical to before.
+    expect(convertSchema({ type: ["string", "integer", "null"] } as never)).toEqual({
+      anyOf: [{ type: "STRING" }, { type: "INTEGER" }],
+      nullable: true,
+    })
+    expect(convertSchema({ type: ["string", "null"] } as never)).toEqual({ type: "STRING", nullable: true })
+    expect(convertSchema({ type: ["string"] } as never)).toEqual({ type: "STRING" })
+    // The node's other keywords stay on the node and apply to every
+    // branch; an ARRAY branch carries items like any ARRAY schema.
+    expect(
+      convertSchema({
+        type: "object",
+        properties: {
+          choice: { type: ["array", "string"], items: { type: "string" }, description: "list or label" },
+          level: { type: ["integer", "number"], minimum: 0, maximum: 10, enum: [1, 2.5] },
+        },
+      } as never),
+    ).toEqual({
+      type: "OBJECT",
+      properties: {
+        choice: {
+          description: "list or label",
+          items: { type: "STRING" },
+          anyOf: [{ type: "ARRAY", items: { type: "STRING" } }, { type: "STRING" }],
+        },
+        level: { minimum: 0, maximum: 10, enum: [1, 2.5], anyOf: [{ type: "INTEGER" }, { type: "NUMBER" }] },
+      },
+    })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
