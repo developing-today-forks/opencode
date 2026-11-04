@@ -595,8 +595,10 @@ export const make = Effect.gen(function* () {
         // A policy rejection bypasses the health accounting below, so it must also settle
         // any half-open probe claim this attempt carried: failed()/completed() normally
         // settle it, and an outstanding claim would strand the target's route recovery
-        // (probeDue stays false) until the bench expires (#1084).
-        if (policyFailure && input.model.routing?.probeClaim) {
+        // (probeDue stays false) until the bench expires (#1084). The same holds for the
+        // refusal delivered as a content-filter finish, which settles nothing either:
+        // completed() is gated on !providerFailed and failed() needs an llmFailure (#1620).
+        if ((policyFailure || policyFinish) && input.model.routing?.probeClaim) {
           const claim = input.model.routing.probeClaim
           ModelRoute.releaseBenchProbe(input.model.routing.target, undefined, claim.claimedAt, claim.token)
           if (claim.credentialID)
