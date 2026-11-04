@@ -606,5 +606,5 @@ function negateSymbol(value: string): string {
     "∣": "∤",
     "∥": "∦",
   }
-  return negated[value] ?? `${value}̸`
+  return (Object.hasOwn(negated, value) ? negated[value] : undefined) ?? `${value}̸`
 }

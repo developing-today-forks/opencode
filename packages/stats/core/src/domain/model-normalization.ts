@@ -47,7 +47,7 @@ export function modelAuthor(value: string | undefined) {
 export function statModel(model: string | undefined, providerModel: string | undefined) {
   const normalized = normalizeInferenceModel(model)
   const resolved = normalized === "big-pickle" ? normalizeInferenceModel(providerModel?.split("/").at(-1)) : normalized
-  const value = MODEL_NAME_ALIASES[resolved.toLowerCase()] ?? resolved
+  const value = (Object.hasOwn(MODEL_NAME_ALIASES, resolved.toLowerCase()) ? MODEL_NAME_ALIASES[resolved.toLowerCase()] : undefined) ?? resolved
   return value.length > MODEL_NAME_MAX_LENGTH ? "unknown" : value
 }
 
