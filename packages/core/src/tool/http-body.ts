@@ -1,8 +1,8 @@
 import { Effect, Stream } from "effect"
 import { HttpClientResponse } from "effect/http"
-import { readBoundedResponseText } from "@opencode/util/http-body"
+import { readBoundedResponseText, readExcerptResponseText } from "@opencode/util/http-body"
 
-export { readBoundedResponseText }
+export { readBoundedResponseText, readExcerptResponseText }
 
 export const collectBoundedResponseBody = (
   response: HttpClientResponse.HttpClientResponse,

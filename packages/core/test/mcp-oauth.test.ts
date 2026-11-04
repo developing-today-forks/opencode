@@ -307,6 +307,28 @@ describe("MCP OAuth", () => {
     ])
   })
 
+  test("resolves an over-cap streamed clone without consuming the original", async () => {
+    // Regression (Codex P1 on #1603): the bounded reader awaited cancellation of
+    // the tee'd clone at the cap, which pends until the original branch is
+    // consumed — but the caller awaits this read first, deadlocking oversized
+    // streamed rejections. The excerpt read must resolve on its own.
+    const chunk = new Uint8Array(32 * 1024).fill(120)
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let index = 0; index < 5; index++) controller.enqueue(chunk)
+          controller.close()
+        },
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    )
+    const parsed = await Promise.race([
+      McpOAuth.parseErrorBody(response.clone() as unknown as Parameters<typeof McpOAuth.parseErrorBody>[0]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("error-body read deadlocked")), 5_000)),
+    ])
+    expect(parsed).toBeUndefined()
+  })
+
   test("parses a small OAuth error body and yields no parsed error for an over-cap one", async () => {
     const small = new Response(
       JSON.stringify({ error: "invalid_grant", error_description: "refresh token revoked" }),
