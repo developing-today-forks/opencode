@@ -108,6 +108,8 @@ const layer = Layer.effect(
 
     const download = Effect.fn("SkillDiscovery.download")(function* (url: string, destination: string) {
       if (yield* fs.exists(destination).pipe(Effect.orDie)) return true
+      // Keep the published file intact if the deadline interrupts the write.
+      const temp = path.join(path.dirname(destination), ".skill-download-" + crypto.randomUUID() + ".tmp")
       return yield* HttpClientRequest.get(url).pipe(
         HttpClient.withScope(http).execute,
         Effect.flatMap((response) =>
@@ -117,9 +119,11 @@ const layer = Layer.effect(
             () => new Error(`Skill file too large (exceeds ${MAX_SKILL_FILE_BYTES} byte limit): ${url}`),
           ),
         ),
-        Effect.flatMap((body) => fs.writeWithDirs(destination, new Uint8Array(body))),
+        Effect.flatMap((body) => fs.writeWithDirs(temp, new Uint8Array(body))),
+        Effect.flatMap(() => fs.rename(temp, destination)),
         Effect.as(true),
         Effect.timeout(downloadTimeout),
+        Effect.ensuring(fs.remove(temp, { recursive: true, force: true }).pipe(Effect.ignore)),
         Effect.catch((error) =>
           Effect.logError("failed to download skill file", { url, error }).pipe(Effect.as(false)),
         ),

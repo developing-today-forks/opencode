@@ -134,24 +134,38 @@ describe("SkillDiscovery.pull", () => {
     "settles a download whose body never completes as failed once the download deadline passes",
     Effect.gen(function* () {
       const catalog = yield* fixture
+      let started = false
       let result: { directories: string[]; requests: string[] } | undefined
+      const stalled = Stream.concat(
+        Stream.fromEffect(
+          Effect.sync(() => {
+            started = true
+            return new Uint8Array([0x23])
+          }),
+        ),
+        Stream.never,
+      )
       yield* catalog
         .pull(
           [{ name: "deploy", files: ["SKILL.md"] }],
           {},
-          { "/catalog/deploy/SKILL.md": HttpServerResponse.stream(Stream.never) },
+          { "/catalog/deploy/SKILL.md": HttpServerResponse.stream(stalled) },
         )
         .pipe(
           Effect.tap((value) => Effect.sync(() => (result = value))),
           Effect.forkChild,
         )
-      // The download deadline runs on the test clock while the stalled body
-      // occupies real time: advance the clock in steps, yielding to the real
-      // event loop between steps, until the deadline settles the pull.
-      for (let i = 0; i < 60 && result === undefined; i++) {
-        yield* TestClock.adjust("10 seconds")
-        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
+      // Wait for the download body to begin before measuring its deadline;
+      // the index fetch may take real time before the download pipeline starts.
+      for (let i = 0; i < 100 && !started; i++) {
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
       }
+      expect(started).toBe(true)
+      yield* TestClock.adjust("59 seconds")
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
+      expect(result).toBeUndefined()
+      yield* TestClock.adjust("1 second")
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
       expect(result).toBeDefined()
       expect(result?.directories).toEqual([])
       expect(result?.requests).toContain(`${catalog.base}deploy/SKILL.md`)
