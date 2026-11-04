@@ -15726,7 +15726,8 @@
               },
               "required": ["action", "resource", "effect"],
               "additionalProperties": false
-            }
+            },
+            "description": "Ordered policies controlling access to providers, tools, and integrations"
           },
           "agents": {
             "type": "object",
@@ -15905,7 +15906,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs to discover skills from"
           },
           "commands": {
             "type": "object",
@@ -15918,7 +15920,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs supplying ambient instructions"
           },
           "references": {
             "type": "object",
@@ -16145,7 +16148,8 @@
                   },
                   "required": ["action", "resource", "effect"],
                   "additionalProperties": false
-                }
+                },
+                "description": "Deprecated: use top-level policies. Ordered policies controlling access to configured resources"
               },
               "model_route_demotion": {
                 "type": "object",
@@ -16325,7 +16329,7 @@
                             "type": "integer",
                             "exclusiveMinimum": 0,
                             "maximum": 50,
-                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                           },
                           "outcomeWindow": {
                             "type": "integer",
@@ -16548,7 +16552,7 @@
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "maximum": 50,
-                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                       },
                       "outcomeWindow": {
                         "type": "integer",

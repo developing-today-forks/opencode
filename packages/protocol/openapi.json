@@ -15726,7 +15726,8 @@
               },
               "required": ["action", "resource", "effect"],
               "additionalProperties": false
-            }
+            },
+            "description": "Ordered policies controlling access to providers, tools, and integrations"
           },
           "agents": {
             "type": "object",
@@ -15905,7 +15906,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs to discover skills from"
           },
           "commands": {
             "type": "object",
@@ -15918,7 +15920,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs supplying ambient instructions"
           },
           "references": {
             "type": "object",
@@ -16145,7 +16148,8 @@
                   },
                   "required": ["action", "resource", "effect"],
                   "additionalProperties": false
-                }
+                },
+                "description": "Deprecated: use top-level policies. Ordered policies controlling access to configured resources"
               },
               "model_route_demotion": {
                 "type": "object",
