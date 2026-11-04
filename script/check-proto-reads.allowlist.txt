@@ -24,7 +24,6 @@ packages/core/src/model-route-limits.ts :: total += Number(amount) * (RELATIVE_U
 packages/core/src/model-route-schedule.ts :: dayOfWeek: SHORT_DAYS[values.weekday.toLowerCase()] ?? 0, :: safe: key comes from Intl weekday formatting (#833)
 packages/core/src/model-route-schedule.ts :: return Object.hasOwn(DAY_NAMES, text) ? DAY_NAMES[text] : undefined :: guarded: Object.hasOwn ternary at the same site (#791)
 packages/core/src/model-route-schedule.ts :: window.daysOfWeek?.length ? window.daysOfWeek.map((day) => DAY_LABELS[day]).join(", ") : "every day" :: safe: numeric day index
-packages/core/src/model-route-tuning.ts :: total += Number(amount) * (unit[name] ?? 1_000) :: safe: name captured by the (second|minute|hour|day|sec|s) regex
 packages/core/src/model-route.ts :: [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1)) :: safe: numeric index into a weight array
 packages/core/src/model-route.ts :: const base = node.weights[position] ?? 1 :: safe: numeric index into a weight array
 packages/core/src/model-route.ts :: const base = node.weights[position] ?? 1 :: safe: numeric index into a weight array (second occurrence, round-robin tiers block #1277; occurrence-aware entry #1086)
@@ -104,3 +103,6 @@ packages/plugin-github/src/issue.ts :: const edit = Object.hasOwn(EDIT_MUTATIONS
 packages/plugin-github/src/issue.ts :: const remove = Object.hasOwn(DELETE_MUTATIONS, node.__typename) ? DELETE_MUTATIONS[node.__typename] : undefined :: guarded: Object.hasOwn ternary at the same site (#1361)
 packages/plugin-github/src/explore.ts :: const page = yield* api.json<SearchPage<unknown>>("GET", `/search/${REST_SEARCH[input.type]}`, { :: safe: input.type is validated by Schema.Literals(SEARCH_TYPES); REST_SEARCH is Record<Exclude<SearchType, "discussions">, string> (#1361)
 packages/plugin-github/src/explore.ts :: const media = MEDIA[path.extname(file).toLowerCase()] :: safe: key is path.extname(...) lowercased — always dot-prefixed, so it can only name an extension key of MEDIA, never a prototype member (#1361)
+packages/core/src/embeddings-native.ts :: for (let index = 0; index < dimensions; index++) sliced[index] = full[index] ?? 0 :: safe: numeric index into a ReadonlyArray<number> under a bounded loop counter (dimensions is validated against the native dimension first), not a string-keyed dictionary read (#1476)
+packages/core/src/generate.ts :: if (typeof path === "string" && !path.endsWith(DOOR_PATHS[dialect])) return undefined :: safe by construction: dialect is the closed Dialect union and the line above returns early unless NATIVE_DIALECTS yields exactly that dialect, so the key is proven to be an own key of DOOR_PATHS (#1476)
+packages/core/src/systemone.ts :: const gatewayBase = (process.env[GATEWAY_BASE_ENV] ?? DEFAULT_GATEWAY_BASE).replace(/\/+$/, "") :: safe by construction: the key is the module constant GATEWAY_BASE_ENV ("OPENCODE_SYSTEMONE_GATEWAY_BASE"), never caller-controlled (#1476)

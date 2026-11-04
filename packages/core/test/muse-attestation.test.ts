@@ -50,6 +50,19 @@ describe("MuseAttestation.plan", () => {
     expect(MuseAttestation.plan([])).toBeUndefined()
   })
 
+  test("prototype-named tools are left unaliased (#1476)", () => {
+    // Tool names come from the caller's request, so a bare ALIASES[name]
+    // read walked the prototype chain and produced function-valued
+    // "aliases" for these names; the own-property read must not.
+    for (const name of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+      expect(MuseAttestation.plan([name])).toBeUndefined()
+    }
+    // Mixed with a genuine alias, only the genuine one is planned.
+    const mixed = MuseAttestation.plan(["toString", "shell"])
+    expect(mixed?.forward.get("shell")).toBe("run_command")
+    expect(mixed?.forward.has("toString")).toBe(false)
+  })
+
   test("collision guard: a genuine run_command keeps shell verbatim (the door's taken check)", () => {
     const plan = MuseAttestation.plan(["shell", "run_command"])
     expect(plan).toBeUndefined()
