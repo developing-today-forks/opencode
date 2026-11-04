@@ -28,7 +28,17 @@ export interface GateDefinition {
 
 export const hitKey = (file: string, text: string) => `${file} :: ${text}`
 
-const isCommentOnly = (text: string) => text.startsWith("//") || text.startsWith("*") || text.startsWith("/*")
+/**
+ * A line is comment-only when it is a `//` line, a block-comment
+ * continuation (`*`-led), or a block comment that closes at the end of
+ * the line. A line that opens a block comment and closes it before
+ * code (a note followed by a statement on the same line) is executable
+ * and is scanned.
+ */
+const isCommentOnly = (text: string) =>
+  text.startsWith("//") ||
+  text.startsWith("*") ||
+  (text.startsWith("/*") && text.indexOf("*/", 2) === text.length - 2)
 
 /** Return every matching, non-comment source line for a gate's declared patterns. */
 export function scanSource(file: string, source: string, patterns: readonly RegExp[]): Hit[] {
@@ -202,4 +212,26 @@ export function runGate(gate: GateDefinition, root: string, allowlist: Map<strin
     process.exit(1)
   }
   console.log(gate.summary(result.hits.length, gate.scanRoots.length, gate.allowlistPath))
+}
+
+/**
+ * The harness as one named namespace: the gates import this object and
+ * call its members qualified (`gateHarness.collect(...)`) instead of
+ * aliasing value imports, which the repo's AGENTS.md bans.
+ */
+export const gateHarness = {
+  collect,
+  evaluateGate,
+  hitKey,
+  isScannedFile,
+  parseAllowlist,
+  runGate,
+  scanSource,
+  scriptTreesOnDisk,
+  srcTreesOnDisk,
+  staleEntries,
+  treesOnDisk,
+  unlistedHits,
+  unscannedScriptTrees,
+  unscannedSrcTrees,
 }

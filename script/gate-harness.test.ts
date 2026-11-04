@@ -13,13 +13,19 @@ import {
   type GateDefinition,
   type Hit,
 } from "./gate-harness"
-import { GATE as PROTO_GATE, PATTERNS as PROTO_PATTERNS } from "./check-proto-reads"
-import { GATE as NUMERIC_GATE } from "./check-numeric-boundaries"
-import { GATE as BOUNDED_GATE } from "./check-bounded-http"
+import * as ProtoReads from "./check-proto-reads"
+import * as NumericBoundaries from "./check-numeric-boundaries"
+import * as BoundedHttp from "./check-bounded-http"
 
 const PATTERNS = [/TABLE\[key\]/]
 
 describe("scanSource (shared)", () => {
+  test("code after a leading block comment on the same line is still scanned", () => {
+    const hits = scanSource("f.ts", "/* note */ const value = TABLE[key]", PATTERNS)
+    expect(hits).toHaveLength(1)
+    expect(hits[0].text).toBe("/* note */ const value = TABLE[key]")
+  })
+
   test("comment-only lines are skipped for every gate (#1526: proto-reads gains the skip)", () => {
     const hits = scanSource(
       "f.ts",
@@ -41,7 +47,7 @@ describe("collect on disk (#1289, generalised by #1526)", () => {
       writeFileSync(join(dir, "example.ts"), "const a = TABLE[key]\n")
       writeFileSync(join(dir, "notes.md"), "const ignored = TABLE[key]\n")
       const hits: Hit[] = []
-      collect(root, join(root, "packages/core/src"), hits, PROTO_PATTERNS, [".ts"])
+      collect(root, join(root, "packages/core/src"), hits, ProtoReads.PATTERNS, [".ts"])
       expect(hits).toHaveLength(1)
       expect(hits[0].file).toBe("packages/core/src/util/example.ts")
     } finally {
@@ -101,7 +107,7 @@ describe("treesOnDisk (shared inventory, #1425/#1494 shape)", () => {
 })
 
 describe("gate declarations", () => {
-  const gates: GateDefinition[] = [PROTO_GATE, NUMERIC_GATE, BOUNDED_GATE]
+  const gates: GateDefinition[] = [ProtoReads.GATE, NumericBoundaries.GATE, BoundedHttp.GATE]
   test("all three gates load as declarations over the harness, with roots and allowlists on disk", () => {
     const root = join(import.meta.dir, "..")
     for (const gate of gates) {

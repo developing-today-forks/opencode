@@ -38,19 +38,7 @@
  * Usage:
  *   bun run script/check-numeric-boundaries.ts   # exit 1 listing unlisted/stale hits
  */
-import {
-  collect as collectHits,
-  hitKey,
-  isScannedFile as isFileScanned,
-  parseAllowlist,
-  runGate,
-  scanSource as scan,
-  srcTreesOnDisk,
-  staleEntries,
-  unlistedHits,
-  unscannedSrcTrees as findUnscannedSrcTrees,
-  type Hit,
-} from "./gate-harness"
+import { gateHarness, type Hit } from "./gate-harness"
 import { join } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
@@ -101,7 +89,7 @@ export const PATTERNS: RegExp[] = [/\bNumber\s*\(/, /\bparseInt\s*\(/, /\bparseF
 /** Extensions whose files execute code in the scanned packages. */
 export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx"]
 
-export const isScannedFile = (name: string) => isFileScanned(name, SCANNED_EXTENSIONS)
+export const isScannedFile = (name: string) => gateHarness.isScannedFile(name, SCANNED_EXTENSIONS)
 
 export const GATE = {
   name: "numeric-boundaries",
@@ -117,20 +105,23 @@ export const GATE = {
 } as const
 
 export type { Hit }
-export { hitKey, parseAllowlist, staleEntries, unlistedHits }
-export const scanSource = (file: string, source: string) => scan(file, source, PATTERNS)
+export const hitKey = gateHarness.hitKey
+export const parseAllowlist = gateHarness.parseAllowlist
+export const staleEntries = gateHarness.staleEntries
+export const unlistedHits = gateHarness.unlistedHits
+export const scanSource = (file: string, source: string) => gateHarness.scanSource(file, source, PATTERNS)
 export function collect(root: string, dir: string, hits: Hit[]) {
-  return collectHits(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
+  return gateHarness.collect(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
 
-export { srcTreesOnDisk }
+export const srcTreesOnDisk = gateHarness.srcTreesOnDisk
 export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
-  findUnscannedSrcTrees(root, roots)
+  gateHarness.unscannedSrcTrees(root, roots)
 
 async function main() {
   const root = join(import.meta.dir, "..")
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
-  runGate(GATE, root, allowlist)
+  gateHarness.runGate(GATE, root, allowlist)
 }
 
 if (import.meta.main) await main()

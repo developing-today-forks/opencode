@@ -56,21 +56,7 @@
  * Usage:
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
  */
-import {
-  collect as collectHits,
-  hitKey,
-  isScannedFile as isFileScanned,
-  parseAllowlist,
-  runGate,
-  scanSource as scan,
-  scriptTreesOnDisk,
-  srcTreesOnDisk,
-  staleEntries,
-  unlistedHits,
-  unscannedScriptTrees as findUnscannedScriptTrees,
-  unscannedSrcTrees as findUnscannedSrcTrees,
-  type Hit,
-} from "./gate-harness"
+import { gateHarness, type Hit } from "./gate-harness"
 import { join } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
@@ -157,23 +143,27 @@ export const PATTERNS: RegExp[] = [
 ]
 
 export type { Hit }
-export { hitKey, parseAllowlist, staleEntries, unlistedHits }
-export const scanSource = (file: string, source: string) => scan(file, source, PATTERNS)
+export const hitKey = gateHarness.hitKey
+export const parseAllowlist = gateHarness.parseAllowlist
+export const staleEntries = gateHarness.staleEntries
+export const unlistedHits = gateHarness.unlistedHits
+export const scanSource = (file: string, source: string) => gateHarness.scanSource(file, source, PATTERNS)
 
 /** Extensions whose files execute code: TS/TSX plus Astro (frontmatter runs server-side). */
 export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx", ".astro"]
 
-export const isScannedFile = (name: string) => isFileScanned(name, SCANNED_EXTENSIONS)
+export const isScannedFile = (name: string) => gateHarness.isScannedFile(name, SCANNED_EXTENSIONS)
 
 export function collect(root: string, dir: string, hits: Hit[]) {
-  return collectHits(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
+  return gateHarness.collect(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
 
-export { scriptTreesOnDisk, srcTreesOnDisk }
+export const scriptTreesOnDisk = gateHarness.scriptTreesOnDisk
+export const srcTreesOnDisk = gateHarness.srcTreesOnDisk
 export const unscannedScriptTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
-  findUnscannedScriptTrees(root, roots)
+  gateHarness.unscannedScriptTrees(root, roots)
 export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
-  findUnscannedSrcTrees(root, roots)
+  gateHarness.unscannedSrcTrees(root, roots)
 
 export const GATE = {
   name: "bounded-http",
@@ -195,7 +185,7 @@ export const GATE = {
 async function main() {
   const root = join(import.meta.dir, "..")
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
-  runGate(GATE, root, allowlist)
+  gateHarness.runGate(GATE, root, allowlist)
 }
 
 if (import.meta.main) await main()
