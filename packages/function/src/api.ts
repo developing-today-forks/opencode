@@ -1,11 +1,11 @@
 import { Hono } from "hono"
 import { DurableObject } from "cloudflare:workers"
 import { randomUUID } from "node:crypto"
-import { jwtVerify, createRemoteJWKSet } from "jose"
+import { jwtVerify } from "jose"
 import { createAppAuth } from "@octokit/auth-app"
 import { Octokit } from "@octokit/rest"
 import { Resource } from "sst"
-import { parseRepositoryClaim } from "./github"
+import { githubActionsJWKSet, parseRepositoryClaim } from "./github"
 import { postDiscordSupportMessage } from "./discord"
 
 type Env = {
@@ -263,8 +263,9 @@ export default new Hono<{ Bindings: Env }>()
     const token = c.req.header("Authorization")?.replace(/^Bearer /, "")
     if (!token) return c.json({ error: "Authorization header is required" }, { status: 401 })
 
-    // verify token
-    const JWKS = createRemoteJWKSet(new URL(JWKS_URL))
+    // verify token (shared module-scope JWK set: its cache survives across
+    // requests, so verification does not fetch the JWKS document every time, #1112)
+    const JWKS = githubActionsJWKSet(new URL(JWKS_URL))
     let repository: ReturnType<typeof parseRepositoryClaim>
     try {
       const { payload } = await jwtVerify(token, JWKS, {
