@@ -430,4 +430,22 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
     expect(decodeEscalation({ afterGiveUps: 2, outcomeWindow: 2 }).afterGiveUps).toBe(2)
     expect(() => decodeEscalation({ afterGiveUps: 3, outcomeWindow: 2 })).toThrow()
   })
+
+  test("enforces exactly one of factor and weight on schedules (#1589)", () => {
+    const decodeSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.Schedule)
+    // Exactly one set decodes, either way around.
+    expect(decodeSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    // Both set would silently discard factor in core's interpreter; neither is inert.
+    expect(() => decodeSchedule({ when: {}, factor: 2, weight: 5 })).toThrow("exactly one of factor and weight")
+    expect(() => decodeSchedule({ when: {} })).toThrow("exactly one of factor and weight")
+
+    const decodeGlobalSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.GlobalSchedule)
+    expect(decodeGlobalSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeGlobalSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    expect(() => decodeGlobalSchedule({ when: {}, factor: 2, weight: 5 })).toThrow(
+      "exactly one of factor and weight",
+    )
+    expect(() => decodeGlobalSchedule({ when: {} })).toThrow("exactly one of factor and weight")
+  })
 })
