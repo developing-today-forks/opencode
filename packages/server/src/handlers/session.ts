@@ -125,6 +125,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.create",
         Effect.fn(function* (ctx) {
+          if (ctx.query.directory !== undefined && ctx.payload.parentID !== undefined)
+            return yield* new InvalidRequestError({
+              message:
+                "The directory query parameter cannot be combined with parentID: a child session inherits its parent's location.",
+              field: "directory",
+            })
           return {
             data: yield* session
               .create({
@@ -136,7 +142,13 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 permissions: ctx.payload.permissions,
                 subagentPolicy: ctx.payload.subagentPolicy,
                 ...(ctx.payload.parentID === undefined
-                  ? { location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) } }
+                  ? {
+                      location:
+                        ctx.payload.location ??
+                        (ctx.query.directory === undefined
+                          ? { directory: AbsolutePath.make(process.cwd()) }
+                          : { directory: ctx.query.directory }),
+                    }
                   : { parentID: ctx.payload.parentID }),
               })
               .pipe(

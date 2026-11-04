@@ -659,6 +659,7 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/session`,
+            query: { directory: input?.["directory"] },
             body: {
               id: input?.["id"],
               parentID: input?.["parentID"],
