@@ -420,17 +420,33 @@ export class QuotaGate extends Schema.Class<QuotaGate>("Config.ModelRoute.Settin
 }) {}
 
 /** Escalation: when a route races its next target because the current one keeps giving up. */
-export class Escalation extends Schema.Class<Escalation>("Config.ModelRoute.Settings.Escalation")({
+class EscalationClass extends Schema.Class<EscalationClass>("Config.ModelRoute.Settings.Escalation")({
   enabled: Schema.Boolean.annotate({
     description: "Whether routes race their next target once the current one keeps giving up. Defaults to true.",
   }).pipe(optional),
   afterGiveUps: SampleCount.annotate({
-    description: "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2.",
+    description:
+      "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2.",
   }).pipe(optional),
   outcomeWindow: SampleCount.annotate({
     description: "Recent finished requests per target that the give-up count reads. Defaults to 5.",
   }).pipe(optional),
 }) {}
+
+/** Escalation as it decodes: the cross-field invariant the fields cannot state alone (#1163).
+ * The give-up count reads only the `outcomeWindow` most recent outcomes, so an effective
+ * `afterGiveUps` above the effective window could never be reached and escalation would be
+ * silently inert. Reject that combination at decode, applying the field defaults (2 and 5)
+ * when either side is omitted, so one-sided overrides are checked too. Equality is valid:
+ * every outcome in the window giving up reaches the threshold exactly. */
+export const Escalation = EscalationClass.check(
+  Schema.makeFilter((escalation: EscalationClass) =>
+    (escalation.afterGiveUps ?? 2) <= (escalation.outcomeWindow ?? 5)
+      ? undefined
+      : "escalation afterGiveUps must not exceed outcomeWindow",
+  ),
+)
+export type Escalation = EscalationClass
 
 /** Telling a provider-wide fault from a local network fault. When several models of one
  * provider are cooling, the provider itself is demoted to last resort; when several unrelated

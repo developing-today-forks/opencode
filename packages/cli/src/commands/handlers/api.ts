@@ -1,5 +1,5 @@
 import { EOL } from "node:os"
-import { Effect, Option } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
@@ -161,7 +161,7 @@ export async function fetchOpenApi(endpoint: Endpoint, timeoutMs = OPENAPI_FETCH
       () => new Error(`OpenAPI document exceeded ${maxOpenApiBytes} bytes`),
     )
     try {
-      return JSON.parse(text) as OpenApi
+      return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(text) as OpenApi
     } catch {
       throw new Error("Failed to parse OpenAPI document")
     }

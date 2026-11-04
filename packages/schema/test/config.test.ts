@@ -410,9 +410,24 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
       { network: { windowMs: 0 } },
       { escalation: { outcomeWindow: 0 } },
       { escalation: { afterGiveUps: 51 } },
+      { escalation: { afterGiveUps: 6, outcomeWindow: 5 } },
+      { escalation: { afterGiveUps: 6 } },
+      { escalation: { outcomeWindow: 1 } },
       { continuity: { hedgeRequests: 0 } },
       { overrides: { preferredFactor: 0 } },
     ]
     for (const value of bad) expect(() => decode({ routes: { settings: value } })).toThrow()
+  })
+
+  test("accepts escalation pairs at the cross-field boundary (#1163)", () => {
+    // Equality is valid: every outcome in the window giving up reaches the threshold exactly.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5, outcomeWindow: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    // One-sided values at the default of the other side (afterGiveUps 2, outcomeWindow 5) are valid.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    expect(decode({ routes: { settings: { escalation: { outcomeWindow: 2 } } } }).routes?.settings?.escalation?.outcomeWindow).toBe(2)
+    // The invariant also holds decoding Escalation on its own.
+    const decodeEscalation = Schema.decodeUnknownSync(ConfigModelRoutes.Escalation)
+    expect(decodeEscalation({ afterGiveUps: 2, outcomeWindow: 2 }).afterGiveUps).toBe(2)
+    expect(() => decodeEscalation({ afterGiveUps: 3, outcomeWindow: 2 })).toThrow()
   })
 })

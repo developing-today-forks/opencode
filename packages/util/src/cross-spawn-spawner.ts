@@ -1,5 +1,9 @@
 import { isArrayNonEmpty } from "effect/Array"
+// Deep imports: this module is in the workerd module graph (packages/server/src/workerd.ts),
+// so the @effect/platform-node barrel's eager undici/ioredis/node:sqlite loads must stay out.
+// ast-grep-ignore: no-star-import
 import * as NodeSink from "@effect/platform-node/NodeSink"
+// ast-grep-ignore: no-star-import
 import * as NodeStream from "@effect/platform-node/NodeStream"
 import { Deferred, Effect, Exit, FileSystem, Layer, Path, PlatformError, Predicate, Sink, Stream } from "effect"
 import type { Scope } from "effect"
