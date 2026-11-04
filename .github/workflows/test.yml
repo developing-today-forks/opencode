@@ -247,6 +247,17 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run check:workflows
 
+      - name: Test gate wiring meta-check
+        # script/ is not a workspace; run the fixtures from its directory.
+        working-directory: script
+        run: bun test check-gates.test.ts
+
+      - name: Check gate registry and wiring
+        # Every promised gate must be registered, invoked by its owning
+        # workflow, and reachable for at least one declared trigger (#1527).
+        if: runner.os == 'Linux'
+        run: bun run check:gates
+
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"

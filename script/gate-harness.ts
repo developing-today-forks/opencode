@@ -226,6 +226,8 @@ export const gateHarness = {
   isScannedFile,
   parseAllowlist,
   runGate,
+  gateWiringViolations,
+  stepEventRequirements,
   scanSource,
   scriptTreesOnDisk,
   srcTreesOnDisk,
@@ -234,4 +236,191 @@ export const gateHarness = {
   unlistedHits,
   unscannedScriptTrees,
   unscannedSrcTrees,
+}
+
+/**
+ * Gate registry + wiring meta-check data (#1527, design #1525 phase 3).
+ *
+ * Every gate the repo promises to run is registered here exactly once:
+ * the root `check:*` gates, the root `lint:*` scans, `test:lint-rules`,
+ * and each package's `check:generated`. `script/check-gates.ts` (the
+ * `check:gates` gate, itself registered below) fails when a gate script
+ * exists but is unregistered, when a registered gate is invoked by no
+ * step of its owning workflow, or when the invoking step is unreachable
+ * because its `if:` requires a `github.event_name` the workflow never
+ * triggers on — the #1508 shape, where check.yml's lint step waited for
+ * a `pull_request` event its workflow did not declare.
+ */
+export interface RegisteredGate {
+  readonly name: string
+  /** The package.json script that runs the gate. */
+  readonly script: string
+  /** Repo-relative package directory, or "." for the root package. */
+  readonly packagePath: string
+  /** Basename of the workflow that must invoke the gate. */
+  readonly workflow: string
+}
+
+export const GATE_REGISTRY: readonly RegisteredGate[] = [
+  { name: "check:doc-env-vars", script: "check:doc-env-vars", packagePath: ".", workflow: "test.yml" },
+  { name: "check:proto-reads", script: "check:proto-reads", packagePath: ".", workflow: "test.yml" },
+  { name: "check:bounded-http", script: "check:bounded-http", packagePath: ".", workflow: "test.yml" },
+  { name: "check:numeric-boundaries", script: "check:numeric-boundaries", packagePath: ".", workflow: "test.yml" },
+  { name: "check:workflows", script: "check:workflows", packagePath: ".", workflow: "test.yml" },
+  { name: "check:gates", script: "check:gates", packagePath: ".", workflow: "test.yml" },
+  { name: "lint:changed", script: "lint:changed", packagePath: ".", workflow: "check.yml" },
+  { name: "lint:effect-patterns", script: "lint:effect-patterns", packagePath: ".", workflow: "test.yml" },
+  {
+    name: "lint:effect-simplifications",
+    script: "lint:effect-simplifications",
+    packagePath: ".",
+    workflow: "test.yml",
+  },
+  { name: "test:lint-rules", script: "test:lint-rules", packagePath: ".", workflow: "test.yml" },
+  { name: "client check:generated", script: "check:generated", packagePath: "packages/client", workflow: "test.yml" },
+  {
+    name: "protocol check:generated",
+    script: "check:generated",
+    packagePath: "packages/protocol",
+    workflow: "test.yml",
+  },
+  { name: "www check:generated", script: "check:generated", packagePath: "services/www", workflow: "test.yml" },
+]
+
+/** Root script names that must be registered: every `check:*` and `lint:*` script, plus `test:lint-rules`. */
+export const mustRegisterRootScript = (name: string) =>
+  name.startsWith("check:") || name.startsWith("lint:") || name === "test:lint-rules"
+
+/** One observed invocation of a script by a workflow step. */
+export interface GateUse {
+  readonly workflow: string
+  readonly script: string
+  /** The step's working directory ("." when the step runs at the repo root). */
+  readonly packagePath: string
+  /** The step's `if:` expression, when it declares one. */
+  readonly stepIf?: string
+}
+
+export interface GateWiringInput {
+  /** Script names declared by the root package.json. */
+  readonly rootScripts: readonly string[]
+  /** Repo-relative package directories whose package.json declares a `check:generated` script. */
+  readonly generatedPackages: readonly string[]
+  readonly uses: readonly GateUse[]
+  /** Trigger event names per workflow basename, from the parsed `on:` value. */
+  readonly workflowTriggers: Readonly<Record<string, readonly string[]>>
+}
+
+export interface GateWiringViolation {
+  readonly rule: "unregistered-gate" | "stale-registry-entry" | "unwired-gate" | "unreachable-gate"
+  readonly detail: string
+}
+
+/** Event names a step `if:` expression requires by equality on `github.event_name`. */
+export function stepEventRequirements(stepIf: string): string[] {
+  const events: string[] = []
+  for (const match of stepIf.matchAll(/github\.event_name\s*={2,3}\s*'([^']+)'/g)) events.push(match[1])
+  for (const match of stepIf.matchAll(/github\.event_name\s*={2,3}\s*"([^"]+)"/g)) events.push(match[1])
+  return events
+}
+
+/** Split OR branches without breaking on parentheses or quoted event names. */
+function eventAlternatives(stepIf: string): string[][] {
+  const branches: string[] = []
+  let start = 0
+  let depth = 0
+  let quote: "'" | '"' | undefined
+  for (let index = 0; index < stepIf.length; index++) {
+    const character = stepIf[index]
+    if (quote) {
+      if (character === quote) quote = undefined
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+      continue
+    }
+    if (character === "(") depth++
+    if (character === ")") depth--
+    if (depth === 0 && stepIf.startsWith("||", index)) {
+      branches.push(stepIf.slice(start, index))
+      start = index + 2
+      index++
+    }
+  }
+  branches.push(stepIf.slice(start))
+  return branches.map(stepEventRequirements)
+}
+
+/**
+ * Every wiring violation in the given snapshot, in rule order. Pure:
+ * `script/check-gates.ts` supplies the on-disk snapshot and the tests
+ * supply fixtures, including the #1508 shape verbatim. Expressions that
+ * do not equate `github.event_name` to a literal (e.g. `runner.os`) and
+ * equalities naming a declared trigger are not violations.
+ */
+export function gateWiringViolations(
+  input: GateWiringInput,
+  registry: readonly RegisteredGate[] = GATE_REGISTRY,
+): GateWiringViolation[] {
+  const violations: GateWiringViolation[] = []
+  const rootEntries = registry.filter((entry) => entry.packagePath === ".")
+  for (const name of input.rootScripts) {
+    if (!mustRegisterRootScript(name)) continue
+    if (!rootEntries.some((entry) => entry.script === name))
+      violations.push({
+        rule: "unregistered-gate",
+        detail: `root script ${name} is not in GATE_REGISTRY (script/gate-harness.ts); register it with its owning workflow or the gate runs nowhere anyone checks (#1527)`,
+      })
+  }
+  for (const packagePath of input.generatedPackages) {
+    if (!registry.some((entry) => entry.packagePath === packagePath && entry.script === "check:generated"))
+      violations.push({
+        rule: "unregistered-gate",
+        detail: `${packagePath} declares check:generated but is not in GATE_REGISTRY (script/gate-harness.ts); register it with its owning workflow (#1527)`,
+      })
+  }
+  for (const entry of registry) {
+    const exists =
+      entry.packagePath === "."
+        ? input.rootScripts.includes(entry.script)
+        : entry.script === "check:generated" && input.generatedPackages.includes(entry.packagePath)
+    if (!exists) {
+      violations.push({
+        rule: "stale-registry-entry",
+        detail: `registered gate ${entry.name} names script ${entry.script} in ${entry.packagePath}, which no longer exists; remove the registry entry (#1527)`,
+      })
+      continue
+    }
+    const uses = input.uses.filter(
+      (use) => use.workflow === entry.workflow && use.script === entry.script && use.packagePath === entry.packagePath,
+    )
+    if (!uses.length) {
+      violations.push({
+        rule: "unwired-gate",
+        detail: `registered gate ${entry.name} is invoked by no step of ${entry.workflow}; wire it or remove the registry entry (#1527)`,
+      })
+      continue
+    }
+    const triggers = input.workflowTriggers[entry.workflow] ?? []
+    for (const use of uses) {
+      if (!use.stepIf) continue
+      const alternatives = eventAlternatives(use.stepIf)
+      if (!alternatives.some((events) => events.length)) continue
+      const reachable = alternatives.some((events) => {
+        if (!events.length) return true
+        const distinctEvents = [...new Set(events)]
+        return distinctEvents.length === 1 && triggers.includes(distinctEvents[0])
+      })
+      if (reachable) continue
+      const unavailable = [...new Set(alternatives.flat())].filter((event) => !triggers.includes(event))
+      violations.push({
+        rule: "unreachable-gate",
+        detail: unavailable.length
+          ? `gate ${entry.name} in ${entry.workflow} is gated on github.event_name == '${unavailable.join("' or '")}', which ${entry.workflow} never triggers on (triggers: ${triggers.join(", ") || "none"}); the step can never run — the #1508 shape (#1527)`
+          : `gate ${entry.name} in ${entry.workflow} requires mutually exclusive github.event_name values (${[...new Set(alternatives.flat())].join(", ")}); the step can never run — the #1527 shape`,
+      })
+    }
+  }
+  return violations
 }
