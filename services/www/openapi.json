@@ -15828,17 +15828,20 @@
                   "startup": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
                   },
                   "catalog": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
                   },
                   "execution": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
                   }
                 },
                 "additionalProperties": false
@@ -16918,6 +16921,9 @@
             ]
           },
           "disabled": {
+            "type": "boolean"
+          },
+          "hidden": {
             "type": "boolean"
           },
           "limit": {
@@ -19551,17 +19557,20 @@
               "startup": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "catalog": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "execution": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
               }
             },
             "additionalProperties": false
@@ -19645,17 +19654,20 @@
               "startup": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "catalog": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "execution": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
               }
             },
             "additionalProperties": false
@@ -21522,6 +21534,9 @@
             "enum": ["alpha", "beta", "deprecated", "active"]
           },
           "enabled": {
+            "type": "boolean"
+          },
+          "hidden": {
             "type": "boolean"
           },
           "limit": {

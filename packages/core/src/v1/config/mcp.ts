@@ -2,6 +2,11 @@ export * as ConfigMCPV1 from "./mcp.js"
 
 import { Schema } from "effect"
 import { PositiveInt } from "../../schema.js"
+import { SET_TIMEOUT_MAX_MS } from "../../util/number.js"
+
+/** The V1 single timeout lands on every phase of the bounded native timeout
+ * config, so it takes the same setTimeout-cliff bound (#1077). */
+const TimeoutMs = PositiveInt.check(Schema.isLessThanOrEqualTo(SET_TIMEOUT_MAX_MS))
 
 export const Local = Schema.Struct({
   type: Schema.Literal("local").annotate({ description: "Type of MCP server connection" }),
@@ -17,8 +22,9 @@ export const Local = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean).annotate({
     description: "Enable or disable the MCP server on startup",
   }),
-  timeout: Schema.optional(PositiveInt).annotate({
-    description: "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.",
+  timeout: Schema.optional(TimeoutMs).annotate({
+    description:
+      "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified. At most 2147483647 (~24.8 days); a larger value is rejected.",
   }),
 }).annotate({ identifier: "McpLocalConfig" })
 export type Local = Schema.Schema.Type<typeof Local>
@@ -53,8 +59,9 @@ export const Remote = Schema.Struct({
   oauth: Schema.optional(Schema.Union([OAuth, Schema.Literal(false)])).annotate({
     description: "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection.",
   }),
-  timeout: Schema.optional(PositiveInt).annotate({
-    description: "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.",
+  timeout: Schema.optional(TimeoutMs).annotate({
+    description:
+      "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified. At most 2147483647 (~24.8 days); a larger value is rejected.",
   }),
 }).annotate({ identifier: "McpRemoteConfig" })
 export type Remote = Schema.Schema.Type<typeof Remote>

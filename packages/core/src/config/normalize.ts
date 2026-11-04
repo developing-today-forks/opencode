@@ -28,7 +28,6 @@ import { ConfigPluginV1 } from "../v1/config/plugin.js"
 import { ConfigProviderV1 } from "../v1/config/provider.js"
 import { ConfigMigrateV1 } from "../v1/config/migrate.js"
 import { ModelAlias } from "../model-alias.js"
-import { PositiveInt } from "../schema.js"
 
 export interface Diagnostic {
   readonly kind: "conflict" | "invalid" | "unsupported"
@@ -264,8 +263,11 @@ function normalizeMcp(input: Record<string, unknown>, encoded: Record<string, un
   const nativeServers: Record<string, unknown> = {}
   const timeout: Record<string, unknown> = {}
   if (isRecord(input.experimental) && own(input.experimental, "mcp_timeout")) {
+    // The legacy value lands on the catalog and execution leaves, so it decodes
+    // with a leaf of the bounded timeout config and takes the same
+    // setTimeout-cliff cap (#1077) instead of a bare PositiveInt.
     const value = decodeEncoded(
-      PositiveInt,
+      ConfigMCP.Timeout.fields.catalog,
       input.experimental.mcp_timeout,
       ["experimental", "mcp_timeout"],
       diagnostics,
