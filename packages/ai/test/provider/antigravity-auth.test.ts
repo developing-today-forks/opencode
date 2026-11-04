@@ -1,4 +1,4 @@
-import { afterAll, describe, expect } from "bun:test"
+import { afterAll, afterEach, describe, expect } from "bun:test"
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -94,6 +94,104 @@ describe("Antigravity token refresh bounding (#1469)", () => {
       const error = yield* Fiber.join(fiber)
 
       expect(error.message).toContain("timed out")
+    }),
+  )
+})
+
+describe("Antigravity client-secret candidates (#1633)", () => {
+  const ua = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
+  const writeFixture = (name: string, content: string) => {
+    const path = join(fixtureDir, name)
+    writeFileSync(path, content)
+    chmodSync(path, 0o755)
+    process.env.AGY_BIN = path
+    return path
+  }
+  afterEach(() => {
+    process.env.AGY_BIN = fixtureBin
+  })
+
+  // Token endpoint double: accepts exactly one candidate; every other
+  // candidate gets Google's invalid_client rejection. The sent candidate
+  // is identified by matching the request body against the known fixture
+  // candidates. All secrets below are synthetic fixture strings, never
+  // real credential material.
+  const endpoint = (accepted: string, candidates: readonly string[], sent: Array<string | undefined>) =>
+    handlerLayer((input) =>
+      Effect.gen(function* () {
+        const { call } = yield* observe([], input)
+        const candidate = candidates.find((known) => call.body.includes(known))
+        sent.push(candidate)
+        if (candidate !== accepted)
+          return input.respond(
+            JSON.stringify({ error: "invalid_client", error_description: "The provided client secret is invalid." }),
+            { status: 401, headers: { "content-type": "application/json" } },
+          )
+        return input.respond(JSON.stringify({ ["access" + "_token"]: "fresh-token", expires_in: 3600 }), {
+          headers: { "content-type": "application/json" },
+        })
+      }),
+    )
+
+  it.effect("advances past a decoy first run to the pairing secret (agy 1.4.11 layout)", () =>
+    Effect.gen(function* () {
+      // 1.4.11 layout: runs of 40/43/40 chars; only run 2's [:35] pairs.
+      const decoy = `GOCSPX-${"d".repeat(33)}`
+      const pairing = `GOCSPX-${"p".repeat(36)}`
+      const third = `GOCSPX-${"e".repeat(33)}`
+      writeFixture("agy-1411", `noise ${decoy} mid ${pairing} tail ${third} ${ua}`)
+      const candidates = [decoy.slice(0, 35), pairing.slice(0, 35), third.slice(0, 35)]
+      const sent: Array<string | undefined> = []
+      const layer = endpoint(pairing.slice(0, 35), candidates, sent)
+
+      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      expect(token.accessToken).toBe("fresh-token")
+      // Decoy rejected with invalid_client, pairing accepted; third never tried.
+      expect(sent).toEqual([decoy.slice(0, 35), pairing.slice(0, 35)])
+
+      // Winner is cached in memory: the next refresh tries it first.
+      const again = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      expect(again.accessToken).toBe("fresh-token")
+      expect(sent).toEqual([decoy.slice(0, 35), pairing.slice(0, 35), pairing.slice(0, 35)])
+    }),
+  )
+
+  it.effect("offers both halves of a 70-char concatenated run (agy 1.4.8 layout)", () =>
+    Effect.gen(function* () {
+      // 1.4.8 layout: one 70-char run concatenating two secrets; here the
+      // endpoint accepts the SECOND half, proving it is a candidate too.
+      const run = `GOCSPX-${"a".repeat(28)}${"b".repeat(35)}`
+      expect(run).toHaveLength(70)
+      writeFixture("agy-148", `noise ${run} ${ua}`)
+      const sent: Array<string | undefined> = []
+      const layer = endpoint(run.slice(35, 70), [run.slice(0, 35), run.slice(35, 70)], sent)
+
+      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      expect(token.accessToken).toBe("fresh-token")
+      expect(sent).toEqual([run.slice(0, 35), run.slice(35, 70)])
+    }),
+  )
+
+  it.effect("does not cycle candidates on a non-invalid_client failure", () =>
+    Effect.gen(function* () {
+      const decoy = `GOCSPX-${"d".repeat(33)}`
+      const pairing = `GOCSPX-${"p".repeat(36)}`
+      writeFixture("agy-grant", `noise ${decoy} mid ${pairing} ${ua}`)
+      const sent: Array<string | undefined> = []
+      const layer = handlerLayer((input) =>
+        Effect.gen(function* () {
+          const { call } = yield* observe([], input)
+          sent.push([decoy.slice(0, 35), pairing.slice(0, 35)].find((known) => call.body.includes(known)))
+          return input.respond(JSON.stringify({ error: "invalid_grant", error_description: "Token has been revoked." }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          })
+        }),
+      )
+      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
+
+      expect(error.message).toContain("invalid_grant")
+      expect(sent).toHaveLength(1)
     }),
   )
 })
