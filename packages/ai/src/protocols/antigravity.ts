@@ -260,8 +260,18 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
   const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}), anthropic)
   // A branch-only root (a multi-valued type union, #1556, or the node's own
   // anyOf/oneOf composition) describes itself; forcing OBJECT onto it would
-  // narrow the union back to objects only.
-  if (converted.type === undefined && converted.anyOf === undefined && converted.oneOf === undefined)
+  // narrow the union back to objects only. The same holds for an
+  // allOf/not-only root (#1667): allOf composes its branches (a string
+  // branch plus a forced OBJECT is unsatisfiable), and `not` negates its
+  // subschema against every type, so OBJECT would narrow "not a string"
+  // to objects only.
+  if (
+    converted.type === undefined &&
+    converted.anyOf === undefined &&
+    converted.oneOf === undefined &&
+    converted.allOf === undefined &&
+    converted.not === undefined
+  )
     converted.type = "OBJECT"
   return converted
 }
