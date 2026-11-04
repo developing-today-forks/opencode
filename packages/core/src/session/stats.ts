@@ -83,6 +83,10 @@ const Window = 31 * 24 * 60 * 60 * 1_000
 // database scans inside a single request. Wider spans are rejected with
 // InvalidRangeError instead; every plausible stats range is far narrower.
 const MaxSpan = 120 * Window
+/** The span cap in whole days (3720), for callers that must state the
+ * limit in user-facing units: the CLI's --days bound and the server
+ * handler's too-wide message both use it (issue #1000). */
+export const MaxSpanDays = MaxSpan / (24 * 60 * 60 * 1_000)
 
 export class InvalidRangeError extends Schema.TaggedError<InvalidRangeError>()("SessionStats.InvalidRangeError", {
   from: Schema.Finite,

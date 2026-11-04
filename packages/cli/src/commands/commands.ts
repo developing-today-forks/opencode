@@ -327,8 +327,12 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       params: {
         ...ServerParams,
         days: Flag.Int("days").pipe(
-          Flag.withSchema(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-          Flag.withDescription("Show the last N days; 0 means today"),
+          // 3720 is the stats service's maximum span (core SessionStats
+          // MaxSpan: 120 x 31-day windows, #959); a larger --days could
+          // only ever fail server-side, so reject it at the flag (#1000).
+          // The handler repeats the check with an explicit message.
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3720 }))),
+          Flag.withDescription("Show the last N days (maximum 3720); 0 means today"),
           Flag.optional,
         ),
         year: Flag.Int("year").pipe(
