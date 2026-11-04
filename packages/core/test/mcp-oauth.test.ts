@@ -307,6 +307,22 @@ describe("MCP OAuth", () => {
     ])
   })
 
+  test("parses a small OAuth error body and yields no parsed error for an over-cap one", async () => {
+    const small = new Response(
+      JSON.stringify({ error: "invalid_grant", error_description: "refresh token revoked" }),
+      { status: 400 },
+    )
+    const parsed = await McpOAuth.parseErrorBody(small)
+    expect(parsed?.code).toBe("invalid_grant")
+    expect(parsed?.message).toContain("refresh token revoked")
+
+    const overCap = new Response(
+      JSON.stringify({ error: "invalid_grant", error_description: "x".repeat(McpOAuth.ERROR_RESPONSE_MAX_BYTES + 1) }),
+      { status: 400 },
+    )
+    expect(await McpOAuth.parseErrorBody(overCap)).toBeUndefined()
+  })
+
   test("generates a loopback redirect URL when none is configured", async () => {
     expect(await authorize()).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/)
   })

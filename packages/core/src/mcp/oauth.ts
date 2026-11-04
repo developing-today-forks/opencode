@@ -39,6 +39,32 @@ export const CONFIGURED_DISCOVERY_TIMEOUT_MS = 5_000
  */
 export const CONFIGURED_DISCOVERY_MAX_BYTES = 64 * 1024
 
+/**
+ * Maximum response body size in bytes for an OAuth token-endpoint error body read for logging.
+ * Error documents are small JSON objects; the cap matches CONFIGURED_DISCOVERY_MAX_BYTES so a
+ * malicious or broken endpoint cannot make the client buffer an unbounded rejection body (#1049).
+ */
+export const ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+/**
+ * Parses an OAuth error response for logging, reading the body through the bounded reader:
+ * an over-cap or unreadable body yields undefined ("no parsed error") instead of buffering
+ * unbounded (#1049).
+ */
+export const parseErrorBody = async (response: Response) => {
+  try {
+    return await parseErrorResponse(
+      await readBoundedResponseText(
+        response,
+        ERROR_RESPONSE_MAX_BYTES,
+        () => new Error(`OAuth error response exceeded ${ERROR_RESPONSE_MAX_BYTES} bytes`),
+      ),
+    )
+  } catch {
+    return undefined
+  }
+}
+
 /** Client ID Metadata Document: servers that support CIMD accept this URL as the client_id without registration. */
 export const CLIENT_METADATA_URL = "https://opencode.ai/oauth/opencode/client.json"
 
@@ -80,9 +106,12 @@ export const loggedFetch = (fields: { readonly server: string; readonly director
           const response = yield* Effect.tryPromise({ try: () => send(url, init), catch: (error) => error })
           const result = { status: response.status, durationMs: Date.now() - started }
           if (operation && !response.ok) {
-            const error = yield* Effect.tryPromise(async () => parseErrorResponse(await response.clone().text())).pipe(
-              Effect.orElseSucceed(() => undefined),
-            )
+            const error = yield* Effect.tryPromise(() =>
+              // SAFETY: the SDK FetchLike response and the bounded reader's Response are the
+              // same runtime fetch Response; only their type packages differ (undici-types
+              // vs the Bun lib types), and the reader uses only headers/body/text.
+              parseErrorBody(response.clone() as Response),
+            ).pipe(Effect.orElseSucceed(() => undefined))
             yield* Effect.logWarning("mcp oauth request rejected", {
               ...result,
               error: error?.code,

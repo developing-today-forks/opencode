@@ -10,7 +10,7 @@ import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { configuredSettings } from "./configured.js"
-import { collectBoundedResponseBody } from "../../tool/http-body.js"
+import { collectBoundedResponseBody, readBoundedResponseText } from "../../tool/http-body.js"
 
 const providerID = Provider.ID.make("snowflake-cortex")
 const integrationID = Integration.ID.make(providerID)
@@ -20,6 +20,10 @@ const clientID = "LOCAL_APPLICATION"
  * a user-entered Snowflake host must not stream unbounded data into login or refresh.
  * Mirrors the #1026 bound the native-fetch providers apply via readBoundedResponseText. */
 export const oauthMaxResponseBytes = 64 * 1024
+/** Cap on a 400 error body read by the http.response hook (#1049): the hook only needs the
+ * small JSON error document, and an over-cap body cannot be the "conversation complete"
+ * answer it rewrites, so it is left alone instead of being buffered whole. */
+export const errorResponseMaxBytes = 64 * 1024
 const accountForm = Form.Fields.make([
   {
     type: "string",
@@ -251,7 +255,17 @@ export const SnowflakeCortexPlugin = define({
       "http.response",
       Effect.fn(function* (event) {
         if (event.response.status !== 400) return
-        const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text())))
+        const body = yield* Effect.tryPromise(() =>
+          readBoundedResponseText(
+            // SAFETY: the hook event's response and the bounded reader's Response are the
+            // same runtime fetch Response; only their type packages differ (undici-types
+            // vs the Bun lib types), and the reader uses only headers/body/text.
+            event.response.clone() as Response,
+            errorResponseMaxBytes,
+            () => new Error(`Snowflake error response exceeded ${errorResponseMaxBytes} bytes`),
+          ),
+        ).pipe(Effect.orElseSucceed(() => undefined))
+        const error = body === undefined ? undefined : Option.getOrUndefined(decodeError(body))
         // oxlint-disable-next-line typescript-eslint/no-base-to-string -- Preserve V1's error-body coercion.
         const message = String(error?.message || error?.error || "")
         if (!message.toLowerCase().includes("conversation complete")) return

@@ -295,6 +295,23 @@ it.live("uses environment tokens rather than the account identifier and bypasses
   ),
 )
 
+it.live("does not rewrite an over-cap 400 error body as conversation complete", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      // The message names the rewrite trigger, but the body is over the hook's cap: it must
+      // be left alone (and surface as the failure it is), not buffered whole and rewritten.
+      test.replies.push(
+        Response.json(
+          { message: `Conversation complete ${"x".repeat(128 * 1024)}` },
+          { status: 400 },
+        ),
+      )
+      expect((yield* test.send.pipe(Effect.exit))._tag).toBe("Failure")
+    }),
+  ),
+)
+
 it.live("requires a token separately from the account and supports environment PATs", () =>
   withEnv({ ...env, SNOWFLAKE_ACCOUNT: "myorg-myaccount" }, () =>
     Effect.gen(function* () {
