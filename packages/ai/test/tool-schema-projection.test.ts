@@ -216,6 +216,31 @@ describe("tool schema projections", () => {
     })
   })
 
+  test("moonshot keeps prefix constraints when prefixItems and items are both present (#1574)", () => {
+    expect(
+      ToolSchemaProjection.moonshot({
+        type: "object",
+        properties: {
+          pair: { type: "array", prefixItems: [{ type: "string" }], items: { type: "integer" } },
+          triple: {
+            type: "array",
+            prefixItems: [{ type: "string" }, { type: "boolean" }],
+            items: { type: "integer" },
+          },
+        },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        pair: { type: "array", items: { anyOf: [{ type: "string" }, { type: "integer" }] } },
+        triple: {
+          type: "array",
+          items: { anyOf: [{ type: "string" }, { type: "boolean" }, { type: "integer" }] },
+        },
+      },
+    })
+  })
+
   test("moonshot derives a type for untyped enums", () => {
     expect(
       ToolSchemaProjection.moonshot({
