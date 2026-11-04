@@ -17,6 +17,9 @@ on:
       - packages/web/src/content/docs/*.mdx
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sync-locales:
     timeout-minutes: 60
