@@ -28,7 +28,7 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join, relative, sep } from "node:path"
 
-export const SCAN_ROOTS = ["packages/core/src", "packages/ai/src"] as const
+export const SCAN_ROOTS = ["packages/core/src", "packages/ai/src", "packages/plugin-github/src"] as const
 /** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
 export const SCAN_ROOT = SCAN_ROOTS[0]
 export const ALLOWLIST_PATH = "script/check-proto-reads.allowlist.txt"

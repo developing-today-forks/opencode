@@ -34,7 +34,11 @@ describe("scanSource", () => {
 
 describe("scan roots", () => {
   test("scans packages/ai in addition to packages/core (#912)", () => {
-    expect(SCAN_ROOTS).toEqual(["packages/core/src", "packages/ai/src"])
+    expect(SCAN_ROOTS).toEqual(["packages/core/src", "packages/ai/src", "packages/plugin-github/src"])
+  })
+
+  test("scans packages/plugin-github in addition to core and ai (#1361)", () => {
+    expect(SCAN_ROOTS).toContain("packages/plugin-github/src")
   })
 })
 
