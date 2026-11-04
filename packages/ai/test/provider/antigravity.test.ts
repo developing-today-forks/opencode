@@ -357,8 +357,9 @@ it.effect("convertSchema encodes boolean false as { not: {} } instead of inverti
       oneOf: [{ not: {} }, { type: "STRING" }],
     })
     expect(convertSchema({ oneOf: [true] } as never)).toEqual({ oneOf: [{}] })
-    // (An allOf-only root also takes the root OBJECT default, as before.)
-    expect(convertSchema({ allOf: [false] } as never)).toEqual({ allOf: [{ not: {} }], type: "OBJECT" })
+    // (An allOf-only root is self-describing and takes no root OBJECT
+    // default — #1667; see the root-composition test below.)
+    expect(convertSchema({ allOf: [false] } as never)).toEqual({ allOf: [{ not: {} }] })
     // Root positions: false is { not: {} } with no forced OBJECT; true
     // keeps the historical { type: "OBJECT" }.
     expect(convertSchema(false as never)).toEqual({ not: {} })
@@ -367,7 +368,42 @@ it.effect("convertSchema encodes boolean false as { not: {} } instead of inverti
     // unconstrained (key omitted), not:true is never.
     expect(convertSchema({ type: "string", not: false } as never)).toEqual({ type: "STRING" })
     expect(convertSchema({ type: "string", not: true } as never)).toEqual({ type: "STRING", not: {} })
-    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" }, type: "OBJECT" })
+    // (A not-only root likewise takes no forced OBJECT — #1667.)
+    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" } })
+  }),
+)
+
+it.effect("convertSchema leaves allOf/not-only roots self-describing (#1667)", () =>
+  Effect.sync(() => {
+    // An allOf root composes its branches: forcing type OBJECT onto a
+    // string branch makes the conjunction unsatisfiable, and onto an
+    // object branch it is at best redundant. Either way no OBJECT is
+    // added, for Gemini and Anthropic targets alike.
+    expect(convertSchema({ allOf: [{ type: "string", minLength: 2 }] } as never)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+    })
+    expect(convertSchema({ allOf: [{ type: "string", minLength: 2 }] } as never, true)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+    })
+    expect(
+      convertSchema({ allOf: [{ type: "object", properties: { a: { type: "string" } } }] } as never),
+    ).toEqual({ allOf: [{ type: "OBJECT", properties: { a: { type: "STRING" } } }] })
+    // A not-only root negates against every type: "not a string" must
+    // not be narrowed to objects only by a forced OBJECT.
+    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" } })
+    expect(convertSchema({ not: { type: "string" } } as never, true)).toEqual({
+      not: { type: "STRING" },
+    })
+    // Plain roots keep the OBJECT default byte-identically.
+    expect(convertSchema({} as never)).toEqual({ type: "OBJECT" })
+    expect(convertSchema({ properties: { a: { type: "string" } } } as never)).toEqual({
+      type: "OBJECT",
+      properties: { a: { type: "STRING" } },
+    })
+    expect(convertSchema({ description: "a thing" } as never)).toEqual({
+      type: "OBJECT",
+      description: "a thing",
+    })
   }),
 )
 
