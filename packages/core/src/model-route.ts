@@ -1161,6 +1161,13 @@ export const escalates = (target: Model.Ref, credentialID?: string, location?: s
 // it from the ledger at startup, so a restart does not reset demotion state.
 const quotaEvents = new Map<string, number[]>()
 
+/** Ledger ids of the quota attempts `seedDemotion` has already restored in this
+ * process: a repeated restore over the same ledger must not count an attempt twice,
+ * and identity — not the timestamp — is what names an attempt, since distinct
+ * attempts can share a millisecond (#1151, review follow-up). Cleared with the
+ * cache it guards in `resetHealth`. */
+const restoredDemotionAttempts = new Set<number>()
+
 /** True when a target has hit its quota errors often enough recently to be put last. With a
  * credentialID, only that credential's quota errors count: the demotion is per credential (#6).
  * The threshold and window are the demotion policy for the target's Location (#1151) when
@@ -1920,6 +1927,7 @@ export const resetHealth = () => {
   credentialQuota.clear()
   providerQuota.clear()
   quotaEvents.clear()
+  restoredDemotionAttempts.clear()
   continuity.clear()
   recentFailures.length = 0
   lastQuotaFeedAtByProvider.clear()
@@ -2364,17 +2372,18 @@ export const seedCooldowns = (
  * Rows are replayed oldest first through the same recording path live failures use, so
  * retention and the per-target cap match live behaviour; `demoted` then applies the
  * judging Location's own window over the cache, so rows outside that window never
- * demote. A row whose exact timestamp is already cached is skipped, so a restore
- * repeated over live history never counts one attempt twice. A credential's rows
- * restore onto that credential only (#6), exactly as live recording scopes them. */
+ * demote. Deduplication is by the row's ledger id: a restore repeated over the same
+ * ledger never counts one attempt twice, while distinct attempts that share a
+ * millisecond still count individually, exactly as live recording counts them. A
+ * credential's rows restore onto that credential only (#6), exactly as live recording
+ * scopes them. */
 export const seedDemotion = (
-  rows: ReadonlyArray<{ time: number; providerID: string; modelID: string; credentialID?: string }>,
+  rows: ReadonlyArray<{ id: number; time: number; providerID: string; modelID: string; credentialID?: string }>,
 ) => {
   for (const row of rows.toSorted((left, right) => left.time - right.time)) {
-    const target = ref({ providerID: row.providerID, model: row.modelID })
-    const id = row.credentialID ? credentialKey(target, row.credentialID) : key(target)
-    if (quotaEvents.get(id)?.includes(row.time)) continue
-    recordQuota(target, row.time, row.credentialID)
+    if (restoredDemotionAttempts.has(row.id)) continue
+    restoredDemotionAttempts.add(row.id)
+    recordQuota(ref({ providerID: row.providerID, model: row.modelID }), row.time, row.credentialID)
   }
 }
 

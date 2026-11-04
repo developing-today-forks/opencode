@@ -344,7 +344,7 @@ export const onRestoreLimits = (next: typeof restoreLimits) => {
   restoreLimits = next
 }
 
-type DemotionRow = { time: number; providerID: string; modelID: string; credentialID?: string }
+type DemotionRow = { id: number; time: number; providerID: string; modelID: string; credentialID?: string }
 let restoreDemotion: ((rows: readonly DemotionRow[]) => void) | undefined
 export const onRestoreDemotion = (next: typeof restoreDemotion) => {
   restoreDemotion = next
@@ -491,17 +491,26 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
     )
   })
 
-/** Quota-error attempts of the last day, so demotion counts survive a restart (#1151).
- * A quota error is the attempt whose `error_tag` is `QuotaExceeded`: that is the same
- * failure class `ModelRoute.failed` counts live (its `hint.quota`), and `failureFields`
- * records it on the attempt row for session and facade traffic alike, so both traffic
- * classes rehydrate the one shared demotion count. Older rows are not replayed: no
- * demotion window the restore serves reaches past a day, matching the usage and
- * cooldown restores above. */
+/** The widest demotion window either config surface admits: both
+ * `experimental.model_route_demotion.window_ms` and `routes.settings.demotion.windowMs`
+ * cap at 7,776,000,000 ms (90 days) in the schema, so the demotion restore below reads
+ * that far back. Replay retention (`recordQuota`) and judging (`demoted`) apply the
+ * actually configured windows over what is restored, so a shorter window never counts
+ * the older rows. */
+export const MAX_DEMOTION_WINDOW_MS = 7_776_000_000
+
+/** Quota-error attempts inside the widest demotion window, so demotion counts survive
+ * a restart (#1151). A quota error is the attempt whose `error_tag` is `QuotaExceeded`:
+ * that is the same failure class `ModelRoute.failed` counts live (its `hint.quota`),
+ * and `failureFields` records it on the attempt row for session and facade traffic
+ * alike, so both traffic classes rehydrate the one shared demotion count. Each row
+ * keeps its ledger id: restored attempts are deduplicated by that identity, never by
+ * timestamp (distinct attempts can share a millisecond). */
 export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
   Effect.gen(function* () {
     const rows = yield* db
       .select({
+        id: RouteAttemptTable.id,
         time: RouteAttemptTable.time_ended,
         providerID: RouteAttemptTable.provider_id,
         modelID: RouteAttemptTable.model_id,
@@ -509,13 +518,17 @@ export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
       })
       .from(RouteAttemptTable)
       .where(
-        and(gte(RouteAttemptTable.time_ended, Date.now() - 86_400_000), eq(RouteAttemptTable.error_tag, "QuotaExceeded")),
+        and(
+          gte(RouteAttemptTable.time_ended, Date.now() - MAX_DEMOTION_WINDOW_MS),
+          eq(RouteAttemptTable.error_tag, "QuotaExceeded"),
+        ),
       )
       .orderBy(asc(RouteAttemptTable.time_ended))
       .all()
       .pipe(Effect.orElseSucceed(() => []))
     restoreDemotion?.(
       rows.map((row) => ({
+        id: row.id,
         time: row.time,
         providerID: row.providerID,
         modelID: row.modelID,

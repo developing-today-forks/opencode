@@ -1452,4 +1452,44 @@ describe("demotion restore (#1151)", () => {
       expect(ModelRoute.demoted(target, now)).toBe(false)
     }),
   )
+
+  it.live("distinct attempts that share a millisecond each count toward demotion", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // Three distinct ledger rows, one time_ended: live recordQuota would count all
+      // three, so the restore must too — deduplication is by row id, not timestamp.
+      for (let i = 0; i < 3; i++) quotaAttempt("demote-same-ms", now - 1_000)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-same-ms", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(true)
+    }),
+  )
+
+  it.live("rows older than a day restore when the configured window reaches them", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const twoDaysAgo = now - 2 * 86_400_000
+      for (const at of [twoDaysAgo, twoDaysAgo + 1_000, twoDaysAgo + 2_000]) quotaAttempt("demote-long-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // A seven-day demotion window (the schema admits up to ninety days): rows from
+      // two days ago still count, so the restore must reach back past one day.
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        yield* ModelRouteLog.restoreDemotionFrom(db)
+        const target = ModelRoute.ref({ providerID: "demote-long-window", model: "m" })
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
+    }),
+  )
 })
