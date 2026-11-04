@@ -39,6 +39,15 @@ test("validateText applies the strict decimal grammar to numeric answers (#844)"
   expect(validateText(rate, "1.5")).toBeUndefined()
 })
 
+test("validateText rejects calendar-invalid named-form date-time answers (#1003)", () => {
+  const when = { type: "string", key: "when", format: "date-time" } satisfies FormFields[number]
+  expect(validateText(when, "Feb 30 2026")).toBe("Expected a date and time")
+  expect(validateText(when, "30 Feb 2026")).toBe("Expected a date and time")
+  expect(validateText(when, "Feb 28 2026 24:00")).toBe("Expected a date and time")
+  expect(validateText(when, "Jan 5 2026")).toBeUndefined()
+  expect(validateText(when, "Wed, 21 Oct 2015 07:28:00 GMT")).toBeUndefined()
+})
+
 test("renders exponent-notation defaults as plain-decimal text validateText accepts (#1065)", () => {
   // The CLI auth form pre-fills a numeric default with formNumberText, the
   // shared helper from the TUI form utils; the rendered text must pass the

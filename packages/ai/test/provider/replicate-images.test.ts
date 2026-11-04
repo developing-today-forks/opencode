@@ -72,6 +72,20 @@ describe("Replicate Images completed_at expiry", () => {
     }),
   )
 
+  it.effect("leaves expiresAt undefined for a calendar-invalid named-form completed_at (Feb 30 2026)", () =>
+    Effect.gen(function* () {
+      const response = yield* generate("Feb 30 2026")
+      expect(response.image.expiresAt).toBeUndefined()
+    }),
+  )
+
+  it.effect("derives expiresAt from a valid named-form completed_at", () =>
+    Effect.gen(function* () {
+      const response = yield* generate("Wed, 21 Oct 2015 07:28:00 GMT")
+      expect(response.image.expiresAt).toBe(Date.parse("Wed, 21 Oct 2015 07:28:00 GMT") + 3_600_000)
+    }),
+  )
+
   it.effect("leaves expiresAt undefined when completed_at is absent", () =>
     Effect.gen(function* () {
       const response = yield* generate(null)
