@@ -147,6 +147,14 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run lint:effect-simplifications
 
+      - name: Check Effect patterns
+        # The pattern scan itself (no-star-import, no-json-parse-cast,
+        # no-effect-die-string, no-import-alias) was never wired into CI —
+        # only its rule tests ran — so violations accumulated unchecked
+        # (#1496).
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-patterns
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root
