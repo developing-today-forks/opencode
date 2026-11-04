@@ -1,0 +1,232 @@
+// Mistral Vibe credential bridge — the vibe provider (#1653) emulates the
+// mistral-vibe CLI binary's wire behavior natively; this module mirrors
+// the binary's credential resolution (utils/api_keys.py +
+// core/config/vibe_schema.py in the mistral-vibe 3.1.0 package) so the
+// provider spends the exact credential the binary's one-time browser
+// sign-in provisions.
+//
+// Resolution order (the binary's resolve_api_key_with_origin, first hit
+// wins):
+//   0. explicit config: `auth` override, then static `apiKey` (fork-level,
+//      for tests/offline — mirrors antigravity-auth's keyringAuth inputs)
+//   1. environment MISTRAL_API_KEY (the binary loads ~/.vibe/.env values
+//      into its process env UNDER the real env, so a real env var wins
+//      over the file)
+//   2. ~/.vibe/.env (dotenv; VIBE_HOME overrides the directory) — the
+//      binary writes this file (0600) only as the fallback for when no OS
+//      keyring backend is available at sign-in time
+//   3. OS keyring, service "ai.mistral.vibe", username "MISTRAL_API_KEY"
+//      (what `vibe --setup`'s browser sign-in stores: a plain workspace
+//      API key, sent as Bearer verbatim — no refresh, no exchange)
+//   4. OS keyring, legacy service "vibe", same username (the binary
+//      migrates legacy entries to the new service; read-only here)
+//
+// The keyring is read IN PLACE via `secret-tool lookup` (the
+// antigravity-auth pattern: SECRET_TOOL_PATH -> PATH -> /nix/store scan
+// for libsecret). Python's keyring library is not an option from this
+// runtime, and on amd-6 it is broken besides: kwalletd6 owns
+// org.freedesktop.secrets without the DH session python-secretstorage
+// mandates, and gnome-keyring runs pkcs11-only. The credential is never
+// copied into the fork's credential store, never written back, and never
+// logged. The vibe CLI remains the owner of the stored credential.
+import { Effect } from "effect"
+import { Headers } from "effect/http"
+import { AIError, AuthenticationError } from "../schema/index.js"
+import { Auth, MissingCredentialError } from "../route/auth.js"
+
+export const API_KEY_ENV_VAR = "MISTRAL_API_KEY"
+export const KEYRING_SERVICE = "ai.mistral.vibe"
+export const LEGACY_KEYRING_SERVICE = "vibe"
+
+export const NOT_SIGNED_IN_MESSAGE =
+  "Mistral Vibe is not signed in on this machine: no MISTRAL_API_KEY in the environment, " +
+  '~/.vibe/.env, or the OS keyring (service "ai.mistral.vibe"). ' +
+  "Run `vibe --setup` once and complete the browser sign-in, or set MISTRAL_API_KEY."
+
+/** Injectable credential sources (tests); every field defaults to the real machine source. */
+export interface CredentialSources {
+  readonly env?: Readonly<Record<string, string | undefined>>
+  readonly readFile?: (path: string) => string | undefined | Promise<string | undefined>
+  readonly keyringLookup?: (service: string, username: string) => Promise<string | undefined>
+}
+
+/** Minimal dotenv parser: KEY=VALUE lines, `#` comments, optional `export `, optional quotes. */
+export const parseDotEnv = (contents: string): Readonly<Record<string, string>> => {
+  const values: Record<string, string> = {}
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    const statement = line.startsWith("export ") ? line.slice("export ".length) : line
+    const eq = statement.indexOf("=")
+    if (eq <= 0) continue
+    const key = statement.slice(0, eq).trim()
+    let value = statement.slice(eq + 1).trim()
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1)
+    } else {
+      // Unquoted values may carry a trailing comment (`KEY=value # note`).
+      const comment = value.indexOf(" #")
+      if (comment >= 0) value = value.slice(0, comment).trimEnd()
+    }
+    if (key) values[key] = value
+  }
+  return values
+}
+
+const findSecretTool = async (): Promise<string> => {
+  const { accessSync, constants, readdirSync } = await import("node:fs")
+  const { join } = await import("node:path")
+  const candidates: string[] = []
+  if (process.env.SECRET_TOOL_PATH) candidates.push(process.env.SECRET_TOOL_PATH)
+  for (const dir of (process.env.PATH ?? "").split(":")) if (dir) candidates.push(join(dir, "secret-tool"))
+  try {
+    for (const store of readdirSync("/nix/store").filter((entry) => entry.includes("libsecret")).sort())
+      candidates.push(join("/nix/store", store, "bin", "secret-tool"))
+  } catch {}
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {}
+  }
+  throw new Error("secret-tool not found (set SECRET_TOOL_PATH)")
+}
+
+/**
+ * One keyring read. Any failure (no secret-tool, no Secret Service, entry
+ * absent, timeout) resolves to undefined — the binary treats keyring
+ * trouble as "no credential there" and falls through, and the resolver's
+ * final absence error names every location checked.
+ */
+const defaultKeyringLookup = async (service: string, username: string): Promise<string | undefined> => {
+  const { execFile } = await import("node:child_process")
+  const env = { ...process.env }
+  if (!env.DBUS_SESSION_BUS_ADDRESS) {
+    const uid = typeof process.getuid === "function" ? process.getuid() : 1000
+    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${uid}/bus`
+  }
+  let tool: string
+  try {
+    tool = await findSecretTool()
+  } catch {
+    return undefined
+  }
+  return new Promise<string | undefined>((resolve) => {
+    execFile(
+      tool,
+      ["lookup", "service", service, "username", username],
+      { env, timeout: 15_000, maxBuffer: 1 << 20 },
+      (error, out) => {
+        if (error) return resolve(undefined)
+        const value = out.trim()
+        resolve(value ? value : undefined)
+      },
+    )
+  })
+}
+
+const defaultReadFile = async (path: string): Promise<string | undefined> => {
+  const { readFileSync } = await import("node:fs")
+  try {
+    return readFileSync(path, "utf8")
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The binary's credential resolution (tiers 1-4 above). Rejects with the
+ * not-signed-in guidance when no tier holds a key.
+ */
+export const resolveApiKey = async (sources: CredentialSources = {}): Promise<string> => {
+  const env = sources.env ?? process.env
+  const fromEnv = env[API_KEY_ENV_VAR]?.trim()
+  if (fromEnv) return fromEnv
+
+  const { join } = await import("node:path")
+  const { homedir } = await import("node:os")
+  const vibeHome = env.VIBE_HOME?.trim() ? env.VIBE_HOME : join(homedir(), ".vibe")
+  const contents = await (sources.readFile ?? defaultReadFile)(join(vibeHome, ".env"))
+  if (contents !== undefined) {
+    const fromFile = parseDotEnv(contents)[API_KEY_ENV_VAR]?.trim()
+    if (fromFile) return fromFile
+  }
+
+  const lookup = sources.keyringLookup ?? defaultKeyringLookup
+  for (const service of [KEYRING_SERVICE, LEGACY_KEYRING_SERVICE]) {
+    const fromKeyring = (await lookup(service, API_KEY_ENV_VAR))?.trim()
+    if (fromKeyring) return fromKeyring
+  }
+
+  throw new Error(NOT_SIGNED_IN_MESSAGE)
+}
+
+let cached: string | undefined
+let inflight: Promise<string> | undefined
+
+/** Drop the in-memory credential (re-resolve on next use). */
+export const invalidate = () => {
+  cached = undefined
+  inflight = undefined
+}
+
+const loadApiKey = (sources?: CredentialSources): Promise<string> => {
+  // Explicit sources (tests, embedding hosts) bypass the process cache.
+  if (sources) return resolveApiKey(sources)
+  if (cached !== undefined) return Promise.resolve(cached)
+  if (inflight) return inflight
+  inflight = (async () => {
+    try {
+      cached = await resolveApiKey()
+      return cached
+    } finally {
+      inflight = undefined
+    }
+  })()
+  return inflight
+}
+
+const loadApiKeyEffect = (sources?: CredentialSources) =>
+  Effect.tryPromise({
+    try: () => loadApiKey(sources),
+    catch: (cause: unknown) =>
+      new MissingCredentialError(
+        "mistral vibe credential",
+        cause instanceof Error ? cause.message : NOT_SIGNED_IN_MESSAGE,
+      ),
+  })
+
+/**
+ * Bearer auth whose credential is the vibe binary's own sign-in credential,
+ * resolved exactly as the binary resolves it. An explicit `auth` override
+ * wins; an explicit static `apiKey` is accepted for tests/offline use.
+ */
+export const vibeAuth = (input: {
+  readonly auth?: Auth.Definition
+  readonly apiKey?: string
+  readonly sources?: CredentialSources
+}) => {
+  if (input.auth) return input.auth
+  if (input.apiKey !== undefined) return Auth.bearer(input.apiKey)
+  return Auth.custom((authInput) =>
+    Effect.gen(function* () {
+      const apiKey = yield* loadApiKeyEffect(input.sources)
+      return Headers.setAll(authInput.headers, { authorization: `Bearer ${apiKey}` })
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AIError({
+            reason: new AuthenticationError({
+              message: cause instanceof Error ? cause.message : String(cause),
+              cause,
+            }),
+          }),
+      ),
+    ),
+  )
+}
+
+export * as VibeAuth from "./vibe-auth.js"
