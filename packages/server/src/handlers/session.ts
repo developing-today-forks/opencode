@@ -117,7 +117,20 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               timezone,
               tools: ctx.query.tools,
             }).pipe(
-              Effect.mapError(() => new InvalidRequestError({ message: "Stats range must end after it starts" })),
+              // SessionStats.InvalidRangeError has exactly two causes, and
+              // its from/to fields separate them: a reversed or empty range
+              // (from >= to), or a span over the service cap (#959). Report
+              // the actual cause — an over-wide span used to be mislabelled
+              // as a reversed range (#1000).
+              Effect.mapError(
+                (error) =>
+                  new InvalidRequestError({
+                    message:
+                      error.from >= error.to
+                        ? "Stats range must end after it starts"
+                        : `Stats range is too wide: the maximum span is ${SessionStats.MaxSpanDays} days`,
+                  }),
+              ),
             ),
           }
         }),
