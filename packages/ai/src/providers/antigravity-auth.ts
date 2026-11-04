@@ -14,9 +14,14 @@
 // POST https://oauth2.googleapis.com/token with grant_type=refresh_token
 // and the CLI's embedded OAuth client. The client id below is a public
 // identifier (it appears in the CLI's sign-in URLs); the paired secret
-// is extracted from the agy binary at runtime (the first 35 chars of its
-// embedded GOCSPX blob — the pairing the standalone door verified live)
-// and is never persisted. Google does not rotate the refresh token for
+// is extracted from the agy binary at runtime and is never persisted.
+// The binary embeds several GOCSPX runs and which one pairs with the
+// client id below has moved between agy releases (#1633: on 1.4.11 the
+// first run is a decoy), so extraction collects every candidate (each
+// run's first 35 chars, plus chars 35-70 for runs of 70+ chars) and the
+// refresh exchange tries them in order, advancing only when the token
+// endpoint rejects a candidate as invalid_client; the winner is cached
+// in memory only. Google does not rotate the refresh token for
 // this client, so refreshing here never invalidates the CLI's stored
 // credential. This mirrors bin/antigravity-direct.mjs in
 // developing-today/code, which this module replaces.
@@ -58,7 +63,11 @@ interface TokenState {
 
 let cached: TokenState | undefined
 let inflight: Promise<TokenState> | undefined
-let binaryIntelCache: { readonly ua: string; readonly clientSecret?: string } | undefined
+let binaryIntelCache:
+  | { readonly bin?: string; readonly ua: string; readonly clientSecrets: readonly string[] }
+  | undefined
+/** The candidate the token endpoint last accepted; tried first next time. Memory only, never logged. */
+let winningSecret: string | undefined
 
 /** Drop the in-memory access token (upstream 401: re-read + refresh on next use). */
 export const invalidate = () => {
@@ -132,12 +141,12 @@ const findAgyBinary = async (): Promise<string | undefined> => {
   return undefined
 }
 
-/** User-Agent + OAuth client secret from the agy binary, scanned in chunks, memory only. */
+/** User-Agent + OAuth client secret candidates from the agy binary, scanned in chunks, memory only. */
 const binaryIntel = async () => {
-  if (binaryIntelCache) return binaryIntelCache
   const bin = await findAgyBinary()
+  if (binaryIntelCache && binaryIntelCache.bin === bin) return binaryIntelCache
   let ua = FALLBACK_UA
-  let clientSecret: string | undefined
+  const runs = new Set<string>()
   if (bin) {
     const { openSync, readSync, closeSync } = await import("node:fs")
     const fd = openSync(bin, "r")
@@ -146,27 +155,39 @@ const binaryIntel = async () => {
       let carry = ""
       let position = 0
       let read: number
-      while ((read = readSync(fd, chunk, 0, chunk.length, position)) > 0) {
-        position += read
-        const text = carry + chunk.toString("latin1", 0, read)
-        if (!clientSecret) {
-          const match = text.match(/GOCSPX-[A-Za-z0-9_-]{10,}/)
-          // The binary embeds two client secrets concatenated (70 chars);
-          // the first 35 chars pair with OAUTH_CLIENT_ID (verified live).
-          if (match) clientSecret = match[0].slice(0, 35)
-        }
+      // No early exit (#1633): every GOCSPX run in the binary is a
+      // candidate, and runs can appear anywhere in the file. Matches are
+      // collected from the stable region (all but the last 256 chars,
+      // which carry into the next chunk) so a run split across a chunk
+      // boundary is matched whole, never as a truncated prefix.
+      const collect = (text: string, flush: boolean) => {
+        const stable = flush ? text : text.slice(0, -256)
+        for (const match of stable.matchAll(/GOCSPX-[A-Za-z0-9_-]{10,}/g)) runs.add(match[0])
         if (ua === FALLBACK_UA) {
           const match = text.match(/antigravity\/cli\/[0-9.]+ \(aidev_client;[^)]*\)/)
           if (match) ua = match[0]
         }
-        if (clientSecret && ua !== FALLBACK_UA) break
+      }
+      while ((read = readSync(fd, chunk, 0, chunk.length, position)) > 0) {
+        position += read
+        const text = carry + chunk.toString("latin1", 0, read)
+        collect(text, false)
         carry = text.slice(-256)
       }
+      collect(carry, true)
     } finally {
       closeSync(fd)
     }
   }
-  binaryIntelCache = { ua, clientSecret }
+  // Candidate shape (#1633): each run's first 35 chars, plus chars 35-70
+  // for runs of 70+ chars (the 1.4.8 layout concatenates two secrets in
+  // one run), deduped in scan order.
+  const clientSecrets: string[] = []
+  for (const run of runs) {
+    for (const candidate of [run.slice(0, 35), ...(run.length >= 70 ? [run.slice(35, 70)] : [])])
+      if (!clientSecrets.includes(candidate)) clientSecrets.push(candidate)
+  }
+  binaryIntelCache = { bin, ua, clientSecrets }
   return binaryIntelCache
 }
 
@@ -205,38 +226,77 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
     return body.subarray(0, size).toString("utf8")
   })
 
+/** The token endpoint rejected this candidate as not-the-client-secret (#1633). */
+class InvalidClientError extends Error {
+  readonly _tag = "InvalidClientError"
+}
+
 export const refresh = (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_MS) =>
   Effect.gen(function* () {
-    const { clientSecret } = yield* Effect.tryPromise({
+    const { clientSecrets } = yield* Effect.tryPromise({
       try: () => binaryIntel(),
       catch: (cause) => cause,
     })
-    if (!clientSecret) return yield* Effect.fail(new Error("could not extract OAuth client secret from agy binary"))
-    const body = new URLSearchParams({
-      client_id: OAUTH_CLIENT_ID,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }).toString()
-    const request = HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
-      HttpClientRequest.bodyText(body, "application/x-www-form-urlencoded"),
-    )
-    const exchange = Effect.gen(function* () {
-      const http = yield* HttpClient.HttpClient
-      const response = yield* HttpClient.withScope(http).execute(request)
-      const text = yield* readBoundedTokenResponse(response)
-      if (response.status !== 200) return yield* Effect.fail(new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`))
-      const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(TokenResponse))(text)
-      if (!parsed.access_token) return yield* Effect.fail(new Error("token endpoint returned no access_token"))
-      return { accessToken: parsed.access_token, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
-    }).pipe(
-      Effect.scoped,
-      Effect.timeoutOrElse({
-        duration: Duration.millis(timeoutMs),
-        orElse: () => Effect.fail(new Error(`token endpoint request timed out after ${timeoutMs}ms`)),
-      }),
-    )
-    return yield* exchange
+    if (clientSecrets.length === 0)
+      return yield* Effect.fail(new Error("could not extract OAuth client secret from agy binary"))
+    // Try the last accepted candidate first, then the rest in scan order.
+    const ordered =
+      winningSecret && clientSecrets.includes(winningSecret)
+        ? [winningSecret, ...clientSecrets.filter((candidate) => candidate !== winningSecret)]
+        : [...clientSecrets]
+    const exchange = (clientSecret: string) =>
+      Effect.gen(function* () {
+        const body = new URLSearchParams({
+          client_id: OAUTH_CLIENT_ID,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: "refresh_token",
+        }).toString()
+        const request = HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
+          HttpClientRequest.bodyText(body, "application/x-www-form-urlencoded"),
+        )
+        const http = yield* HttpClient.HttpClient
+        const response = yield* HttpClient.withScope(http).execute(request)
+        const text = yield* readBoundedTokenResponse(response)
+        if (response.status !== 200) {
+          // Only invalid_client means "wrong candidate" (#1633); every
+          // other failure (invalid_grant for a bad stored grant, 5xx,
+          // transport) surfaces unchanged instead of cycling candidates.
+          let errorCode: string | undefined
+          try {
+            errorCode = (JSON.parse(text) as { error?: string }).error
+          } catch {}
+          if (response.status === 401 && errorCode === "invalid_client")
+            return yield* Effect.fail(new InvalidClientError(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`))
+          return yield* Effect.fail(new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`))
+        }
+        const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(TokenResponse))(text)
+        if (!parsed.access_token) return yield* Effect.fail(new Error("token endpoint returned no access_token"))
+        return { accessToken: parsed.access_token, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
+      }).pipe(
+        Effect.scoped,
+        Effect.timeoutOrElse({
+          duration: Duration.millis(timeoutMs),
+          orElse: () => Effect.fail(new Error(`token endpoint request timed out after ${timeoutMs}ms`)),
+        }),
+      )
+    let lastInvalidClient: InvalidClientError | undefined
+    for (const candidate of ordered) {
+      const token = yield* exchange(candidate).pipe(
+        Effect.catch((error) => {
+          if (error instanceof InvalidClientError) {
+            lastInvalidClient = error
+            return Effect.succeed(undefined)
+          }
+          return Effect.fail(error)
+        }),
+      )
+      if (token) {
+        winningSecret = candidate
+        return token
+      }
+    }
+    return yield* Effect.fail(lastInvalidClient ?? new Error("could not extract OAuth client secret from agy binary"))
   })
 
 const loadToken = (): Promise<TokenState> => {
