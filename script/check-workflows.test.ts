@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
-import { collectViolations, parseWorkflow, sourceViolations, triggerNames, workflowFiles, workflowViolations } from "./check-workflows"
+import { absentFileExceptions, collectViolations, parseWorkflow, sourceViolations, triggerNames, workflowFiles, workflowViolations } from "./check-workflows"
 
 const compliant = [
   "name: example",
@@ -8,6 +8,8 @@ const compliant = [
   "  push:",
   "    branches: [main]",
   "  workflow_dispatch:",
+  "permissions:",
+  "  contents: read",
   "jobs:",
   "  test:",
   "    timeout-minutes: 15",
@@ -32,7 +34,7 @@ describe("triggerNames", () => {
   test("reads the on:-as-boolean-true quirk (YAML 1.1 parsers)", () => {
     // A YAML 1.1 parser turns the unquoted key `on` into boolean true,
     // which a JS object carries under the "true" key.
-    const workflow = { true: { push: null, workflow_dispatch: null }, jobs: {} }
+    const workflow = { true: { push: null, workflow_dispatch: null }, permissions: { contents: "read" }, jobs: {} }
     expect(triggerNames(workflow)).toEqual(["push", "workflow_dispatch"])
     expect(workflowViolations(".github/workflows/example.yml", workflow)).toEqual([])
   })
@@ -55,14 +57,14 @@ describe("sourceViolations", () => {
   test("flags a pull_request_target trigger (list form)", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",
-      ["on: [pull_request_target, workflow_dispatch]", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+      ["on: [pull_request_target, workflow_dispatch]", "permissions: { contents: read }", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["no-pr-trigger"])
   })
 
   test("exact-key matching: pull_request_review_comment and issue_comment are not PR triggers", () => {
     const violations = sourceViolations(
-      ".github/workflows/opencode.yml",
+      ".github/workflows/example.yml",
       [
         "on:",
         "  issue_comment:",
@@ -70,6 +72,7 @@ describe("sourceViolations", () => {
         "  pull_request_review_comment:",
         "    types: [created]",
         "  workflow_dispatch:",
+        "permissions: { contents: read }",
         "jobs:",
         "  opencode:",
         "    timeout-minutes: 60",
@@ -81,7 +84,7 @@ describe("sourceViolations", () => {
   test("flags a workflow with no workflow_dispatch", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",
-      ["on: [push]", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+      ["on: [push]", "permissions: { contents: read }", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["require-workflow-dispatch"])
   })
@@ -91,6 +94,7 @@ describe("sourceViolations", () => {
       ".github/workflows/example.yml",
       [
         "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
         "jobs:",
         "  test:",
         "    timeout-minutes: 15",
@@ -104,9 +108,10 @@ describe("sourceViolations", () => {
 
   test("a reusable-workflow job (job-level uses:) needs no timeout-minutes", () => {
     const violations = sourceViolations(
-      ".github/workflows/agents.yml",
+      ".github/workflows/example.yml",
       [
         "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
         "jobs:",
         "  scheduled:",
         "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
@@ -119,9 +124,10 @@ describe("sourceViolations", () => {
     "flags %s on a reusable-workflow caller job",
     (key) => {
       const violations = sourceViolations(
-        ".github/workflows/agents.yml",
+        ".github/workflows/example.yml",
         [
           "on: [workflow_dispatch]",
+          "permissions: { contents: read }",
           "jobs:",
           "  scheduled:",
           "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
@@ -139,9 +145,10 @@ describe("sourceViolations", () => {
 
   test("allows GitHub's reusable-workflow caller keywords", () => {
     const violations = sourceViolations(
-      ".github/workflows/agents.yml",
+      ".github/workflows/example.yml",
       [
         "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
         "jobs:",
         "  scheduled:",
         "    name: Scheduled tasks",
@@ -157,6 +164,110 @@ describe("sourceViolations", () => {
       ].join("\n"),
     )
     expect(violations).toEqual([])
+  })
+})
+
+describe("permissions policy (#1503)", () => {
+  const base = (permissions: string, jobs: string[] = ["  test:", "    timeout-minutes: 15", "    runs-on: ubuntu-24.04"]) =>
+    ["on: [workflow_dispatch]", permissions, "jobs:", ...jobs].join("\n")
+
+  test("flags a workflow with no top-level permissions", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      ["on: [workflow_dispatch]", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["require-top-level-permissions"])
+  })
+
+  test.each(["write-all", "read-all"])("flags the scalar %s shorthand", (shorthand) => {
+    const violations = sourceViolations(".github/workflows/example.yml", base(`permissions: ${shorthand}`))
+    expect(violations.map((violation) => violation.rule)).toEqual(["permissions-mapping-form"])
+  })
+
+  test("accepts contents: write, the one permitted write scope", () => {
+    expect(sourceViolations(".github/workflows/example.yml", base("permissions: { contents: write }"))).toEqual([])
+  })
+
+  test("flags a non-contents write grant", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      base("permissions: { contents: read, pull-requests: write }"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["permissions-write-scope"])
+  })
+
+  test("flags an unknown permission scope", () => {
+    const violations = sourceViolations(".github/workflows/example.yml", base("permissions: { bogus: read }"))
+    expect(violations.map((violation) => violation.rule)).toEqual(["permissions-scope"])
+  })
+
+  test("flags an unknown permission level", () => {
+    const violations = sourceViolations(".github/workflows/example.yml", base("permissions: { contents: admin }"))
+    expect(violations.map((violation) => violation.rule)).toEqual(["permissions-level"])
+  })
+
+  test("flags a job-level permissions block, naming the job", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      base("permissions: { contents: read }", [
+        "  test:",
+        "    timeout-minutes: 15",
+        "    permissions: { contents: read }",
+      ]),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["no-job-level-permissions"])
+    expect(violations[0].job).toBe("test")
+  })
+
+  test("honors a baselined write grant and job block (test.yml: checks, ci-fix)", () => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read, checks: write }", [
+        "  ci-fix:",
+        "    timeout-minutes: 15",
+        "    permissions: { contents: read }",
+      ]),
+    )
+    expect(violations).toEqual([])
+  })
+
+  test("flags a baselined write grant that is no longer used", () => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read }", ["  ci-fix:", "    timeout-minutes: 15", "    permissions: { contents: read }"]),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["stale-permission-exception"])
+  })
+
+  test.each(["artifact-metadata", "code-quality", "vulnerability-alerts"])(
+    "accepts the documented %s scope at read level",
+    (scope) => {
+      expect(
+        sourceViolations(".github/workflows/example.yml", base(`permissions: { contents: read, ${scope}: read }`)),
+      ).toEqual([])
+    },
+  )
+
+  test("flags exceptions whose workflow file is absent from the tree", () => {
+    const violations = absentFileExceptions([".github/workflows/check.yml"])
+    expect(violations.length).toBeGreaterThan(0)
+    expect(violations.every((violation) => violation.rule === "stale-permission-exception")).toBe(true)
+    expect(violations.map((violation) => violation.file)).toContain(".github/workflows/containers.yml")
+    expect(absentFileExceptions([]).length).toBeGreaterThan(0)
+  })
+
+  test("no absent-file violations when every baselined workflow is present", () => {
+    const root = join(import.meta.dir, "..")
+    expect(absentFileExceptions(workflowFiles(root))).toEqual([])
+  })
+
+  test("flags a baselined job block that is no longer used", () => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read, checks: write }"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["stale-permission-exception"])
+    expect(violations[0].job).toBe("ci-fix")
   })
 })
 
