@@ -79,6 +79,7 @@
     "@effect/platform-node": "catalog:",
     "@effect/sql-sqlite-bun": "catalog:",
     "@modelcontextprotocol/server": "2.3.0",
+    "ajv": "8.20.0",
     "@opencode/http-recorder": "workspace:*",
     "@opencode/protocol": "workspace:*",
     "@parcel/watcher-darwin-arm64": "2.5.1",

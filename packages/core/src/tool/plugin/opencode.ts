@@ -41,6 +41,8 @@ export const WorktreeRemoveInput = Schema.Struct({
   }),
 })
 
+export const WorktreeListInput = Schema.Struct({})
+
 const WorktreeRemoveOutput = Schema.Struct({ directory: AbsolutePath, removed: Schema.Boolean })
 
 export const ModelsInput = Schema.Struct({
@@ -169,7 +171,7 @@ export const Plugin = {
         draft.add({
           name: "worktree_list",
           description: "List a repository's worktrees.",
-          input: Schema.Struct({}),
+          input: WorktreeListInput,
           output: Schema.Struct({ worktrees: Worktree.List }),
           options: { namespace: "opencode", codemode: true, pinned: true },
           execute: () =>
