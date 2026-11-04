@@ -1,7 +1,7 @@
 export * as SkillDiscovery from "./discovery.js"
 
 import path from "path"
-import { Context, Effect, Layer, Schedule, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Schedule, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
@@ -39,7 +39,7 @@ const indexFetchTimeout = "15 seconds"
  * transfer settles through download()'s failure path instead of hanging
  * pull() - and with it plugin/skill loading - forever (#1381).
  */
-export const downloadTimeout = "60 seconds"
+export const downloadTimeout = Duration.seconds(60)
 
 const skillConcurrency = 4
 const fileConcurrency = 8

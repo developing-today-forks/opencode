@@ -3,7 +3,7 @@ import path from "path"
 import { createServer } from "node:http"
 import { describe, expect } from "bun:test"
 import { NodeHttpServer } from "@effect/platform-node"
-import { Effect } from "effect"
+import { Deferred, Duration, Effect } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -134,14 +134,11 @@ describe("SkillDiscovery.pull", () => {
     "settles a download whose body never completes as failed once the download deadline passes",
     Effect.gen(function* () {
       const catalog = yield* fixture
-      let started = false
-      let result: { directories: string[]; requests: string[] } | undefined
+      const started = yield* Deferred.make<void>()
+      const completed = yield* Deferred.make<{ directories: string[]; requests: string[] }>()
       const stalled = Stream.concat(
         Stream.fromEffect(
-          Effect.sync(() => {
-            started = true
-            return new Uint8Array([0x23])
-          }),
+          Effect.as(Deferred.succeed(started, undefined), new Uint8Array([0x23])),
         ),
         Stream.never,
       )
@@ -152,23 +149,17 @@ describe("SkillDiscovery.pull", () => {
           { "/catalog/deploy/SKILL.md": HttpServerResponse.stream(stalled) },
         )
         .pipe(
-          Effect.tap((value) => Effect.sync(() => (result = value))),
-          Effect.forkChild,
+          Effect.tap((value) => Deferred.succeed(completed, value)),
+          Effect.forkChild({ startImmediately: true }),
         )
-      // Wait for the download body to begin before measuring its deadline;
-      // the index fetch may take real time before the download pipeline starts.
-      for (let i = 0; i < 100 && !started; i++) {
-        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
-      }
-      expect(started).toBe(true)
-      yield* TestClock.adjust("59 seconds")
-      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
-      expect(result).toBeUndefined()
-      yield* TestClock.adjust("1 second")
-      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
-      expect(result).toBeDefined()
-      expect(result?.directories).toEqual([])
-      expect(result?.requests).toContain(`${catalog.base}deploy/SKILL.md`)
+      // The index fetch uses real I/O, so measure only after the response body signals its start.
+      yield* Deferred.await(started)
+      yield* TestClock.adjust(Duration.subtract(SkillDiscovery.downloadTimeout, Duration.seconds(1)))
+      expect(yield* Deferred.isDone(completed)).toBe(false)
+      yield* TestClock.adjust(Duration.seconds(2))
+      const result = yield* Deferred.await(completed)
+      expect(result.directories).toEqual([])
+      expect(result.requests).toContain(`${catalog.base}deploy/SKILL.md`)
     }),
   )
 
