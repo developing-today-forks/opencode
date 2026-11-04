@@ -85,6 +85,43 @@ describe("ModelRouteLog", () => {
       expect(yield* ModelRouteLog.recentFailures(db, 0)).toHaveLength(1)
     }),
   )
+
+  it.live("counts content-policy rejections separately from failures", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRouteLog.record({ kind: "attempt", row: attempt({}) })
+      for (let i = 0; i < 3; i++)
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ContentPolicy", message: "blocked by policy" }),
+          }),
+        })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          outcome: "failure",
+          output_started: false,
+          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "You exceeded your current quota" }),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
+      expect(stats).toHaveLength(1)
+      expect(stats[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      const hourly = yield* ModelRouteLog.hourlyStats(db, 0)
+      expect(hourly).toHaveLength(1)
+      expect(hourly[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      // The per-tag breakdown still sees the policy class by its own tag.
+      const breakdown = yield* ModelRouteLog.errorBreakdown(db, 0)
+      expect(breakdown.find((row) => row.tag === "ContentPolicy")?.count).toBe(3)
+    }),
+  )
 })
 
 describe("per-pool history", () => {
