@@ -2,7 +2,7 @@
 #
 # opencode module — home-manager.
 #
-# Canonical home: developing-today/opencode, nix/modules
+# Canonical home: developing-today-forks/opencode, nix/modules
 # (opencode#1511). The Linux branch installs the same systemd user
 # unit as nixos.nix; the darwin branch installs a launchd user
 # agent with the same command and environment, the paths spelled

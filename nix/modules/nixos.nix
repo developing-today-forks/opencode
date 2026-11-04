@@ -2,7 +2,7 @@
 #
 # opencode module — NixOS.
 #
-# Canonical home: developing-today/opencode, nix/modules
+# Canonical home: developing-today-forks/opencode, nix/modules
 # (opencode#1511). Installs a systemd *user* unit for the standing
 # server; the darwin module in this directory installs the launchd
 # equivalent.

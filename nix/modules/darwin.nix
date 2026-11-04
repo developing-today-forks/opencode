@@ -2,7 +2,7 @@
 #
 # opencode module — nix-darwin.
 #
-# Canonical home: developing-today/opencode, nix/modules
+# Canonical home: developing-today-forks/opencode, nix/modules
 # (opencode#1511). Installs the standing server as a launchd user
 # agent, equivalent to the systemd user unit the NixOS and
 # home-manager modules install: same command, same environment
