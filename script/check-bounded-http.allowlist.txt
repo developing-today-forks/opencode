@@ -114,7 +114,6 @@ packages/core/src/aisdk.ts :: const body = request.body ? new Uint8Array(yield* 
 packages/core/src/aisdk.ts :: body: web.body ? await web.arrayBuffer() : undefined, :: read of a locally constructed web Request body (in-process conversion), not a network response body
 packages/core/src/codemode/web.ts :: const response = await globalThis.fetch(input, { :: bounded at the site: globalThis.fetch call whose options carry a signal (deadline/caller signal composed at the call)
 packages/core/src/github-copilot/models.ts :: const response = await fetch(url, { :: bounded at the site: call options carry AbortSignal.timeout as the signal
-packages/core/src/mcp/oauth.ts :: const error = yield* Effect.tryPromise(async () => parseErrorResponse(await response.clone().text())).pipe( :: direct body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127 (receiver: chained call)
 packages/core/src/modal/models.ts :: const response = await fetch(url, { :: bounded at the site: call options carry AbortSignal.timeout as the signal
 packages/core/src/oauth/page.ts :: fetch(TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:signal}).then(function(res){ :: AbortSignal.timeout(5000) bounds the same-origin OAuth token POST; stalled requests reach fail() — fixed by #1386
 packages/core/src/persistent-pty/binary.bun.ts :: const bytes = new Uint8Array(await Bun.file(input.path).arrayBuffer()) :: local file read via Bun.file (filesystem), not a network response body
@@ -125,7 +124,6 @@ packages/core/src/plugin/provider/gitlab.ts :: fetch(input, { ...init, signal: i
 packages/core/src/plugin/provider/openai.ts :: fetch(`http://localhost:${port}/cancel`, { :: bounded at the site: call options carry AbortSignal.timeout as the signal
 packages/core/src/plugin/provider/openai.ts :: fetch(`${issuer}/api/accounts/deviceauth/token`, { :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
 packages/core/src/plugin/provider/openai.ts :: const response = await fetch(url, { ...init, signal }) :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
-packages/core/src/plugin/provider/snowflake-cortex.ts :: const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text()))) :: direct body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127 (receiver: chained call)
 packages/core/src/plugin/provider/xai.ts :: try: (signal) => fetch(url, { ...init, signal }), :: bounded at the site: call options carry a signal (caller/deadline signal composed at the call)
 packages/core/src/plugin/vcs/git.ts :: return (yield* run(args, opts)).text() :: direct body read not through a bounded/excerpt reader — remaining surface in this inventory under design #1127 (receiver: chained call)
 packages/core/src/plugin/vcs/git.ts :: const name = result.text().trim() :: subprocess result accessor: .text() on the local command-runner result object, not a fetch Response

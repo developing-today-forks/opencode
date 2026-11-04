@@ -295,6 +295,47 @@ it.live("uses environment tokens rather than the account identifier and bypasses
   ),
 )
 
+it.live("does not rewrite an over-cap 400 error body as conversation complete", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      // The message names the rewrite trigger, but the body is over the hook's cap: it must
+      // be left alone (and surface as the failure it is), not buffered whole and rewritten.
+      test.replies.push(
+        Response.json(
+          { message: `Conversation complete ${"x".repeat(128 * 1024)}` },
+          { status: 400 },
+        ),
+      )
+      expect((yield* test.send.pipe(Effect.exit))._tag).toBe("Failure")
+    }),
+  ),
+)
+
+it.live("does not deadlock on a streamed over-cap 400 error body", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      // Regression (Codex P1 on #1603): the hook reads a clone of the error response
+      // before downstream code consumes the original; awaiting the bounded reader's
+      // cancellation of the tee'd clone deadlocked exactly this streamed case.
+      const chunk = new Uint8Array(32 * 1024).fill(120)
+      test.replies.push(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let index = 0; index < 5; index++) controller.enqueue(chunk)
+              controller.close()
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      )
+      expect((yield* test.send.pipe(Effect.exit))._tag).toBe("Failure")
+    }),
+  ),
+)
+
 it.live("requires a token separately from the account and supports environment PATs", () =>
   withEnv({ ...env, SNOWFLAKE_ACCOUNT: "myorg-myaccount" }, () =>
     Effect.gen(function* () {

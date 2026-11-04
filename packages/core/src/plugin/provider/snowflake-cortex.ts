@@ -10,7 +10,7 @@ import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { configuredSettings } from "./configured.js"
-import { collectBoundedResponseBody } from "../../tool/http-body.js"
+import { collectBoundedResponseBody, readExcerptResponseText } from "../../tool/http-body.js"
 
 const providerID = Provider.ID.make("snowflake-cortex")
 const integrationID = Integration.ID.make(providerID)
@@ -20,6 +20,10 @@ const clientID = "LOCAL_APPLICATION"
  * a user-entered Snowflake host must not stream unbounded data into login or refresh.
  * Mirrors the #1026 bound the native-fetch providers apply via readBoundedResponseText. */
 export const oauthMaxResponseBytes = 64 * 1024
+/** Cap on a 400 error body read by the http.response hook (#1049): the hook only needs the
+ * small JSON error document, and an over-cap body cannot be the "conversation complete"
+ * answer it rewrites, so it is left alone instead of being buffered whole. */
+export const errorResponseMaxBytes = 64 * 1024
 const accountForm = Form.Fields.make([
   {
     type: "string",
@@ -251,7 +255,28 @@ export const SnowflakeCortexPlugin = define({
       "http.response",
       Effect.fn(function* (event) {
         if (event.response.status !== 400) return
-        const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text())))
+        const body = yield* Effect.tryPromise(() =>
+          // The excerpt reader, not the bounded reader: the hook awaits this read of a
+          // clone before downstream code may consume the original response, and the
+          // bounded reader awaits cancellation at the cap — cancelling a tee'd clone
+          // can pend until the original branch is consumed, deadlocking oversized
+          // error responses. The excerpt reader reads at most the cap, truncates, and
+          // cancels without awaiting; a truncated body decodes to no error below,
+          // which is the same fail-closed outcome as an over-cap refusal (#1049).
+          readExcerptResponseText(
+            // SAFETY: the hook event's response and the excerpt reader's Response are the
+            // same runtime fetch Response; only their type packages differ (undici-types
+            // vs the Bun lib types), and the reader uses only headers/body/text.
+            event.response.clone() as Response,
+            errorResponseMaxBytes,
+          ),
+        ).pipe(Effect.orElseSucceed(() => undefined))
+        // An excerpt that filled the cap may be truncated — or, worse, a complete
+        // small error document followed by padding — so it counts as over-cap and
+        // is left alone, the bounded reader's refusal outcome (#1049).
+        const complete =
+          body !== undefined && new TextEncoder().encode(body).byteLength < errorResponseMaxBytes ? body : undefined
+        const error = complete === undefined ? undefined : Option.getOrUndefined(decodeError(complete))
         // oxlint-disable-next-line typescript-eslint/no-base-to-string -- Preserve V1's error-body coercion.
         const message = String(error?.message || error?.error || "")
         if (!message.toLowerCase().includes("conversation complete")) return

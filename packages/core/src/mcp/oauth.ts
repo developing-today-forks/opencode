@@ -24,7 +24,7 @@ import { OauthCallbackPage } from "../oauth/page.js"
 import type { Integration } from "../integration.js"
 import { ErrorSummary } from "../util/error-summary.js"
 import { serverSeconds } from "../util/number.js"
-import { readBoundedResponseText } from "../tool/http-body.js"
+import { readBoundedResponseText, readExcerptResponseText } from "../tool/http-body.js"
 
 /**
  * Timeout in milliseconds for fetching configured OAuth authorization server metadata.
@@ -38,6 +38,36 @@ export const CONFIGURED_DISCOVERY_TIMEOUT_MS = 5_000
  * a few kilobytes; 64 KiB allows ample headroom while bounding memory usage against malicious endpoints.
  */
 export const CONFIGURED_DISCOVERY_MAX_BYTES = 64 * 1024
+
+/**
+ * Maximum response body size in bytes for an OAuth token-endpoint error body read for logging.
+ * Error documents are small JSON objects; the cap matches CONFIGURED_DISCOVERY_MAX_BYTES so a
+ * malicious or broken endpoint cannot make the client buffer an unbounded rejection body (#1049).
+ */
+export const ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+/**
+ * Parses an OAuth error response for logging, reading the body through the excerpt
+ * reader: at most ERROR_RESPONSE_MAX_BYTES are read, an over-cap body truncates (its
+ * JSON then fails to parse) and an unreadable body yields undefined ("no parsed
+ * error") instead of buffering unbounded (#1049). Excerpt semantics are load-bearing
+ * here, not just a bound: the caller hands over a clone whose original the SDK still
+ * has to read, and the excerpt reader never awaits cancellation of the tee'd clone —
+ * the bounded reader's awaited cancel can pend until the original branch is consumed,
+ * deadlocking exactly the oversized rejections this guards.
+ */
+export const parseErrorBody = async (response: Response) => {
+  try {
+    const text = await readExcerptResponseText(response, ERROR_RESPONSE_MAX_BYTES)
+    // Fail closed at the cap: an excerpt that filled the cap may be truncated
+    // mid-document (or carry a near-cap description into the log), so it counts as
+    // over-cap — "no parsed error" — exactly as the bounded reader's refusal did.
+    if (new TextEncoder().encode(text).byteLength >= ERROR_RESPONSE_MAX_BYTES) return undefined
+    return await parseErrorResponse(text)
+  } catch {
+    return undefined
+  }
+}
 
 /** Client ID Metadata Document: servers that support CIMD accept this URL as the client_id without registration. */
 export const CLIENT_METADATA_URL = "https://opencode.ai/oauth/opencode/client.json"
@@ -80,9 +110,12 @@ export const loggedFetch = (fields: { readonly server: string; readonly director
           const response = yield* Effect.tryPromise({ try: () => send(url, init), catch: (error) => error })
           const result = { status: response.status, durationMs: Date.now() - started }
           if (operation && !response.ok) {
-            const error = yield* Effect.tryPromise(async () => parseErrorResponse(await response.clone().text())).pipe(
-              Effect.orElseSucceed(() => undefined),
-            )
+            const error = yield* Effect.tryPromise(() =>
+              // SAFETY: the SDK FetchLike response and the bounded reader's Response are the
+              // same runtime fetch Response; only their type packages differ (undici-types
+              // vs the Bun lib types), and the reader uses only headers/body/text.
+              parseErrorBody(response.clone() as Response),
+            ).pipe(Effect.orElseSucceed(() => undefined))
             yield* Effect.logWarning("mcp oauth request rejected", {
               ...result,
               error: error?.code,
