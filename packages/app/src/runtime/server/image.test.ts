@@ -42,7 +42,12 @@ describe("readLocalImage", () => {
     expect([...requests[0].url.searchParams]).toEqual([["location[directory]", directory]])
     expect(requests[0].init?.method).toBe("GET")
     expect(new Headers(requests[0].init?.headers).get("authorization")).toBe(`Basic ${btoa("opencode:secret")}`)
-    expect(requests[0].init?.signal).toBe(signal)
+    // The client composes the caller signal with its own 120s deadline
+    // (AbortSignal.any, #1385/#1562), so the sent signal is a composed
+    // signal, never the caller's own signal object.
+    expect(requests[0].init?.signal).toBeInstanceOf(AbortSignal)
+    expect(requests[0].init?.signal).not.toBe(signal)
+    expect(requests[0].init?.signal?.aborted).toBe(false)
   })
 
   test("preserves literal percent escapes and encodes the supplied relative location", async () => {
@@ -134,8 +139,12 @@ describe("readLocalImage", () => {
     )
 
     const result = readLocalImage(api, "/repo", "image.png", controller.signal)
-    expect(requests[0].init?.signal).toBe(controller.signal)
+    // Composed signal (#1562): not the caller's object, but it must abort
+    // when the caller aborts.
+    expect(requests[0].init?.signal).not.toBe(controller.signal)
+    expect(requests[0].init?.signal?.aborted).toBe(false)
     controller.abort()
+    expect(requests[0].init?.signal?.aborted).toBe(true)
     await expect(result).rejects.toMatchObject({ reason: "Transport", cause: controller.signal.reason })
   })
 })
