@@ -63,6 +63,7 @@ export * as MuseAttestation from "./muse-attestation.js"
  */
 import { LLMEvent, LLMResponse, Message, ToolChoice, ToolEntry, type AIError, type ToolEntryInput } from "@opencode/ai"
 import type { CompletionInput } from "./generate.js"
+import { ownValue } from "./util/record.js"
 
 /** The provider id of the muse backend: the native Meta provider. */
 export const PROVIDER_ID = "meta"
@@ -87,7 +88,7 @@ export const plan = (toolNames: Iterable<string>): Plan | undefined => {
   const taken = new Set(toolNames)
   const forward = new Map<string, string>()
   for (const name of taken) {
-    const alias = ALIASES[name]
+    const alias = ownValue(ALIASES, name)
     if (alias && !taken.has(alias)) forward.set(name, alias)
   }
   if (forward.size === 0) return undefined
