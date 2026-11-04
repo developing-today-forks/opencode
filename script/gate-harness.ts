@@ -181,13 +181,13 @@ export function evaluateGate(gate: GateDefinition, root: string, allowlistText: 
 }
 
 /**
- * Execute a gate declaration as a CLI: the repo root is this module's
- * parent directory and the allowlist is loaded from the declaration's
- * allowlist path. Exit 1 listing every failure, or print the summary.
+ * Execute a gate declaration as a CLI against an already-loaded allowlist.
+ * Each gate's entry point loads its own allowlist with the same
+ * `Bun.file(...).text()` line the gates have always carried — that line is
+ * itself a bounded-http hit dispositioned in that gate's allowlist, so it
+ * stays in the gate files, not here.
  */
-export async function runGate(gate: GateDefinition): Promise<void> {
-  const root = join(import.meta.dir, "..")
-  const allowlist = parseAllowlist(await Bun.file(join(root, gate.allowlistPath)).text())
+export function runGate(gate: GateDefinition, root: string, allowlist: Map<string, string[]>): void {
   const result = evaluate(gate, root, allowlist)
   if (result.unlisted.length || result.stale.length || result.unscannedTrees.length) {
     for (const { kind, tree, gateFile } of result.unscannedTrees)

@@ -51,6 +51,7 @@ import {
   unscannedSrcTrees as findUnscannedSrcTrees,
   type Hit,
 } from "./gate-harness"
+import { join } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
   "packages/ai/src",
@@ -126,4 +127,10 @@ export { srcTreesOnDisk }
 export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
   findUnscannedSrcTrees(root, roots)
 
-if (import.meta.main) await runGate(GATE)
+async function main() {
+  const root = join(import.meta.dir, "..")
+  const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
+  runGate(GATE, root, allowlist)
+}
+
+if (import.meta.main) await main()

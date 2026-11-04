@@ -36,6 +36,7 @@ import {
   unlistedHits,
   type Hit,
 } from "./gate-harness"
+import { join } from "node:path"
 
 export const SCAN_ROOTS = ["packages/core/src", "packages/ai/src"] as const
 /** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
@@ -65,4 +66,10 @@ export function collect(root: string, dir: string, hits: Hit[]) {
   return collectHits(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
 
-if (import.meta.main) await runGate(GATE)
+async function main() {
+  const root = join(import.meta.dir, "..")
+  const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
+  runGate(GATE, root, allowlist)
+}
+
+if (import.meta.main) await main()
