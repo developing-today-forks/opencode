@@ -89,6 +89,15 @@ html[data-theme="${themeId}"] {
  */
 export const themeMaxResponseBytes = 1024 * 1024
 
+/**
+ * Deadline for loading a theme from a URL, covering the fetch and the
+ * bounded body read (the fetch signal stays live on the response).
+ * The size cap alone cannot settle a source that stalls or slow-drips
+ * under it (#1081). 5 seconds matches the Copilot models fetch bound
+ * and still admits a full 1 MiB theme on a ~200 KiB/s link.
+ */
+export const themeFetchTimeoutMs = 5_000
+
 const readBoundedThemeText = async (response: Response, url: string): Promise<string> => {
   const tooLarge = () => new Error(`Theme response from ${url} exceeded ${themeMaxResponseBytes} bytes`)
   const contentLength = response.headers.get("content-length")
@@ -128,7 +137,7 @@ const readBoundedThemeText = async (response: Response, url: string): Promise<st
 }
 
 export async function loadThemeFromUrl(url: string): Promise<DesktopTheme> {
-  const response = await fetch(url)
+  const response = await fetch(url, { signal: AbortSignal.timeout(themeFetchTimeoutMs) })
 
   if (!response.ok) {
     throw new Error(`Failed to load theme from ${url}: ${response.statusText}`)
