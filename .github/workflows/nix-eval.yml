@@ -1,5 +1,5 @@
 name: nix-eval
-# CI tier policy: .github/ci-policy.md (fast PR tier, full main tier).
+# CI tier policy: .github/ci-policy.md (fast tier, full main tier; no PR triggers, #1401).
 # RUNNER-SWITCH (2026-10-18): runners in this workflow were switched from Blacksmith to
 # GitHub-hosted at Drew's direction. To switch back, grep the repo for RUNNER-SWITCH and
 # swap each commented Blacksmith line back in for the active line under it. To choose per
