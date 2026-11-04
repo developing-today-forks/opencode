@@ -1315,6 +1315,8 @@ function normalizeTransport(
   if (schema === undefined) return undefined
   if (isStreamSchema(schema)) return { schema, effectPortable: true } as const
   if (!metadataPortable(schema.ast, new Set())) {
+    // Imported Effect clients can use the authoritative API's success schema without re-emitting it.
+    if (source === "success") return { schema, effectPortable: false } as const
     throw new GenerationError({ reason: `Unportable schema: ${operation}.${source}` })
   }
   const decoded = Schema.toType(schema)
