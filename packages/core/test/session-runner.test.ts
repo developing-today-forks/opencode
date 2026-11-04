@@ -1294,6 +1294,81 @@ describe("SessionRunnerLLM", () => {
     expect(ModelRoute.steady(s.routing.target)).toBe(true)
   })
 
+  scenario("releases the probe claim when a probe attempt ends in a content-filter finish", function* (s) {
+    ModelRoute.resetHealth()
+    const target = ModelRoute.ref({ providerID: "fake", model: "fake-model" })
+    const benchPolicy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const now = Date.now()
+    // The probe falls due at the quota window reset a minute out; every probeDue/claim
+    // call below is evaluated at that reset instead of sleeping (this harness runs on a
+    // TestClock, so a real sleep would never advance).
+    const resetAt = now + 60_000
+    const full = {
+      planID: "plan",
+      window: "five-hours",
+      providerID: "fake",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    } as const
+    // Bench both scopes the pick will claim (target and its serving credential), then arm
+    // each bench with the quota window reset that makes its probe due (#1620).
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true })
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true }, "cred-lab")
+    ModelRoute.observeProviderQuota(target, full, now)
+    ModelRoute.observeCredentialQuota(target, "cred-lab", full, now)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    const claimedAt = resetAt
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-lab", claimedAt, token)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(false)
+
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let fallbacks = 0
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target,
+      // fixed: failover only — the benched target's failure history must not trigger
+      // a hedge race against the fallback in this scenario.
+      autonomy: "fixed",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      probeClaim: { claimedAt, token, credentialID: Credential.ID.make("cred-lab") },
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "content-filter", raw: "SAFETY" } },
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+      ),
+    )
+    expect((yield* s.runPrompt("Probe the benched target").pipe(Effect.flip)).message).toBe(
+      "Provider blocked the response",
+    )
+
+    // No failover and no health accounting for a policy finish — but the claim is settled:
+    // the bench stands and both scopes are probe-eligible again instead of stranded
+    // behind the outstanding claim until the bench expires.
+    expect(fallbacks).toBe(0)
+    expect(s.requests).toHaveLength(1)
+    expect(ModelRoute.coolingDown(target)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
   scenario("generates the title while the first model step is still running", function* (s) {
     yield* prepareTitleGeneration
 
