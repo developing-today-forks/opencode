@@ -1,15 +1,24 @@
-# agents.yml — the single home for this repo's dispatch-scheduled agents,
-# replacing the retired Jules scheduled tasks and the old Suggestions
-# automation.
+# agents.yml — the single home for this repo's dispatch-scheduled agents
+# (bolt, palette, suggestions), replacing the retired Jules scheduled
+# tasks and the old Suggestions automation.
 #
-# This file is a THIN CALLER: it contains no task steps of its own. The
-# actual work lives centrally in developing-today/code — the reusable
-# workflow .github/workflows/pm-scheduled.yml owns the task list and the
-# slot table (which tasks run on which cron), and the prompts live in the
-# central library in developing-today/code's pm-dispatch-task action
-# (.github/actions/pm-dispatch-task/prompts/). To change what runs, when
-# it runs, or what it is asked to do, edit developing-today/code, not
-# this file.
+# This workflow INLINES developing-today/code's pm-scheduled.yml instead
+# of calling it with `uses:` (#1572). Any job that references a
+# developing-today/code action or reusable workflow dies at "Set up job"
+# because the runner cannot download that repo's action archive —
+# `Could not find file '.../_staging/code-<sha>/archive'` — on every head
+# SHA since at least 2026-11-01 (run 41715413055, and every later agents
+# run). The fix is the one already proven for the same defect class in
+# developing-today/code's main-broken.yml (#4867) and pm-scheduled.yml
+# (#4742): check the repo out into `.pm-central` and load the action from
+# a local path, so no action-repository download happens in the chain.
+#
+# The task list and prompts still live centrally in developing-today/code:
+# pm-dispatch-task resolves each task's prompt from its bundled library
+# (prompts/<task>.md), and the slot table below mirrors the one in
+# pm-scheduled.yml. When central changes the slot table, re-copy it here.
+# If the runner's action-archive download is fixed upstream, this job can
+# go back to calling pm-scheduled.yml@main.
 #
 # Times are America/Chicago, converted to UTC crons from CDT:
 #   tasks (bolt, palette): 19:00 CDT = 00:00 UTC -> cron "0 0 * * *"
@@ -42,14 +51,163 @@ permissions:
 
 jobs:
   scheduled:
-    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main
+    runs-on: ubuntu-latest
+    # Matches the timeout of the workflow this inlines.
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
-    with:
-      schedule: ${{ github.event.schedule }}
-      # Empty on schedule events (inputs are empty there) and when the
-      # manual selector is 'all' — the central workflow then runs the
-      # full slot for the event. A specific manual pick passes just that
-      # task name (bolt | palette | suggestions).
-      tasks: ${{ github.event_name == 'workflow_dispatch' && inputs.task != 'all' && inputs.task || '' }}
+    steps:
+      # The pm-dispatch action family is loaded from this checkout rather
+      # than as `developing-today/code/.github/actions/...@main`; the
+      # remote form is what fails with the `_staging` archive error. The
+      # checkout lands at .pm-central because pm-dispatch-task's own nested
+      # steps load pm-dispatch-start / pm-dispatch-queue from that same
+      # path (see that action's loading contract).
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - name: Resolve the target repo and the task list
+        id: resolve
+        shell: bash
+        env:
+          INPUT_SCHEDULE: ${{ github.event.schedule }}
+          INPUT_TASKS: ${{ github.event_name == 'workflow_dispatch' && inputs.task != 'all' && inputs.task || '' }}
+          CALLER_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Effective repo: the repository that fired this workflow.
+          repo="$CALLER_REPO"
+
+          # Task list: an explicit `tasks` input (trimmed) is used
+          # verbatim (a comma-separated list) and the slot table is not
+          # consulted.
+          tasks_input="$INPUT_TASKS"
+          # Trim leading/trailing whitespace.
+          tasks_input="${tasks_input#"${tasks_input%%[![:space:]]*}"}"
+          tasks_input="${tasks_input%"${tasks_input##*[![:space:]]}"}"
+
+          if [ -n "$tasks_input" ]; then
+            tasks="$tasks_input"
+          else
+            # ======================================================
+            # THE SLOT TABLE — schedule -> tasks resolution, mirrored
+            # from pm-scheduled.yml in developing-today/code.
+            #
+            # All cron expressions are UTC (GitHub Actions cron is
+            # always UTC); the comments give the repo each slot belongs
+            # to and the local time in America/Chicago (CDT, UTC-5).
+            #
+            # NOTE: the patterns are quoted on purpose — quoted, they
+            # match literally; unquoted, the `*` in a cron expression
+            # would be a glob wildcard.
+            # ======================================================
+            case "$INPUT_SCHEDULE" in
+              # --- Task slots -> bolt,palette ---
+              "0 1 * * *")   tasks="bolt,palette" ;; # developing-today/code — 20:00 CDT (previous evening)
+              "0 2 * * *")   tasks="bolt,palette" ;; # developing-today/openchamber — 21:00 CDT (previous evening)
+              "0 0 * * *")   tasks="bolt,palette" ;; # developing-today/opencode — 19:00 CDT (previous evening)
+              "0 5 * * *")   tasks="bolt,palette" ;; # dezren39/nix + dezren39/dezren39 — 00:00 CDT
+              "30 13 * * *") tasks="bolt,palette" ;; # developing-today/zettel — 08:30 CDT
+
+              # --- Suggestions slots -> suggestions ---
+              "0 13 * * *") tasks="suggestions" ;; # developing-today/code — 08:00 CDT
+              "0 14 * * *") tasks="suggestions" ;; # developing-today/openchamber — 09:00 CDT
+              "0 15 * * *") tasks="suggestions" ;; # developing-today/opencode — 10:00 CDT
+              "0 16 * * *") tasks="suggestions" ;; # dezren39/nix — 11:00 CDT
+              "0 17 * * *") tasks="suggestions" ;; # developing-today/zettel — 12:00 CDT
+              "0 18 * * *") tasks="suggestions" ;; # dezren39/dezren39 — 13:00 CDT
+
+              # --- Empty or unknown schedule -> everything ---
+              *) tasks="bolt,palette,suggestions" ;;
+            esac
+          fi
+
+          # Per-task booleans for the step `if:`s below — cleaner than
+          # contains() on the comma string in each step. Spaces are
+          # stripped for the membership test only, so "bolt, palette"
+          # gates the same as "bolt,palette"; the `tasks` output itself
+          # stays verbatim.
+          compact=",$(printf '%s' "$tasks" | tr -d '[:space:]'),"
+          has_bolt="false"
+          has_palette="false"
+          has_suggestions="false"
+          case "$compact" in *",bolt,"*) has_bolt="true" ;; esac
+          case "$compact" in *",palette,"*) has_palette="true" ;; esac
+          case "$compact" in *",suggestions,"*) has_suggestions="true" ;; esac
+
+          {
+            echo "repo=$repo"
+            echo "tasks=$tasks"
+            echo "has_bolt=$has_bolt"
+            echo "has_palette=$has_palette"
+            echo "has_suggestions=$has_suggestions"
+          } >> "$GITHUB_OUTPUT"
+          echo "agents resolve: repo=$repo schedule='${INPUT_SCHEDULE}' tasks=$tasks has_bolt=$has_bolt has_palette=$has_palette has_suggestions=$has_suggestions"
+
+      # THE LIST — one dispatch step per task, following pm-scheduled.yml.
+
+      - name: Dispatch bolt
+        id: bolt
+        if: steps.resolve.outputs.has_bolt == 'true'
+        uses: ./.pm-central/.github/actions/pm-dispatch-task
+        with:
+          task: bolt
+          repo: ${{ steps.resolve.outputs.repo }}
+
+      - name: Dispatch palette
+        id: palette
+        if: steps.resolve.outputs.has_palette == 'true'
+        uses: ./.pm-central/.github/actions/pm-dispatch-task
+        with:
+          task: palette
+          repo: ${{ steps.resolve.outputs.repo }}
+
+      - name: Dispatch suggestions
+        id: suggestions
+        if: steps.resolve.outputs.has_suggestions == 'true'
+        uses: ./.pm-central/.github/actions/pm-dispatch-task
+        with:
+          task: suggestions
+          repo: ${{ steps.resolve.outputs.repo }}
+
+      - name: Summarize the dispatched tasks
+        if: always()
+        shell: bash
+        env:
+          RESOLVED_REPO: ${{ steps.resolve.outputs.repo }}
+          RESOLVED_TASKS: ${{ steps.resolve.outputs.tasks }}
+          BOLT_TASK_ID: ${{ steps.bolt.outputs.task_id }}
+          BOLT_SESSION_ID: ${{ steps.bolt.outputs.session_id }}
+          BOLT_ISSUE_NUMBER: ${{ steps.bolt.outputs.issue_number }}
+          BOLT_ISSUE_URL: ${{ steps.bolt.outputs.issue_url }}
+          PALETTE_TASK_ID: ${{ steps.palette.outputs.task_id }}
+          PALETTE_SESSION_ID: ${{ steps.palette.outputs.session_id }}
+          PALETTE_ISSUE_NUMBER: ${{ steps.palette.outputs.issue_number }}
+          PALETTE_ISSUE_URL: ${{ steps.palette.outputs.issue_url }}
+          SUGGESTIONS_TASK_ID: ${{ steps.suggestions.outputs.task_id }}
+          SUGGESTIONS_SESSION_ID: ${{ steps.suggestions.outputs.session_id }}
+          SUGGESTIONS_ISSUE_NUMBER: ${{ steps.suggestions.outputs.issue_number }}
+          SUGGESTIONS_ISSUE_URL: ${{ steps.suggestions.outputs.issue_url }}
+        run: |
+          set -euo pipefail
+          # A skipped task step leaves all of its outputs blank; they are
+          # reported blank here, exactly as passed in.
+          {
+            echo "## agents — ${RESOLVED_REPO}"
+            echo ""
+            echo "Resolved tasks: ${RESOLVED_TASKS}"
+            echo ""
+            echo "| Task | task_id | session_id | issue_number | issue_url |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| bolt | ${BOLT_TASK_ID} | ${BOLT_SESSION_ID} | ${BOLT_ISSUE_NUMBER} | ${BOLT_ISSUE_URL} |"
+            echo "| palette | ${PALETTE_TASK_ID} | ${PALETTE_SESSION_ID} | ${PALETTE_ISSUE_NUMBER} | ${PALETTE_ISSUE_URL} |"
+            echo "| suggestions | ${SUGGESTIONS_TASK_ID} | ${SUGGESTIONS_SESSION_ID} | ${SUGGESTIONS_ISSUE_NUMBER} | ${SUGGESTIONS_ISSUE_URL} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "agents summary written for repo=${RESOLVED_REPO} tasks=${RESOLVED_TASKS}"
