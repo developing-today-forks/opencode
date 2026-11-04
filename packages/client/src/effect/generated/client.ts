@@ -453,6 +453,7 @@ const EndpointSessionStats = (raw: RawClient["server.session"]) => (input?: Sess
 const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: SessionCreateInput) =>
   preserveEffect<SessionCreateOutput>()(
     raw["session.create"]({
+      query: { directory: input?.["directory"] },
       payload: {
         id: input?.["id"],
         parentID: input?.["parentID"],

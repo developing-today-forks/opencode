@@ -3700,6 +3700,7 @@ export type SessionStatsInput = {
 export type SessionStatsOutput = { data: SessionStatsInfo }["data"]
 
 export type SessionCreateInput = {
+  readonly directory?: { readonly directory?: string | undefined }["directory"]
   readonly id?: {
     readonly id?: string | null
     readonly parentID?: string | null
