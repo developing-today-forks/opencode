@@ -592,6 +592,16 @@ export const make = Effect.gen(function* () {
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
         } else clearFailedAttempt(retryKey)
+        // A policy rejection bypasses the health accounting below, so it must also settle
+        // any half-open probe claim this attempt carried: failed()/completed() normally
+        // settle it, and an outstanding claim would strand the target's route recovery
+        // (probeDue stays false) until the bench expires (#1084).
+        if (policyFailure && input.model.routing?.probeClaim) {
+          const claim = input.model.routing.probeClaim
+          ModelRoute.releaseBenchProbe(input.model.routing.target, undefined, claim.claimedAt, claim.token)
+          if (claim.credentialID)
+            ModelRoute.releaseBenchProbe(input.model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+        }
         // Health accounting is broader than current-request failover: a terminal non-retryable
         // error still makes the target unhealthy for later selections. Keep the routeFailure gate
         // below so this does not broaden which failures may move the current request elsewhere.
