@@ -494,8 +494,9 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
 /** The widest demotion window either config surface admits: both
  * `experimental.model_route_demotion.window_ms` and `routes.settings.demotion.windowMs`
  * cap at 7,776,000,000 ms (90 days) in the schema, so the demotion restore below reads
- * that far back. Replay retention (`recordQuota`) and judging (`demoted`) apply the
- * actually configured windows over what is restored, so a shorter window never counts
+ * that far back. Seeding retains the whole horizon (a judging Location may only
+ * register after the restore), while judging (`demoted`) applies the actually
+ * configured window over what is retained, so a shorter window never counts
  * the older rows. */
 export const MAX_DEMOTION_WINDOW_MS = 7_776_000_000
 

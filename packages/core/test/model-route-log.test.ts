@@ -1470,6 +1470,31 @@ describe("demotion restore (#1151)", () => {
     }),
   )
 
+  it.live("restored history survives when the judging window registers after the restore", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // One failure inside the default retention, two far outside it: replaying
+      // through the default four-hour retention would keep only the latest.
+      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000]) quotaAttempt("demote-late-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // No demotion config is registered yet, so retention at restore time is
+      // the default; the seven-day policy only arrives afterwards.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-late-window", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
+    }),
+  )
+
   it.live("rows older than a day restore when the configured window reaches them", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

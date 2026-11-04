@@ -1180,9 +1180,14 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= policy.threshold
 }
 
-const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
+const recordQuota = (
+  target: Model.Ref,
+  now: number,
+  credentialID?: string,
+  retentionMs = retainedDemotionWindow(),
+) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retentionMs)
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -2376,14 +2381,26 @@ export const seedCooldowns = (
  * ledger never counts one attempt twice, while distinct attempts that share a
  * millisecond still count individually, exactly as live recording counts them. A
  * credential's rows restore onto that credential only (#6), exactly as live recording
- * scopes them. */
+ * scopes them. Seeding retains the full supported restore horizon
+ * (ModelRouteLog.MAX_DEMOTION_WINDOW_MS), not the window of whichever Locations
+ * happen to be registered when the restore runs: a Location with a longer demotion
+ * window can activate after the restore, and pruning the replay against the
+ * then-current retention (four hours by default) would discard failures its policy
+ * still counts, unrecoverably - the restored-id set bars a second restore. Judging
+ * still applies each Location's own window over the retained cache, so the wider
+ * seeding retention never demotes a target its policy would not. */
 export const seedDemotion = (
   rows: ReadonlyArray<{ id: number; time: number; providerID: string; modelID: string; credentialID?: string }>,
 ) => {
   for (const row of rows.toSorted((left, right) => left.time - right.time)) {
     if (restoredDemotionAttempts.has(row.id)) continue
     restoredDemotionAttempts.add(row.id)
-    recordQuota(ref({ providerID: row.providerID, model: row.modelID }), row.time, row.credentialID)
+    recordQuota(
+      ref({ providerID: row.providerID, model: row.modelID }),
+      row.time,
+      row.credentialID,
+      ModelRouteLog.MAX_DEMOTION_WINDOW_MS,
+    )
   }
 }
 
