@@ -336,6 +336,41 @@ it.effect("convertSchema expands multi-valued type unions into branches (#1556)"
   }),
 )
 
+it.effect("convertSchema encodes boolean false as { not: {} } instead of inverting it (#1573)", () =>
+  Effect.sync(() => {
+    // Property, items/prefixItems, and branch positions: false is never,
+    // true stays unconstrained {}.
+    expect(
+      convertSchema({ type: "object", properties: { never: false, any: true } } as never),
+    ).toEqual({ type: "OBJECT", properties: { never: { not: {} }, any: {} } })
+    expect(convertSchema({ type: "array", items: false } as never)).toEqual({ type: "ARRAY", items: { not: {} } })
+    expect(convertSchema({ type: "array", items: true } as never)).toEqual({ type: "ARRAY", items: {} })
+    expect(convertSchema({ type: "array", prefixItems: [false, { type: "string" }] } as never)).toEqual({
+      type: "ARRAY",
+      items: {},
+      prefixItems: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ anyOf: [false, { type: "string" }] } as never)).toEqual({
+      anyOf: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ anyOf: [false, { type: "string" }] } as never, true)).toEqual({
+      oneOf: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ oneOf: [true] } as never)).toEqual({ oneOf: [{}] })
+    // (An allOf-only root also takes the root OBJECT default, as before.)
+    expect(convertSchema({ allOf: [false] } as never)).toEqual({ allOf: [{ not: {} }], type: "OBJECT" })
+    // Root positions: false is { not: {} } with no forced OBJECT; true
+    // keeps the historical { type: "OBJECT" }.
+    expect(convertSchema(false as never)).toEqual({ not: {} })
+    expect(convertSchema(true as never)).toEqual({ type: "OBJECT" })
+    // Under `not` itself the booleans flip meaning: not:false is
+    // unconstrained (key omitted), not:true is never.
+    expect(convertSchema({ type: "string", not: false } as never)).toEqual({ type: "STRING" })
+    expect(convertSchema({ type: "string", not: true } as never)).toEqual({ type: "STRING", not: {} })
+    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" }, type: "OBJECT" })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
