@@ -37,6 +37,13 @@ const resolver = ModelResolver.layer.pipe(
       Layer.mock(Provider.Service, { get: () => Effect.undefined }),
       Layer.mock(Model.Service, {
         get: () => Effect.succeed(catalog),
+        // #1547 made resolve judge alias precedence against the full
+        // enabled model list via all() (#230); the mock must implement
+        // it or Layer.mock throws UnimplementedError before the bare-
+        // alias tests assert anything (#1584). The catalog entry is in
+        // the real all() shape (enabled, providerID, id), so the
+        // resolver's exists check is genuinely exercised.
+        all: () => Effect.succeed([catalog]),
         available: () => Effect.succeed([catalog]),
       }),
       Layer.mock(Integration.Service, {
