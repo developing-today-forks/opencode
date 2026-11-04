@@ -8,10 +8,6 @@ name: publish-vscode
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "vscode-v*.*.*"
-
 concurrency:
   # Releases are never cancelled mid-publish: push-to-main, tag pushes and
   # manual dispatches are keyed by run_id (unique group, cancel can never
