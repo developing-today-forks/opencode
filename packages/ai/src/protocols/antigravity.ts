@@ -200,7 +200,29 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
     const types = node.type.filter((entry): entry is string => typeof entry === "string")
     if (types.includes("null")) nullable = true
     const concrete = types.filter((entry) => entry !== "null")
-    if (concrete.length) out.type = concrete[0].toUpperCase()
+    if (concrete.length === 1) out.type = concrete[0].toUpperCase()
+    else if (concrete.length > 1) {
+      // A multi-valued type union cannot ride the proto's single `type`
+      // enum, so emit one branch per concrete member (#1556) through the
+      // same branch machinery #1550 uses for anyOf: anyOf for Gemini
+      // targets, oneOf for Anthropic, merged with any branches the node's
+      // own anyOf handling already emitted on that side. The node's other
+      // keywords stay on this node and keep applying to every branch; an
+      // ARRAY branch carries the node's items/prefixItems (or an
+      // unconstrained items, per #1548) because the proto requires items
+      // on every ARRAY schema.
+      const branches = concrete.map((entry) => {
+        const branch: Record<string, unknown> = { type: entry.toUpperCase() }
+        if (entry === "array") {
+          if (out.items !== undefined) branch.items = out.items
+          else if (out.prefixItems !== undefined) branch.prefixItems = out.prefixItems
+          else branch.items = {}
+        }
+        return branch
+      })
+      if (anthropic) out.oneOf = [...(Array.isArray(out.oneOf) ? out.oneOf : []), ...branches]
+      else out.anyOf = [...(Array.isArray(out.anyOf) ? out.anyOf : []), ...branches]
+    }
   } else if (typeof node.type === "string") {
     out.type = node.type.toUpperCase()
   }
@@ -223,7 +245,11 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
 /** Convert a client JSON Schema tool definition to the proto Schema the wire accepts. */
 export const convertSchema = (schema: unknown, anthropic = false) => {
   const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}), anthropic)
-  if (converted.type === undefined) converted.type = "OBJECT"
+  // A branch-only root (a multi-valued type union, #1556, or the node's own
+  // anyOf/oneOf composition) describes itself; forcing OBJECT onto it would
+  // narrow the union back to objects only.
+  if (converted.type === undefined && converted.anyOf === undefined && converted.oneOf === undefined)
+    converted.type = "OBJECT"
   return converted
 }
 
