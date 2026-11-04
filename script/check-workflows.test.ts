@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
-import { collectViolations, parseWorkflow, sourceViolations, triggerNames, workflowFiles, workflowViolations } from "./check-workflows"
+import { absentFileExceptions, collectViolations, parseWorkflow, sourceViolations, triggerNames, workflowFiles, workflowViolations } from "./check-workflows"
 
 const compliant = [
   "name: example",
@@ -237,6 +237,28 @@ describe("permissions policy (#1503)", () => {
       base("permissions: { contents: read }", ["  ci-fix:", "    timeout-minutes: 15", "    permissions: { contents: read }"]),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["stale-permission-exception"])
+  })
+
+  test.each(["artifact-metadata", "code-quality", "vulnerability-alerts"])(
+    "accepts the documented %s scope at read level",
+    (scope) => {
+      expect(
+        sourceViolations(".github/workflows/example.yml", base(`permissions: { contents: read, ${scope}: read }`)),
+      ).toEqual([])
+    },
+  )
+
+  test("flags exceptions whose workflow file is absent from the tree", () => {
+    const violations = absentFileExceptions([".github/workflows/check.yml"])
+    expect(violations.length).toBeGreaterThan(0)
+    expect(violations.every((violation) => violation.rule === "stale-permission-exception")).toBe(true)
+    expect(violations.map((violation) => violation.file)).toContain(".github/workflows/containers.yml")
+    expect(absentFileExceptions([]).length).toBeGreaterThan(0)
+  })
+
+  test("no absent-file violations when every baselined workflow is present", () => {
+    const root = join(import.meta.dir, "..")
+    expect(absentFileExceptions(workflowFiles(root))).toEqual([])
   })
 
   test("flags a baselined job block that is no longer used", () => {

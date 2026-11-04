@@ -71,8 +71,10 @@ export const REUSABLE_WORKFLOW_CALLER_KEYS = new Set([
 /** GitHub's documented top-level permission scopes. */
 export const PERMISSION_SCOPES = new Set([
   "actions",
+  "artifact-metadata",
   "attestations",
   "checks",
+  "code-quality",
   "contents",
   "deployments",
   "discussions",
@@ -84,6 +86,7 @@ export const PERMISSION_SCOPES = new Set([
   "repository-projects",
   "security-events",
   "statuses",
+  "vulnerability-alerts",
 ])
 
 export const PERMISSION_LEVELS = new Set(["read", "write", "none"])
@@ -294,10 +297,37 @@ export function workflowFiles(root: string): string[] {
     .toSorted((a, b) => a.localeCompare(b))
 }
 
+/**
+ * Stale-exception violations for baselined workflows that are absent
+ * from the collected file set: when an excepted workflow is deleted or
+ * renamed, its exception entries must not survive silently in the maps
+ * (a later workflow reusing the filename would inherit the exemption).
+ */
+export function absentFileExceptions(files: string[]): Violation[] {
+  const present = new Set(files.map((file) => file.split("/").at(-1) ?? file))
+  const violations: Violation[] = []
+  for (const [base, scopes] of Object.entries(PERMISSION_WRITE_EXCEPTIONS))
+    if (!present.has(base))
+      violations.push({
+        file: `${WORKFLOWS_DIR}/${base}`,
+        rule: "stale-permission-exception",
+        detail: `the ${[...scopes].join(", ")} write exception(s) for this workflow match no file in ${WORKFLOWS_DIR}; remove them from PERMISSION_WRITE_EXCEPTIONS so the baseline only shrinks (#1503)`,
+      })
+  for (const [base, jobs] of Object.entries(JOB_PERMISSION_EXCEPTIONS))
+    if (!present.has(base))
+      violations.push({
+        file: `${WORKFLOWS_DIR}/${base}`,
+        rule: "stale-permission-exception",
+        detail: `the job-level permissions exception(s) for job(s) ${[...jobs].join(", ")} match no file in ${WORKFLOWS_DIR}; remove them from JOB_PERMISSION_EXCEPTIONS so the baseline only shrinks (#1503)`,
+      })
+  return violations
+}
+
 /** Every policy violation in every workflow file under `root`. */
 export function collectViolations(root: string): { files: string[]; violations: Violation[] } {
   const files = workflowFiles(root)
   const violations = files.flatMap((file) => sourceViolations(file, readFileSync(join(root, file), "utf8")))
+  violations.push(...absentFileExceptions(files))
   return { files, violations }
 }
 
