@@ -368,6 +368,8 @@ export function make(options: ClientOptions) {
 
   // Non-SSE requests only: the SSE path keeps no total deadline, so a healthy long-lived stream is never killed. A caller signal still aborts independently of the deadline.
   const withDeadline = (requestOptions?: RequestOptions): RequestOptions => {
+    // Runtimes without AbortSignal.timeout get no client deadline rather than a throw; a caller signal still applies on its own (#1562).
+    if (typeof AbortSignal.timeout !== "function") return requestOptions ?? {}
     const timeout = AbortSignal.timeout(requestTimeout)
     return Object.assign({}, requestOptions, {
       signal: requestOptions?.signal ? AbortSignal.any([requestOptions.signal, timeout]) : timeout,
