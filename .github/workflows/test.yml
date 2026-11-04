@@ -7,9 +7,6 @@ name: test
 # or gate individual steps with if: on the runner.
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
   # Nightly backstop: the full main tier (build + e2e included) re-runs even
   # if no merge lands, so nothing the affected filter skipped can vanish.

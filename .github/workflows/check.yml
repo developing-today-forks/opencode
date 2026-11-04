@@ -6,8 +6,6 @@ name: check
 # or gate individual steps with if: on the runner.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
