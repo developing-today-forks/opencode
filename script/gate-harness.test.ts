@@ -13,9 +13,9 @@ import {
   type GateDefinition,
   type Hit,
 } from "./gate-harness"
-import * as ProtoReads from "./check-proto-reads"
-import * as NumericBoundaries from "./check-numeric-boundaries"
-import * as BoundedHttp from "./check-bounded-http"
+import { ProtoReads } from "./check-proto-reads"
+import { NumericBoundaries } from "./check-numeric-boundaries"
+import { BoundedHttp } from "./check-bounded-http"
 
 const PATTERNS = [/TABLE\[key\]/]
 

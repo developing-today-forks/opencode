@@ -182,6 +182,8 @@ export const GATE = {
   ],
 } as const
 
+export const BoundedHttp = { GATE, PATTERNS } as const
+
 async function main() {
   const root = join(import.meta.dir, "..")
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())

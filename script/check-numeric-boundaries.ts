@@ -104,6 +104,8 @@ export const GATE = {
   treeChecks: [{ kind: "src", gateFile: "script/check-numeric-boundaries.ts" }],
 } as const
 
+export const NumericBoundaries = { GATE, PATTERNS } as const
+
 export type { Hit }
 export const hitKey = gateHarness.hitKey
 export const parseAllowlist = gateHarness.parseAllowlist

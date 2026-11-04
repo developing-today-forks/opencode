@@ -48,6 +48,8 @@ export const GATE = {
     `All ${count} prototype-chain read candidates in ${SCAN_ROOTS.join(", ")} are dispositioned in ${allowlist}.`,
 } as const
 
+export const ProtoReads = { GATE, PATTERNS } as const
+
 export type { Hit }
 export const hitKey = gateHarness.hitKey
 export const parseAllowlist = gateHarness.parseAllowlist
