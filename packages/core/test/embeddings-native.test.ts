@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync, readFileSync, readdirSync } from "node:fs"
-import { homedir } from "node:os"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import { EMBEDDING_MODELS, Embeddings, type EmbeddingModel } from "@opencode/core/embeddings"
+import { embedNative } from "@opencode/core/embeddings-native"
 import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { testEffect } from "./lib/effect"
@@ -146,4 +147,27 @@ describeNative("native in-process embeddings backend (#1554 step 2)", () => {
       }),
     NATIVE_TIMEOUT,
   )
+})
+
+// ---------------------------------------------------------- load-failure eviction (#1567)
+//
+// Model-free: a failed first load (here: an empty snapshot dir) must not
+// be cached forever. After the snapshot is fixed, a retry must re-attempt
+// the load and fail at the NEXT missing piece — never replay the stale
+// first error.
+describe("native load failure eviction (#1567)", () => {
+  test("a failed first load is evicted: fixing the snapshot lets a retry advance", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "embeddings-native-load-"))
+    const backend = { kind: "native-onnx", snapshotDir: dir, maxTokens: 8192 } as const
+
+    await expect(embedNative({ backend, inputs: ["hello"], nativeDimensions: 768 })).rejects.toThrow(
+      "no tokenizer.json",
+    )
+
+    writeFileSync(path.join(dir, "tokenizer.json"), "{}")
+
+    await expect(embedNative({ backend, inputs: ["hello"], nativeDimensions: 768 })).rejects.toThrow(
+      "no ONNX graph",
+    )
+  })
 })
