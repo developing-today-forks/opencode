@@ -143,21 +143,26 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     message?: string
     body?: string
   }
+  // The client's own timeout text says how long we waited, not when the provider said to retry:
+  // it must not become a rate-limit hint (#1551). A provider-stated wait in any other shape survives.
+  const clientTimeoutMessage =
+    reason._tag === "Transport" &&
+    reason.code === "Timeout" &&
+    reason.message?.startsWith("No response output within ")
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
-      ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now()),
+      (clientTimeoutMessage
+        ? undefined
+        : ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now())),
     quota: reason._tag === "QuotaExceeded",
     auth:
       reason._tag === "Authentication" ||
       reason.http?.status === 401 ||
       reason.http?.status === 403 ||
       /organization has disabled/i.test(`${reason.message ?? ""} ${reason.body ?? ""}`),
-    network:
-      reason._tag === "Transport" &&
-      reason.http === undefined &&
-      !(reason.code === "Timeout" && reason.message?.startsWith("No response output within ")),
+    network: reason._tag === "Transport" && reason.http === undefined && !clientTimeoutMessage,
   }
 }
 
