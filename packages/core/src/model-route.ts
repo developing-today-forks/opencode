@@ -1106,7 +1106,10 @@ const demotionConfig = (location?: string): DemotionConfig | undefined => {
  * the fallback layer (`configure()` over the compiled defaults), field by field. */
 export const demotionPolicy = (location?: string): DemotionPolicy => {
   const config = demotionConfig(location)
-  const fallback = activeSettings().quota
+  // The fallback layer is the judging Location's own settings (#1484): an unscoped read
+  // here would judge a Location that configured demotion only in its routes settings by
+  // the compiled defaults whenever a second Location is registered.
+  const fallback = activeSettings(location).quota
   return {
     threshold: config?.threshold ?? fallback.demoteAfter,
     windowMs: config?.windowMs ?? fallback.windowMs,
@@ -1122,6 +1125,13 @@ const retainedDemotionWindow = () => {
   let window = activeSettings().quota.windowMs
   for (const read of demotionReaders.values()) {
     const configured = read()?.windowMs
+    if (configured !== undefined && configured > window) window = configured
+  }
+  // The union covers both config layers (#1484): a Location whose wide demotion window
+  // comes from its routes settings (not model_route_demotion) extends retention too,
+  // mirroring retainedNetworkWindowMs over the settings readers.
+  for (const read of settingsReaders.values()) {
+    const configured = read()?.demotion?.windowMs
     if (configured !== undefined && configured > window) window = configured
   }
   return window
