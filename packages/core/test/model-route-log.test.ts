@@ -1360,3 +1360,96 @@ describe("hedge accuracy", () => {
     }),
   )
 })
+
+describe("demotion restore (#1151)", () => {
+  const quotaAttempt = (provider_id: string, at: number, credential_id?: string) =>
+    ModelRouteLog.record({
+      kind: "attempt",
+      row: attempt({
+        provider_id,
+        model_id: "m",
+        time_started: at - 100,
+        time_ended: at,
+        outcome: "failure",
+        output_started: false,
+        ...(credential_id ? { credential_id } : {}),
+        ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "out of quota" }),
+      }),
+    })
+
+  it.live("demotion counts survive a restart: the ledger rehydrates the hot cache", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-restart", at)
+      // Only two quota errors: below the threshold of three, even after a restore.
+      for (const at of [now - 2_000, now - 1_000]) quotaAttempt("demote-few", at)
+      // Non-quota failures are not demotion evidence, however many the ledger holds.
+      for (const at of [now - 3_000, now - 2_000, now - 1_000])
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            provider_id: "demote-other",
+            model_id: "m",
+            time_started: at - 100,
+            time_ended: at,
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ProviderInternal", message: "upstream said no" }),
+          }),
+        })
+      yield* Effect.sleep("100 millis")
+
+      // The simulated restart: the in-process cache is wiped, the ledger is all that remains.
+      ModelRoute.resetHealth()
+      const target = (providerID: string) => ModelRoute.ref({ providerID, model: "m" })
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(false)
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-other"), now)).toBe(false)
+      // A repeated restore over the same ledger must not count an attempt twice:
+      // demote-few would cross the threshold if its two rows were replayed again.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+    }),
+  )
+
+  it.live("restored counts still expire with the demotion window", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const fiveHoursAgo = now - 5 * 3_600_000
+      for (const at of [fiveHoursAgo, fiveHoursAgo + 1_000, fiveHoursAgo + 2_000]) quotaAttempt("demote-old", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-old", model: "m" })
+      // The rows are restored (they demote when judged inside their window) but the
+      // default four-hour window has passed by now, so the target is not demoted.
+      expect(ModelRoute.demoted(target, fiveHoursAgo + 3_000)).toBe(true)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+
+  it.live("a credential's quota rows restore onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-cred", at, "cred-a")
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-cred", model: "m" })
+      expect(ModelRoute.demoted(target, now, "cred-a")).toBe(true)
+      expect(ModelRoute.demoted(target, now, "cred-b")).toBe(false)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+})

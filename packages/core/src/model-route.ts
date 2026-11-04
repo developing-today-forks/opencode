@@ -1156,7 +1156,9 @@ export const escalates = (target: Model.Ref, credentialID?: string, location?: s
   activeSettings(location).escalation.enabled && !steady(target, credentialID, location)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
-// of every order, instead of being retried first on each new session.
+// of every order, instead of being retried first on each new session. This map is only the hot
+// cache over the route_attempt ledger's QuotaExceeded rows (#1151): `seedDemotion` rehydrates
+// it from the ledger at startup, so a restart does not reset demotion state.
 const quotaEvents = new Map<string, number[]>()
 
 /** True when a target has hit its quota errors often enough recently to be put last. With a
@@ -2358,9 +2360,28 @@ export const seedCooldowns = (
   }
 }
 
+/** Rebuilds demotion counts from the route_attempt ledger after a restart (#1151).
+ * Rows are replayed oldest first through the same recording path live failures use, so
+ * retention and the per-target cap match live behaviour; `demoted` then applies the
+ * judging Location's own window over the cache, so rows outside that window never
+ * demote. A row whose exact timestamp is already cached is skipped, so a restore
+ * repeated over live history never counts one attempt twice. A credential's rows
+ * restore onto that credential only (#6), exactly as live recording scopes them. */
+export const seedDemotion = (
+  rows: ReadonlyArray<{ time: number; providerID: string; modelID: string; credentialID?: string }>,
+) => {
+  for (const row of rows.toSorted((left, right) => left.time - right.time)) {
+    const target = ref({ providerID: row.providerID, model: row.modelID })
+    const id = row.credentialID ? credentialKey(target, row.credentialID) : key(target)
+    if (quotaEvents.get(id)?.includes(row.time)) continue
+    recordQuota(target, row.time, row.credentialID)
+  }
+}
+
 ModelRouteLog.onRestoreCooldowns(seedCooldowns)
 ModelRouteLog.onRestoreLimits(seedLimits)
 ModelRouteLog.onRestoreUsage(seedUsage)
+ModelRouteLog.onRestoreDemotion(seedDemotion)
 
 ModelRouteLog.onRestore((notes) => {
   const restored = new Map<string, Adjustment>()

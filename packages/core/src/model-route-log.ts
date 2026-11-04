@@ -344,6 +344,12 @@ export const onRestoreLimits = (next: typeof restoreLimits) => {
   restoreLimits = next
 }
 
+type DemotionRow = { time: number; providerID: string; modelID: string; credentialID?: string }
+let restoreDemotion: ((rows: readonly DemotionRow[]) => void) | undefined
+export const onRestoreDemotion = (next: typeof restoreDemotion) => {
+  restoreDemotion = next
+}
+
 /** Cooldowns still in force, rebuilt from the health history so a restart does not send traffic
  * straight back to a target that was just failing. */
 export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
@@ -485,6 +491,39 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
     )
   })
 
+/** Quota-error attempts of the last day, so demotion counts survive a restart (#1151).
+ * A quota error is the attempt whose `error_tag` is `QuotaExceeded`: that is the same
+ * failure class `ModelRoute.failed` counts live (its `hint.quota`), and `failureFields`
+ * records it on the attempt row for session and facade traffic alike, so both traffic
+ * classes rehydrate the one shared demotion count. Older rows are not replayed: no
+ * demotion window the restore serves reaches past a day, matching the usage and
+ * cooldown restores above. */
+export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
+  Effect.gen(function* () {
+    const rows = yield* db
+      .select({
+        time: RouteAttemptTable.time_ended,
+        providerID: RouteAttemptTable.provider_id,
+        modelID: RouteAttemptTable.model_id,
+        credentialID: RouteAttemptTable.credential_id,
+      })
+      .from(RouteAttemptTable)
+      .where(
+        and(gte(RouteAttemptTable.time_ended, Date.now() - 86_400_000), eq(RouteAttemptTable.error_tag, "QuotaExceeded")),
+      )
+      .orderBy(asc(RouteAttemptTable.time_ended))
+      .all()
+      .pipe(Effect.orElseSucceed(() => []))
+    restoreDemotion?.(
+      rows.map((row) => ({
+        time: row.time,
+        providerID: row.providerID,
+        modelID: row.modelID,
+        ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+      })),
+    )
+  })
+
 /** Hands still-active stored notes to the routing module. Runs when the node starts. */
 export const restoreNotes = (db: Database.Interface["db"]) =>
   Effect.gen(function* () {
@@ -512,6 +551,7 @@ const layer = Layer.effectDiscard(
     yield* restoreNotes(db)
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db)
+    yield* restoreDemotionFrom(db)
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
