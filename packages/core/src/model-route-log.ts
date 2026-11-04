@@ -344,6 +344,12 @@ export const onRestoreLimits = (next: typeof restoreLimits) => {
   restoreLimits = next
 }
 
+type DemotionRow = { id: number; time: number; providerID: string; modelID: string; credentialID?: string }
+let restoreDemotion: ((rows: readonly DemotionRow[]) => void) | undefined
+export const onRestoreDemotion = (next: typeof restoreDemotion) => {
+  restoreDemotion = next
+}
+
 /** Cooldowns still in force, rebuilt from the health history so a restart does not send traffic
  * straight back to a target that was just failing. */
 export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
@@ -485,6 +491,53 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
     )
   })
 
+/** The widest demotion window either config surface admits: both
+ * `experimental.model_route_demotion.window_ms` and `routes.settings.demotion.windowMs`
+ * cap at 7,776,000,000 ms (90 days) in the schema, so the demotion restore below reads
+ * that far back. Seeding retains the whole horizon (a judging Location may only
+ * register after the restore), while judging (`demoted`) applies the actually
+ * configured window over what is retained, so a shorter window never counts
+ * the older rows. */
+export const MAX_DEMOTION_WINDOW_MS = 7_776_000_000
+
+/** Quota-error attempts inside the widest demotion window, so demotion counts survive
+ * a restart (#1151). A quota error is the attempt whose `error_tag` is `QuotaExceeded`:
+ * that is the same failure class `ModelRoute.failed` counts live (its `hint.quota`),
+ * and `failureFields` records it on the attempt row for session and facade traffic
+ * alike, so both traffic classes rehydrate the one shared demotion count. Each row
+ * keeps its ledger id: restored attempts are deduplicated by that identity, never by
+ * timestamp (distinct attempts can share a millisecond). */
+export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
+  Effect.gen(function* () {
+    const rows = yield* db
+      .select({
+        id: RouteAttemptTable.id,
+        time: RouteAttemptTable.time_ended,
+        providerID: RouteAttemptTable.provider_id,
+        modelID: RouteAttemptTable.model_id,
+        credentialID: RouteAttemptTable.credential_id,
+      })
+      .from(RouteAttemptTable)
+      .where(
+        and(
+          gte(RouteAttemptTable.time_ended, Date.now() - MAX_DEMOTION_WINDOW_MS),
+          eq(RouteAttemptTable.error_tag, "QuotaExceeded"),
+        ),
+      )
+      .orderBy(asc(RouteAttemptTable.time_ended))
+      .all()
+      .pipe(Effect.orElseSucceed(() => []))
+    restoreDemotion?.(
+      rows.map((row) => ({
+        id: row.id,
+        time: row.time,
+        providerID: row.providerID,
+        modelID: row.modelID,
+        ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+      })),
+    )
+  })
+
 /** Hands still-active stored notes to the routing module. Runs when the node starts. */
 export const restoreNotes = (db: Database.Interface["db"]) =>
   Effect.gen(function* () {
@@ -512,6 +565,7 @@ const layer = Layer.effectDiscard(
     yield* restoreNotes(db)
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db)
+    yield* restoreDemotionFrom(db)
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))

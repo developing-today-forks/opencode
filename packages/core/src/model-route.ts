@@ -1156,8 +1156,17 @@ export const escalates = (target: Model.Ref, credentialID?: string, location?: s
   activeSettings(location).escalation.enabled && !steady(target, credentialID, location)
 
 // Quota errors are recorded per target so a provider that keeps saying "out of quota" drops to the end
-// of every order, instead of being retried first on each new session.
+// of every order, instead of being retried first on each new session. This map is only the hot
+// cache over the route_attempt ledger's QuotaExceeded rows (#1151): `seedDemotion` rehydrates
+// it from the ledger at startup, so a restart does not reset demotion state.
 const quotaEvents = new Map<string, number[]>()
+
+/** Ledger ids of the quota attempts `seedDemotion` has already restored in this
+ * process: a repeated restore over the same ledger must not count an attempt twice,
+ * and identity — not the timestamp — is what names an attempt, since distinct
+ * attempts can share a millisecond (#1151, review follow-up). Cleared with the
+ * cache it guards in `resetHealth`. */
+const restoredDemotionAttempts = new Set<number>()
 
 /** True when a target has hit its quota errors often enough recently to be put last. With a
  * credentialID, only that credential's quota errors count: the demotion is per credential (#6).
@@ -1171,9 +1180,14 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= policy.threshold
 }
 
-const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
+const recordQuota = (
+  target: Model.Ref,
+  now: number,
+  credentialID?: string,
+  retentionMs = retainedDemotionWindow(),
+) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
+  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retentionMs)
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
@@ -1918,6 +1932,7 @@ export const resetHealth = () => {
   credentialQuota.clear()
   providerQuota.clear()
   quotaEvents.clear()
+  restoredDemotionAttempts.clear()
   continuity.clear()
   recentFailures.length = 0
   lastQuotaFeedAtByProvider.clear()
@@ -2358,9 +2373,41 @@ export const seedCooldowns = (
   }
 }
 
+/** Rebuilds demotion counts from the route_attempt ledger after a restart (#1151).
+ * Rows are replayed oldest first through the same recording path live failures use, so
+ * retention and the per-target cap match live behaviour; `demoted` then applies the
+ * judging Location's own window over the cache, so rows outside that window never
+ * demote. Deduplication is by the row's ledger id: a restore repeated over the same
+ * ledger never counts one attempt twice, while distinct attempts that share a
+ * millisecond still count individually, exactly as live recording counts them. A
+ * credential's rows restore onto that credential only (#6), exactly as live recording
+ * scopes them. Seeding retains the full supported restore horizon
+ * (ModelRouteLog.MAX_DEMOTION_WINDOW_MS), not the window of whichever Locations
+ * happen to be registered when the restore runs: a Location with a longer demotion
+ * window can activate after the restore, and pruning the replay against the
+ * then-current retention (four hours by default) would discard failures its policy
+ * still counts, unrecoverably - the restored-id set bars a second restore. Judging
+ * still applies each Location's own window over the retained cache, so the wider
+ * seeding retention never demotes a target its policy would not. */
+export const seedDemotion = (
+  rows: ReadonlyArray<{ id: number; time: number; providerID: string; modelID: string; credentialID?: string }>,
+) => {
+  for (const row of rows.toSorted((left, right) => left.time - right.time)) {
+    if (restoredDemotionAttempts.has(row.id)) continue
+    restoredDemotionAttempts.add(row.id)
+    recordQuota(
+      ref({ providerID: row.providerID, model: row.modelID }),
+      row.time,
+      row.credentialID,
+      ModelRouteLog.MAX_DEMOTION_WINDOW_MS,
+    )
+  }
+}
+
 ModelRouteLog.onRestoreCooldowns(seedCooldowns)
 ModelRouteLog.onRestoreLimits(seedLimits)
 ModelRouteLog.onRestoreUsage(seedUsage)
+ModelRouteLog.onRestoreDemotion(seedDemotion)
 
 ModelRouteLog.onRestore((notes) => {
   const restored = new Map<string, Adjustment>()
