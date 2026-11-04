@@ -143,6 +143,12 @@ const resolveSchemaRefs = (root: Record<string, unknown>): unknown => {
 }
 
 const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unknown> => {
+  // Boolean schemas (#1573): false is the never schema and the proto has no
+  // boolean form, so encode it as { not: {} } (the negation of the
+  // unconstrained schema). Returning {} for it — the old non-record
+  // fallthrough — inverted it to "anything allowed" on the wire. True is
+  // unconstrained and keeps converting to {}.
+  if (node === false) return { not: {} }
   if (!isRecord(node)) return {}
   const out: Record<string, unknown> = {}
   let minimum = node.minimum
@@ -184,7 +190,10 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       continue
     }
     if (key === "not") {
-      out.not = convertSchemaNode(value, anthropic)
+      // not:false is "not never" — unconstrained — so the key is omitted
+      // rather than emitting { not: { not: {} } } (#1573). not:true flows
+      // through the normal path and lands as { not: {} } (never).
+      if (value !== false) out.not = convertSchemaNode(value, anthropic)
       continue
     }
     if (key === "type" || key === "required" || key === "minimum" || key === "maximum" || key === "items" || key === "prefixItems") continue
@@ -244,6 +253,10 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
 
 /** Convert a client JSON Schema tool definition to the proto Schema the wire accepts. */
 export const convertSchema = (schema: unknown, anthropic = false) => {
+  // A false root is the never schema (#1573): return its encoding directly —
+  // it never reaches convertSchemaNode through the record path, and the
+  // OBJECT default below must not land on it.
+  if (schema === false) return { not: {} }
   const converted = convertSchemaNode(resolveSchemaRefs(isRecord(schema) ? schema : {}), anthropic)
   // A branch-only root (a multi-valued type union, #1556, or the node's own
   // anyOf/oneOf composition) describes itself; forcing OBJECT onto it would
