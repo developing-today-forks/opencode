@@ -9,6 +9,7 @@ import { Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Global } from "@opencode/util/global"
 import { SkillDiscovery } from "@opencode/core/skill/discovery"
+import { TestClock } from "effect/testing"
 import { tmpdir } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 
@@ -126,6 +127,34 @@ describe("SkillDiscovery.pull", () => {
       expect(result.directories).toEqual([])
       expect(result.requests).toContain(`${catalog.base}deploy/SKILL.md`)
       expect(result.requests).toContain(`${catalog.base}deploy/missing.md`)
+    }),
+  )
+
+  it.effect(
+    "settles a download whose body never completes as failed once the download deadline passes",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      let result: { directories: string[]; requests: string[] } | undefined
+      yield* catalog
+        .pull(
+          [{ name: "deploy", files: ["SKILL.md"] }],
+          {},
+          { "/catalog/deploy/SKILL.md": HttpServerResponse.stream(Stream.never) },
+        )
+        .pipe(
+          Effect.tap((value) => Effect.sync(() => (result = value))),
+          Effect.forkChild,
+        )
+      // The download deadline runs on the test clock while the stalled body
+      // occupies real time: advance the clock in steps, yielding to the real
+      // event loop between steps, until the deadline settles the pull.
+      for (let i = 0; i < 60 && result === undefined; i++) {
+        yield* TestClock.adjust("10 seconds")
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)))
+      }
+      expect(result).toBeDefined()
+      expect(result?.directories).toEqual([])
+      expect(result?.requests).toContain(`${catalog.base}deploy/SKILL.md`)
     }),
   )
 

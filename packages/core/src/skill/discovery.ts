@@ -30,6 +30,17 @@ export const MAX_SKILL_INDEX_BYTES = 8 * 1024 * 1024
 /** Deadline for the index fetch, matching WellKnown's manifest fetch bound. */
 const indexFetchTimeout = "15 seconds"
 
+/**
+ * Deadline for one skill file download, bounding the whole transfer
+ * including the HttpClient's transient retries: a per-attempt bound would
+ * let retryTransient re-enter a stalled source indefinitely. Sized against
+ * MAX_SKILL_FILE_BYTES: a full 5 MiB file still completes on a link as slow
+ * as ~85 KiB/s, while a source that stalls or slow-drips past any plausible
+ * transfer settles through download()'s failure path instead of hanging
+ * pull() - and with it plugin/skill loading - forever (#1381).
+ */
+export const downloadTimeout = "60 seconds"
+
 const skillConcurrency = 4
 const fileConcurrency = 8
 
@@ -108,6 +119,7 @@ const layer = Layer.effect(
         ),
         Effect.flatMap((body) => fs.writeWithDirs(destination, new Uint8Array(body))),
         Effect.as(true),
+        Effect.timeout(downloadTimeout),
         Effect.catch((error) =>
           Effect.logError("failed to download skill file", { url, error }).pipe(Effect.as(false)),
         ),
