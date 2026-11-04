@@ -535,6 +535,8 @@ export interface TargetStats {
   readonly modelID: string
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections, counted separately and never part of `failures` (#1084). */
+  readonly policyRejections: number
   readonly timeouts: number
   readonly avgFirstTokenMs: number | null
   readonly avgResponseMs: number | null
@@ -548,7 +550,10 @@ export const targetStats = (db: Database.Interface["db"], since: number, routeID
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      // Content-policy rejections are refusals of a request, not target failures: they are
+      // counted separately (policyRejections) and never enter failure/health rates (#1084).
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
       timeouts: sql<number>`sum(case when ${RouteAttemptTable.outcome} = 'timeout' then 1 else 0 end)`,
       avgFirstTokenMs: sql<number | null>`avg(${RouteAttemptTable.first_token_ms})`,
       avgResponseMs: sql<number | null>`avg(${RouteAttemptTable.response_ms})`,
@@ -602,6 +607,8 @@ export interface HourlyStat {
   readonly hour: number
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections in the hour, kept out of `failures` (#1084). */
+  readonly policyRejections: number
 }
 
 /** Failure counts by hour of day, so a target that only fails at certain times can be told apart
@@ -613,7 +620,8 @@ export const hourlyStats = (db: Database.Interface["db"], since: number) =>
       modelID: RouteAttemptTable.model_id,
       hour: sql<number>`cast(strftime('%H', ${RouteAttemptTable.time_started} / 1000, 'unixepoch') as integer)`,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
     })
     .from(RouteAttemptTable)
     .where(gte(RouteAttemptTable.time_started, since))
@@ -752,7 +760,7 @@ export const decisionRows = (db: Database.Interface["db"], since: number, routeI
 /** The usage columns every rollup below shares: request and failure counts, tokens by kind, and cost. */
 const usageColumns = {
   requests: count(),
-  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end), 0)`,
+  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
   input: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
   output: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
   reasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,

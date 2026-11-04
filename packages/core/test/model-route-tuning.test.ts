@@ -13,6 +13,7 @@ const stats = (modelID: string, over: Partial<TargetStats> = {}): TargetStats =>
   modelID,
   attempts: 20,
   failures: 0,
+  policyRejections: 0,
   timeouts: 0,
   avgFirstTokenMs: 500,
   avgResponseMs: 4_000,
@@ -93,10 +94,10 @@ describe("ModelRouteTuning.suggest", () => {
 
 describe("ModelRouteTuning predictions", () => {
   const hourly = [
-    { providerID: "p", modelID: "m", hour: 3, attempts: 20, failures: 1 },
-    { providerID: "p", modelID: "m", hour: 14, attempts: 20, failures: 12 },
-    { providerID: "q", modelID: "n", hour: 3, attempts: 20, failures: 1 },
-    { providerID: "q", modelID: "n", hour: 14, attempts: 20, failures: 1 },
+    { providerID: "p", modelID: "m", hour: 3, attempts: 20, failures: 1, policyRejections: 0 },
+    { providerID: "p", modelID: "m", hour: 14, attempts: 20, failures: 12, policyRejections: 0 },
+    { providerID: "q", modelID: "n", hour: 3, attempts: 20, failures: 1, policyRejections: 0 },
+    { providerID: "q", modelID: "n", hour: 14, attempts: 20, failures: 1, policyRejections: 0 },
   ]
 
   test("flags a target that has been unreliable at this hour, not one that has not", () => {
@@ -112,7 +113,7 @@ describe("ModelRouteTuning predictions", () => {
   })
 
   test("says nothing without enough attempts in the hour", () => {
-    const sparse = [{ providerID: "p", modelID: "m", hour: 14, attempts: 2, failures: 2 }]
+    const sparse = [{ providerID: "p", modelID: "m", hour: 14, attempts: 2, failures: 2, policyRejections: 0 }]
     expect(ModelRouteTuning.predict({ hourly: sparse, errors: [], now: Date.UTC(2026, 0, 1, 14) })).toEqual([])
   })
 

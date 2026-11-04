@@ -14,6 +14,7 @@ import {
   InvalidProviderOutputError,
   InvalidRequestError,
   RateLimitError,
+  ContentPolicyError,
   QuotaExceededError,
   UnknownProviderError,
 } from "@opencode/ai"
@@ -1219,6 +1220,78 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(String(s.requests[1]?.model.id)).toBe("replacement")
     expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+  })
+
+  scenario("fails over on a content-policy rejection without benching or gating the target", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), options)
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 3,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    // The wording is quota-bait on purpose: a policy rejection must not enter the quota
+    // path through the broad exhaustion text heuristics (#1084).
+    yield* s.llm.push(
+      TestLLM.failAfter(
+        new AIError({
+          reason: new ContentPolicyError({ message: "blocked: quota exhausted, insufficient credits" }),
+        }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    // No same-target retry and no credential switch: the request fails straight over.
+    expect(switches).toBe(0)
+    expect(fallbacks).toBe(1)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    // The rejection left route health and quota state untouched.
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.credentialCoolingDown(s.routing.target, Credential.ID.make("cred-lab"))).toBe(false)
+    expect(ModelRoute.steady(s.routing.target, Credential.ID.make("cred-lab"))).toBe(true)
+  })
+
+  scenario("keeps the target at full health across ten consecutive content-policy rejections", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      fallback: () => Effect.succeed(backup),
+    }
+    for (let i = 0; i < 10; i++) {
+      yield* s.llm.push(
+        TestLLM.failAfter(new AIError({ reason: new ContentPolicyError({ message: "blocked by policy" }) })),
+      )
+      yield* s.llm.push(TestLLM.text(`backup answer ${i}`, `t${i}`))
+      yield* s.runPrompt(`Prompt ${i}`)
+    }
+    expect(s.requests).toHaveLength(20)
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.steady(s.routing.target)).toBe(true)
   })
 
   scenario("generates the title while the first model step is still running", function* (s) {

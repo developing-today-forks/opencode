@@ -201,6 +201,9 @@ const balanceExhaustionText =
 export const quotaFailureClassification = (
   failure: AIError,
 ): "balance-exhaustion" | "rate-limit" | undefined => {
+  // A content-policy rejection is not a quota event, however its text is worded: policy
+  // wording must never gate a pool through the broad exhaustion heuristics (#1084).
+  if (failure.reason._tag === "ContentPolicy") return undefined
   const reason = failure.reason as { _tag?: string; message?: string; body?: string }
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   if (!isQuotaFailure(failure) && !exhaustionText.test(text) && !balanceExhaustionText.test(text)) return undefined
@@ -493,6 +496,14 @@ export const make = Effect.gen(function* () {
           (SessionRunnerRetry.isRetryable(llmFailure) ||
             llmFailure.reason._tag === "Authentication" ||
             llmFailure.reason._tag === "QuotaExceeded")
+        // A content-policy rejection is the provider refusing this request, not the target
+        // failing: it never counts against route health, quota or cooldown state, it is
+        // never retried on the same target, but the request does fail over (#1084).
+        const policyFailure = llmFailure !== undefined && llmFailure.reason._tag === "ContentPolicy"
+        // A content-filter finish is the same refusal delivered as a finish reason rather
+        // than an error: the attempt is recorded as a policy rejection (below), never as a
+        // success or a general failure (#1084).
+        const policyFinish = !failed && recorded.finish?.finish === "content-filter"
         // The failover decision: where this attempt moves to, if anywhere. It is computed
         // after the retry hook below, and the attempt row names its destination.
         let failover: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
@@ -517,8 +528,15 @@ export const make = Effect.gen(function* () {
               model_id: input.model.ref.id,
               variant: input.model.ref.variant,
               credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
-              outcome: streamInterrupted ? "interrupted" : timedOut ? "timeout" : failed ? "failure" : "success",
+              outcome: streamInterrupted
+                ? "interrupted"
+                : timedOut
+                  ? "timeout"
+                  : failed || policyFinish
+                    ? "failure"
+                    : "success",
               ...failureLog,
+              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : undefined),
               // A failed request's own details win; a successful one keeps what its response said.
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
@@ -574,6 +592,16 @@ export const make = Effect.gen(function* () {
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
         } else clearFailedAttempt(retryKey)
+        // A policy rejection bypasses the health accounting below, so it must also settle
+        // any half-open probe claim this attempt carried: failed()/completed() normally
+        // settle it, and an outstanding claim would strand the target's route recovery
+        // (probeDue stays false) until the bench expires (#1084).
+        if (policyFailure && input.model.routing?.probeClaim) {
+          const claim = input.model.routing.probeClaim
+          ModelRoute.releaseBenchProbe(input.model.routing.target, undefined, claim.claimedAt, claim.token)
+          if (claim.credentialID)
+            ModelRoute.releaseBenchProbe(input.model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+        }
         // Health accounting is broader than current-request failover: a terminal non-retryable
         // error still makes the target unhealthy for later selections. Keep the routeFailure gate
         // below so this does not broaden which failures may move the current request elsewhere.
@@ -581,6 +609,7 @@ export const make = Effect.gen(function* () {
           input.model.routing &&
           llmFailure &&
           failureError &&
+          !policyFailure &&
           !isContextOverflowFailure(llmFailure) &&
           !sameTargetRetry &&
           (routeFailure || !retry?.retry || recorded.outputStarted)
@@ -605,7 +634,7 @@ export const make = Effect.gen(function* () {
         // to it. That case cascades through the Continue outcome below when a retry is
         // authorized -- a new assistant message whose re-selection sees the target marked
         // failed above; a hook that declines any further request ends the turn, as instructed.
-        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
+        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure) && !sameTargetRetry) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
