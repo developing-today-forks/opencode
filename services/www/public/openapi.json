@@ -978,7 +978,23 @@
       "post": {
         "tags": ["session"],
         "operationId": "session.create",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AbsolutePath"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          }
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -1029,7 +1045,7 @@
             }
           }
         },
-        "description": "Create a session at the requested location. A parentID creates a linked child session at its parent's location.",
+        "description": "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location.",
         "summary": "Create session",
         "requestBody": {
           "content": {
