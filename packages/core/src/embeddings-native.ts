@@ -49,6 +49,16 @@
  * Bare dev shells on NixOS need LD_LIBRARY_PATH with the gcc-lib and
  * zlib store paths (the same paths ~/local-embed/run.sh carries);
  * the packaged server's nix closure must provide them.
+ *
+ * Node bundle (packages/cli/vite.node.config.ts, #1615): the native
+ * bindings cannot be inlined there — onnxruntime-node's loader
+ * dynamically requires its .node file, which the bundler cannot
+ * resolve, and the throw lands at bundle initialisation. The Node
+ * build therefore stubs onnxruntime-node (and sharp, which
+ * @huggingface/transformers loads) out of the bundle: this backend
+ * is unavailable under Node and any use throws a clear error there.
+ * It stays available under the Bun build, which resolves the real
+ * packages from node_modules.
  */
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
