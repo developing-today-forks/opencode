@@ -64,9 +64,11 @@ import {
   runGate,
   scanSource as scan,
   scriptTreesOnDisk,
+  srcTreesOnDisk,
   staleEntries,
   unlistedHits,
   unscannedScriptTrees as findUnscannedScriptTrees,
+  unscannedSrcTrees as findUnscannedSrcTrees,
   type Hit,
 } from "./gate-harness"
 
@@ -166,9 +168,11 @@ export function collect(root: string, dir: string, hits: Hit[]) {
   return collectHits(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
 
-export { scriptTreesOnDisk }
+export { scriptTreesOnDisk, srcTreesOnDisk }
 export const unscannedScriptTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
   findUnscannedScriptTrees(root, roots)
+export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
+  findUnscannedSrcTrees(root, roots)
 
 export const GATE = {
   name: "bounded-http",
@@ -181,7 +185,10 @@ export const GATE = {
     "Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to",
   summary: (count: number, rootCount: number, allowlist: string) =>
     `All ${count} bounded-http candidates in ${rootCount} scan roots are dispositioned in ${allowlist}.`,
-  checkScriptTrees: true,
+  treeChecks: [
+    { kind: "script", gateFile: "script/check-bounded-http.ts" },
+    { kind: "src", gateFile: "script/check-bounded-http.ts" },
+  ],
 } as const
 
 if (import.meta.main) await runGate(GATE)

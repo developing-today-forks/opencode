@@ -45,8 +45,10 @@ import {
   parseAllowlist,
   runGate,
   scanSource as scan,
+  srcTreesOnDisk,
   staleEntries,
   unlistedHits,
+  unscannedSrcTrees as findUnscannedSrcTrees,
   type Hit,
 } from "./gate-harness"
 
@@ -110,6 +112,7 @@ export const GATE = {
   remediation: "Convert it through the shared primitives (packages/core/src/util/number.ts, #993), or add its disposition to",
   summary: (count: number, rootCount: number, allowlist: string) =>
     `All ${count} numeric-boundary candidates in ${rootCount} scan roots are dispositioned in ${allowlist}.`,
+  treeChecks: [{ kind: "src", gateFile: "script/check-numeric-boundaries.ts" }],
 } as const
 
 export type { Hit }
@@ -118,5 +121,9 @@ export const scanSource = (file: string, source: string) => scan(file, source, P
 export function collect(root: string, dir: string, hits: Hit[]) {
   return collectHits(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
+
+export { srcTreesOnDisk }
+export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
+  findUnscannedSrcTrees(root, roots)
 
 if (import.meta.main) await runGate(GATE)

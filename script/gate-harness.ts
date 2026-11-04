@@ -7,6 +7,13 @@ export interface Hit {
   readonly text: string
 }
 
+/** A drift guard: package trees of one kind on disk must all appear in the gate's scan roots. */
+export interface TreeCheck {
+  readonly kind: "script" | "src"
+  /** Gate file named in the failure message as the place to add the missing root. */
+  readonly gateFile: string
+}
+
 export interface GateDefinition {
   readonly name: string
   readonly scanRoots: readonly string[]
@@ -16,7 +23,7 @@ export interface GateDefinition {
   readonly candidate: string
   readonly remediation: string
   readonly summary: (hitCount: number, rootCount: number, allowlistPath: string) => string
-  readonly checkScriptTrees?: boolean
+  readonly treeChecks?: readonly TreeCheck[]
 }
 
 export const hitKey = (file: string, text: string) => `${file} :: ${text}`
@@ -91,8 +98,16 @@ export function collect(
   }
 }
 
-/** Package-owned script trees on disk, matching the historical bounded-http inventory. */
-export function scriptTreesOnDisk(root: string): string[] {
+/**
+ * Every package-owned tree on disk under `root` whose directory name is in
+ * `names`: a directory at any nesting depth below the package-name level
+ * (packages/console/app, packages/stats/core) whose parent directory (the
+ * package root) or the tree itself carries a package.json. Folders with no
+ * package.json at either level (skill assets, content folders) are not
+ * package trees and are excluded, as is any node_modules subtree. A found
+ * tree is not descended into.
+ */
+export function treesOnDisk(root: string, names: readonly string[]): string[] {
   const trees: string[] = []
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
@@ -100,7 +115,7 @@ export function scriptTreesOnDisk(root: string): string[] {
       const path = join(dir, entry.name)
       const rel = relative(root, path).split(sep).join("/")
       if (
-        (entry.name === "script" || entry.name === "scripts") &&
+        names.includes(entry.name) &&
         rel.split("/").length >= 3 &&
         (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
       ) {
@@ -114,14 +129,31 @@ export function scriptTreesOnDisk(root: string): string[] {
   return trees.toSorted()
 }
 
+/** Package-owned script trees on disk, matching the historical bounded-http inventory (#1425). */
+export const scriptTreesOnDisk = (root: string) => treesOnDisk(root, ["script", "scripts"])
+
+/** Script trees present on disk but absent from `roots` — the #1425 escape, as a failing condition. */
 export const unscannedScriptTrees = (root: string, roots: readonly string[]) =>
   scriptTreesOnDisk(root).filter((tree) => !roots.includes(tree))
+
+/** Package-owned src trees on disk — the mirror of scriptTreesOnDisk for src roots (#1494). */
+export const srcTreesOnDisk = (root: string) => treesOnDisk(root, ["src"])
+
+/** Src trees present on disk but absent from `roots` — the #1494 escape, as a failing condition. */
+export const unscannedSrcTrees = (root: string, roots: readonly string[]) =>
+  srcTreesOnDisk(root).filter((tree) => !roots.includes(tree))
+
+export interface UnscannedTree {
+  readonly kind: TreeCheck["kind"]
+  readonly tree: string
+  readonly gateFile: string
+}
 
 export interface GateResult {
   readonly hits: Hit[]
   readonly unlisted: Hit[]
   readonly stale: string[]
-  readonly unscannedScriptTrees: string[]
+  readonly unscannedTrees: UnscannedTree[]
 }
 
 /** Evaluate a gate's declaration against a root and its allowlist text. */
@@ -129,11 +161,17 @@ function evaluate(gate: GateDefinition, root: string, allowlist: Map<string, str
   const hits: Hit[] = []
   for (const scanRoot of gate.scanRoots)
     collect(root, join(root, scanRoot), hits, gate.patterns, gate.scannedExtensions)
+  const unscannedTrees: UnscannedTree[] = []
+  for (const check of gate.treeChecks ?? []) {
+    const onDisk = check.kind === "script" ? scriptTreesOnDisk(root) : srcTreesOnDisk(root)
+    for (const tree of onDisk)
+      if (!gate.scanRoots.includes(tree)) unscannedTrees.push({ kind: check.kind, tree, gateFile: check.gateFile })
+  }
   return {
     hits,
     unlisted: unlistedHits(hits, allowlist),
     stale: staleEntries(hits, allowlist),
-    unscannedScriptTrees: gate.checkScriptTrees ? unscannedScriptTrees(root, gate.scanRoots) : [],
+    unscannedTrees,
   }
 }
 
@@ -142,21 +180,26 @@ export function evaluateGate(gate: GateDefinition, root: string, allowlistText: 
   return evaluate(gate, root, parseAllowlist(allowlistText))
 }
 
-/** Execute a gate declaration after its small CLI adapter loads the allowlist. */
-export function runGate(gate: GateDefinition, root: string, allowlist: Map<string, string[]>): void {
+/**
+ * Execute a gate declaration as a CLI: the repo root is this module's
+ * parent directory and the allowlist is loaded from the declaration's
+ * allowlist path. Exit 1 listing every failure, or print the summary.
+ */
+export async function runGate(gate: GateDefinition): Promise<void> {
+  const root = join(import.meta.dir, "..")
+  const allowlist = parseAllowlist(await Bun.file(join(root, gate.allowlistPath)).text())
   const result = evaluate(gate, root, allowlist)
-  if (result.unlisted.length || result.stale.length || result.unscannedScriptTrees.length) {
-    for (const tree of result.unscannedScriptTrees)
+  if (result.unlisted.length || result.stale.length || result.unscannedTrees.length) {
+    for (const { kind, tree, gateFile } of result.unscannedTrees)
       console.error(
-        `Unscanned script tree on disk: ${tree}\n  Add it to SCAN_ROOTS in script/check-bounded-http.ts and disposition its hits in ${gate.allowlistPath}.`,
+        `Unscanned ${kind} tree on disk: ${tree}\n  Add it to SCAN_ROOTS in ${gateFile} and disposition its hits in ${gate.allowlistPath}.`,
       )
     for (const hit of result.unlisted)
       console.error(
         `Unlisted ${gate.candidate} at ${hit.file}:${hit.line}:\n  ${hit.text}\n  ${gate.remediation} ${gate.allowlistPath}.`,
       )
     for (const key of result.stale) console.error(`Stale allowlist entry (the line no longer matches a sweep pattern): ${key}`)
-    process.exitCode = 1
-    return
+    process.exit(1)
   }
   console.log(gate.summary(result.hits.length, gate.scanRoots.length, gate.allowlistPath))
 }
