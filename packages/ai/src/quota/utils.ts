@@ -1,0 +1,219 @@
+import type {
+  QuotaAuthEntry,
+  QuotaContext,
+  QuotaCredentialRow,
+  QuotaCredentialValue,
+  QuotaResult,
+  QuotaUsage,
+  QuotaWindow,
+} from "./types.js"
+
+export const asObject = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" ? (value as Record<string, unknown>) : null
+
+export const asNonEmptyString = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed === "" ? undefined : trimmed
+}
+
+export const toNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string") {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+export const toTimestamp = (value: unknown): number | null => {
+  if (!value) return null
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null
+    return value < 1_000_000_000_000 ? value * 1000 : value
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? null : parsed
+  }
+  return null
+}
+
+export const normalizeTimestamp = (value: unknown): number | null => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null
+  return value < 1_000_000_000_000 ? value * 1000 : value
+}
+
+export const clampPercent = (value: number | null): number | null =>
+  value === null ? null : Math.min(100, Math.max(0, value))
+
+export const formatMoney = (value: number | null | undefined): string | null => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null
+  return value.toFixed(2)
+}
+
+export const resolveWindowLabel = (windowSeconds: number | null): string => {
+  if (!windowSeconds) return "tokens"
+  if (windowSeconds % 86400 === 0) {
+    const days = windowSeconds / 86400
+    return days === 7 ? "weekly" : `${days}d`
+  }
+  if (windowSeconds % 3600 === 0) return `${windowSeconds / 3600}h`
+  return `${windowSeconds}s`
+}
+
+export const formatResetTime = (timestamp: number): string | null => {
+  try {
+    const resetDate = new Date(timestamp)
+    if (!Number.isFinite(resetDate.getTime())) return null
+    const now = new Date()
+    if (resetDate.toDateString() === now.toDateString()) {
+      return resetDate.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    }
+    return resetDate.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      weekday: "short",
+      hour: "numeric",
+      minute: "2-digit",
+    })
+  } catch {
+    return null
+  }
+}
+
+const hasResetTimestamp = (resetAt: number | null | undefined): resetAt is number =>
+  resetAt !== null && resetAt !== undefined
+
+export const calculateResetAfterSeconds = (resetAt: number | null | undefined): number | null => {
+  if (!hasResetTimestamp(resetAt)) return null
+  const resetAtTime = new Date(resetAt).getTime()
+  if (!Number.isFinite(resetAtTime)) return null
+  const delta = Math.floor((resetAtTime - Date.now()) / 1000)
+  return delta < 0 ? 0 : delta
+}
+
+export const toUsageWindow = (input: {
+  usedPercent: number | null
+  windowSeconds?: number | null
+  resetAt?: number | null
+  valueLabel?: string | null
+}): QuotaWindow => {
+  const resetAt = input.resetAt ?? null
+  const resetFormatted = hasResetTimestamp(resetAt) ? formatResetTime(resetAt) : null
+  const hasFiniteUsedPercent = typeof input.usedPercent === "number" && Number.isFinite(input.usedPercent)
+  return {
+    usedPercent: input.usedPercent,
+    remainingPercent: hasFiniteUsedPercent ? Math.max(0, 100 - (input.usedPercent as number)) : null,
+    windowSeconds: input.windowSeconds ?? null,
+    resetAfterSeconds: calculateResetAfterSeconds(resetAt),
+    resetAt,
+    resetAtFormatted: resetFormatted,
+    resetAfterFormatted: resetFormatted,
+    ...(input.valueLabel ? { valueLabel: input.valueLabel } : {}),
+  }
+}
+
+export const buildResult = (input: {
+  providerId: string
+  providerName: string
+  ok: boolean
+  configured: boolean
+  usage?: QuotaUsage | null
+  error?: string
+  errorKind?: string
+  failureClass?: string
+  planLabel?: string
+  credentialId?: string
+  credentialLabel?: string
+  accountLabel?: string
+}): QuotaResult => {
+  const result: QuotaResult = {
+    providerId: input.providerId,
+    providerName: input.providerName,
+    ok: input.ok,
+    configured: input.configured,
+    usage: input.usage ?? null,
+    fetchedAt: Date.now(),
+  }
+  if (input.error) result.error = input.error
+  if (input.errorKind) result.errorKind = input.errorKind
+  if (input.failureClass) result.failureClass = input.failureClass
+  if (input.planLabel) result.planLabel = input.planLabel
+  if (input.credentialId) result.credentialId = input.credentialId
+  if (input.credentialLabel) result.credentialLabel = input.credentialLabel
+  if (input.accountLabel) result.accountLabel = input.accountLabel
+  return result
+}
+
+/**
+ * The most a quota provider answer may weigh: every quota payload is a
+ * small per-account usage/balance/credits JSON document, so 1 MiB is
+ * orders of magnitude above any legitimate response, and a hostile or
+ * misconfigured endpoint cannot grow memory inside the deadline.
+ */
+export const QUOTA_RESPONSE_MAX_BYTES = 1 * 1024 * 1024
+
+export const readQuotaJson = async (response: Response): Promise<unknown> => {
+  const text = await response.text()
+  if (text.length > QUOTA_RESPONSE_MAX_BYTES) {
+    throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+  }
+  return JSON.parse(text.replace(/^\uFEFF/, ""))
+}
+
+export const isTimeoutError = (error: unknown, signal?: AbortSignal): boolean =>
+  error instanceof DOMException &&
+  (error.name === "TimeoutError" || (error.name === "AbortError" && (signal?.aborted ?? false)))
+
+export const errorText = (error: unknown): string => (error instanceof Error ? error.message : "Request failed")
+
+/** One stored credential value → legacy auth.json entry shape. */
+export const projectCredentialValue = (value: QuotaCredentialValue): QuotaAuthEntry => {
+  if (value.type === "key") {
+    return value.metadata ? { type: "api", key: value.key, metadata: value.metadata } : { type: "api", key: value.key }
+  }
+  const entry: QuotaAuthEntry = {
+    type: "oauth",
+    access: value.access,
+    refresh: value.refresh,
+    expires: value.expires,
+  }
+  const metadata = value.metadata ?? {}
+  if (typeof metadata.accountID === "string") entry.accountId = metadata.accountID
+  if (typeof metadata.enterpriseUrl === "string") entry.enterpriseUrl = metadata.enterpriseUrl
+  if (typeof metadata.server === "string") entry.server = metadata.server
+  if (typeof metadata.orgID === "string") entry.orgID = metadata.orgID
+  if (value.metadata) entry.metadata = value.metadata
+  return entry
+}
+
+/** Each integration's selected (active) credential, projected. */
+export const projectAuth = (ctx: QuotaContext): Record<string, QuotaAuthEntry> => {
+  const result: Record<string, QuotaAuthEntry> = {}
+  for (const row of ctx.credentials) {
+    if (!row.active) continue
+    Object.defineProperty(result, row.integrationID, {
+      value: projectCredentialValue(row.value),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+  return result
+}
+
+export const getAuthEntry = (auth: Record<string, QuotaAuthEntry>, aliases: string[]): QuotaAuthEntry | null => {
+  for (const alias of aliases) {
+    if (auth[alias]) return auth[alias]
+  }
+  return null
+}
+
+/** Rows of the given integrations, in store order. */
+export const credentialRows = (ctx: QuotaContext, integrationIDs: string[]): QuotaCredentialRow[] =>
+  ctx.credentials.filter((row) => integrationIDs.includes(row.integrationID))
+
+export const fetchOf = (ctx: QuotaContext): typeof fetch => ctx.fetchImpl ?? fetch
+
+export const envOf = (ctx: QuotaContext): Record<string, string | undefined> => ctx.env ?? process.env
