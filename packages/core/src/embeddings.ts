@@ -121,6 +121,20 @@ export const EMBEDDING_MODELS: ReadonlyArray<EmbeddingModel> = [
     baseURL: "http://127.0.0.1:18752/v1",
     baseURLEnv: "OPENCODE_LOCAL_EMBED_BASE_URL",
     ownedBy: "local-embed",
+    // Step 3 flip (#1554, 2026-11-05): the native in-process backend
+    // is now the default for this registration. The HTTP registration
+    // data above (baseURL/baseURLEnv) stays intact for step 4, which
+    // retires the sidecar. Snapshot resolution: the LOCAL_EMBED_SNAPSHOT
+    // env var (the same one the sidecar service uses) wins; otherwise
+    // the HF cache snapshot dir below (the sidecar default) is used.
+    // The backend throws loudly when the snapshot is missing.
+    backend: {
+      kind: "native-onnx",
+      snapshotEnv: "LOCAL_EMBED_SNAPSHOT",
+      snapshotDir:
+        "~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-m-v2.0/snapshots/95c2741480856aa9666782eb4afe11959938017f",
+      maxTokens: 8192,
+    },
   },
 ]
 
