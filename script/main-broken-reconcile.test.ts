@@ -103,6 +103,17 @@ describe("main-broken race-loser reconcile run links (#1314)", () => {
     expect(comment).toContain(run(222))
   })
 
+  test("the closing status echo names the survivor the created loser's links were forwarded to (#1582)", () => {
+    // The echo sits after RUN-LINKS-END, outside the executed snippet
+    // above, which is how PR #1315 lost its $SURVIVOR interpolation
+    // without any test noticing. Pin the line itself: it must name
+    // both the created loser and the survivor it forwards to.
+    const line = workflow.split("\n").find((entry) => entry.includes("this run created loser"))
+    expect(line).toBeDefined()
+    expect(line).toContain("#$CREATED")
+    expect(line).toContain("forwarded to #$SURVIVOR above")
+  })
+
   test("adjacent Markdown links are collected as separate run URLs", () => {
     const comment = reconcile({
       loser: 32,
