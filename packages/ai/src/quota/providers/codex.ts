@@ -99,32 +99,56 @@ const fetchQuotaForEntry = async (
     const credits = asObject(payload?.credits)
 
     const windows: Record<string, ReturnType<typeof toUsageWindow>> = {}
-    if (primary) {
-      const windowSeconds = toNumber(primary.limit_window_seconds)
-      windows[resolveWindowLabel(windowSeconds)] = toUsageWindow({
-        usedPercent: clampPercent(toNumber(primary.used_percent)),
-        windowSeconds,
-        resetAt: toTimestamp(primary.reset_at),
-      })
-    }
-    if (secondary) {
-      const windowSeconds = toNumber(secondary.limit_window_seconds)
-      windows[resolveWindowLabel(windowSeconds)] = toUsageWindow({
-        usedPercent: clampPercent(toNumber(secondary.used_percent)),
-        windowSeconds,
-        resetAt: toTimestamp(secondary.reset_at),
-      })
+
+    // Rate-limit windows (#1762): a window without a usable
+    // used_percent carries no quota figure, so it is dropped — an
+    // empty window object used to mint a phantom all-null window, and
+    // a duration/reset with no percent is dispositioned the same way
+    // (dropped, not published with a null percent). The survivors are
+    // keyed by their derived duration label; when the primary and
+    // secondary labels collide (equal durations, or both missing),
+    // BOTH keys gain a -primary/-secondary qualifier so neither window
+    // can silently overwrite the other. Distinct durations keep their
+    // plain 5h/weekly keys, unchanged for downstream consumers.
+    const rateLimitWindows = (
+      [
+        ["primary", primary],
+        ["secondary", secondary],
+      ] as const
+    ).flatMap(([role, window]) => {
+      if (!window) return []
+      const usedPercent = clampPercent(toNumber(window.used_percent))
+      if (usedPercent === null) return []
+      const windowSeconds = toNumber(window.limit_window_seconds)
+      return [
+        {
+          role,
+          label: resolveWindowLabel(windowSeconds),
+          window: toUsageWindow({
+            usedPercent,
+            windowSeconds,
+            resetAt: toTimestamp(window.reset_at),
+          }),
+        },
+      ]
+    })
+    const labelsCollide = rateLimitWindows.length === 2 && rateLimitWindows[0].label === rateLimitWindows[1].label
+    for (const entry of rateLimitWindows) {
+      windows[labelsCollide ? `${entry.label}-${entry.role}` : entry.label] = entry.window
     }
     if (credits) {
       const balance = toNumber(credits.balance)
       const unlimited = Boolean(credits.unlimited)
       const label = unlimited ? "Unlimited" : balance !== null ? String(balance) : null
-      windows.credits_balance = toUsageWindow({
-        usedPercent: null,
-        windowSeconds: null,
-        resetAt: null,
-        valueLabel: label,
-      })
+      // An empty credits object carries no usable data either (#1762).
+      if (label !== null) {
+        windows.credits_balance = toUsageWindow({
+          usedPercent: null,
+          windowSeconds: null,
+          resetAt: null,
+          valueLabel: label,
+        })
+      }
     }
     const spendLimit = asObject(asObject(payload?.spend_control)?.individual_limit)
     if (spendLimit) {
@@ -132,11 +156,27 @@ const fetchQuotaForEntry = async (
       const limit = toNumber(spendLimit.limit)
       const valueLabel =
         used !== null && limit !== null ? `${used.toFixed(0)} / ${limit.toFixed(0)} used` : null
-      windows.credits = toUsageWindow({
-        usedPercent: clampPercent(toNumber(spendLimit.used_percent)),
-        windowSeconds: null,
-        resetAt: null,
-        valueLabel,
+      const usedPercent = clampPercent(toNumber(spendLimit.used_percent))
+      if (usedPercent !== null || valueLabel !== null) {
+        windows.credits = toUsageWindow({
+          usedPercent,
+          windowSeconds: null,
+          resetAt: null,
+          valueLabel,
+        })
+      }
+    }
+
+    // No usable quota or credit data at all: the sibling providers'
+    // no-data contract (ClinePass/DeepSeek/OpenRouter), not ok:true
+    // with empty windows (#1762).
+    if (Object.keys(windows).length === 0) {
+      return buildResult({
+        providerId,
+        providerName,
+        ok: false,
+        configured: true,
+        error: "No quota data in response",
       })
     }
 
