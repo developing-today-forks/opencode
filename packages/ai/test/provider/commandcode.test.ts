@@ -395,6 +395,50 @@ it.effect("Command Code stream: an in-stream error event fails with the upstream
   }),
 )
 
+it.effect("Command Code stream: a content-filter finish normalizes to content-filter, never stop (#1755)", () =>
+  Effect.gen(function* () {
+    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "text-delta", text: "partial" },
+            { type: "finish", finishReason: "content-filter" },
+          ),
+        ),
+      ),
+    )
+    expect(response.finishReason).toEqual({ normalized: "content-filter", raw: "content-filter" })
+  }),
+)
+
+it.effect("Command Code stream: an error finish normalizes to error, never stop (#1755)", () =>
+  Effect.gen(function* () {
+    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(fixedResponse(ndjson({ type: "finish", finishReason: "error" }))),
+    )
+    expect(response.finishReason).toEqual({ normalized: "error", raw: "error" })
+  }),
+)
+
+it.effect("Command Code stream: an abort event then EOF finishes as error with raw abort, partial text kept (#1755)", () =>
+  Effect.gen(function* () {
+    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(fixedResponse(ndjson({ type: "text-delta", text: "partial" }, { type: "abort" }))),
+    )
+    expect(response.text).toBe("partial")
+    expect(response.finishReason).toEqual({ normalized: "error", raw: "abort" })
+  }),
+)
+
+it.effect("Command Code stream: an unrecognized finish reason normalizes to unknown, never stop (#1755)", () =>
+  Effect.gen(function* () {
+    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(fixedResponse(ndjson({ type: "finish", finishReason: "frobnicate" }))),
+    )
+    expect(response.finishReason).toEqual({ normalized: "unknown", raw: "frobnicate" })
+  }),
+)
+
 it.effect("Command Code stream: a stream ending before its finish event fails loudly, never as a silent stop", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(

@@ -444,8 +444,13 @@ const mapUsage = (usage: typeof WireUsage.Type | undefined, metadataKey: string)
   })
 }
 
-// The bundle's normalizeStopReason: tool spellings win, then length,
-// everything else is end_turn; client tool calls also force tool-calls.
+// Finish mapping (#1755): tool spellings win, then length; the honest
+// outcomes come next — a content-filter finish is not a stop, an error
+// or abort finish is not a stop either (an abort still emits the finish
+// event so partial text stays usable; the raw reason is preserved on
+// the event). Recognized stop spellings (and no reason) map to stop;
+// anything else unrecognized maps to unknown rather than being
+// silently reported as a clean stop.
 const mapFinishReason = (raw: string | undefined, hasToolCalls: boolean): FinishReason => {
   if (hasToolCalls) return "tool-calls"
   switch ((raw ?? "").toLowerCase()) {
@@ -456,8 +461,26 @@ const mapFinishReason = (raw: string | undefined, hasToolCalls: boolean): Finish
     case "length":
     case "max_tokens":
       return "length"
-    default:
+    case "content-filter":
+    case "content_filter":
+    case "content_filtering":
+      return "content-filter"
+    case "error":
+    case "failed":
+    case "failure":
+    case "abort":
+    case "aborted":
+    case "cancelled":
+    case "canceled":
+      return "error"
+    case "":
+    case "stop":
+    case "end_turn":
+    case "end-turn":
+    case "stop_sequence":
       return "stop"
+    default:
+      return "unknown"
   }
 }
 
