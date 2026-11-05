@@ -662,6 +662,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/meta/chat": openaiChat,
   "@opencode/ai/providers/minimax/chat": openaiChat,
   "@opencode/ai/providers/mistral": openaiChat,
+  "@opencode/ai/providers/vibe": openaiChat,
   "@opencode/ai/providers/google-vertex/mistral": openaiChat,
   "@opencode/ai/providers/google-vertex-mistral": openaiChat,
   "@opencode/ai/providers/moonshot": moonshotChat,

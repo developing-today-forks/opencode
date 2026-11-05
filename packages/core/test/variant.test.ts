@@ -541,6 +541,23 @@ test("spells Antigravity variants as thinking levels", () => {
   expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "toggle" }])).toEqual([])
 })
 
+test("spells vibe variants as reasoning effort (Mistral parity, #1692)", () => {
+  // Vibe reuses the MistralChat protocol unchanged (#1653), so it spells
+  // exactly like the mistral package: effort as settings.reasoningEffort.
+  const pkg = "@opencode/ai/providers/vibe"
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "effort", values: ["low", "high"] }])).toEqual([
+    { id: "low", settings: { reasoningEffort: "low" } },
+    { id: "high", settings: { reasoningEffort: "high" } },
+  ])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "effort" }])).toEqual([
+    { id: "low", settings: { reasoningEffort: "low" } },
+    { id: "medium", settings: { reasoningEffort: "medium" } },
+    { id: "high", settings: { reasoningEffort: "high" } },
+  ])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "budget_tokens" }])).toEqual([])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "toggle" }])).toEqual([])
+})
+
 test("spells Mantle variants for the API each model is routed through", () => {
   expect(
     resolve(model("@opencode/ai/providers/amazon-bedrock/mantle/messages", "anthropic.claude-opus-4-8"), [
