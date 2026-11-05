@@ -409,7 +409,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`provider\` text NOT NULL,
           \`binding\` text,
           \`created_at\` integer NOT NULL,
-          \`last_used_at\` integer NOT NULL
+          \`last_used_at\` integer NOT NULL,
+          \`last_snapshot_at\` integer,
+          \`snapshot_retry_at\` integer
         );
       `)
       yield* tx.run(`
