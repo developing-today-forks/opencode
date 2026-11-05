@@ -168,11 +168,21 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
         // same package embeddings-native imports. (The Node bundle
         // rewrites this same call to a stub; the Bun build needs the
         // real backend.)
-        const transformed = source
-          .replace('import sharp from "sharp";', stub)
-          .replace('requireFromHere("onnxruntime-node")', 'require("onnxruntime-node")')
-        if (transformed === source || transformed.includes('requireFromHere("onnxruntime-node")'))
-          throw new Error("Failed to rewrite the transformers sharp/onnxruntime-node loaders")
+        // Each rewrite is asserted on its own (#1788): a combined
+        // transformed === source check only catches BOTH rewrites
+        // failing, so a respelled sharp import (a routine bundle
+        // formatting change) used to pass the guard with the real
+        // sharp import still in place — silently restoring the
+        // #1727 packaged-binary failure.
+        const withoutSharp = source.replace('import sharp from "sharp";', stub)
+        if (withoutSharp === source || withoutSharp.includes('from "sharp"'))
+          throw new Error("Failed to rewrite the transformers sharp loader")
+        const transformed = withoutSharp.replace(
+          'requireFromHere("onnxruntime-node")',
+          'require("onnxruntime-node")',
+        )
+        if (transformed === withoutSharp || transformed.includes('requireFromHere("onnxruntime-node")'))
+          throw new Error("Failed to rewrite the transformers onnxruntime-node loader")
         return { contents: transformed, loader: "js" }
       })
     },
