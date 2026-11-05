@@ -2,14 +2,16 @@ import { execFile } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow, JsonValue } from "../types.js"
 import {
+  asNonEmptyString,
   asObject,
   buildResult,
   envOf,
   fetchOf,
   toTimestamp,
   toUsageWindow,
+  parseJsonValue,
 } from "../utils.js"
 
 /**
@@ -44,12 +46,12 @@ export const TURSO_LIMITS = {
 const gb = (bytes: number): number => Math.round((bytes / 1e9) * 1e6) / 1e6
 const pct3 = (used: number, limit: number): number => Math.round((used / limit) * 100 * 1000) / 1000
 
-const numNonNegative = (value: unknown): number | null =>
+const numNonNegative = (value: JsonValue | undefined): number | null =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
 
 export const tursoWindows = (
-  usageDoc: unknown,
-  subscriptionDoc: unknown,
+  usageDoc: JsonValue,
+  subscriptionDoc: JsonValue,
 ): { windows: Record<string, QuotaWindow>; planLabel?: string } | null => {
   const usageRoot = asObject(usageDoc)
   const usage = asObject(asObject(usageRoot?.organization)?.usage) ?? asObject(usageRoot?.usage)
@@ -147,21 +149,25 @@ export const resolveBwsSecret = async (ctx: QuotaContext, name: string): Promise
   }
   if (!accessToken) return null
 
+  const bin: string = bwsBin
+  const token: string = accessToken
   const run = (args: string[]): Promise<string> =>
     new Promise((resolve, reject) => {
       execFile(
-        bwsBin as string,
+        bin,
         args,
-        { env: { ...process.env, BWS_ACCESS_TOKEN: accessToken as string }, maxBuffer: 16 * 1024 * 1024, timeout: 30_000 },
+        { env: { ...process.env, BWS_ACCESS_TOKEN: token }, maxBuffer: 16 * 1024 * 1024, timeout: 30_000 },
         (error, stdout) => (error ? reject(error) : resolve(stdout)),
       )
     })
   try {
-    const list = JSON.parse(await run(["secret", "list"])) as { id?: string; key?: string }[]
-    const found = list.find((secret) => secret.key === name)
-    if (!found?.id) return null
-    const got = JSON.parse(await run(["secret", "get", found.id])) as { value?: string }
-    return got.value && got.value.trim() ? got.value.trim() : null
+    const list = parseJsonValue(await run(["secret", "list"]))
+    const entries = Array.isArray(list) ? list : []
+    const found = entries.map((entry) => asObject(entry)).find((secret) => secret?.key === name)
+    const foundId = asNonEmptyString(found?.id)
+    if (!foundId) return null
+    const got = asObject(parseJsonValue(await run(["secret", "get", foundId])))
+    return asNonEmptyString(got?.value) ?? null
   } catch {
     return null
   }
@@ -182,13 +188,14 @@ export const fetchTursoQuota = async (ctx: QuotaContext): Promise<QuotaResult> =
   const base = env.TURSO_API_BASE ?? "https://api.turso.tech"
   const slug = env.TURSO_ORG_SLUG ?? "dezren39"
   try {
-    const get = async (path: string): Promise<unknown> => {
+    const get = async (path: string): Promise<JsonValue> => {
       const response = await fetchOf(ctx)(`${base}/v1/organizations/${slug}${path}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(15_000),
       })
       if (!response.ok) throw new Error(`turso ${path} HTTP ${response.status}`)
-      return response.json()
+      const parsed: JsonValue = await response.json()
+      return parsed
     }
     const usage = await get("/usage")
     const subscription = await get("/subscription")

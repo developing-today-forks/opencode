@@ -1,4 +1,4 @@
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow, JsonValue } from "../types.js"
 import { cdpPageFetch, isSessionExpiredStatus } from "../cdp.js"
 import {
   asNonEmptyString,
@@ -66,7 +66,7 @@ export interface MistralBudgetWindow {
   resetAt: number | null
 }
 
-const parseBudget = (raw: unknown): MistralBudgetWindow | null => {
+const parseBudget = (raw: JsonValue | undefined): MistralBudgetWindow | null => {
   const budget = asObject(raw)
   if (!budget) return null
   const usedPercent = toNumber(budget.usage_percentage)
@@ -83,7 +83,7 @@ const parseBudget = (raw: unknown): MistralBudgetWindow | null => {
 
 /** The billing.budget payload → the two dollar windows (api, vibe). */
 export const parseMistralBudget = (
-  payload: unknown,
+  payload: JsonValue,
 ): { api: MistralBudgetWindow | null; vibe: MistralBudgetWindow | null } => {
   const root = asObject(payload)
   const json = asObject(asObject(asObject(root?.result)?.data)?.json) ?? root
@@ -101,7 +101,7 @@ const budgetWindow = (budget: MistralBudgetWindow): QuotaWindow =>
     valueLabel: `$${formatMoney(budget.usedAmount)} / $${formatMoney(budget.budgetAmount)}`,
   })
 
-const windowsFromPayload = (payload: unknown): Record<string, QuotaWindow> | null => {
+const windowsFromPayload = (payload: JsonValue): Record<string, QuotaWindow> | null => {
   const { api, vibe } = parseMistralBudget(payload)
   const windows: Record<string, QuotaWindow> = {}
   if (api) windows.api = budgetWindow(api)
@@ -114,8 +114,12 @@ const consoleCookieOf = (ctx: QuotaContext): string | null => {
   const fromEnv = asNonEmptyString(env.MISTRAL_ADMIN_COOKIE) ?? asNonEmptyString(env.MISTRAL_CONSOLE_COOKIE)
   if (fromEnv) return fromEnv
   const entry = getAuthEntry(projectAuth(ctx), aliases)
-  const metadata = asObject(entry?.metadata)
-  return asNonEmptyString(metadata?.consoleCookie) ?? asNonEmptyString(metadata?.cookie) ?? null
+  const metadata = entry?.metadata
+  const cookieField = (field: string) => {
+    const value = metadata?.[field]
+    return typeof value === "string" ? value : null
+  }
+  return asNonEmptyString(cookieField("consoleCookie")) ?? asNonEmptyString(cookieField("cookie")) ?? null
 }
 
 type ConsoleRead =
@@ -157,8 +161,10 @@ const readConsoleBudget = async (ctx: QuotaContext): Promise<ConsoleRead> => {
     if (result.status !== 200) {
       return { kind: "error", failureClass: "http-error", message: `Mistral console budget API returned HTTP ${result.status}` }
     }
-    let payload: unknown
+    let payload: JsonValue
     try {
+      // JSON.parse yields exactly the JsonValue grammar; the
+      // annotation records that contract at the boundary.
       payload = JSON.parse(result.text)
     } catch {
       return { kind: "error", failureClass: "no-data", message: "Mistral console budget response was not JSON" }
@@ -187,7 +193,7 @@ const keyValidity = async (ctx: QuotaContext, apiKey: string): Promise<string> =
     })
     if (response.status === 401 || response.status === 403) return "the enrolled API key is invalid or revoked"
     if (!response.ok) return `the API key check returned HTTP ${response.status}`
-    const payload = (await readQuotaJson(response)) as { data?: unknown }
+    const payload = asObject(await readQuotaJson(response))
     return Array.isArray(payload?.data) ? "the enrolled API key is live" : "the API key check returned no model data"
   } catch (error) {
     return isTimeoutError(error, timeoutSignal) ? "the API key check timed out" : "the API key check failed"

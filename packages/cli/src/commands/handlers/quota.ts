@@ -1,9 +1,15 @@
 import { OpenCode } from "@opencode/client"
 import { Service } from "@opencode/client/effect/service"
 import {
+  asNonEmptyString,
+  asObject,
   fetchQuotaForProviderInstances,
+  isJsonObject,
   listConfiguredQuotaProviders,
+  parseJsonValue,
   resolveQuotaProviderName,
+  type JsonObject,
+  type JsonValue,
   type QuotaContext,
   type QuotaCredentialRow,
   type QuotaResult,
@@ -51,12 +57,60 @@ interface GlobalPaths {
   state: string
 }
 
+/** The server credential value, mapped field-by-field into the quota row value shape. */
+type SdkCredentialValue = Awaited<ReturnType<ReturnType<typeof OpenCode.make>["credential"]["list"]>>[number]["value"]
+
+const mapEntryValue = (value: SdkCredentialValue): QuotaCredentialRow["value"] => {
+  switch (value.type) {
+    case "key":
+      return { type: "key", key: value.key, ...(value.metadata ? { metadata: value.metadata } : {}) }
+    case "oauth":
+      return {
+        type: "oauth",
+        methodID: value.methodID,
+        access: value.access,
+        refresh: value.refresh,
+        expires: value.expires,
+        ...(value.metadata ? { metadata: value.metadata } : {}),
+      }
+    case "external":
+      return { type: "external", methodID: value.methodID, ...(value.metadata ? { metadata: value.metadata } : {}) }
+  }
+}
+
+/** One stored credential value (JSON text in the local store), decoded field-by-field. */
+const decodeStoreValue = (parsed: JsonValue | null): QuotaCredentialRow["value"] | null => {
+  const record = asObject(parsed)
+  if (!record) return null
+  const metadata = isJsonObject(record.metadata) ? record.metadata : undefined
+  if (record.type === "key") {
+    const key = asNonEmptyString(record.key)
+    return key ? { type: "key", key, ...(metadata ? { metadata } : {}) } : null
+  }
+  if (record.type === "oauth") {
+    return {
+      type: "oauth",
+      methodID: asNonEmptyString(record.methodID),
+      access: asNonEmptyString(record.access),
+      refresh: asNonEmptyString(record.refresh),
+      expires: typeof record.expires === "number" ? record.expires : undefined,
+      ...(metadata ? { metadata } : {}),
+    }
+  }
+  return null
+}
+
 const readStoreRows = async (dbPath: string): Promise<QuotaCredentialRow[]> => {
   // The CLI runs on Bun (dev and the compiled binary alike); the
   // local store is read through bun:sqlite, read-only. Loaded via
   // createRequire so a Node runtime without bun:sqlite simply has
   // no fallback instead of failing to load this handler.
   const { createRequire } = await import("node:module")
+  // SAFETY: bun:sqlite is a Bun builtin resolved dynamically, so no
+  // static type exists to import; the inline structural type is the
+  // contract for the two members used here (the constructor and
+  // prepare), and a runtime without the builtin throws at this
+  // require, which callers treat as "no local-store fallback".
   const { Database } = createRequire(import.meta.url)("bun:sqlite") as {
     Database: new (path: string, options: { readonly: boolean }) => {
       prepare: (sql: string) => { all: () => Array<Record<string, unknown>> }
@@ -70,13 +124,8 @@ const readStoreRows = async (dbPath: string): Promise<QuotaCredentialRow[]> => {
       .all()
     const entries: QuotaCredentialRow[] = []
     for (const row of rows) {
-      let value: QuotaCredentialRow["value"] | null = null
-      try {
-        value = JSON.parse(String(row.value)) as QuotaCredentialRow["value"]
-      } catch {
-        value = null
-      }
-      if (!row.integration_id || !value || (value.type !== "key" && value.type !== "oauth")) continue
+      const value = decodeStoreValue(parseJsonValue(String(row.value)))
+      if (!row.integration_id || !value) continue
       entries.push({
         id: String(row.id),
         integrationID: String(row.integration_id),
@@ -125,7 +174,7 @@ const readLocalCredentialRows = async (global: GlobalPaths): Promise<QuotaCreden
 interface ConfigFacts {
   disabledProviders: Set<string>
   instances: Map<string, { base: string; name?: string }>
-  providerConfig: Record<string, Record<string, unknown>>
+  providerConfig: Record<string, JsonObject>
 }
 
 const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
@@ -140,14 +189,17 @@ const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
 
   const disabledProviders = new Set<string>()
   const instances = new Map<string, { base: string; name?: string }>()
-  const providerConfig: Record<string, Record<string, unknown>> = {}
+  const providerConfig: Record<string, JsonObject> = {}
 
   for (const file of files) {
-    let document: Record<string, unknown> | undefined
+    let document: JsonObject | undefined
     try {
       if (!existsSync(file)) continue
-      const parsed = parse(readFileSync(file, "utf8")) as Record<string, unknown> | undefined
-      if (parsed && typeof parsed === "object") document = parsed
+      // jsonc-parser returns the decoded document as `any`; the
+      // annotation records that a config document is JSON-shaped, and
+      // isJsonObject below rejects the non-object cases.
+      const parsed: JsonValue | undefined = parse(readFileSync(file, "utf8"))
+      if (isJsonObject(parsed)) document = parsed
     } catch {
       document = undefined
     }
@@ -159,10 +211,10 @@ const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
     }
     for (const sectionKey of ["provider", "providers"]) {
       const section = document[sectionKey]
-      if (!section || typeof section !== "object" || Array.isArray(section)) continue
-      for (const [id, definition] of Object.entries(section as Record<string, unknown>)) {
-        if (!definition || typeof definition !== "object" || Array.isArray(definition)) continue
-        const record = definition as Record<string, unknown>
+      if (!isJsonObject(section)) continue
+      for (const [id, definition] of Object.entries(section)) {
+        if (!isJsonObject(definition)) continue
+        const record = definition
         providerConfig[id] = { ...(providerConfig[id] ?? {}), ...record }
         const base = typeof record.instanceOf === "string" ? record.instanceOf : undefined
         if (base) {
@@ -190,7 +242,7 @@ export const buildQuotaContext = async (
         integrationID: String(entry.integrationID),
         label: entry.label,
         active: Boolean(entry.active),
-        value: entry.value as QuotaCredentialRow["value"],
+        value: mapEntryValue(entry.value),
       }))
     } catch {
       credentials = []

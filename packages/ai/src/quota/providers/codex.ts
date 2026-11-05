@@ -1,6 +1,7 @@
 import type { QuotaContext, QuotaProvider, QuotaResult } from "../types.js"
 import {
   asNonEmptyString,
+  asObject,
   buildResult,
   clampPercent,
   errorText,
@@ -62,10 +63,8 @@ const fetchQuotaForEntry = async (
       // access-enforcement body. OpenAI has no usage endpoint for that
       // sign-in and sends users to the ChatGPT usage page instead.
       if (response.status === 401) {
-        const body = (await readQuotaJson(response).catch(() => null)) as {
-          error?: { type?: unknown }
-        } | null
-        const errorType = asNonEmptyString(body?.error?.type)
+        const body = asObject(await readQuotaJson(response).catch(() => null))
+        const errorType = asNonEmptyString(asObject(body?.error)?.type)
         if (errorType === "rejected_by_access_enforcement") {
           return buildResult({
             providerId,
@@ -93,21 +92,11 @@ const fetchQuotaForEntry = async (
       })
     }
 
-    const payload = (await readQuotaJson(response)) as {
-      rate_limit?: {
-        primary_window?: { limit_window_seconds?: unknown; used_percent?: unknown; reset_at?: unknown } | null
-        secondary_window?: { limit_window_seconds?: unknown; used_percent?: unknown; reset_at?: unknown } | null
-      } | null
-      credits?: { balance?: unknown; unlimited?: unknown } | null
-      spend_control?: {
-        individual_limit?: { used?: unknown; limit?: unknown; used_percent?: unknown } | null
-      } | null
-      email?: unknown
-      account_id?: unknown
-    }
-    const primary = payload?.rate_limit?.primary_window ?? null
-    const secondary = payload?.rate_limit?.secondary_window ?? null
-    const credits = payload?.credits ?? null
+    const payload = asObject(await readQuotaJson(response))
+    const rateLimit = asObject(payload?.rate_limit)
+    const primary = asObject(rateLimit?.primary_window)
+    const secondary = asObject(rateLimit?.secondary_window)
+    const credits = asObject(payload?.credits)
 
     const windows: Record<string, ReturnType<typeof toUsageWindow>> = {}
     if (primary) {
@@ -137,8 +126,8 @@ const fetchQuotaForEntry = async (
         valueLabel: label,
       })
     }
-    if (payload?.spend_control?.individual_limit) {
-      const spendLimit = payload.spend_control.individual_limit
+    const spendLimit = asObject(asObject(payload?.spend_control)?.individual_limit)
+    if (spendLimit) {
       const used = toNumber(spendLimit.used)
       const limit = toNumber(spendLimit.limit)
       const valueLabel =

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaCredentialSource } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, QuotaCredentialSource, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -18,6 +18,7 @@ import {
   toNumber,
   toTimestamp,
   toUsageWindow,
+  parseJsonValue,
 } from "../utils.js"
 
 /**
@@ -69,7 +70,7 @@ const claudeConfigDirectory = (ctx: QuotaContext): string => {
   return override ?? join(ctx.homeDir ?? homedir(), ".claude")
 }
 
-const parseClaudeCodeBlob = (blob: unknown, source: ClaudeCredential["source"]): ClaudeCredential | null => {
+const parseClaudeCodeBlob = (blob: JsonValue, source: ClaudeCredential["source"]): ClaudeCredential | null => {
   const oauth = asObject(asObject(blob)?.claudeAiOauth)
   const accessToken = asNonEmptyString(oauth?.accessToken)
   if (!accessToken) return null
@@ -85,7 +86,7 @@ const parseClaudeCodeBlob = (blob: unknown, source: ClaudeCredential["source"]):
 const readCredentialsFile = (ctx: QuotaContext): ClaudeCredential | null => {
   try {
     const raw = readFileSync(join(claudeConfigDirectory(ctx), ".credentials.json"), "utf8")
-    return parseClaudeCodeBlob(JSON.parse(raw), "credentials-file")
+    return parseClaudeCodeBlob(parseJsonValue(raw), "credentials-file")
   } catch {
     return null
   }
@@ -130,7 +131,7 @@ const EXTRA_USAGE_WINDOW = "extra_usage"
 const SESSION_WINDOW_SECONDS = 5 * 60 * 60
 const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
 
-const toAmount = (value: unknown): number | null => {
+const toAmount = (value: JsonValue | undefined): number | null => {
   const money = asObject(value)
   const minor = toNumber(money?.amount_minor)
   if (minor === null) return null
@@ -162,7 +163,7 @@ const addWindow = (
   })
 }
 
-export const toClaudeUsage = (rawPayload: unknown): { windows: WindowMap; models: Record<string, { windows: WindowMap }> } => {
+export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; models: Record<string, { windows: WindowMap }> } => {
   const payload = asObject(rawPayload) ?? {}
   const windows: WindowMap = {}
   const models: Record<string, { windows: WindowMap }> = {}
@@ -260,7 +261,7 @@ export const provider: QuotaProvider = {
       return withMetadata(failure(`API error: ${response.status}`), credential)
     }
 
-    let payload: unknown
+    let payload: JsonValue
     try {
       payload = await readQuotaJson(response)
     } catch {

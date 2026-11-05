@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaWindow } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaWindow, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -12,6 +12,7 @@ import {
   toNumber,
   toTimestamp,
   toUsageWindow,
+  parseJsonValue,
 } from "../utils.js"
 
 /**
@@ -42,10 +43,10 @@ interface OpenDesignCredential {
   workspaceId: string
 }
 
-const clean = (value: unknown): string =>
+const clean = (value: JsonValue | undefined): string =>
   typeof value === "string" && !/[\r\n]/.test(value) ? value.trim() : ""
 
-export const normalizeOpenDesignCredential = (value: unknown): OpenDesignCredential | null => {
+export const normalizeOpenDesignCredential = (value: JsonValue): OpenDesignCredential | null => {
   const record = asObject(value)
   const cookieInput = clean(record?.cookie)
   const workspaceId = clean(record?.workspaceId)
@@ -63,7 +64,7 @@ export const readManagedOpenDesignCredential = (ctx: QuotaContext): OpenDesignCr
     ctx.openchamberDataDir ??
     (asNonEmptyString(env.OPENCHAMBER_DATA_DIR) ?? join(ctx.homeDir ?? homedir(), ".config", "openchamber"))
   try {
-    return normalizeOpenDesignCredential(JSON.parse(readFileSync(join(root, "quota", "opendesign.json"), "utf8")))
+    return normalizeOpenDesignCredential(parseJsonValue(readFileSync(join(root, "quota", "opendesign.json"), "utf8")))
   } catch {
     return null
   }
@@ -74,7 +75,7 @@ const WINDOW_LABELS = new Map<number, string>([
   [604800, "7d"],
 ])
 
-export const parseCodingPlanWindows = (payload: unknown): Record<string, QuotaWindow> | null => {
+export const parseCodingPlanWindows = (payload: JsonValue): Record<string, QuotaWindow> | null => {
   const data = asObject(payload)
   if (!data || !Array.isArray(data.windows)) return null
   const windows: Record<string, QuotaWindow> = {}

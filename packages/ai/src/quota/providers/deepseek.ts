@@ -1,4 +1,4 @@
-import type { QuotaProvider } from "../types.js"
+import type { QuotaProvider, JsonValue } from "../types.js"
 import {
   buildResult,
   errorText,
@@ -7,6 +7,7 @@ import {
   getAuthEntry,
   isTimeoutError,
   projectAuth,
+  asObject,
   readQuotaJson,
   toNumber,
   toUsageWindow,
@@ -66,21 +67,20 @@ export const provider: QuotaProvider = {
         })
       }
 
-      const payload = (await readQuotaJson(response)) as {
-        balance_infos?: Array<{ total_balance?: unknown; currency?: unknown }>
-      }
+      const payload = asObject(await readQuotaJson(response))
       const balanceInfos = Array.isArray(payload?.balance_infos) ? payload.balance_infos : []
+      const infoField = (info: JsonValue, field: string) => asObject(info)?.[field]
       const positiveBalances = balanceInfos.filter((info) => {
-        const num = toNumber(info?.total_balance)
+        const num = toNumber(infoField(info, "total_balance"))
         return typeof num === "number" && num > 0
       })
       const balanceInfo =
-        positiveBalances.find((info) => info?.currency === "USD") ??
-        positiveBalances.find((info) => info?.currency === "CNY") ??
-        balanceInfos.find((info) => info?.currency === "USD") ??
-        balanceInfos.find((info) => info?.currency === "CNY") ??
+        positiveBalances.find((info) => infoField(info, "currency") === "USD") ??
+        positiveBalances.find((info) => infoField(info, "currency") === "CNY") ??
+        balanceInfos.find((info) => infoField(info, "currency") === "USD") ??
+        balanceInfos.find((info) => infoField(info, "currency") === "CNY") ??
         null
-      const rawBalance = balanceInfo?.total_balance
+      const rawBalance = balanceInfo ? infoField(balanceInfo, "total_balance") : undefined
       const totalBalance =
         typeof rawBalance === "number" || (typeof rawBalance === "string" && rawBalance.trim() !== "")
           ? toNumber(rawBalance)
@@ -96,7 +96,7 @@ export const provider: QuotaProvider = {
         })
       }
 
-      const isCny = balanceInfo?.currency === "CNY"
+      const isCny = balanceInfo ? infoField(balanceInfo, "currency") === "CNY" : false
       const symbol = isCny ? "¥" : "$"
       const valueLabel = `${symbol}${formatMoney(totalBalance)}`
 
