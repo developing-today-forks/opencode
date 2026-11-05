@@ -93,7 +93,7 @@ export const parseSubscriptionQuota = (
   return {
     tier: asNonEmptyString(quota.tier) ?? null,
     windows: {
-      [windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"]: toUsageWindow({
+      [windowSeconds ? `rolling:${resolveWindowLabel(windowSeconds)}` : "rolling"]: toUsageWindow({
         usedPercent: pct(windowUsed, windowLimit),
         windowSeconds,
         resetAt: windowReset === null ? null : windowReset * 1000,
@@ -216,7 +216,7 @@ const keyUsageResult = (body: JsonObject): QuotaResult => {
   if (rolling) {
     const durationMinutes = toNumber(rolling.window_duration_mins)
     const windowSeconds = durationMinutes !== null && durationMinutes > 0 ? durationMinutes * 60 : null
-    windows[windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"] = toUsageWindow({
+    windows[windowSeconds ? `rolling:${resolveWindowLabel(windowSeconds)}` : "rolling"] = toUsageWindow({
       usedPercent: toUsedPercent(rolling.used_percent),
       windowSeconds,
       resetAt: toTimestamp(rolling.resets_at),
