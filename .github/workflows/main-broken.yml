@@ -296,7 +296,7 @@ jobs:
             # RUN-LINKS-END
           done
           if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
-            echo "this run created loser #$CREATED -- its links were forwarded to # above"
+            echo "this run created loser #$CREATED -- its links were forwarded to #$SURVIVOR above"
           else
             echo "reconcile complete -- single survivor #$SURVIVOR"
           fi
