@@ -5,12 +5,12 @@ import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
 import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
-import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
-import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
+import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider } from "../src/quota/providers/meta.js"
@@ -510,13 +510,17 @@ describe("toTimestamp non-positive handling (#1845)", () => {
     expect(toTimestamp("not-a-date")).toBeNull()
   })
 
-  test("opencode-go: a non-positive reset publishes no window (existing drop-on-null behaviour)", () => {
-    // Interaction with #1725, stated not decided: parseOpenCodeGoUsage
-    // already drops a window whose resetAt is null, so a bogus
-    // non-positive reset now follows that existing path instead of
-    // publishing a 1969 reset. #1725 keeps the broader rule-3 call.
-    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: -5000 } } })).toEqual({})
-    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: "1970-01-01T00:00:00.000Z" } } })).toEqual({})
+  test("opencode-go: a non-positive reset keeps the window with resetAt null (#1725 rule 3)", () => {
+    // #1725 adopted contract rule 3: a present window is kept with the
+    // missing field null, matching the deepseek/codex siblings, so a
+    // bogus non-positive reset publishes the window with resetAt null
+    // rather than dropping it (and never a 1969 reset).
+    const negative = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: -5000 } } })
+    expect(negative["5h"]?.usedPercent).toBe(50)
+    expect(negative["5h"]?.resetAt).toBeNull()
+    const epoch = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: "1970-01-01T00:00:00.000Z" } } })
+    expect(epoch["5h"]?.usedPercent).toBe(50)
+    expect(epoch["5h"]?.resetAt).toBeNull()
     const control = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: 1893456000 } } })
     expect(control["5h"]?.resetAt).toBe(1893456000000)
   })
@@ -613,6 +617,9 @@ describe("command-code windowLimits clamp-both disposition (#1821)", () => {
 })
 
   test("an empty percent field mints no 0%-used opencode-go window", () => {
+    // Rule 4: an entry with no usable percent publishes no window (a
+    // percent-bearing entry would keep its window with a null reset —
+    // rule 3, the #1725 conformance change pinned below).
     const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
     expect(parseOpenCodeGoUsage(payload)).toEqual({})
   })
@@ -1354,8 +1361,10 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
   // rate-limit windows, command-code, and meta's conforming cases.
   // Known-lossy paths remain marked in types.ts: codex credits_balance
-  // (#1924), deepseek balance (#1928), meta collisions (#1777), and
-  // opencode-go/openrouter reset math (#1725).
+  // (#1924), deepseek balance (#1928), and meta collisions (#1777).
+  // opencode-go and openrouter reset math left the known-lossy set when
+  // #1725 landed: opencode-go conforms to rules 3/4 and resolveResetAt
+  // is pinned by its dedicated describe.
   // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
   // dedicated describes; mistral #1785 is likewise pinned by its
   // dedicated describe. If a
@@ -1541,7 +1550,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
 
   test("rule 4 (no figure, no window): openrouter zero-limit payload is the no-data contract (#1799)", async () => {
     // Only the zero-limit rule-4 case is asserted for openrouter here;
-    // its #1725 resolveResetAt row stays known-lossy in the inventory.
+    // its resolveResetAt arithmetic is pinned by the OpenRouter
+    // calendar reset calculation describe (#1725).
     const result = await openrouterFetchWith({
       data: { limit: 0, limit_remaining: 0, usage_monthly: 0, limit_reset: "monthly" },
     })
@@ -2043,5 +2053,125 @@ describe("claude duplicate limits keep-first (#1781)", () => {
       ],
     })
     expect(claimed.windows["5h"]?.usedPercent).toBe(80)
+  })
+})
+
+describe("OpenCode Go API-key usage mapping", () => {
+  test("maps rolling, weekly, and monthly usage payloads to quota windows", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 37.5, resetsAt: "2026-11-05T12:00:00Z" },
+        weekly: { percent: 62, resetsAt: "2026-11-09T00:00:00Z" },
+        monthly: { percent: 105, resetsAt: "2026-12-01T00:00:00Z" },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(37.5)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBe(62)
+    expect(mapped.weekly?.resetAt).toBe(Date.parse("2026-11-09T00:00:00Z"))
+    expect(mapped.monthly?.usedPercent).toBe(100)
+  })
+
+  test("keeps a percent-bearing window with resetAt null, and drops a percent-less entry", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 20 },
+        weekly: { resetsAt: "2026-11-09T00:00:00Z" },
+      },
+    })
+
+    // Rule 3 (#1725): a percent-bearing window keeps its window and
+    // nulls the absent reset instead of dropping it.
+    expect(mapped["5h"]?.usedPercent).toBe(20)
+    expect(mapped["5h"]?.resetAt).toBeNull()
+    // Rule 4: an entry with no usable percent publishes no window.
+    expect(mapped.weekly).toBeUndefined()
+    expect(parseOpenCodeGoUsage({})).toEqual({})
+  })
+
+  test("an all-dropped usage payload throws the unparseable-usage error", async () => {
+    const payload = { usage: { rolling: {}, weekly: {} } }
+    const ctx = {
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+    }
+    await expect(fetchOpenCodeGoUsage(ctx as never, "sk-fixture")).rejects.toThrow(
+      "OpenCode Go usage data could not be parsed",
+    )
+  })
+})
+
+describe("OpenCode Console Go usage mapping", () => {
+  test("derives quota percentages from Console meter payloads", () => {
+    const mapped = parseConsoleGoUsage({
+      product: "go-plus",
+      access: {
+        meters: {
+          fiveHour: {
+            limitMicroCents: 50_000_000,
+            usedMicroCents: 12_500_000,
+            resetsAt: "2026-11-05T12:00:00Z",
+          },
+          week: {
+            limitMicroCents: 150_000_000,
+            usedMicroCents: 100_000_000,
+            resetsAt: "2026-11-09T00:00:00Z",
+          },
+          month: {
+            limitMicroCents: 100_000_000,
+            usedMicroCents: 0,
+            resetsAt: "2026-12-01T00:00:00Z",
+          },
+        },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(25)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBeCloseTo((100_000_000 / 150_000_000) * 100, 6)
+    expect(mapped.monthly?.usedPercent).toBe(0)
+  })
+
+  test("returns no windows for missing or incomplete meter payloads", () => {
+    expect(parseConsoleGoUsage({})).toEqual({})
+    expect(
+      parseConsoleGoUsage({
+        access: { meters: { fiveHour: { limitMicroCents: 100_000_000, usedMicroCents: 20_000_000 } } },
+      }),
+    ).toEqual({})
+  })
+})
+
+describe("OpenCode Console billing balance mapping", () => {
+  test("converts available micro-cents to dollars", () => {
+    expect(parseConsoleBillingBalance({ availableMicroCents: 123_456_789 })).toBe(1.23456789)
+  })
+
+  test("maps missing and negative balances to null", () => {
+    expect(parseConsoleBillingBalance({})).toBeNull()
+    expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
+    expect(parseConsoleBillingBalance(null)).toBeNull()
+  })
+})
+
+describe("OpenRouter calendar reset calculation", () => {
+  test("daily reset is the next UTC midnight across the year boundary", () => {
+    expect(resolveResetAt("daily", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("weekly reset is the next Monday UTC, including across week and year boundaries", () => {
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 27, 23, 59, 59))).toBe(Date.UTC(2026, 11, 28))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 4))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 28))).toBe(Date.UTC(2027, 0, 4))
+  })
+
+  test("monthly reset is the first UTC day of the next month and year", () => {
+    expect(resolveResetAt("monthly", Date.UTC(2026, 10, 30, 23, 59, 59))).toBe(Date.UTC(2026, 11, 1))
+    expect(resolveResetAt("monthly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("unknown reset periods have no calendar reset", () => {
+    expect(resolveResetAt("quarterly", Date.UTC(2026, 11, 31))).toBeNull()
   })
 })

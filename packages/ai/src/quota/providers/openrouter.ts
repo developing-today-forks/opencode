@@ -27,6 +27,13 @@ export const providerName = "OpenRouter"
 export const aliases = ["openrouter"]
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+// The reset periods are OpenRouter's calendar, resolved in UTC (the
+// wire format is UTC): daily is the next UTC midnight, monthly the
+// first UTC day of the next month. Weekly is the next UTC Monday —
+// `getUTCDay()` is 0 on Sunday and 1 on Monday, so `(8 - dow) % 7`
+// counts days forward to Monday and its `|| 7` fallback makes Monday
+// itself jump a full week rather than resolve to today. Pinned by the
+// "OpenRouter calendar reset calculation" suite (#1725).
 export const resolveResetAt = (limitReset: JsonValue | undefined, nowMs: number): number | null => {
   const now = new Date(nowMs)
   const y = now.getUTCFullYear()
