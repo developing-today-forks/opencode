@@ -6,6 +6,9 @@ import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
 import { toNumber } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import { parseBillingBanner } from "../src/quota/providers/meta.js"
+import { toClaudeUsage } from "../src/quota/providers/claude.js"
+import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from
@@ -241,5 +244,121 @@ describe("command-code monthly over-included credits (#1744)", () => {
       },
     }
     expect(parseSubscriptionQuota(payload)).toBeNull()
+  })
+})
+
+describe("meta billing banner (#1750)", () => {
+  test("numeric and numeric-string minor units both convert to dollars", () => {
+    expect(parseBillingBanner({ remaining_minor_units: 12345, currency: "USD" })).toBe(123.45)
+    expect(parseBillingBanner({ remaining_minor_units: "12345", currency: "USD" })).toBe(123.45)
+    expect(parseBillingBanner({ remaining_minor_units: 0, currency: "USD" })).toBe(0)
+  })
+
+  test("absent, blank, malformed, negative, and non-USD banners map to null", () => {
+    expect(parseBillingBanner({ currency: "USD" })).toBeNull()
+    expect(parseBillingBanner({ remaining_minor_units: "", currency: "USD" })).toBeNull()
+    expect(parseBillingBanner({ remaining_minor_units: "abc", currency: "USD" })).toBeNull()
+    expect(parseBillingBanner({ remaining_minor_units: -5, currency: "USD" })).toBeNull()
+    expect(parseBillingBanner({ remaining_minor_units: 100, currency: "EUR" })).toBeNull()
+    expect(parseBillingBanner({})).toBeNull()
+    expect(parseBillingBanner(null)).toBeNull()
+  })
+})
+
+describe("claude usage transform (#1750)", () => {
+  const resets = "2026-12-01T00:00:00Z"
+
+  test("limits session/weekly windows win; legacy fills only the gaps", () => {
+    const { windows, models } = toClaudeUsage({
+      limits: [{ kind: "session", percent: 20, resets_at: resets }],
+      five_hour: { utilization: 40, resets_at: resets },
+      seven_day: { utilization: 50, resets_at: resets },
+    })
+    expect(windows["5h"]?.usedPercent).toBe(20)
+    expect(windows["7d"]?.usedPercent).toBe(50)
+    expect(models).toEqual({})
+  })
+
+  test("a scoped-only limits list still surfaces the legacy windows", () => {
+    const { windows, models } = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resets, scope: { model: { display_name: "Claude Sonnet" } } },
+      ],
+      five_hour: { utilization: 40, resets_at: resets },
+      seven_day: { utilization: 50, resets_at: resets },
+    })
+    expect(windows["5h"]?.usedPercent).toBe(40)
+    expect(windows["7d"]?.usedPercent).toBe(50)
+    expect(models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+  })
+
+  test("legacy-only and empty payloads keep their shapes", () => {
+    const legacy = toClaudeUsage({ five_hour: { utilization: 10, resets_at: resets } })
+    expect(legacy.windows["5h"]?.usedPercent).toBe(10)
+    expect(legacy.windows["7d"]).toBeUndefined()
+    expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
+    expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
+  })
+})
+
+describe("opendesign coding-plan windows (#1750)", () => {
+  test("maps known durations to percent-used windows, string numbers included", () => {
+    const windows = parseCodingPlanWindows({
+      windows: [
+        { durationSeconds: 18000, limitCredits: 100, remainingCredits: 25 },
+        { durationSeconds: "604800", limitCredits: "50", remainingCredits: "50" },
+      ],
+    })
+    expect(windows?.["5h"]?.usedPercent).toBe(75)
+    expect(windows?.["5h"]?.valueLabel).toBe("25 / 100 credits")
+    expect(windows?.["5h"]?.windowSeconds).toBe(18000)
+    expect(windows?.["7d"]?.usedPercent).toBe(0)
+  })
+
+  test("a zero-limit entry publishes no window", () => {
+    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    const windows = parseCodingPlanWindows({
+      windows: [
+        { durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 },
+        { durationSeconds: 604800, limitCredits: 10, remainingCredits: 5 },
+      ],
+    })
+    expect(windows?.["5h"]).toBeUndefined()
+    expect(windows?.["7d"]?.usedPercent).toBe(50)
+  })
+
+  test("duplicate durations keep the first entry; unknown durations and bad shapes map to null", () => {
+    const windows = parseCodingPlanWindows({
+      windows: [
+        { durationSeconds: 18000, limitCredits: 100, remainingCredits: 25 },
+        { durationSeconds: 18000, limitCredits: 100, remainingCredits: 0 },
+      ],
+    })
+    expect(windows?.["5h"]?.usedPercent).toBe(75)
+    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+    expect(parseCodingPlanWindows({})).toBeNull()
+    expect(parseCodingPlanWindows({ windows: "nope" })).toBeNull()
+    expect(parseCodingPlanWindows(null)).toBeNull()
+  })
+})
+
+describe("opendesign credential normalization (#1750)", () => {
+  test("a bare token is prefixed with the session-cookie name; a full cookie passes through", () => {
+    expect(normalizeOpenDesignCredential({ cookie: "abc123", workspaceId: "ws1" })).toEqual({
+      cookie: "better-auth.session_token=abc123",
+      workspaceId: "ws1",
+    })
+    expect(normalizeOpenDesignCredential({ cookie: "better-auth.session_token=xyz", workspaceId: "ws1" })).toEqual({
+      cookie: "better-auth.session_token=xyz",
+      workspaceId: "ws1",
+    })
+  })
+
+  test("missing, empty, or newline-carrying credentials map to null", () => {
+    expect(normalizeOpenDesignCredential({ cookie: "abc123" })).toBeNull()
+    expect(normalizeOpenDesignCredential({ workspaceId: "ws1" })).toBeNull()
+    expect(normalizeOpenDesignCredential({ cookie: "", workspaceId: "ws1" })).toBeNull()
+    expect(normalizeOpenDesignCredential({ cookie: "a\nb", workspaceId: "ws1" })).toBeNull()
+    expect(normalizeOpenDesignCredential(null)).toBeNull()
   })
 })
