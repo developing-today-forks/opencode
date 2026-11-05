@@ -88,7 +88,15 @@ export const parseCodingPlanWindows = (payload: JsonValue): Record<string, Quota
     const limit = toNumber(record.limitCredits)
     const remaining = toNumber(record.remainingCredits)
     if (limit === null || remaining === null) continue
-    const usedPercent = limit > 0 ? Math.min(100, Math.max(0, (1 - remaining / limit) * 100)) : null
+    // A zero (or negative) limit is no plan window at all (#1750): it
+    // used to publish a label-only window (usedPercent null, "0 / 0
+    // credits") that reads as quota headroom where there is no plan.
+    if (limit <= 0) continue
+    // Duplicate durations: the first entry wins (#1750). The later
+    // entry used to silently overwrite it; contradictory duplicates
+    // are a payload anomaly, not an update.
+    if (label in windows) continue
+    const usedPercent = Math.min(100, Math.max(0, (1 - remaining / limit) * 100))
     windows[label] = toUsageWindow({
       usedPercent,
       windowSeconds: duration,
