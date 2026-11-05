@@ -11,8 +11,11 @@
  * site invents its own answer. The blessed direction is the #993
  * primitives (pageLimit and friends) or an explicit local disposition.
  * This gate scans every production `src` tree under packages/ and
- * services/, matching check-bounded-http's explicit root inventory,
- * with the sweep patterns —
+ * services/, and (since #1517) every script tree (root `script/`, each
+ * package script/scripts tree — including nested package trees such as
+ * `packages/console/app/script` and `packages/plugins/figma/script` —
+ * and `services/www/script`), matching check-bounded-http's explicit
+ * root inventory, with the sweep patterns —
  *   P-A: a `Number(` call. The pattern is deliberately line-shaped and
  *        word-bounded: `Number.isFinite(` / `Number.isNaN(` are
  *        internal arithmetic predicates, not conversions, and do not
@@ -34,6 +37,14 @@
  *
  * Comment-only lines are skipped: a comment mentioning `Number(` is
  * documentation, not a call site.
+ *
+ * Scope note (#1517, mirroring bounded-http #1394): the script trees
+ * are in scope. They are operator-run local/CI tooling, but they run
+ * the release, publish, and CI paths, and bare conversions there
+ * escaped precisely because this gate did not scan them. This gate's
+ * own checker and tests self-match (pattern literals, fixtures);
+ * those hits are dispositioned in the allowlist as fixtures, not
+ * hidden.
  *
  * Usage:
  *   bun run script/check-numeric-boundaries.ts   # exit 1 listing unlisted/stale hits
@@ -80,6 +91,38 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
+  // Script trees (#1517, mirroring bounded-http #1394, nested trees
+  // #1425): root script/, every packages/*/script and
+  // packages/*/scripts — at any nesting depth (console/app,
+  // plugins/figma) — and services/*/script where present. main()
+  // fails when a package script tree exists on disk but is not
+  // listed here (scriptTreesOnDisk), so this list cannot drift again.
+  "script",
+  "packages/ai/script",
+  "packages/client/script",
+  "packages/cli/script",
+  "packages/codemode/script",
+  "packages/console/app/script",
+  "packages/containers/script",
+  "packages/core/script",
+  "packages/desktop/scripts",
+  "packages/http-recorder/script",
+  "packages/merman/script",
+  "packages/plugin/script",
+  "packages/plugin-browser/script",
+  "packages/plugin-github/script",
+  "packages/plugins/figma/script",
+  "packages/posts/script",
+  "packages/protocol/script",
+  "packages/schema/script",
+  "packages/sdk/script",
+  "packages/server/script",
+  "packages/session-ui/script",
+  "packages/simulation/script",
+  "packages/theme/script",
+  "packages/ui/script",
+  "packages/util/script",
+  "services/www/script",
 ]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"
@@ -101,7 +144,10 @@ export const GATE = {
   remediation: "Convert it through the shared primitives (packages/core/src/util/number.ts, #993), or add its disposition to",
   summary: (count: number, rootCount: number, allowlist: string) =>
     `All ${count} numeric-boundary candidates in ${rootCount} scan roots are dispositioned in ${allowlist}.`,
-  treeChecks: [{ kind: "src", gateFile: "script/check-numeric-boundaries.ts" }],
+  treeChecks: [
+    { kind: "script", gateFile: "script/check-numeric-boundaries.ts" },
+    { kind: "src", gateFile: "script/check-numeric-boundaries.ts" },
+  ],
 } as const
 
 export const NumericBoundaries = { GATE, PATTERNS } as const
@@ -119,6 +165,9 @@ export function collect(root: string, dir: string, hits: Hit[]) {
 export const srcTreesOnDisk = gateHarness.srcTreesOnDisk
 export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
   gateHarness.unscannedSrcTrees(root, roots)
+export const scriptTreesOnDisk = gateHarness.scriptTreesOnDisk
+export const unscannedScriptTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
+  gateHarness.unscannedScriptTrees(root, roots)
 
 async function main() {
   const root = join(import.meta.dir, "..")
