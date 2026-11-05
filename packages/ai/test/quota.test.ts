@@ -3,6 +3,12 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
+import {
+  parseConsoleBillingBalance,
+  parseConsoleGoUsage,
+  parseOpenCodeGoUsage,
+} from "../src/quota/providers/opencode-go.js"
+import { resolveResetAt } from "../src/quota/providers/openrouter.js"
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from
@@ -132,5 +138,112 @@ describe("groq reset duration parsing", () => {
     expect(parseGroqResetSeconds("14h12m")).toBe(14 * 3600 + 12 * 60)
     expect(parseGroqResetSeconds(null)).toBeNull()
     expect(parseGroqResetSeconds("soon")).toBeNull()
+  })
+})
+
+describe("OpenCode Go API-key usage mapping", () => {
+  test("maps rolling, weekly, and monthly usage payloads to quota windows", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 37.5, resetsAt: "2026-11-05T12:00:00Z" },
+        weekly: { percent: 62, resetsAt: "2026-11-09T00:00:00Z" },
+        monthly: { percent: 105, resetsAt: "2026-12-01T00:00:00Z" },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(37.5)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBe(62)
+    expect(mapped.weekly?.resetAt).toBe(Date.parse("2026-11-09T00:00:00Z"))
+    expect(mapped.monthly?.usedPercent).toBe(100)
+  })
+
+  test("keeps present windows with nulls when payload fields are missing", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 20 },
+        weekly: { resetsAt: "2026-11-09T00:00:00Z" },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(20)
+    expect(mapped["5h"]?.resetAt).toBeNull()
+    expect(mapped.weekly?.usedPercent).toBeNull()
+    expect(mapped.weekly?.resetAt).toBe(Date.parse("2026-11-09T00:00:00Z"))
+    expect(parseOpenCodeGoUsage({})).toEqual({})
+  })
+})
+
+describe("OpenCode Console Go usage mapping", () => {
+  test("derives quota percentages from Console meter payloads", () => {
+    const mapped = parseConsoleGoUsage({
+      product: "go-plus",
+      access: {
+        meters: {
+          fiveHour: {
+            limitMicroCents: 50_000_000,
+            usedMicroCents: 12_500_000,
+            resetsAt: "2026-11-05T12:00:00Z",
+          },
+          week: {
+            limitMicroCents: 150_000_000,
+            usedMicroCents: 100_000_000,
+            resetsAt: "2026-11-09T00:00:00Z",
+          },
+          month: {
+            limitMicroCents: 100_000_000,
+            usedMicroCents: 0,
+            resetsAt: "2026-12-01T00:00:00Z",
+          },
+        },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(25)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBeCloseTo((100_000_000 / 150_000_000) * 100, 6)
+    expect(mapped.monthly?.usedPercent).toBe(0)
+  })
+
+  test("returns no windows for missing or incomplete meter payloads", () => {
+    expect(parseConsoleGoUsage({})).toEqual({})
+    expect(
+      parseConsoleGoUsage({
+        access: { meters: { fiveHour: { limitMicroCents: 100_000_000, usedMicroCents: 20_000_000 } } },
+      }),
+    ).toEqual({})
+  })
+})
+
+describe("OpenCode Console billing balance mapping", () => {
+  test("converts available micro-cents to dollars", () => {
+    expect(parseConsoleBillingBalance({ availableMicroCents: 123_456_789 })).toBe(1.23456789)
+  })
+
+  test("maps missing and negative balances to null", () => {
+    expect(parseConsoleBillingBalance({})).toBeNull()
+    expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
+    expect(parseConsoleBillingBalance(null)).toBeNull()
+  })
+})
+
+describe("OpenRouter calendar reset calculation", () => {
+  test("daily reset is the next UTC midnight across the year boundary", () => {
+    expect(resolveResetAt("daily", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("weekly reset is the next Monday UTC, including across week and year boundaries", () => {
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 27, 23, 59, 59))).toBe(Date.UTC(2026, 11, 28))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 4))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 28))).toBe(Date.UTC(2027, 0, 4))
+  })
+
+  test("monthly reset is the first UTC day of the next month and year", () => {
+    expect(resolveResetAt("monthly", Date.UTC(2026, 10, 30, 23, 59, 59))).toBe(Date.UTC(2026, 11, 1))
+    expect(resolveResetAt("monthly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("unknown reset periods have no calendar reset", () => {
+    expect(resolveResetAt("quarterly", Date.UTC(2026, 11, 31))).toBeNull()
   })
 })
