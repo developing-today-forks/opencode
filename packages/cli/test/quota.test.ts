@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
-import type { QuotaResult } from "@opencode/ai/quota"
+import { collectNamedQuotaGroups, quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
+import type { QuotaContext, QuotaResult } from "@opencode/ai/quota"
 
 const window = (usedPercent: number | null, valueLabel?: string) => ({
   usedPercent,
@@ -61,5 +61,48 @@ describe("quota human rendering", () => {
     const rendered = renderQuotaResults([errorResult])
     expect(rendered).toContain("Meta Model API (meta): Subscription quota exhausted")
     expect(rendered).not.toContain("% used")
+  })
+})
+
+describe("quota named-provider collection (#1734)", () => {
+  const ctx: QuotaContext = {
+    credentials: [],
+    disabledProviders: new Set<string>(),
+    instances: new Map(),
+    providerConfig: {},
+  }
+
+  const fetchStub = (calls: string[]) => async (_ctx: QuotaContext, providerId: string): Promise<QuotaResult[]> => {
+    calls.push(providerId)
+    return [providerId === "mistral" ? okResult : errorResult]
+  }
+
+  test("a mixed invocation keeps every resolvable group and reports the unknown name", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["mistral", "bogus", "meta"], fetchStub(calls))
+    // The unknown name is reported, not fatal: names after it are still fetched.
+    expect(unknown).toEqual(["bogus"])
+    expect(calls).toEqual(["mistral", "meta"])
+    expect(groups.map((group) => group.providerId)).toEqual(["mistral", "meta"])
+    // The resolvable rows are what the handler renders on stdout.
+    const rendered = renderQuotaResults(groups.flatMap((group) => group.results))
+    expect(rendered).toContain("Mistral AI (mistral)")
+    expect(rendered).toContain("Meta Model API (meta): Subscription quota exhausted")
+  })
+
+  test("an only-unknown invocation collects every unknown name and no groups", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["bogus", "also-bogus"], fetchStub(calls))
+    expect(unknown).toEqual(["bogus", "also-bogus"])
+    expect(groups).toEqual([])
+    expect(calls).toEqual([])
+  })
+
+  test("all-valid names are fetched once each, in request order, however they are spelled", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["meta", "mistral", "Mistral AI"], fetchStub(calls))
+    expect(unknown).toEqual([])
+    expect(calls).toEqual(["meta", "mistral"])
+    expect(groups.map((group) => group.providerId)).toEqual(["meta", "mistral"])
   })
 })
