@@ -152,6 +152,14 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run lint:effect-patterns
 
+      - name: Test gate harness
+        # script/ is not a workspace, so turbo test never picks up
+        # script/gate-harness.test.ts, and the root bunfig test root
+        # deliberately blocks running tests from the repo root (#1611).
+        # Run the file explicitly from its own directory instead.
+        working-directory: script
+        run: bun test gate-harness.test.ts
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root
