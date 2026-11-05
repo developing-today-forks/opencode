@@ -110,7 +110,11 @@ const withPresetDefaults = (input: Config, modelID: string): Config => {
   return {
     ...input,
     generation: {
-      ...(defaults.temperature === undefined ? {} : { temperature: defaults.temperature }),
+      // Mistral rejects temperature and top_p together, so caller topP
+      // suppresses this preset-only temperature default.
+      ...(defaults.temperature === undefined || input.generation?.topP !== undefined
+        ? {}
+        : { temperature: defaults.temperature }),
       ...input.generation,
     },
     providerOptions: {
