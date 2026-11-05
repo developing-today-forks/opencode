@@ -126,6 +126,36 @@ describe("turso org usage mapping", () => {
     expect(tursoWindows({}, {})).toBeNull()
     expect(tursoWindows(null, null)).toBeNull()
   })
+
+  test("over-limit usage publishes windows above 100 percent (code#6227)", () => {
+    // The 2026-11-05 live shape: storage and rows-read over their
+    // Starter limits vanished from the quota row because the mapper
+    // dropped pct > 100 windows, so the over-limit state read as
+    // recovered.
+    const mapped = tursoWindows(
+      {
+        organization: {
+          usage: {
+            rows_read: 821_437_321,
+            rows_written: 1_672_071,
+            storage_bytes: 7_358_009_000,
+            bytes_synced: 0,
+            databases: 44,
+          },
+        },
+      },
+      {
+        plan: "starter",
+        current_billing_period_start: "2026-11-01T00:00:00Z",
+        current_billing_period_end: "2026-12-01T00:00:00Z",
+      },
+    )
+    expect(mapped?.windows.storage?.usedPercent).toBe(147.16)
+    expect(mapped?.windows.storage?.valueLabel).toBe("7.358009 GB / 5 GB")
+    expect(mapped?.windows["rows-read"]?.usedPercent).toBe(164.287)
+    expect(mapped?.windows.databases?.usedPercent).toBe(44)
+    expect(mapped?.windows.sync?.usedPercent).toBe(0)
+  })
 })
 
 describe("groq reset duration parsing", () => {
