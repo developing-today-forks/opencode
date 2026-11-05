@@ -30,6 +30,11 @@ describe("parseAuthFile — the CLI's ~/.commandcode/auth.json shape", () => {
     expect(parseAuthFile("{}")).toBeUndefined()
     expect(parseAuthFile(JSON.stringify({ apiKey: "" }))).toBeUndefined()
   })
+
+  test("a whitespace-only apiKey reads as no credential, and a padded key is trimmed (#1763)", () => {
+    expect(parseAuthFile(JSON.stringify({ apiKey: "   " }))).toBeUndefined()
+    expect(parseAuthFile(authFile("  user_paddedkey  "))).toBe("user_paddedkey")
+  })
 })
 
 describe("resolveApiKey — env first, then the CLI's login file", () => {
@@ -62,6 +67,19 @@ describe("resolveApiKey — env first, then the CLI's login file", () => {
 
   test("nothing anywhere resolves to undefined", async () => {
     await expect(resolveApiKey({ env: {}, readFile: () => undefined })).resolves.toBeUndefined()
+  })
+
+  test("a whitespace-only env var does not shadow the login file (#1763)", async () => {
+    const sources: CredentialSources = {
+      env: { COMMAND_CODE_API_KEY: "   " },
+      readFile: () => authFile("user_filekey"),
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("user_filekey")
+  })
+
+  test("a padded env value resolves to the trimmed key (#1763)", async () => {
+    const sources: CredentialSources = { env: { COMMAND_CODE_API_KEY: "  user_envkey  " }, readFile: () => undefined }
+    await expect(resolveApiKey(sources)).resolves.toBe("user_envkey")
   })
 })
 

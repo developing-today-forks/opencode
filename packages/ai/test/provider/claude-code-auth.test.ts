@@ -34,6 +34,11 @@ describe("parseCredentialsFile — the CLI's ~/.claude/.credentials.json shape",
     expect(parseCredentialsFile(JSON.stringify({ claudeAiOauth: { accessToken: "" } }))).toBeUndefined()
     expect(parseCredentialsFile(JSON.stringify({ other: {} }))).toBeUndefined()
   })
+
+  test("a whitespace-only access token reads as no credential, and a padded token is trimmed (#1763)", () => {
+    expect(parseCredentialsFile(blob("   "))).toBeUndefined()
+    expect(parseCredentialsFile(blob("  tok-padded  "))).toMatchObject({ accessToken: "tok-padded" })
+  })
 })
 
 describe("resolveCredential — credentials file first, env second", () => {
@@ -69,6 +74,20 @@ describe("resolveCredential — credentials file first, env second", () => {
 
   test("nothing anywhere resolves to undefined", async () => {
     await expect(resolveCredential({ env: {}, readFile: () => undefined })).resolves.toBeUndefined()
+  })
+
+  test("a whitespace-only file token falls through to the env token (#1763)", async () => {
+    const sources: CredentialSources = {
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-env" },
+      readFile: () => blob("   "),
+    }
+    await expect(resolveCredential(sources)).resolves.toEqual({ accessToken: "tok-env", source: "environment" })
+  })
+
+  test("a whitespace-only env token resolves to undefined (#1763)", async () => {
+    await expect(
+      resolveCredential({ env: { CLAUDE_CODE_OAUTH_TOKEN: "   " }, readFile: () => undefined }),
+    ).resolves.toBeUndefined()
   })
 })
 
