@@ -169,40 +169,41 @@ export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; mode
   const models: Record<string, { windows: WindowMap }> = {}
 
   const limits = Array.isArray(payload.limits) ? payload.limits : []
-  if (limits.length > 0) {
-    for (const entry of limits) {
-      const limit = asObject(entry)
-      if (!limit) continue
-      const percent = clampPercent(toNumber(limit.percent))
-      const resetAt = toTimestamp(limit.resets_at)
-      const modelName = asNonEmptyString(asObject(asObject(limit.scope)?.model)?.display_name)
-      if (limit.kind === "session") {
-        addWindow(windows, SESSION_WINDOW, { percent, resetAt, windowSeconds: SESSION_WINDOW_SECONDS })
-      } else if (limit.kind === "weekly_all") {
-        addWindow(windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
-      } else if (limit.kind === "weekly_scoped" && modelName) {
-        const modelWindows: WindowMap = {}
-        addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
-        if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
-      }
+  for (const entry of limits) {
+    const limit = asObject(entry)
+    if (!limit) continue
+    const percent = clampPercent(toNumber(limit.percent))
+    const resetAt = toTimestamp(limit.resets_at)
+    const modelName = asNonEmptyString(asObject(asObject(limit.scope)?.model)?.display_name)
+    if (limit.kind === "session") {
+      addWindow(windows, SESSION_WINDOW, { percent, resetAt, windowSeconds: SESSION_WINDOW_SECONDS })
+    } else if (limit.kind === "weekly_all") {
+      addWindow(windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
+    } else if (limit.kind === "weekly_scoped" && modelName) {
+      const modelWindows: WindowMap = {}
+      addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
+      if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
     }
-  } else {
-    const fiveHour = asObject(payload.five_hour)
-    const sevenDay = asObject(payload.seven_day)
-    if (fiveHour) {
-      addWindow(windows, SESSION_WINDOW, {
-        percent: clampPercent(toNumber(fiveHour.utilization)),
-        resetAt: toTimestamp(fiveHour.resets_at),
-        windowSeconds: SESSION_WINDOW_SECONDS,
-      })
-    }
-    if (sevenDay) {
-      addWindow(windows, WEEKLY_WINDOW, {
-        percent: clampPercent(toNumber(sevenDay.utilization)),
-        resetAt: toTimestamp(sevenDay.resets_at),
-        windowSeconds: WEEKLY_WINDOW_SECONDS,
-      })
-    }
+  }
+
+  // Some API payloads include scoped/unknown limits alongside the legacy
+  // account-wide windows. Keep those legacy windows when limits did not
+  // provide the corresponding account-wide value.
+  const fiveHour = asObject(payload.five_hour)
+  const sevenDay = asObject(payload.seven_day)
+  if (fiveHour && !windows[SESSION_WINDOW]) {
+    addWindow(windows, SESSION_WINDOW, {
+      percent: clampPercent(toNumber(fiveHour.utilization)),
+      resetAt: toTimestamp(fiveHour.resets_at),
+      windowSeconds: SESSION_WINDOW_SECONDS,
+    })
+  }
+  if (sevenDay && !windows[WEEKLY_WINDOW]) {
+    addWindow(windows, WEEKLY_WINDOW, {
+      percent: clampPercent(toNumber(sevenDay.utilization)),
+      resetAt: toTimestamp(sevenDay.resets_at),
+      windowSeconds: WEEKLY_WINDOW_SECONDS,
+    })
   }
 
   const spend = asObject(payload.spend)

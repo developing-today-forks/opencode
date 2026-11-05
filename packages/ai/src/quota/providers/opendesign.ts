@@ -87,8 +87,8 @@ export const parseCodingPlanWindows = (payload: JsonValue): Record<string, Quota
     if (!label) continue
     const limit = toNumber(record.limitCredits)
     const remaining = toNumber(record.remainingCredits)
-    if (limit === null || remaining === null) continue
-    const usedPercent = limit > 0 ? Math.min(100, Math.max(0, (1 - remaining / limit) * 100)) : null
+    if (limit === null || limit <= 0 || remaining === null) continue
+    const usedPercent = Math.min(100, Math.max(0, (1 - remaining / limit) * 100))
     windows[label] = toUsageWindow({
       usedPercent,
       windowSeconds: duration,

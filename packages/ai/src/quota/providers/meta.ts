@@ -108,8 +108,8 @@ export const parseSubscriptionQuota = (
 }
 
 export const parseBillingBanner = (payload: JsonValue): number | null => {
-  const minor = asObject(payload)?.remaining_minor_units
-  if (typeof minor !== "number" || !Number.isFinite(minor) || minor < 0) return null
+  const minor = toNumber(asObject(payload)?.remaining_minor_units)
+  if (minor === null || minor < 0) return null
   if (asObject(payload)?.currency !== "USD") return null
   return minor / 100
 }
