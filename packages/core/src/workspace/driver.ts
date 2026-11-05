@@ -48,6 +48,18 @@ export interface Interface {
     readonly saveBinding: (binding: Binding) => Effect.Effect<void>
   }) => Effect.Effect<void, Error>
   /**
+   * Create a provider-owned safety snapshot without opening a workspace connection, then prune
+   * this workspace's snapshots older than `retentionMs` relative to `now`. Core schedules
+   * successful rotations 23 hours apart, retries failures after a bounded delay, and supplies a
+   * fixed seven-day retention window.
+   */
+  readonly snapshot?: (input: {
+    readonly workspaceID: Workspace.ID
+    readonly binding: Binding
+    readonly now: number
+    readonly retentionMs: number
+  }) => Effect.Effect<void, Error>
+  /**
    * Release the provider resource for this workspace.
    *
    * `binding` is null when none was persisted: the workspace was never
