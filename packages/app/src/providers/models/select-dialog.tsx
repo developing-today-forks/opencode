@@ -22,7 +22,7 @@ import { decode64 } from "@/runtime/persistence/base64"
 import { handleDocumentSearchKeydown } from "@/shell/commands/search-keydown"
 import { createMenuDismissController } from "@/shell/commands/menu-dismiss"
 import { createEventListener } from "@solid-primitives/event-listener"
-import { isExactModelName, matchesModelSearch } from "./search"
+import { isExactModelName, isWildcardSearch, matchesModelSearch, matchesWildcardSearch } from "./search"
 import { SettingsList } from "@/settings/list"
 import {
   CONSOLE_GROUP_KEY,
@@ -476,7 +476,8 @@ function createModelSelectorController(input: {
       const query = search.trim()
 
       // Hidden models (#230) are absent from the picker unless the search is
-      // the model's exact full name; every other model keeps fuzzy matching.
+      // the model's exact full name or a matching wildcard pattern; every
+      // other model keeps fuzzy matching (or the same wildcard rule).
       const filtered = query
         ? catalogModels().filter((item) =>
             item.hidden
@@ -485,9 +486,22 @@ function createModelSelectorController(input: {
                   item.id,
                   `${item.provider.id}/${item.id}`,
                   `${item.provider.name}/${item.name}`,
+                ]) ||
+                matchesWildcardSearch(query, [
+                  item.name,
+                  item.id,
+                  `${item.provider.id}/${item.id}`,
+                  `${item.provider.name}/${item.name}`,
                 ])
               : model.visible({ modelID: item.id, providerID: item.provider.id }) &&
-                matchesModelSearch(query, [item.name, item.id, item.provider.name]),
+                (isWildcardSearch(query)
+                  ? matchesWildcardSearch(query, [
+                      item.name,
+                      item.id,
+                      `${item.provider.id}/${item.id}`,
+                      `${item.provider.name}/${item.name}`,
+                    ])
+                  : matchesModelSearch(query, [item.name, item.id, item.provider.name])),
           )
         : allModels().filter((item) => !item.hidden)
 
