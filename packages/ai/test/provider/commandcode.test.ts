@@ -352,6 +352,36 @@ it.effect(
     }),
 )
 
+it.effect("Command Code stream: wire reasoningTokens and provider totalTokens reach Usage", () =>
+  Effect.gen(function* () {
+    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "text-delta", text: "ok" },
+            {
+              type: "finish",
+              finishReason: "stop",
+              totalUsage: {
+                inputTokens: 100,
+                outputTokens: 50,
+                totalTokens: 999,
+                reasoningTokens: 20,
+                inputTokenDetails: { cacheReadTokens: 10, cacheWriteTokens: 5 },
+              },
+            },
+          ),
+        ),
+      ),
+    )
+    expect(response.usage?.reasoningTokens).toBe(20)
+    expect(response.usage?.visibleOutputTokens).toBe(30)
+    // The provider total is the source of truth when present (shared.ts
+    // totalTokens policy) — 999, not the 100+50 computed sum.
+    expect(response.usage?.totalTokens).toBe(999)
+  }),
+)
+
 it.effect("Command Code stream: an in-stream error event fails with the upstream message", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
