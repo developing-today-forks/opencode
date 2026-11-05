@@ -72,7 +72,14 @@ export const tursoWindows = (
   const push = (name: string, rawUsed: number | null, limit: number, valueLabel: string): void => {
     if (rawUsed === null) return
     const pct = (rawUsed / limit) * 100
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return
+    // Over-100 is a real state, not bad data (code#6227): these are
+    // usage-vs-limit ratios over counts, and an org over its Starter
+    // limits must publish that fact — dropping the window erased the
+    // over-limit storage / rows-read state from the live quota row
+    // (2026-11-05: storage ~147%, rows-read ~165% vanished while the
+    // under-limit windows survived). Only non-finite / negative
+    // ratios are unusable.
+    if (!Number.isFinite(pct) || pct < 0) return
     windows[name] = toUsageWindow({
       usedPercent: pct3(rawUsed, limit),
       windowSeconds,
