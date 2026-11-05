@@ -652,6 +652,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/alibaba/chat": alibabaChat,
   "@opencode/ai/providers/baseten": basetenChat,
   "@opencode/ai/providers/cerebras": openaiChat,
+  "@opencode/ai/providers/commandcode": openaiChat,
   "@opencode/ai/providers/cloudflare-workers-ai": workersAIChat,
   "@opencode/ai/providers/cohere/chat": openaiChat,
   "@opencode/ai/providers/deepinfra": deepinfraChat,
@@ -675,6 +676,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/zai-coding-plan/chat": zaiChat,
 
   "@opencode/ai/providers/anthropic": anthropicMessages,
+  "@opencode/ai/providers/claude-code": anthropicMessages,
   "@opencode/ai/providers/anthropic-compatible": anthropicMessages,
   "@opencode/ai/providers/amazon-bedrock/mantle/messages": anthropicMessages,
   "@opencode/ai/providers/google-vertex/messages": anthropicMessages,
