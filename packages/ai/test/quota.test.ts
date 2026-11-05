@@ -6,6 +6,7 @@ import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
 import { toNumber } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
@@ -360,5 +361,108 @@ describe("opendesign credential normalization (#1750)", () => {
     expect(normalizeOpenDesignCredential({ cookie: "", workspaceId: "ws1" })).toBeNull()
     expect(normalizeOpenDesignCredential({ cookie: "a\nb", workspaceId: "ws1" })).toBeNull()
     expect(normalizeOpenDesignCredential(null)).toBeNull()
+  })
+})
+
+describe("codex quota window mapping (#1762)", () => {
+  // Drive the real provider against a mocked wham/usage response.
+  const fetchWith = (payload: unknown) =>
+    codexProvider.fetchQuota({
+      credentials: [
+        {
+          id: "row-1",
+          integrationID: "openai",
+          active: true,
+          value: { type: "oauth", access: "tok-fixture", refresh: "fixture", expires: 4_102_444_800_000 },
+        },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  const reset = 1893456000
+
+  test("distinct durations keep the plain 5h/weekly keys", async () => {
+    const result = await fetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows["5h"]?.resetAt).toBe(reset * 1000)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(80)
+  })
+
+  test("missing durations collide on tokens and both windows survive qualified", async () => {
+    const result = await fetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, reset_at: reset },
+        secondary_window: { used_percent: 80, reset_at: reset },
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.tokens).toBeUndefined()
+    expect(result.usage?.windows["tokens-primary"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows["tokens-secondary"]?.usedPercent).toBe(80)
+  })
+
+  test("equal durations qualify both keys instead of overwriting", async () => {
+    const result = await fetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 18000, reset_at: reset },
+      },
+    })
+    expect(result.usage?.windows["5h"]).toBeUndefined()
+    expect(result.usage?.windows["5h-primary"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows["5h-secondary"]?.usedPercent).toBe(80)
+  })
+
+  test("an empty window object mints no phantom window", async () => {
+    const result = await fetchWith({
+      rate_limit: {
+        primary_window: {},
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["weekly"])
+  })
+
+  test("a window with duration/reset but no used_percent is dropped", async () => {
+    const result = await fetchWith({
+      rate_limit: {
+        primary_window: { limit_window_seconds: 18000, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(result.usage?.windows["5h"]).toBeUndefined()
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(80)
+  })
+
+  test("no usable data at all is the sibling no-data contract, not ok:true", async () => {
+    const empty = await fetchWith({ rate_limit: {} })
+    expect(empty.ok).toBe(false)
+    expect(empty.configured).toBe(true)
+    expect(empty.error).toBe("No quota data in response")
+    expect(empty.usage).toBeNull()
+
+    const percentless = await fetchWith({
+      rate_limit: { primary_window: { limit_window_seconds: 18000, reset_at: reset } },
+    })
+    expect(percentless.ok).toBe(false)
+    expect(percentless.error).toBe("No quota data in response")
+  })
+
+  test("credits data alone still counts as usable data", async () => {
+    const result = await fetchWith({ rate_limit: {}, credits: { balance: 12.5, unlimited: false } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("12.5")
   })
 })
