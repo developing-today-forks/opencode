@@ -50,7 +50,13 @@
  * Bare dev shells on NixOS need LD_LIBRARY_PATH with the gcc-lib and
  * zlib store paths (the same paths ~/local-embed/run.sh carries);
  * the packaged server provides them: nix/opencode.nix puts
- * stdenv.cc.cc.lib and zlib on the wrapper's LD_LIBRARY_PATH (Linux).
+ * stdenv.cc.cc.lib and zlib on the wrapper's LD_LIBRARY_PATH (Linux),
+ * and also ships libonnxruntime.so.1 itself (copied out of
+ * onnxruntime-node, whose binding dlopens it) under lib/onnxruntime
+ * on the same path. sharp, which transformers imports statically but
+ * only calls for image inputs, is stubbed out of the compiled binary
+ * (packages/cli/script/build.ts) — its binding cannot be located
+ * from inside $bunfs, and text embeddings never reach it.
  *
  * Node bundle (packages/cli/vite.node.config.ts, #1615): the native
  * bindings cannot be inlined there — onnxruntime-node's loader
