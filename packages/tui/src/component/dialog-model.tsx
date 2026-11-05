@@ -10,6 +10,7 @@ import { useData } from "../context/data"
 import { modelPreferenceKey } from "../model-preference"
 import { useLocation } from "../context/location"
 import { useNewDesigns } from "../config"
+import { isWildcardSearch, matchesWildcardSearch } from "./model-search"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
@@ -70,19 +71,20 @@ export function DialogModel(props: { providerID?: string }) {
         .filter((model) => model.status !== "deprecated")
         .filter((model) => (props.providerID ? model.providerID === props.providerID : true))
         // Hidden models (#230) are absent from the picker unless the search is
-        // the model's exact full name; favorites/recents above are explicit
-        // user choices and keep working either way.
+        // the model's exact full name or a matching wildcard pattern;
+        // favorites/recents above are explicit user choices and keep working.
         .filter((model) => {
           if (!model.hidden) return true
           const search = needle.toLowerCase()
           if (!search) return false
           const provider = providers().get(model.providerID)
-          return [
-            model.name.toLowerCase(),
-            String(model.id).toLowerCase(),
-            `${model.providerID}/${model.id}`.toLowerCase(),
-            `${provider?.name ?? model.providerID}/${model.name}`.toLowerCase(),
-          ].includes(search)
+          const values = [
+            model.name,
+            String(model.id),
+            `${model.providerID}/${model.id}`,
+            `${provider?.name ?? model.providerID}/${model.name}`,
+          ]
+          return values.map((value) => value.toLowerCase()).includes(search) || matchesWildcardSearch(needle, values)
         })
         .map((model) => {
           const provider = providers().get(model.providerID)
@@ -125,15 +127,16 @@ export function DialogModel(props: { providerID?: string }) {
     )
 
     if (needle) {
-      return prioritizeFavorites(
-        sortModelOptions(
-          fuzzysort
+      // Wildcard searches (#230) match with the shared glob rule instead of
+      // fuzzysort, so app and TUI pickers return the same results.
+      const matched = isWildcardSearch(needle)
+        ? modelOptions.filter((option) =>
+            matchesWildcardSearch(needle, [option.title, option.reference, option.qualifiedName]),
+          )
+        : fuzzysort
             .go(needle, modelOptions, { keys: ["title", "category", "reference", "qualifiedName"] })
-            .map((item) => item.obj),
-          false,
-        ),
-        favoritePriority,
-      )
+            .map((item) => item.obj)
+      return prioritizeFavorites(sortModelOptions(matched, false), favoritePriority)
     }
 
     return [...favoriteOptions, ...recentOptions, ...modelOptions]
