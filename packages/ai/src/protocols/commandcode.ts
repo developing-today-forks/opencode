@@ -218,6 +218,8 @@ const WireUsage = Schema.StructWithRest(
   Schema.Struct({
     inputTokens: optionalNull(Schema.Number),
     outputTokens: optionalNull(Schema.Number),
+    totalTokens: optionalNull(Schema.Number),
+    reasoningTokens: optionalNull(Schema.Number),
     inputTokenDetails: Schema.optional(WireUsageDetails),
   }),
   [Schema.Record(Schema.String, Schema.Unknown)],
@@ -436,7 +438,8 @@ const mapUsage = (usage: typeof WireUsage.Type | undefined, metadataKey: string)
     nonCachedInputTokens: ProviderShared.subtractTokens(inputTokens, cacheRead),
     cacheReadInputTokens: cacheRead,
     cacheWriteInputTokens: cacheWrite,
-    totalTokens: ProviderShared.totalTokens(inputTokens, outputTokens, undefined),
+    reasoningTokens: usage.reasoningTokens ?? undefined,
+    totalTokens: ProviderShared.totalTokens(inputTokens, outputTokens, usage.totalTokens ?? undefined),
     providerMetadata: { [metadataKey]: { ...usage } } as ProviderMetadata,
   })
 }
