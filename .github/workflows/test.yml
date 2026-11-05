@@ -196,8 +196,8 @@ jobs:
         run: bun test check-proto-reads.test.ts
 
       - name: Check prototype-chain reads are dispositioned
-        # Every P-A/P-C sweep hit in packages/core/src, packages/ai/src and
-        # packages/plugin-github/src
+        # Every P-A/P-C sweep hit in every package-owned src tree
+        # (packages/*/src incl. console/stats subtrees, services/*/src)
         # must be guarded by ownValue/ownOr or listed with a disposition
         # in the allowlist, or
         # the prototype-chain class regrows one bare read at a time (#865).
@@ -246,6 +246,17 @@ jobs:
         # workflow policies stay convention only (#1406).
         if: runner.os == 'Linux'
         run: bun run check:workflows
+
+      - name: Test gate wiring meta-check
+        # script/ is not a workspace; run the fixtures from its directory.
+        working-directory: script
+        run: bun test check-gates.test.ts
+
+      - name: Check gate registry and wiring
+        # Every promised gate must be registered, invoked by its owning
+        # workflow, and reachable for at least one declared trigger (#1527).
+        if: runner.os == 'Linux'
+        run: bun run check:gates
 
       - name: Configure git identity
         run: |
@@ -524,7 +535,18 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: developing-today/code/.github/actions/pm-dispatch-ci-fix@main
+      # This wrapper loads pm-dispatch-task from .pm-central, which in turn
+      # loads its sibling actions there. A remote action download can fail in
+      # `_staging` before the continue-on-error step is reached.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - uses: ./.pm-central/.github/actions/pm-dispatch-ci-fix
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

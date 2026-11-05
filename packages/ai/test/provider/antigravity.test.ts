@@ -336,6 +336,77 @@ it.effect("convertSchema expands multi-valued type unions into branches (#1556)"
   }),
 )
 
+it.effect("convertSchema encodes boolean false as { not: {} } instead of inverting it (#1573)", () =>
+  Effect.sync(() => {
+    // Property, items/prefixItems, and branch positions: false is never,
+    // true stays unconstrained {}.
+    expect(
+      convertSchema({ type: "object", properties: { never: false, any: true } } as never),
+    ).toEqual({ type: "OBJECT", properties: { never: { not: {} }, any: {} } })
+    expect(convertSchema({ type: "array", items: false } as never)).toEqual({ type: "ARRAY", items: { not: {} } })
+    expect(convertSchema({ type: "array", items: true } as never)).toEqual({ type: "ARRAY", items: {} })
+    expect(convertSchema({ type: "array", prefixItems: [false, { type: "string" }] } as never)).toEqual({
+      type: "ARRAY",
+      items: {},
+      prefixItems: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ anyOf: [false, { type: "string" }] } as never)).toEqual({
+      anyOf: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ anyOf: [false, { type: "string" }] } as never, true)).toEqual({
+      oneOf: [{ not: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema({ oneOf: [true] } as never)).toEqual({ oneOf: [{}] })
+    // (An allOf-only root is self-describing and takes no root OBJECT
+    // default — #1667; see the root-composition test below.)
+    expect(convertSchema({ allOf: [false] } as never)).toEqual({ allOf: [{ not: {} }] })
+    // Root positions: false is { not: {} } with no forced OBJECT; true
+    // keeps the historical { type: "OBJECT" }.
+    expect(convertSchema(false as never)).toEqual({ not: {} })
+    expect(convertSchema(true as never)).toEqual({ type: "OBJECT" })
+    // Under `not` itself the booleans flip meaning: not:false is
+    // unconstrained (key omitted), not:true is never.
+    expect(convertSchema({ type: "string", not: false } as never)).toEqual({ type: "STRING" })
+    expect(convertSchema({ type: "string", not: true } as never)).toEqual({ type: "STRING", not: {} })
+    // (A not-only root likewise takes no forced OBJECT — #1667.)
+    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" } })
+  }),
+)
+
+it.effect("convertSchema leaves allOf/not-only roots self-describing (#1667)", () =>
+  Effect.sync(() => {
+    // An allOf root composes its branches: forcing type OBJECT onto a
+    // string branch makes the conjunction unsatisfiable, and onto an
+    // object branch it is at best redundant. Either way no OBJECT is
+    // added, for Gemini and Anthropic targets alike.
+    expect(convertSchema({ allOf: [{ type: "string", minLength: 2 }] } as never)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+    })
+    expect(convertSchema({ allOf: [{ type: "string", minLength: 2 }] } as never, true)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+    })
+    expect(
+      convertSchema({ allOf: [{ type: "object", properties: { a: { type: "string" } } }] } as never),
+    ).toEqual({ allOf: [{ type: "OBJECT", properties: { a: { type: "STRING" } } }] })
+    // A not-only root negates against every type: "not a string" must
+    // not be narrowed to objects only by a forced OBJECT.
+    expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" } })
+    expect(convertSchema({ not: { type: "string" } } as never, true)).toEqual({
+      not: { type: "STRING" },
+    })
+    // Plain roots keep the OBJECT default byte-identically.
+    expect(convertSchema({} as never)).toEqual({ type: "OBJECT" })
+    expect(convertSchema({ properties: { a: { type: "string" } } } as never)).toEqual({
+      type: "OBJECT",
+      properties: { a: { type: "STRING" } },
+    })
+    expect(convertSchema({ description: "a thing" } as never)).toEqual({
+      type: "OBJECT",
+      description: "a thing",
+    })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(

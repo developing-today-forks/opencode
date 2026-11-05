@@ -541,3 +541,85 @@ it.effect("surfaces wake failures during file overrides as Environment.Failed", 
     )
   }),
 )
+
+const seedRow = (id: Workspace.ID, binding: WorkspaceDriver.Binding | null, lastUsedAt: number) =>
+  Database.Service.use(({ db }) =>
+    db
+      .insert(WorkspaceTable)
+      .values({ id, provider: "fake", binding, created_at: lastUsedAt, last_used_at: lastUsedAt })
+      .run(),
+  ).pipe(Effect.orDie)
+
+it.effect("suspends a stale persisted bound workspace at boot without any connect", () =>
+  Effect.gen(function* () {
+    const stale = Workspace.ID.create()
+    const unbound = Workspace.ID.create()
+    yield* seedRow(stale, { workspaceID: stale, generation: 0 }, -10 * 60 * 1000)
+    yield* seedRow(unbound, null, -10 * 60 * 1000)
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(calls).toEqual([{ operation: "suspendForIdle", binding: { workspaceID: stale, generation: 0 } }])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, stale)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: stale, generation: 1, suspended: true })
+    const untouched = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, unbound)).get(),
+    ).pipe(Effect.orDie)
+    expect(untouched?.binding).toBeNull()
+
+    // The same idle episode is not suspended again on the next poll pass.
+    yield* TestClock.adjust("1 minute")
+    expect(calls.map((call) => call.operation)).toEqual(["suspendForIdle"])
+  }),
+)
+
+it.effect("leaves a fresh persisted bound workspace alone at boot", () =>
+  Effect.gen(function* () {
+    const fresh = Workspace.ID.create()
+    yield* seedRow(fresh, { workspaceID: fresh, generation: 0 }, 0)
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(calls).toEqual([])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, fresh)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: fresh, generation: 0 })
+  }),
+)
+
+it.effect("does not suspend a persisted workspace whose connect races the boot scan", () =>
+  Effect.gen(function* () {
+    const raced = Workspace.ID.create()
+    yield* seedRow(raced, { workspaceID: raced, generation: 0 }, -10 * 60 * 1000)
+
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    connectDriver = () =>
+      Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(memory))
+
+    const workspace = yield* Workspace.Service
+    const environment = yield* workspace.connect(raced)
+    const spawned = yield* Effect.scoped(environment.spawner.spawn(ChildProcess.make("race"))).pipe(
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    // The connect now holds the per-workspace lock inside open().
+    yield* Deferred.await(started)
+
+    const adjusting = yield* TestClock.adjust("1 minute").pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Effect.yieldNow
+    expect(calls.map((call) => call.operation)).toEqual(["connect"])
+
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.await(spawned)
+    yield* Fiber.await(adjusting)
+
+    expect(calls.map((call) => call.operation)).toEqual(["connect"])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, raced)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: raced, generation: 0 })
+  }),
+)

@@ -45,6 +45,38 @@ describe("sourceViolations", () => {
     expect(sourceViolations(".github/workflows/example.yml", compliant)).toEqual([])
   })
 
+  test("flags remote developing-today/code action uses", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      compliant.replace("run: echo ok", "uses: developing-today/code/.github/actions/pm-dispatch-queue@main"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["no-remote-code-actions"])
+    expect(violations[0].detail).toContain("pm-dispatch-queue@main")
+  })
+
+  test("allows local .pm-central action uses", () => {
+    expect(
+      sourceViolations(
+        ".github/workflows/example.yml",
+        compliant.replace("run: echo ok", "uses: ./.pm-central/.github/actions/pm-dispatch-queue"),
+      ),
+    ).toEqual([])
+  })
+
+  test("flags remote action uses on reusable-workflow caller jobs too", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      [
+        "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
+        "jobs:",
+        "  scheduled:",
+        "    uses: developing-today/code/.github/actions/pm-dispatch-task@main",
+      ].join("\n"),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["no-remote-code-actions"])
+  })
+
   test("flags a pull_request trigger (map form)", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",

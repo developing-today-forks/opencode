@@ -135,6 +135,15 @@ const loadModel = (snapshotDir: string, onnxFile: string): Promise<LoadedModel> 
     }
   })()
   loadedModels.set(key, pending)
+  // A failed load must not brick the backend for the process lifetime
+  // (#1567): evict the entry when the load rejects, so the next call
+  // retries against the (possibly fixed) snapshot. Successful loads keep
+  // the shared/cached behavior; the rejection still reaches every caller
+  // holding `pending`, and this handler only keeps that rejection from
+  // surfacing as unhandled on the eviction branch.
+  pending.catch(() => {
+    if (loadedModels.get(key) === pending) loadedModels.delete(key)
+  })
   return pending
 }
 
@@ -178,6 +187,22 @@ export const embedNative = async (input: NativeEmbedInput): Promise<NativeEmbedR
     }),
   )
   const data = await model.run(ids, mask, input.inputs.length, width)
+
+  // The graph's output width is the registration's claim, and until now
+  // nothing checked the tensor against it (#1583): slicing by
+  // nativeDimensions with a wider graph hands each input the tail of
+  // its neighbour's vector, and a narrower one is silently zero-padded
+  // by truncateVector — while every returned vector still has the
+  // registered length, so the caller's length check passes. Reject
+  // loudly, like every other invariant in this module.
+  const expected = input.inputs.length * input.nativeDimensions
+  if (data.length !== expected)
+    throw new Error(
+      `native embeddings model at ${snapshotDir} produced ${data.length} sentence_embedding values for ` +
+        `${input.inputs.length} input(s) (${input.inputs.length ? data.length / input.inputs.length : 0} per input); ` +
+        `the registration declares ${input.nativeDimensions} per input (${expected} total) — ` +
+        `the snapshot and the registration disagree`,
+    )
 
   const dimensions = input.dimensions ?? input.nativeDimensions
   const vectors = idsList.map((_, rowIndex) => {

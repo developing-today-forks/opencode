@@ -1,20 +1,28 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync, readFileSync, readdirSync } from "node:fs"
-import { homedir } from "node:os"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import { EMBEDDING_MODELS, Embeddings, type EmbeddingModel } from "@opencode/core/embeddings"
+import { embedNative } from "@opencode/core/embeddings-native"
 import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { testEffect } from "./lib/effect"
 
-// ---------------------------------------------------------- step 2 stays additive
+// ---------------------------------------------------------- step 3 flip
 //
 // The native in-process backend (#1554) registers behind the same
-// EMBEDDING_MODELS registry, but flipping a registration is step 3:
-// in this step the shipped registration still names no backend,
-// which the service reads as the HTTP sidecar default.
-test("the registered Snowflake model still defaults to the HTTP backend", () => {
-  expect(EMBEDDING_MODELS[0]?.backend).toBeUndefined()
+// EMBEDDING_MODELS registry; step 3 flipped the shipped registration
+// to it: the default backend is now native-onnx, with snapshot
+// resolution via LOCAL_EMBED_SNAPSHOT / the HF cache default. The
+// HTTP registration data stays intact for step 4 (sidecar retirement).
+test("the registered Snowflake model defaults to the native-onnx backend", () => {
+  expect(EMBEDDING_MODELS[0]?.backend).toEqual({
+    kind: "native-onnx",
+    snapshotEnv: "LOCAL_EMBED_SNAPSHOT",
+    snapshotDir:
+      "~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-m-v2.0/snapshots/95c2741480856aa9666782eb4afe11959938017f",
+    maxTokens: 8192,
+  })
   expect(EMBEDDING_MODELS[0]?.baseURL).toBe("http://127.0.0.1:18752/v1")
 })
 
@@ -146,4 +154,27 @@ describeNative("native in-process embeddings backend (#1554 step 2)", () => {
       }),
     NATIVE_TIMEOUT,
   )
+})
+
+// ---------------------------------------------------------- load-failure eviction (#1567)
+//
+// Model-free: a failed first load (here: an empty snapshot dir) must not
+// be cached forever. After the snapshot is fixed, a retry must re-attempt
+// the load and fail at the NEXT missing piece — never replay the stale
+// first error.
+describe("native load failure eviction (#1567)", () => {
+  test("a failed first load is evicted: fixing the snapshot lets a retry advance", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "embeddings-native-load-"))
+    const backend = { kind: "native-onnx", snapshotDir: dir, maxTokens: 8192 } as const
+
+    await expect(embedNative({ backend, inputs: ["hello"], nativeDimensions: 768 })).rejects.toThrow(
+      "no tokenizer.json",
+    )
+
+    writeFileSync(path.join(dir, "tokenizer.json"), "{}")
+
+    await expect(embedNative({ backend, inputs: ["hello"], nativeDimensions: 768 })).rejects.toThrow(
+      "no ONNX graph",
+    )
+  })
 })

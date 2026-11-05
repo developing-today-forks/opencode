@@ -1084,7 +1084,7 @@ function formatProvider(provider: string) {
     zhipuai: "Zhipu",
   }
   const normalized = provider.toLowerCase().replace(/[^a-z0-9]/g, "")
-  return known[normalized] ?? provider.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return (Object.hasOwn(known, normalized) ? known[normalized] : undefined) ?? provider.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 function resolveModelName(modelParam: string, rows: StatMetricRow[], providerParam?: string) {
@@ -1139,7 +1139,7 @@ function providerSlug(value: string) {
     qwen: "qwen",
     zhipuai: "zhipu",
   }
-  return aliases[slug] ?? slug
+  return (Object.hasOwn(aliases, slug) ? aliases[slug] : undefined) ?? slug
 }
 
 function costPerMillion(costMicrocents: number, tokens: number) {

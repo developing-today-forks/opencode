@@ -1,35 +1,6 @@
-import { afterAll, expect, mock, test } from "bun:test"
+import { afterAll, expect, test } from "bun:test"
 
-// The Resource module is an SST link snapshot whose contents are frozen process-wide
-// on first access, so env-based fixtures depend on which test file runs first. Mock
-// the module instead: these tests only need the handful of values below.
-mock.module("@opencode/console-resource", () => {
-  const fixtures: Record<string, unknown> = {
-    AWS_SES_ACCESS_KEY_ID: { value: "local-test-access-key" },
-    AWS_SES_SECRET_ACCESS_KEY: { value: "local-test-secret-key" },
-    ENTERPRISE_SALES_INBOX_EMAIL: { value: "sales@example.test" },
-    EMAILOCTOPUS_API_KEY: { value: "local-test-octopus-key" },
-  }
-  // mock.module is process-wide in Bun and restoring fetch in afterAll does not
-  // undo it: if this file runs before salesforce.test.ts in the same process,
-  // that suite would otherwise see a Resource with no Salesforce entries and
-  // throw before reaching its local server. Fall back to the SST env snapshot
-  // (SST_RESOURCE_<name>, parsed at access time, like the real module) for any
-  // property this file does not fixture, so other suites keep working.
-  const Resource = new Proxy(fixtures, {
-    get(target, prop: string) {
-      if (prop in target) return target[prop as keyof typeof target]
-      const raw = process.env[`SST_RESOURCE_${String(prop)}`]
-      if (!raw) return undefined
-      try {
-        return JSON.parse(raw)
-      } catch {
-        return undefined
-      }
-    },
-  })
-  return { Resource, waitUntil: (promise: Promise<unknown>) => promise }
-})
+// @opencode/console-resource is provided by the shared preload fixture (test/preload.ts, #1522).
 
 const originalFetch = globalThis.fetch
 const seen: { url: string; method: string; body: string; signal: AbortSignal | null }[] = []

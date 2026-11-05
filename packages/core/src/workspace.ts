@@ -86,6 +86,10 @@ const layer = (options: Options) =>
       const registry = yield* WorkspaceDriver.RegistryService
       const lifetime = yield* Scope.Scope
       const connections = new Map<ID, Connection>()
+      // Workspaces already driven through suspendForIdle with no live connection
+      // (boot reconciliation or the poll path) — never suspend the same idle
+      // episode twice in one process. Cleared when a connection opens.
+      const suspendedPersisted = new Set<ID>()
       // Destroy cancels the racing provision body by settling the deferred.
       const attempts = new Map<ID, Deferred.Deferred<Info, ReadinessError>>()
       const locks = KeyedMutex.makeUnsafe<ID>()
@@ -179,6 +183,7 @@ const layer = (options: Options) =>
           scope,
         }
         connections.set(workspaceID, connection)
+        suspendedPersisted.delete(workspaceID)
         yield* db
           .update(WorkspaceTable)
           .set({ last_used_at: now })
@@ -214,9 +219,46 @@ const layer = (options: Options) =>
                   .run()
                   .pipe(Effect.orDie)
                 connections.delete(workspaceID)
+                suspendedPersisted.add(workspaceID)
                 yield* Scope.close(connection.scope, Exit.void)
               }).pipe(Effect.catchCause((cause) => Effect.logError("workspace idle suspension failed", cause))),
             ),
+          { concurrency: "unbounded", discard: true },
+        )
+        // Boot reconciliation: the loop above only sees live connections, which
+        // is empty at process start, so persisted bound rows orphaned by a
+        // restart are reconciled here — on the first (boot) pass and every
+        // poll pass after it. Race safety: reconciliation takes the same
+        // per-workspace lock as connect/open and re-checks inside it, so a
+        // racing connect either completed first (live connection present or
+        // last_used_at fresh — skip) or waits on the lock and then wakes
+        // cleanly from the post-suspend binding, the deliberate racing-spawn
+        // semantics documented in the poll path. Unbound rows are untouched.
+        const rows = yield* db.select().from(WorkspaceTable).all().pipe(Effect.orDie)
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            Effect.suspend(() => {
+              if (!row.binding || connections.has(row.id) || suspendedPersisted.has(row.id)) return Effect.void
+              if (now - row.last_used_at < idleThreshold) return Effect.void
+              return locks.withLock(row.id)(
+                Effect.gen(function* () {
+                  if (connections.has(row.id) || suspendedPersisted.has(row.id)) return
+                  const fresh = yield* find(row.id)
+                  if (!fresh?.binding) return
+                  if (now - fresh.last_used_at < idleThreshold) return
+                  const driver = yield* registry.get(fresh.provider)
+                  yield* driver.suspendForIdle({
+                    workspaceID: row.id,
+                    binding: fresh.binding,
+                    saveBinding: (binding) => saveBinding(row.id, binding),
+                  })
+                  suspendedPersisted.add(row.id)
+                }).pipe(
+                  Effect.catchCause((cause) => Effect.logError("workspace boot idle suspension failed", cause)),
+                ),
+              )
+            }),
           { concurrency: "unbounded", discard: true },
         )
       }).pipe(Effect.repeat(Schedule.spaced(options.pollInterval ?? Duration.minutes(1))), Effect.forkScoped)
@@ -355,7 +397,7 @@ const layer = (options: Options) =>
 
 export const node = configured()
 
-// TODO(workspace-plan): add the boot janitor and ~23h safety snapshot rotation in a later PR.
+// TODO(workspace-plan): add the ~23h safety snapshot rotation tracked in #1624 in a later PR (the boot janitor landed with #1622).
 // TODO(workspace-plan): make cold wake interruptible with a re-pin loop against janitor races.
 // TODO(workspace-plan): consider extracting a keyed shared-attempt helper (join/cancel, drop-on-settle) beside
 // KeyedMutex at end-of-series consolidation; filesystem/search.ts and session/run-coordinator.ts hand-roll the same

@@ -174,7 +174,7 @@ export function formatCatalogLabName(lab: string) {
     zhipu: "Zhipu",
     zhipuai: "Zhipu",
   }
-  return known[catalogSlug(lab)] ?? lab.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return (Object.hasOwn(known, catalogSlug(lab)) ? known[catalogSlug(lab)] : undefined) ?? lab.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 export function isProviderlessLab(lab: string | undefined) {
@@ -480,7 +480,7 @@ function catalogLabSlug(value: string) {
     zhipu: "zhipuai",
     zai: "zhipuai",
   }
-  return aliases[slug] ?? slug
+  return (Object.hasOwn(aliases, slug) ? aliases[slug] : undefined) ?? slug
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

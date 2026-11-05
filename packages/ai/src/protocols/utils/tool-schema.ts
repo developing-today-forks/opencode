@@ -24,10 +24,16 @@ const moonshotNode = (schema: unknown): unknown => {
   if (!isRecord(schema)) return schema
   if (typeof schema.$ref === "string") return { $ref: schema.$ref }
   const type = schema.type === undefined && Array.isArray(schema.enum) ? enumType(schema.enum) : undefined
+  // With both present (the 2020-12 tuple form), the prefix positions fold
+  // together with the trailing `items` schema into one anyOf (#1574);
+  // dropping the prefix would let `items` contradict position 0.
+  const prefixItems =
+    Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0 ? schema.prefixItems : undefined
   return Object.fromEntries([
     ...(type === undefined ? [] : [["type", type]]),
     ...Object.entries(schema).flatMap(([key, value]) => {
       if (key === "items" && Array.isArray(value)) return [[key, tupleItemsSchema(value)]]
+      if (key === "items" && prefixItems) return [[key, tupleItemsSchema([...prefixItems, value])]]
       if (key === "prefixItems") {
         if ("items" in schema) return []
         return [["items", tupleItemsSchema(Array.isArray(value) ? value : [])]]

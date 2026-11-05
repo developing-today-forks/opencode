@@ -45,9 +45,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The pm-dispatch actions are used from a local checkout, not as
+      # remote action references: the
+      # runner's action-download staging for that repo fails in
+      # "Set up job" ("Could not find file .../_staging/code-<sha>/archive",
+      # #1519 -- runs 41629732319, 41797627927, 41824863958 all died
+      # before any step ran), so this workflow never started. A plain
+      # checkout does not go through that staging path. This mirrors
+      # the .pm-central pattern in developing-today/code's own
+      # pm-dispatch-smoke workflow.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
       - name: Run upstream sync agent via pm-dispatch
         id: sync
-        uses: developing-today/code/.github/actions/pm-dispatch-start@main
+        uses: ./.pm-central/.github/actions/pm-dispatch-start
         with:
           title: "Daily upstream sync"
           prompt: >-
@@ -108,7 +125,7 @@ jobs:
       - name: Queue the sync failure via pm-dispatch
         id: dispatch-failure
         if: failure()
-        uses: developing-today/code/.github/actions/pm-dispatch-queue@main
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
         with:
           title: "chore(deps): automated upstream sync failing"
           prompt: >-
