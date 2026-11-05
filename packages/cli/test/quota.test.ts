@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { readConfigFacts, quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
-import type { QuotaResult } from "@opencode/ai/quota"
+import { collectNamedQuotaGroups, readConfigFacts, quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
+import type { QuotaContext, QuotaResult } from "@opencode/ai/quota"
 
 const window = (usedPercent: number | null, valueLabel?: string) => ({
   usedPercent,
@@ -67,6 +67,48 @@ describe("quota human rendering", () => {
   })
 })
 
+describe("quota named-provider collection (#1734)", () => {
+  const ctx: QuotaContext = {
+    credentials: [],
+    disabledProviders: new Set<string>(),
+    instances: new Map(),
+    providerConfig: {},
+  }
+
+  const fetchStub = (calls: string[]) => async (_ctx: QuotaContext, providerId: string): Promise<QuotaResult[]> => {
+    calls.push(providerId)
+    return [providerId === "mistral" ? okResult : errorResult]
+  }
+
+  test("a mixed invocation keeps every resolvable group and reports the unknown name", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["mistral", "bogus", "meta"], fetchStub(calls))
+    // The unknown name is reported, not fatal: names after it are still fetched.
+    expect(unknown).toEqual(["bogus"])
+    expect(calls).toEqual(["mistral", "meta"])
+    expect(groups.map((group) => group.providerId)).toEqual(["mistral", "meta"])
+    // The resolvable rows are what the handler renders on stdout.
+    const rendered = renderQuotaResults(groups.flatMap((group) => group.results))
+    expect(rendered).toContain("Mistral AI (mistral)")
+    expect(rendered).toContain("Meta Model API (meta): Subscription quota exhausted")
+  })
+
+  test("an only-unknown invocation collects every unknown name and no groups", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["bogus", "also-bogus"], fetchStub(calls))
+    expect(unknown).toEqual(["bogus", "also-bogus"])
+    expect(groups).toEqual([])
+    expect(calls).toEqual([])
+  })
+
+  test("all-valid names are fetched once each, in request order, however they are spelled", async () => {
+    const calls: string[] = []
+    const { groups, unknown } = await collectNamedQuotaGroups(ctx, ["meta", "mistral", "Mistral AI"], fetchStub(calls))
+    expect(unknown).toEqual([])
+    expect(calls).toEqual(["meta", "mistral"])
+    expect(groups.map((group) => group.providerId)).toEqual(["meta", "mistral"])
+  })
+})
 describe("quota config facts discovery (#1733)", () => {
   const makeTree = () => {
     const root = mkdtempSync(join(tmpdir(), "quota-config-facts-"))
