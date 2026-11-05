@@ -357,6 +357,21 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         json: Flag.Boolean("json").pipe(Flag.withDescription("Output statistics as JSON"), Flag.withDefault(false)),
       },
     }),
+    Spec.make("quota", {
+      description: "Show provider quota usage",
+      params: {
+        ...ServerParams,
+        providers: Argument.String("provider").pipe(
+          Argument.withDescription("Provider id, name, or alias (repeat for multiple)"),
+          Argument.variadic({ min: 0 }),
+        ),
+        json: Flag.Boolean("json").pipe(Flag.withDescription("Output quota as JSON"), Flag.withDefault(false)),
+        all: Flag.Boolean("all").pipe(
+          Flag.withDescription("Include providers turned off in config (disabled_providers)"),
+          Flag.withDefault(false),
+        ),
+      },
+    }),
     Spec.make("mini", {
       description: "Start the minimal interactive interface",
       params: {
