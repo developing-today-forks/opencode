@@ -54,8 +54,11 @@ export const parseOpenCodeGoUsage = (payload: unknown): WindowMap => {
     if (!entry) continue
     const usedPercent = toNumber(entry.percent)
     const resetAt = toTimestamp(entry.resetsAt)
-    if (usedPercent === null || resetAt === null) continue
-    windows[key] = toUsageWindow({ usedPercent: clampPercent(usedPercent), resetAt, windowSeconds: null })
+    windows[key] = toUsageWindow({
+      usedPercent: usedPercent === null ? null : clampPercent(usedPercent),
+      resetAt,
+      windowSeconds: null,
+    })
   }
   return windows
 }
