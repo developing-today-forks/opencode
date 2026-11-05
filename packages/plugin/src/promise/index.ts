@@ -1,3 +1,4 @@
+export { tool, type ToolDefinition } from "./tool-helper.js"
 export type { PluginOptions } from "../options.js"
 export type { StorageEntry, StorageScanOptions, StorageScanResult } from "../storage.js"
 export * as Plugin from "./plugin.js"

@@ -526,6 +526,7 @@
         "@opencode/schema": "workspace:*",
         "@opencode/util": "workspace:*",
         "effect": "catalog:",
+        "zod": "catalog:",
       },
       "devDependencies": {
         "@opencode/theme": "workspace:*",

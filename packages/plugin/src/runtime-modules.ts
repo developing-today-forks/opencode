@@ -61,10 +61,19 @@ export function discoverPluginRuntimeSpecifiers(
       }
     }
   }
+  // v1 custom tools import `tool()` from "@opencode-ai/plugin" (#1703). Alias
+  // that legacy specifier to the host's compatibility helper so existing
+  // `.opencode/tool/*.ts` files load unchanged, with no per-project install.
+  // This must live in discovery: the CLI build replaces loadRuntimeModules
+  // with a generated map keyed by exactly these specifiers.
+  const helper = entries.get("@opencode/plugin/tool-helper")
+  if (helper) entries.set("@opencode-ai/plugin", helper)
   return entries
 }
 
 export function pluginRuntimeLoaderCode(specifier: string, entries: ReadonlyMap<string, string>) {
+  // The legacy alias loads through its canonical specifier (see discovery).
+  if (specifier === "@opencode-ai/plugin") return pluginRuntimeLoaderCode("@opencode/plugin/tool-helper", entries)
   if (specifier.startsWith("effect/")) {
     const slash = specifier.lastIndexOf("/")
     const parent = specifier.slice(0, slash)
