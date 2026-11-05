@@ -126,6 +126,41 @@ it.effect("resolveModelAndEffort ports the door's suffix + effort rules", () =>
     expect(resolveModelAndEffort("gemini-4-argon", "xhigh").fullName).toBe("gemini-4-argon-high")
     expect(resolveModelAndEffort("claude-opus-5-5-low", "high").fullName).toBe("claude-opus-5-5-high")
     expect(resolveModelAndEffort("gpt-oss-120b", "bogus").fullName).toBe("gpt-oss-120b-medium")
+    // Wire-complete ids (fetchAvailableModels catalog, probed live
+    // 2026-11-05): the bare id IS the wire id — an appended effort
+    // suffix is a nonexistent entity and upstream answers 404
+    // NOT_FOUND. The effort survives for thinkingLevel only.
+    expect(resolveModelAndEffort("gemini-2.5-flash")).toEqual({
+      base: "gemini-2.5-flash",
+      effort: "medium",
+      fullName: "gemini-2.5-flash",
+    })
+    expect(resolveModelAndEffort("gemini-3-flash", "high")).toEqual({
+      base: "gemini-3-flash",
+      effort: "high",
+      fullName: "gemini-3-flash",
+    })
+    // A caller spelling a wire-complete id with an effort suffix is
+    // healed back to the bare wire id.
+    expect(resolveModelAndEffort("gemini-2.5-flash-medium").fullName).toBe("gemini-2.5-flash")
+    expect(resolveModelAndEffort("gemini-3.8-flash-tiered").fullName).toBe("gemini-3.8-flash-tiered")
+    expect(resolveModelAndEffort("gemini-2.5-pro", "low").fullName).toBe("gemini-2.5-pro")
+  }),
+)
+
+it.effect("Antigravity sends wire-complete model ids bare, effort as thinkingLevel only", () =>
+  Effect.gen(function* () {
+    const bareModel = Antigravity.configure({ accessToken: "fixture-token" }).model("gemini-2.5-flash")
+    const compiled = yield* compileRequest(
+      LLM.request({ model: bareModel, prompt: "hi", providerOptions: { reasoning_effort: "high" } }),
+    )
+    const body = compiled.body as Record<string, never>
+    expect(body.model).toBe("gemini-2.5-flash")
+    const request = body.request as Record<string, never>
+    expect(request.generationConfig).toEqual({
+      maxOutputTokens: 65536,
+      thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" },
+    })
   }),
 )
 

@@ -59,6 +59,35 @@ export type ProviderOptionsInput = OptionsInput
 const EFFORTS = ["low", "medium", "high"] as const
 type Effort = (typeof EFFORTS)[number]
 
+// The upstream catalog (v1internal:fetchAvailableModels, probed live
+// 2026-11-05 on both daily-cloudcode-pa and cloudcode-pa — identical
+// 26-key catalogs) carries TWO model-id shapes:
+//   - effort families, keyed only as "<base>-<low|medium|high>"
+//     (gemini-4-argon, gemini-3.8-flash, claude-sonnet-5-5,
+//     claude-opus-5-5, gpt-oss-120b-medium): the suffix is part of the
+//     wire id and must be appended, as the door always did.
+//   - wire-complete ids, keyed bare (below): the id IS the whole wire
+//     id. Appending an effort suffix mints an entity that does not
+//     exist upstream — streamGenerateContent answers 404 NOT_FOUND
+//     ("Requested entity was not found.") for e.g.
+//     "gemini-2.5-flash-medium" / "gemini-3-flash-medium", while the
+//     bare ids answer 200 (probed live 2026-11-05). For these models
+//     the effort still drives generationConfig.thinkingLevel; it is
+//     just not part of the model id.
+// The list is the non-internal subset of the probed catalog (the
+// chat_*/tab_* completion keys are not chat models and stay unlisted).
+const WIRE_COMPLETE_MODELS = new Set([
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash-thinking",
+  "gemini-2.5-pro",
+  "gemini-3-flash",
+  "gemini-3.1-flash-image",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash-tiered",
+])
+
 export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: string) => {
   let model = String(requestedModel ?? "").trim()
   let effort = requestedEffort ? String(requestedEffort).toLowerCase() : undefined
@@ -69,7 +98,7 @@ export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: 
   }
   if (effort === "xhigh" || effort === "max") effort = "high"
   const resolved: Effort = effort !== undefined && (EFFORTS as ReadonlyArray<string>).includes(effort) ? (effort as Effort) : "medium"
-  return { base: model, effort: resolved, fullName: `${model}-${resolved}` }
+  return { base: model, effort: resolved, fullName: WIRE_COMPLETE_MODELS.has(model) ? model : `${model}-${resolved}` }
 }
 
 // =============================================================================
