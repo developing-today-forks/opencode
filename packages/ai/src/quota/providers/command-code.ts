@@ -50,9 +50,6 @@ const requestJson = async (ctx: QuotaContext, path: string, apiKey: string): Pro
 
 const formatCredits = (value: number): string => String(Math.round((value + Number.EPSILON) * 100) / 100)
 
-const toBalanceWindow = (value: number) =>
-  toUsageWindow({ usedPercent: null, windowSeconds: null, resetAt: null, valueLabel: formatCredits(value) })
-
 /** The Go plan's included monthly credits. */
 export const MONTHLY_INCLUDED_CREDITS = 10
 
@@ -75,14 +72,6 @@ export const parseCommandCodeCredits = (payload: JsonValue) => {
           ? `${formatCredits(monthlyUsed)} / ${formatCredits(MONTHLY_INCLUDED_CREDITS)} (${formatCredits(monthlyRemaining)} remaining)`
           : `${formatCredits(monthlyUsed)} / ${formatCredits(MONTHLY_INCLUDED_CREDITS)}`,
     })
-  }
-
-  for (const [label, field] of [
-    ["purchased_credits", "purchasedCredits"],
-    ["free_credits", "freeCredits"],
-  ] as const) {
-    const value = toNumber(credits?.[field])
-    if (value !== null) windows[label] = toBalanceWindow(value)
   }
 
   for (const [label, field, windowSeconds] of [
