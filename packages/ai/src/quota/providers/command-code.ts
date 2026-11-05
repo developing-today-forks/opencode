@@ -63,13 +63,17 @@ export const parseCommandCodeCredits = (payload: JsonValue) => {
   const windows: Record<string, ReturnType<typeof toUsageWindow>> = {}
 
   const monthlyRemaining = toNumber(credits?.monthlyCredits)
-  if (monthlyRemaining !== null && monthlyRemaining >= 0 && monthlyRemaining <= MONTHLY_INCLUDED_CREDITS) {
-    const monthlyUsed = MONTHLY_INCLUDED_CREDITS - monthlyRemaining
+  if (monthlyRemaining !== null && monthlyRemaining >= 0) {
+    // Over-included remaining (plan change, promo/rollover, higher tier) is a fully-unused month, not absent data: publish at 0% used with the real remaining figure in the label (#1744; cf. #1743 Turso).
+    const monthlyUsed = Math.max(0, MONTHLY_INCLUDED_CREDITS - monthlyRemaining)
     windows.monthly = toUsageWindow({
       usedPercent: Math.min(100, Math.max(0, (monthlyUsed / MONTHLY_INCLUDED_CREDITS) * 100)),
       windowSeconds: null,
       resetAt: null,
-      valueLabel: `${formatCredits(monthlyUsed)} / ${formatCredits(MONTHLY_INCLUDED_CREDITS)}`,
+      valueLabel:
+        monthlyRemaining > MONTHLY_INCLUDED_CREDITS
+          ? `${formatCredits(monthlyUsed)} / ${formatCredits(MONTHLY_INCLUDED_CREDITS)} (${formatCredits(monthlyRemaining)} remaining)`
+          : `${formatCredits(monthlyUsed)} / ${formatCredits(MONTHLY_INCLUDED_CREDITS)}`,
     })
   }
 
