@@ -25,6 +25,10 @@ export const asNonEmptyString = (value: JsonValue | undefined): string | undefin
 export const toNumber = (value: JsonValue | undefined): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string") {
+    // An empty/blank string is an absent field, not zero: Number("") === 0
+    // would mint a real 0 (a 0% window, a zero balance, a 100%-used pool
+    // computed from 0 remaining) out of no data (#1741).
+    if (value.trim() === "") return null
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : null
   }

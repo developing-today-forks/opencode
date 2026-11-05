@@ -3,6 +3,9 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
+import { toNumber } from "../src/quota/utils.js"
+import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
+import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from
@@ -132,5 +135,44 @@ describe("groq reset duration parsing", () => {
     expect(parseGroqResetSeconds("14h12m")).toBe(14 * 3600 + 12 * 60)
     expect(parseGroqResetSeconds(null)).toBeNull()
     expect(parseGroqResetSeconds("soon")).toBeNull()
+  })
+})
+
+describe("toNumber blank-string handling (#1741)", () => {
+  test("empty and whitespace-only strings are absent values, not zero", () => {
+    expect(toNumber("")).toBeNull()
+    expect(toNumber("   ")).toBeNull()
+    expect(toNumber("12")).toBe(12)
+    expect(toNumber(" 12 ")).toBe(12)
+    expect(toNumber("-3.5")).toBe(-3.5)
+    expect(toNumber("abc")).toBeNull()
+    expect(toNumber(0)).toBe(0)
+    expect(toNumber(undefined)).toBeNull()
+  })
+
+  test("an empty monthlyCredits field mints no 100%-used command-code window", () => {
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: "" } })).toEqual({})
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: " " } })).toEqual({})
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
+  })
+
+  test("an empty percent field mints no 0%-used opencode-go window", () => {
+    const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
+    expect(parseOpenCodeGoUsage(payload)).toEqual({})
+  })
+
+  test("an empty weighted-used field fails meta parseSubscriptionQuota null gate", () => {
+    const payload = {
+      subscription_quota: {
+        window_weighted_used: "",
+        window_weighted_limit: "100",
+        weekly_weighted_used: "10",
+        weekly_weighted_limit: "100",
+        window_resets_at: "1893456000",
+        weekly_resets_at: "1893456000",
+        window_duration_secs: "18000",
+      },
+    }
+    expect(parseSubscriptionQuota(payload)).toBeNull()
   })
 })

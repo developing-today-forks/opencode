@@ -70,18 +70,13 @@ export const parseSubscriptionQuota = (
 ): { tier: string | null; windows: Record<string, QuotaWindow> } | null => {
   const quota = asObject(asObject(payload)?.subscription_quota)
   if (!quota) return null
-  const num = (value: JsonValue | undefined): number | null => {
-    if (typeof value !== "string" && typeof value !== "number") return null
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  const windowUsed = num(quota.window_weighted_used)
-  const windowLimit = num(quota.window_weighted_limit)
-  const weeklyUsed = num(quota.weekly_weighted_used)
-  const weeklyLimit = num(quota.weekly_weighted_limit)
-  const windowReset = num(quota.window_resets_at)
-  const weeklyReset = num(quota.weekly_resets_at)
-  const durationSecs = num(quota.window_duration_secs)
+  const windowUsed = toNumber(quota.window_weighted_used)
+  const windowLimit = toNumber(quota.window_weighted_limit)
+  const weeklyUsed = toNumber(quota.weekly_weighted_used)
+  const weeklyLimit = toNumber(quota.weekly_weighted_limit)
+  const windowReset = toNumber(quota.window_resets_at)
+  const weeklyReset = toNumber(quota.weekly_resets_at)
+  const durationSecs = toNumber(quota.window_duration_secs)
   if (
     windowUsed === null || windowLimit === null || weeklyUsed === null || weeklyLimit === null ||
     windowReset === null || weeklyReset === null || windowLimit === 0 || weeklyLimit === 0
