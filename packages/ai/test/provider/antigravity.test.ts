@@ -473,6 +473,92 @@ it.effect("Antigravity lowers tool results as proto Structs, exactly like the do
   }),
 )
 
+it.effect("Antigravity recovers chat-carried signatures when replaying tool history after a leaf switch", () =>
+  Effect.gen(function* () {
+    const history = [
+      Message.user("Weather in Paris and Tokyo?"),
+      Message.assistant([
+        ToolCallPart.make({
+          id: "call_1",
+          name: "lookup",
+          input: { city: "Paris" },
+          providerMetadata: { openai: { extraContent: { google: { thought_signature: "sig-paris" } } } },
+        }),
+        ToolCallPart.make({
+          id: "call_2",
+          name: "lookup",
+          input: { city: "Tokyo" },
+          providerMetadata: { openai: { extraContent: { google: { thought_signature: "sig-tokyo" } } } },
+        }),
+      ]),
+      Message.tool({ id: "call_1", name: "lookup", result: "Sunny" }),
+      Message.tool({ id: "call_2", name: "lookup", result: "Rainy" }),
+      Message.user("And tomorrow?"),
+    ]
+    const compiled = yield* compileRequest(LLM.request({ model, messages: history }))
+    const contents = (compiled.body as Record<string, never>).request as Record<string, never>
+    const calls = (contents.contents as ReadonlyArray<Record<string, never>>)
+      .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
+      .filter((part) => "functionCall" in part)
+
+    expect(calls.map((part) => part.thoughtSignature)).toEqual(["sig-paris", "sig-tokyo"])
+  }),
+)
+
+it.effect("Antigravity assigns a signature or the skip sentinel to every unsigned tool call", () =>
+  Effect.gen(function* () {
+    const compiled = yield* compileRequest(
+      LLM.request({
+        model,
+        messages: [
+          Message.user("Do these things"),
+          Message.assistant([
+            ToolCallPart.make({
+              id: "call_1",
+              name: "lookup",
+              input: { city: "Paris" },
+              providerMetadata: { antigravity: { thoughtSignature: "sig-signed" } },
+            }),
+            ToolCallPart.make({ id: "call_2", name: "lookup", input: { city: "Tokyo" } }),
+            ToolCallPart.make({ id: "call_3", name: "lookup", input: { city: "Rome" } }),
+          ]),
+        ],
+      }),
+    )
+    const request = (compiled.body as Record<string, never>).request as Record<string, never>
+    const calls = (request.contents as ReadonlyArray<Record<string, never>>)
+      .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
+      .filter((part) => "functionCall" in part)
+
+    expect(calls.map((part) => part.thoughtSignature)).toEqual([
+      "sig-signed",
+      "skip_thought_signature_validator",
+      "skip_thought_signature_validator",
+    ])
+
+    const unsigned = yield* compileRequest(
+      LLM.request({
+        model,
+        messages: [
+          Message.user("Do these things"),
+          Message.assistant([
+            ToolCallPart.make({ id: "call_4", name: "lookup", input: { city: "Paris" } }),
+            ToolCallPart.make({ id: "call_5", name: "lookup", input: { city: "Tokyo" } }),
+          ]),
+        ],
+      }),
+    )
+    const unsignedRequest = (unsigned.body as Record<string, never>).request as Record<string, never>
+    const unsignedCalls = (unsignedRequest.contents as ReadonlyArray<Record<string, never>>)
+      .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
+      .filter((part) => "functionCall" in part)
+    expect(unsignedCalls.map((part) => part.thoughtSignature)).toEqual([
+      "skip_thought_signature_validator",
+      "skip_thought_signature_validator",
+    ])
+  }),
+)
+
 it.effect("Antigravity history tool calls carry their ids for Claude targets only (#1550)", () =>
   Effect.gen(function* () {
     // For Claude models the upstream's v1internal->Anthropic conversion
