@@ -1,5 +1,5 @@
 import type { QuotaContext } from "./types.js"
-import { envOf } from "./utils.js"
+import { envOf, readQuotaJson, readBoundedResponseText } from "./utils.js"
 
 /**
  * Console-session reads through the laptop browser's Chrome DevTools
@@ -43,7 +43,7 @@ export const cdpBaseOf = (ctx: QuotaContext): string => {
 const httpJson = async (url: string, init?: RequestInit): Promise<unknown> => {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) })
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  return response.json()
+  return readQuotaJson(response)
 }
 
 const connectWs = (wsUrl: string): Promise<WsClient> =>
@@ -160,8 +160,9 @@ export const cdpPageFetch = async (
           const r = await fetch(new URL(path, ${JSON.stringify(origin)}).toString(), {
             headers: { Accept: "application/json" },
             credentials: "include",
+            signal: AbortSignal.timeout(10_000),
           });
-          out[path] = { status: r.status, url: r.url, text: await r.text() };
+          out[path] = { status: r.status, url: r.url, text: await readBoundedResponseText(r) };
         } catch (e) {
           out[path] = { status: 0, url: "", text: "", error: String(e) };
         }

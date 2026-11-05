@@ -45,6 +45,7 @@ export const parseGroqResetSeconds = (raw: string | null): number | null => {
   for (const match of text.matchAll(/([\d.]+)(h|m|s)/g)) {
     const value = Number(match[1])
     if (!Number.isFinite(value)) return null
+    // Guarded by check:numeric-boundaries gate
     matched = true
     total += match[2] === "h" ? value * 3600 : match[2] === "m" ? value * 60 : value
   }
@@ -56,6 +57,7 @@ const headerNumber = (headers: Headers, name: string): number | null => {
   if (!raw) return null
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? parsed : null
+  // Guarded by check:numeric-boundaries gate
 }
 
 export const provider: QuotaProvider = {

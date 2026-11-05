@@ -154,11 +154,72 @@ export const buildResult = (input: {
  */
 export const QUOTA_RESPONSE_MAX_BYTES = 1 * 1024 * 1024
 
-export const readQuotaJson = async (response: Response): Promise<unknown> => {
-  const text = await response.text()
-  if (text.length > QUOTA_RESPONSE_MAX_BYTES) {
-    throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+/** Read up to QUOTA_RESPONSE_MAX_BYTES of a response body as text. */
+export const readBoundedResponseText = async (response: Response): Promise<string> => {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const text = await response.text()
+    if (text.length > QUOTA_RESPONSE_MAX_BYTES) {
+      throw new Error(`Response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+    }
+    return text
   }
+
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  const decoder = new TextDecoder()
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      totalBytes += value.byteLength
+      if (totalBytes > QUOTA_RESPONSE_MAX_BYTES) {
+        reader.cancel().catch(() => {})
+        throw new Error(`Response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+      }
+    }
+  } catch (err) {
+    reader.cancel().catch(() => {})
+    throw err
+  }
+
+  return decoder.decode(new Uint8Array(chunks.flatMap(c => Array.from(c))))
+}
+
+export const readQuotaJson = async (response: Response): Promise<unknown> => {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    // Fallback to text if body is already consumed or unavailable
+    const text = await response.text()
+    if (text.length > QUOTA_RESPONSE_MAX_BYTES) {
+      throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+    }
+    return JSON.parse(text.replace(/^\uFEFF/, ""))
+  }
+
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  const decoder = new TextDecoder()
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      totalBytes += value.byteLength
+      if (totalBytes > QUOTA_RESPONSE_MAX_BYTES) {
+        reader.cancel().catch(() => {})
+        throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+      }
+    }
+  } catch (err) {
+    reader.cancel().catch(() => {})
+    throw err
+  }
+
+  const text = decoder.decode(new Uint8Array(chunks.flatMap(c => Array.from(c))))
   return JSON.parse(text.replace(/^\uFEFF/, ""))
 }
 

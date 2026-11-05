@@ -188,7 +188,7 @@ export const fetchTursoQuota = async (ctx: QuotaContext): Promise<QuotaResult> =
         signal: AbortSignal.timeout(15_000),
       })
       if (!response.ok) throw new Error(`turso ${path} HTTP ${response.status}`)
-      return response.json()
+      return readQuotaJson(response)
     }
     const usage = await get("/usage")
     const subscription = await get("/subscription")
