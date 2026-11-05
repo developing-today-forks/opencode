@@ -84,6 +84,36 @@ describe("resolveCredential — credentials file first, env second", () => {
     await expect(resolveCredential(sources)).resolves.toEqual({ accessToken: "tok-env", source: "environment" })
   })
 
+  test("an expired file credential falls through to the env token (#1752)", async () => {
+    const sources: CredentialSources = {
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-env" },
+      readFile: () => blob("tok-old", 1_000),
+      now: () => 2_000,
+    }
+    await expect(resolveCredential(sources)).resolves.toEqual({ accessToken: "tok-env", source: "environment" })
+  })
+
+  test("an expired file credential with no env token is returned, so the loud failure still fires (#1752)", async () => {
+    const sources: CredentialSources = {
+      env: {},
+      readFile: () => blob("tok-old", 1_000),
+      now: () => 2_000,
+    }
+    await expect(resolveCredential(sources)).resolves.toMatchObject({
+      accessToken: "tok-old",
+      source: "credentials-file",
+    })
+  })
+
+  test("an unexpired file credential still wins over the env token (#1752)", async () => {
+    const sources: CredentialSources = {
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-env" },
+      readFile: () => blob("tok-file", 3_000),
+      now: () => 2_000,
+    }
+    await expect(resolveCredential(sources)).resolves.toMatchObject({ accessToken: "tok-file" })
+  })
+
   test("a whitespace-only env token resolves to undefined (#1763)", async () => {
     await expect(
       resolveCredential({ env: { CLAUDE_CODE_OAUTH_TOKEN: "   " }, readFile: () => undefined }),
@@ -121,6 +151,15 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
     ).catch((cause: unknown) => cause)
     expect(JSON.stringify(error)).toContain("expired")
     expect(JSON.stringify(error)).toContain("Run `claude`")
+  })
+
+  test("an expired file credential with a valid env token sends the env token (#1752)", async () => {
+    const headers = await apply({
+      readFile: () => blob("tok-old", 1_000),
+      now: () => 2_000,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-env" },
+    })
+    expect(headers.authorization).toBe("Bearer " + "tok-env")
   })
 
   test("no sign-in anywhere fails with the sign-in instructions", async () => {

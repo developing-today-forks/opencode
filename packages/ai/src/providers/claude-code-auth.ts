@@ -22,6 +22,15 @@
 //   2. environment CLAUDE_CODE_OAUTH_TOKEN (the CLI's own headless token
 //      variable; a bare token carries no expiry metadata)
 //
+// An EXPIRED credentials-file credential falls through to source 2
+// (#1752): an expired token is not a usable credential, so resolution
+// continues to the operator's explicitly-set headless env token when
+// one exists (the malformed-file fall-through is the precedent). This
+// is not a silent degradation — the env token is a credential the
+// operator deliberately configured — and when no env token exists the
+// expired file credential is still returned, so the loud expired
+// failure below fires exactly as before.
+//
 // The credential is read IN PLACE, fresh per request, never copied into
 // the fork's credential store, never written back, and never logged. This
 // provider deliberately does NOT refresh the token: the refresh token is
@@ -104,18 +113,26 @@ const defaultReadFile = async (path: string): Promise<string | undefined> => {
   }
 }
 
-/** First credential a source can produce, in the CLI's priority order. */
+/** First usable credential a source can produce, in the CLI's priority order. */
 export const resolveCredential = async (sources: CredentialSources = {}): Promise<ClaudeCodeCredential | undefined> => {
   const readFile = sources.readFile ?? defaultReadFile
   const contents = await readFile(await credentialsFilePath(sources))
-  if (contents !== undefined) {
-    const credential = parseCredentialsFile(contents)
-    if (credential !== undefined) return credential
-  }
+  const fileCredential = contents !== undefined ? parseCredentialsFile(contents) : undefined
   const env = sources.env ?? process.env
-  const token = env[OAUTH_TOKEN_ENV_VAR]?.trim()
-  if (token !== undefined && token.length > 0) return { accessToken: token, source: "environment" }
-  return undefined
+  const envToken = env[OAUTH_TOKEN_ENV_VAR]?.trim()
+  const envCredential: ClaudeCodeCredential | undefined =
+    envToken !== undefined && envToken.length > 0 ? { accessToken: envToken, source: "environment" } : undefined
+  if (fileCredential !== undefined) {
+    const now = sources.now ? sources.now() : Date.now()
+    const expired = fileCredential.expiresAt !== undefined && fileCredential.expiresAt <= now
+    // Expired-file fall-through (#1752): an expired token is not a
+    // usable credential, so the env source is consulted; with no env
+    // token, the expired credential is returned so loadCredentialEffect
+    // still fails loudly with the expired message.
+    if (!expired) return fileCredential
+    return envCredential ?? fileCredential
+  }
+  return envCredential
 }
 
 const loadCredentialEffect = (sources: CredentialSources) =>
