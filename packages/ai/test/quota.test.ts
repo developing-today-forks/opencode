@@ -7,6 +7,7 @@ import { toNumber } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
+import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
@@ -464,5 +465,71 @@ describe("codex quota window mapping (#1762)", () => {
     const result = await fetchWith({ rate_limit: {}, credits: { balance: 12.5, unlimited: false } })
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("12.5")
+  })
+})
+
+describe("cline-pass quota mapping (#1769)", () => {
+  // Drive the real provider against a stubbed usage-limits response.
+  const fetchWith = (payload: unknown) =>
+    clinePassProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "cline-pass", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  test("duplicate five_hour entries publish the first, not the last", async () => {
+    const result = await fetchWith({
+      data: {
+        limits: [
+          { type: "five_hour", percentUsed: 10, resetsAt: 1893456000 },
+          { type: "five_hour", percentUsed: 90, resetsAt: 1893456000 },
+        ],
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows["5h"]?.windowSeconds).toBe(18000)
+  })
+
+  test("duplicate weekly entries publish the first, string percents included", async () => {
+    const result = await fetchWith({
+      data: {
+        limits: [
+          { type: "weekly", percentUsed: "42" },
+          { type: "weekly", percentUsed: 7 },
+        ],
+      },
+    })
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(42)
+  })
+
+  test("distinct types publish all their windows", async () => {
+    const result = await fetchWith({
+      data: {
+        limits: [
+          { type: "five_hour", percentUsed: 10 },
+          { type: "weekly", percentUsed: 20 },
+          { type: "monthly", percentUsed: 30 },
+        ],
+      },
+    })
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(20)
+    expect(result.usage?.windows.monthly?.usedPercent).toBe(30)
+  })
+
+  test("no usable limits is the no-data contract", async () => {
+    const empty = await fetchWith({ data: { limits: [] } })
+    expect(empty.ok).toBe(false)
+    expect(empty.error).toBe("No quota data in response")
+    const unknown = await fetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error).toBe("No quota data in response")
   })
 })
