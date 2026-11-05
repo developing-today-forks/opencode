@@ -94,6 +94,27 @@ describe("stats.ts fetch deadlines and bounded JSON reads (#1337)", () => {
     expect(signal?.aborted).toBe(true)
   })
 
+  test("a stalled later releases page rejects instead of returning the accumulated first page (#1530)", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({
+      tag_name: `v${i}`,
+      name: `release ${i}`,
+      assets: [{ name: "a", download_count: 1 }],
+    }))
+    let call = 0
+    let pageTwoSignal: AbortSignal | null | undefined
+    const stall = stalledFetch((value) => {
+      pageTwoSignal = value
+    })
+    const fetchImpl: typeof fetch = async (input, init) => {
+      call++
+      if (call === 1) return jsonResponse(full)
+      return stall(input, init)
+    }
+    await expect(fetchReleases({ fetchImpl, timeouts })).rejects.toThrow()
+    expect(call).toBe(2)
+    expect(pageTwoSignal?.aborted).toBe(true)
+  })
+
   test("a stalled releases body is cancelled at its deadline", async () => {
     const fetchImpl: typeof fetch = async () => new Response(stalledBody())
     await expect(fetchReleases({ fetchImpl, timeouts })).rejects.toThrow()
