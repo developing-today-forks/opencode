@@ -1,3 +1,37 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -200,7 +200,10 @@
+       "default": {
+         "types": "./types/index.d.ts",
+         "import": "./dist/solid.js",
+-        "require": "./dist/solid.cjs"
++        "require": "./dist/solid.cjs"
++      },
++      "./jsx-dev-runtime": {
++        "default": "./dist/dev.js"
+       },
+       "./store": {
+         "worker": {
+@@ -230,7 +233,7 @@
+       "default": {
+         "types": "./types/index.d.ts",
+         "import": "./dist/server.js",
+-        "require": "./dist/server.cjs"
++        "require": "./dist/server.cjs"
+       },
+       "./jsx-runtime": {
+         "types": "./types/jsx.d.ts",
+@@ -240,7 +243,7 @@
+       "default": {
+         "types": "./types/index.d.ts",
+         "import": "./dist/solid.js",
+-        "require": "./dist/solid.cjs"
++        "require": "./dist/solid.cjs"
+       }
+     },
+     "browser": {
+
 diff --git a/dist/dev.cjs b/dist/dev.cjs
 --- a/dist/dev.cjs
 +++ b/dist/dev.cjs
@@ -90,7 +124,7 @@ diff --git a/dist/server.js b/dist/server.js
 -    for (let i = 0; i < node.cleanups.length; i++) node.cleanups[i]();
 +    const cleanups = node.cleanups;
      node.cleanups = null;
-+    for (let i = 0; i < cleanups.length; i++) cleanups[i]();
++    for (i = 0; i < cleanups.length; i++) cleanups[i]();
    }
  }
  function catchError(fn, handler) {
