@@ -186,6 +186,17 @@ describe("toNumber blank-string handling (#1741)", () => {
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
   })
 
+describe("command-code monthly over-included credits (#1744)", () => {
+  test("remaining above the included amount publishes a 0%-used monthly window", () => {
+    const windows = parseCommandCodeCredits({ credits: { monthlyCredits: 25 } })
+    expect(windows.monthly?.usedPercent).toBe(0)
+    expect(windows.monthly?.valueLabel).toContain("25")
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: 10 } }).monthly?.usedPercent).toBe(0)
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: 5 } }).monthly?.usedPercent).toBe(50)
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: 5 } }).monthly?.valueLabel).toBe("5 / 10")
+  })
+})
+
   test("an empty percent field mints no 0%-used opencode-go window", () => {
     const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
     expect(parseOpenCodeGoUsage(payload)).toEqual({})
