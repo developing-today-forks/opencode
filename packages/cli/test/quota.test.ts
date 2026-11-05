@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { readConfigFacts, quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
 import type { QuotaResult } from "@opencode/ai/quota"
 
 const window = (usedPercent: number | null, valueLabel?: string) => ({
@@ -61,5 +64,69 @@ describe("quota human rendering", () => {
     const rendered = renderQuotaResults([errorResult])
     expect(rendered).toContain("Meta Model API (meta): Subscription quota exhausted")
     expect(rendered).not.toContain("% used")
+  })
+})
+
+describe("quota config facts discovery (#1733)", () => {
+  const makeTree = () => {
+    const root = mkdtempSync(join(tmpdir(), "quota-config-facts-"))
+    const globalDir = join(root, "global")
+    const systemDir = join(root, "system")
+    const project = join(root, "project")
+    const child = join(project, "packages", "app")
+    for (const dir of [globalDir, systemDir, project, child]) mkdirSync(dir, { recursive: true })
+    return { root, globalDir, systemDir, project, child }
+  }
+
+  test("a child directory sees disabled_providers and instances defined only in a parent directory", () => {
+    const tree = makeTree()
+    try {
+      writeFileSync(
+        join(tree.project, "opencode.json"),
+        JSON.stringify({
+          disabled_providers: ["parent-disabled"],
+          provider: { myinstance: { instanceOf: "openai", name: "My Instance" } },
+        }),
+      )
+      const facts = readConfigFacts(
+        { config: tree.globalDir, data: tree.root, state: tree.root },
+        { cwd: tree.child, systemDirectory: tree.systemDir, env: {} },
+      )
+      expect(facts.disabledProviders.has("parent-disabled")).toBe(true)
+      expect(facts.instances.get("myinstance")).toEqual({ base: "openai", name: "My Instance" })
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true })
+    }
+  })
+
+  test("a disable that exists only in the system directory is reported", () => {
+    const tree = makeTree()
+    try {
+      writeFileSync(
+        join(tree.systemDir, "opencode.jsonc"),
+        JSON.stringify({ disabled_providers: ["system-disabled"] }),
+      )
+      const facts = readConfigFacts(
+        { config: tree.globalDir, data: tree.root, state: tree.root },
+        { cwd: tree.child, systemDirectory: tree.systemDir, env: {} },
+      )
+      expect(facts.disabledProviders.has("system-disabled")).toBe(true)
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true })
+    }
+  })
+
+  test("the invocation directory's own config is still read (root behavior unchanged)", () => {
+    const tree = makeTree()
+    try {
+      writeFileSync(join(tree.child, "opencode.json"), JSON.stringify({ disabled_providers: ["local"] }))
+      const facts = readConfigFacts(
+        { config: tree.globalDir, data: tree.root, state: tree.root },
+        { cwd: tree.child, systemDirectory: tree.systemDir, env: {} },
+      )
+      expect(facts.disabledProviders.has("local")).toBe(true)
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true })
+    }
   })
 })
