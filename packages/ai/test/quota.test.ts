@@ -227,6 +227,19 @@ describe("command-code monthly over-included credits (#1744)", () => {
   })
 })
 
+describe("command-code credit balances are not quota windows (#1746)", () => {
+  test("purchased-only and free-only payloads yield no windows", () => {
+    expect(parseCommandCodeCredits({ credits: { purchasedCredits: 40 } })).toEqual({})
+    expect(parseCommandCodeCredits({ credits: { freeCredits: 15 } })).toEqual({})
+  })
+
+  test("balances alongside a monthly window publish only the monthly window", () => {
+    const windows = parseCommandCodeCredits({ credits: { monthlyCredits: 5, purchasedCredits: 40, freeCredits: 15 } })
+    expect(Object.keys(windows)).toEqual(["monthly"])
+    expect(windows.monthly?.usedPercent).toBe(50)
+  })
+})
+
   test("an empty percent field mints no 0%-used opencode-go window", () => {
     const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
     expect(parseOpenCodeGoUsage(payload)).toEqual({})
