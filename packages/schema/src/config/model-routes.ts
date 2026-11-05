@@ -158,7 +158,7 @@ const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9.
 
 /** A recurring local-time window. Days and time bounds all have to match when set, so
  * `daysOfMonth: [1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month. */
-export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
+class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")({
   daysOfWeek: Schema.Array(DayOfWeek)
     .annotate({
       description: "Weekdays the window is active on. Empty or unset means every day.",
@@ -204,6 +204,15 @@ export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
     description: "Epoch milliseconds after which the window never applies.",
   }).pipe(optional),
 }) {}
+
+export const Window = WindowClass.check(
+  Schema.makeFilter((window: WindowClass) =>
+    window.from === undefined || window.until === undefined || window.from < window.until
+      ? undefined
+      : "window from must be before until",
+  ),
+).annotate({ identifier: "Config.ModelRoute.Window" })
+export type Window = WindowClass
 
 /** A schedule's window: inline, or the name of a window defined once in
  * experimental.routes.windows and reused by every rule that shares the meter's clock. */

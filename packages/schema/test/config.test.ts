@@ -202,6 +202,18 @@ describe("ConfigModelRoutes field descriptions", () => {
   })
 })
 
+describe("ConfigModelRoutes.Window bounds", () => {
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects empty or reversed epoch ranges and accepts one-sided or ordered bounds", () => {
+    expect(() => decode({ from: 2, until: 1 })).toThrow("window from must be before until")
+    expect(() => decode({ from: 1, until: 1 })).toThrow("window from must be before until")
+    expect(decode({ from: 1 })).toMatchObject({ from: 1 })
+    expect(decode({ until: 1 })).toMatchObject({ until: 1 })
+    expect(decode({ from: 1, until: 2 })).toMatchObject({ from: 1, until: 2 })
+  })
+})
+
 describe("field descriptions beyond model-routes (#650)", () => {
   // Same defect as #240, in the remaining schema files: a description annotated outside the package
   // `optional` helper never reaches the encoded JSON schema. These cases pin the fields fixed by #650.
