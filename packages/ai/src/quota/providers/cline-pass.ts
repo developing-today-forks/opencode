@@ -81,6 +81,12 @@ const fetchForKey = async (ctx: QuotaContext, apiKey: string | undefined): Promi
         asNonEmptyString(limit.percentUsed) ?? (Number.isFinite(limit.percentUsed) ? limit.percentUsed : null),
       )
       if (rawUsedPercent === null) continue
+      // Duplicate limit entries of the same type: the first entry
+      // wins (#1769) — the keep-first convention adopted for the
+      // identical shape in #1750 (opendesign coding-plan windows).
+      // Later duplicates used to silently overwrite the first report;
+      // contradictory duplicates are a payload anomaly, not an update.
+      if (kind.key in windows) continue
       windows[kind.key] = toUsageWindow({
         usedPercent: clampPercent(rawUsedPercent),
         windowSeconds: kind.windowSeconds,
