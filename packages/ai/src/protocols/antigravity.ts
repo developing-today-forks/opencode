@@ -434,8 +434,18 @@ interface ParserState {
 const providerMetadata = (key: string, metadata: Record<string, unknown>): ProviderMetadata => ({ [key]: metadata })
 
 const thoughtSignature = (metadata: ProviderMetadata | undefined, key: string) => {
-  const value = metadata?.[key]
-  return ProviderShared.isRecord(value) && typeof value.thoughtSignature === "string" ? value.thoughtSignature : undefined
+  const ownValue = metadata?.[key]
+  if (ProviderShared.isRecord(ownValue) && typeof ownValue.thoughtSignature === "string") return ownValue.thoughtSignature
+
+  const values = Object.values(metadata ?? {})
+  for (const value of values) {
+    if (ProviderShared.isRecord(value) && typeof value.thoughtSignature === "string") return value.thoughtSignature
+  }
+  for (const value of values) {
+    if (!ProviderShared.isRecord(value) || !ProviderShared.isRecord(value.extraContent)) continue
+    const google = value.extraContent.google
+    if (ProviderShared.isRecord(google) && typeof google.thought_signature === "string") return google.thought_signature
+  }
 }
 
 const lowerTool = (tool: ToolDefinition, anthropic: boolean) => ({
@@ -474,7 +484,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
       options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
     )
     const anthropic = base.startsWith("claude")
-    const metadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
+    const providerMetadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
     const systemParts: Array<{ text: string }> = request.system.map((part) => ({ text: part.text }))
     const contents: Array<typeof Content.Type> = []
 
@@ -500,7 +510,6 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
       }
       if (message.role === "assistant") {
         const parts: Array<typeof ContentPart.Type> = []
-        let hasSignedToolCall = false
         for (const part of message.content) {
           if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call", "media"]))
             return yield* ProviderShared.unsupportedContent("Antigravity", "assistant", [
@@ -511,7 +520,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
             ])
           if (part.type === "text") {
             if (part.text)
-              parts.push({ text: part.text, thoughtSignature: thoughtSignature(part.providerMetadata, metadataKey) })
+              parts.push({ text: part.text, thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey) })
             continue
           }
           if (part.type === "reasoning") {
@@ -519,18 +528,18 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
               parts.push({
                 text: part.text,
                 thought: true,
-                thoughtSignature: thoughtSignature(part.providerMetadata, metadataKey),
+                thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
               })
             continue
           }
           if (part.type === "media") {
             parts.push({
               ...(yield* lowerMediaPart(part)),
-              thoughtSignature: thoughtSignature(part.providerMetadata, metadataKey),
+              thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
             })
             continue
           }
-          const signature = thoughtSignature(part.providerMetadata, metadataKey)
+          const signature = thoughtSignature(part.providerMetadata, providerMetadataKey)
           const args =
             ProviderShared.isRecord(part.input) && !Array.isArray(part.input) ? part.input : {}
           parts.push({
@@ -539,9 +548,8 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
             // fork sessions carry them in providerMetadata instead. When no
             // signature survives (stateless façade history), fall back to
             // Google's documented skip validator rather than the door's 400.
-            thoughtSignature: signature ?? (hasSignedToolCall ? undefined : SKIP_THOUGHT_SIGNATURE_VALIDATOR),
+            thoughtSignature: signature ?? SKIP_THOUGHT_SIGNATURE_VALIDATOR,
           })
-          if (signature !== undefined) hasSignedToolCall = true
         }
         if (parts.length) contents.push({ role: "model", parts })
         continue
