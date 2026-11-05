@@ -675,15 +675,45 @@ const hasToolHistory = (messages: ReadonlyArray<LLMRequest["messages"][number]>)
   return false
 }
 
+// Model-family classification by model id, for the multi-family gateways
+// (cline-pass, opendesign, opencode-go) whose single provider id/baseURL
+// fronts many model families: family-sensitive compatibility defaults must
+// follow the model, not the gateway's identity (#1706). Patterns are
+// anchored to a whole id segment (start of id, or the segment after a "/"
+// vendor prefix), never arbitrary substrings, and matching is
+// case-insensitive. Accepted shapes:
+//   glm:    "glm-<digit>..."          e.g. glm-5.3, zai/glm-4.5-air, GLM-5.3
+//   kimi:   "kimi-..." / "moonshot-..." e.g. kimi-k2.6, moonshotai/kimi-k2.6,
+//           moonshot-v1-8k
+//   gemini: "gemini-<digit>..."       e.g. gemini-2.5-flash,
+//           google/gemini-3.8-flash
+// Ids that merely embed a family name inside a larger segment
+// ("not-glm-5.3", "xglm-5.3", "my-kimi-k2.6") are NOT that family and keep
+// the provider/baseURL defaults. Explicit `compatibility` overrides are
+// applied after detection and always win, including explicit false.
+type ModelFamily = "glm" | "kimi" | "gemini"
+
+const detectModelFamily = (modelID: string): ModelFamily | undefined => {
+  const id = modelID.toLowerCase()
+  if (/(?:^|\/)glm-\d/.test(id)) return "glm"
+  if (/(?:^|\/)(?:kimi|moonshot)-[a-z0-9]/.test(id)) return "kimi"
+  if (/(?:^|\/)gemini-\d/.test(id)) return "gemini"
+  return undefined
+}
+
 // Derive `max_tokens` vs `max_completion_tokens` from provider/baseURL when
 // explicit `compatibility.maxTokensField` is not set. Aligned with
 // models.dev provider naming: DeepSeek, Moonshot AI, Together AI, ZAI
 // (Zhipu + Coding Plan variants), Nvidia, Cerebras, Chutes, etc. still
-// require `max_tokens`.
+// require `max_tokens`. A GLM or Kimi model id decides this on its own, so
+// the same model behind a gateway gets the direct provider's field.
 const detectMaxTokensField = (
   provider: string,
   baseURL: string | undefined,
+  modelID: string,
 ): "max_tokens" | "max_completion_tokens" => {
+  const family = detectModelFamily(modelID)
+  if (family === "glm" || family === "kimi") return "max_tokens"
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
   if (
@@ -714,7 +744,11 @@ const detectMaxTokensField = (
   return "max_completion_tokens"
 }
 
-const detectSupportsStore = (provider: string, baseURL: string | undefined): boolean => {
+const detectSupportsStore = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
+  // GLM, Kimi and Gemini endpoints are all non-standard for `store` (their
+  // direct providers are in the non-standard set below), so a recognized
+  // family never supports it, whatever gateway fronts the model.
+  if (detectModelFamily(modelID) !== undefined) return false
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
   const isNvidia = p === "nvidia" || url.includes("integrate.api.nvidia.com")
@@ -758,7 +792,10 @@ const detectSupportsStore = (provider: string, baseURL: string | undefined): boo
 
 const detectSupportsUsageInStreaming = (): boolean => true
 
-const detectSupportsStrictMode = (provider: string, baseURL: string | undefined): boolean => {
+const detectSupportsStrictMode = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
+  // Kimi/Moonshot rejects the strict field (direct Moonshot is excluded
+  // below); the family decides behind gateways too.
+  if (detectModelFamily(modelID) === "kimi") return false
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
   const isMoonshot = p === "moonshotai" || p === "moonshotai-cn" || url.includes("api.moonshot.")
@@ -768,7 +805,18 @@ const detectSupportsStrictMode = (provider: string, baseURL: string | undefined)
   return !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia
 }
 
+// GLM 4.5-family models are excluded from tool streaming. The comparison
+// uses the final id segment so vendor-prefixed ids ("zai/glm-4.5") are
+// excluded exactly like the bare id.
+const isGlmToolStreamExcluded = (modelID: string): boolean => {
+  const segment = modelID.toLowerCase().split("/").pop() ?? ""
+  return segment === "glm-4.5" || segment === "glm-4.5-air" || segment === "glm-4.5-flash" || segment === "glm-4.5v"
+}
+
 const detectZaiToolStream = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
+  // A GLM model gets tool streaming behind any gateway, subject to the
+  // same 4.5 exclusions as the direct ZAI route.
+  if (detectModelFamily(modelID) === "glm") return !isGlmToolStreamExcluded(modelID)
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
   const isZai =
@@ -779,9 +827,7 @@ const detectZaiToolStream = (provider: string, baseURL: string | undefined, mode
     url.includes("api.z.ai") ||
     url.includes("open.bigmodel.cn")
   if (!isZai) return false
-  const id = modelID.toLowerCase()
-  if (id === "glm-4.5" || id === "glm-4.5-air" || id === "glm-4.5-flash" || id === "glm-4.5v") return false
-  return true
+  return !isGlmToolStreamExcluded(modelID)
 }
 
 const lowerOptions = (request: LLMRequest, supportsStore: boolean) => {
@@ -817,13 +863,13 @@ export const fromRequest = Effect.fn("OpenAIChat.fromRequest")(function* (
   const flattened = ProviderShared.flattenToolRequest(request)
   const provider = String(request.model.provider)
   const baseURL = request.model.route.endpoint.baseURL
-  const detectedMaxTokensField = detectMaxTokensField(provider, baseURL)
+  const detectedMaxTokensField = detectMaxTokensField(provider, baseURL, request.model.id)
   const maxTokensField = request.model.compatibility?.maxTokensField ?? detectedMaxTokensField
-  const supportsStore = request.model.compatibility?.supportsStore ?? detectSupportsStore(provider, baseURL)
+  const supportsStore = request.model.compatibility?.supportsStore ?? detectSupportsStore(provider, baseURL, request.model.id)
   const supportsUsageInStreaming =
     request.model.compatibility?.supportsUsageInStreaming ?? detectSupportsUsageInStreaming()
   const supportsStrictMode =
-    request.model.compatibility?.supportsStrictMode ?? detectSupportsStrictMode(provider, baseURL)
+    request.model.compatibility?.supportsStrictMode ?? detectSupportsStrictMode(provider, baseURL, request.model.id)
   const zaiToolStream =
     request.model.compatibility?.zaiToolStream ?? detectZaiToolStream(provider, baseURL, request.model.id)
   const hasHistory = hasToolHistory(request.messages)
