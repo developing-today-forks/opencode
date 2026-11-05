@@ -302,6 +302,34 @@ const fetchProviderWithTimeout = async (ctx: QuotaContext, providerId: string): 
   }
 }
 
+/**
+ * Fetch the named providers for a `quota <name>...` invocation. An
+ * unknown name never discards work: it is collected in `unknown` (the
+ * caller reports each on stderr and exits 1) and the remaining names —
+ * including names after the unknown one — are still resolved and
+ * fetched (#1734). Resolved providers are fetched once, in request
+ * order, however many names resolve to them.
+ */
+export const collectNamedQuotaGroups = async (
+  ctx: QuotaContext,
+  requested: string[],
+  fetchProvider: (ctx: QuotaContext, providerId: string) => Promise<QuotaResult[]>,
+): Promise<{ groups: { providerId: string; results: QuotaResult[] }[]; unknown: string[] }> => {
+  const groups: { providerId: string; results: QuotaResult[] }[] = []
+  const unknown: string[] = []
+  for (const name of requested) {
+    const resolved = resolveQuotaProviderName(ctx, name)
+    if (!resolved) {
+      unknown.push(name)
+      continue
+    }
+    if (groups.some((group) => group.providerId === resolved)) continue
+    const results = await fetchProvider(ctx, resolved)
+    groups.push({ providerId: resolved, results })
+  }
+  return { groups, unknown }
+}
+
 /** Whether every requested provider group produced at least one successful result. */
 export const quotaRunSucceeded = (groups: { results: QuotaResult[] }[]): boolean =>
   groups.every((group) => group.results.some((result) => result.ok))
@@ -368,25 +396,25 @@ const handler = Effect.fn("cli.quota")(function* (input: Runtime.Input<typeof Co
       groups.push({ providerId, results })
     }
   } else {
-    for (const name of requested) {
-      const resolved = resolveQuotaProviderName(ctx, name)
-      if (!resolved) {
-        process.stderr.write(`Unknown provider: ${name}${EOL}`)
-        process.exitCode = 1
-        return
-      }
-      if (groups.some((group) => group.providerId === resolved)) continue
-      const results = yield* Effect.promise(() => fetchProviderWithTimeout(ctx, resolved))
-      groups.push({ providerId: resolved, results })
+    const named = yield* Effect.promise(() => collectNamedQuotaGroups(ctx, requested, fetchProviderWithTimeout))
+    groups.push(...named.groups)
+    for (const name of named.unknown) {
+      process.stderr.write(`Unknown provider: ${name}${EOL}`)
     }
+    if (named.unknown.length > 0) process.exitCode = 1
   }
 
+  // An invocation with only unknown names keeps its previous shape:
+  // stderr lines, no stdout at all (not even an empty JSON array), exit 1
+  // (set above). Mixed invocations render every resolvable group.
   const results = groups.flatMap((group) => group.results)
-  if (input.json) {
-    process.stdout.write(JSON.stringify(results, null, 2) + EOL)
-  } else {
-    const rendered = renderQuotaResults(results)
-    if (rendered) process.stdout.write(rendered + EOL)
+  if (groups.length > 0 || requested.length === 0) {
+    if (input.json) {
+      process.stdout.write(JSON.stringify(results, null, 2) + EOL)
+    } else {
+      const rendered = renderQuotaResults(results)
+      if (rendered) process.stdout.write(rendered + EOL)
+    }
   }
   if (!quotaRunSucceeded(groups)) {
     process.exitCode = 1
