@@ -2322,10 +2322,19 @@ describe("OpenAI Chat route", () => {
         expect(direct.body).not.toHaveProperty("store")
       }
 
+      // DeepSeek behind a gateway gets the direct-DeepSeek decisions:
+      // max_tokens and no store.
+      for (const id of ["deepseek-chat", "deepseek/deepseek-chat", "deepseek-v3.2", "deepseek-reasoner"]) {
+        const direct = yield* prepare("deepseek", "https://api.deepseek.com/v1", id)
+        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(direct.body))
+        expect(direct.body).toMatchObject({ max_tokens: 20 })
+        expect(direct.body).not.toHaveProperty("store")
+      }
+
       // Family names embedded in a larger segment are not families: the
       // classifier is anchored to a whole id segment, so these keep the
       // generic gateway defaults.
-      for (const id of ["not-glm-5.3", "xglm-5.3", "my-kimi-k2.6", "not-gemini-2.5-flash", "future-model"]) {
+      for (const id of ["not-glm-5.3", "xglm-5.3", "my-kimi-k2.6", "not-gemini-2.5-flash", "not-deepseek-chat", "future-model"]) {
         for (const prepared of yield* viaGateway(id)) {
           expect(prepared.body).toMatchObject({ max_completion_tokens: 20, store: false })
           expect(prepared.body).not.toHaveProperty("tool_stream")

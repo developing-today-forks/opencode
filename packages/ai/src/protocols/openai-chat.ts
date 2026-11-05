@@ -687,17 +687,20 @@ const hasToolHistory = (messages: ReadonlyArray<LLMRequest["messages"][number]>)
 //           moonshot-v1-8k
 //   gemini: "gemini-<digit>..."       e.g. gemini-2.5-flash,
 //           google/gemini-3.8-flash
+//   deepseek: "deepseek-..."          e.g. deepseek-chat,
+//           deepseek/deepseek-chat, deepseek-v3.2, deepseek-reasoner
 // Ids that merely embed a family name inside a larger segment
 // ("not-glm-5.3", "xglm-5.3", "my-kimi-k2.6") are NOT that family and keep
 // the provider/baseURL defaults. Explicit `compatibility` overrides are
 // applied after detection and always win, including explicit false.
-type ModelFamily = "glm" | "kimi" | "gemini"
+type ModelFamily = "glm" | "kimi" | "gemini" | "deepseek"
 
 const detectModelFamily = (modelID: string): ModelFamily | undefined => {
   const id = modelID.toLowerCase()
   if (/(?:^|\/)glm-\d/.test(id)) return "glm"
   if (/(?:^|\/)(?:kimi|moonshot)-[a-z0-9]/.test(id)) return "kimi"
   if (/(?:^|\/)gemini-\d/.test(id)) return "gemini"
+  if (/(?:^|\/)deepseek-[a-z0-9]/.test(id)) return "deepseek"
   return undefined
 }
 
@@ -705,15 +708,16 @@ const detectModelFamily = (modelID: string): ModelFamily | undefined => {
 // explicit `compatibility.maxTokensField` is not set. Aligned with
 // models.dev provider naming: DeepSeek, Moonshot AI, Together AI, ZAI
 // (Zhipu + Coding Plan variants), Nvidia, Cerebras, Chutes, etc. still
-// require `max_tokens`. A GLM or Kimi model id decides this on its own, so
-// the same model behind a gateway gets the direct provider's field.
+// require `max_tokens`. A GLM, Kimi or DeepSeek model id decides this on
+// its own, so the same model behind a gateway gets the direct provider's
+// field.
 const detectMaxTokensField = (
   provider: string,
   baseURL: string | undefined,
   modelID: string,
 ): "max_tokens" | "max_completion_tokens" => {
   const family = detectModelFamily(modelID)
-  if (family === "glm" || family === "kimi") return "max_tokens"
+  if (family === "glm" || family === "kimi" || family === "deepseek") return "max_tokens"
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
   if (
@@ -745,9 +749,10 @@ const detectMaxTokensField = (
 }
 
 const detectSupportsStore = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
-  // GLM, Kimi and Gemini endpoints are all non-standard for `store` (their
-  // direct providers are in the non-standard set below), so a recognized
-  // family never supports it, whatever gateway fronts the model.
+  // GLM, Kimi, Gemini and DeepSeek endpoints are all non-standard for
+  // `store` (their direct providers are in the non-standard set below), so
+  // a recognized family never supports it, whatever gateway fronts the
+  // model.
   if (detectModelFamily(modelID) !== undefined) return false
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
