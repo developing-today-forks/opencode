@@ -56,6 +56,27 @@ it.effect("the binary's alias for the default model gets the same defaults", () 
   }),
 )
 
+it.effect("caller topP suppresses the preset temperature for the default model and its alias", () =>
+  Effect.gen(function* () {
+    const withTopP = Vibe.configure({ apiKey: "fixture-key", generation: { topP: 0.9 } })
+    const defaultModel = withTopP.model("mistral-vibe-cli-latest")
+    const defaultBody = (yield* compileRequest(LLM.request({ model: defaultModel, prompt: "hi" }))).body as Record<
+      string,
+      unknown
+    >
+    const alias = withTopP.model("mistral-medium-3.5")
+    const aliasBody = (yield* compileRequest(LLM.request({ model: alias, prompt: "hi" }))).body as Record<
+      string,
+      unknown
+    >
+
+    expect(defaultBody.temperature).toBeUndefined()
+    expect(defaultBody.top_p).toBe(0.9)
+    expect(aliasBody.temperature).toBeUndefined()
+    expect(aliasBody.top_p).toBe(0.9)
+  }),
+)
+
 it.effect("caller-supplied generation and provider options win over the preset defaults", () =>
   Effect.gen(function* () {
     const custom = Vibe.configure({
