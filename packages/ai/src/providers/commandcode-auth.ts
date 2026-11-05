@@ -54,7 +54,10 @@ export const parseAuthFile = (contents: string): string | undefined => {
   }
   if (typeof parsed !== "object" || parsed === null) return undefined
   const apiKey = (parsed as Record<string, unknown>).apiKey
-  return typeof apiKey === "string" && apiKey.length > 0 ? apiKey : undefined
+  // A blank value is no credential (the vibe-auth rule): trim, and treat
+  // whitespace-only as absent so it can never be sent as a Bearer of spaces.
+  const trimmed = typeof apiKey === "string" ? apiKey.trim() : ""
+  return trimmed.length > 0 ? trimmed : undefined
 }
 
 const authFilePath = async (sources: CredentialSources): Promise<string> => {
@@ -76,7 +79,9 @@ const defaultReadFile = async (path: string): Promise<string | undefined> => {
 export const resolveApiKey = async (sources: CredentialSources = {}): Promise<string | undefined> => {
   const env = sources.env ?? process.env
   for (const name of API_KEY_ENV_VARS) {
-    const value = env[name]
+    // Trimmed like vibe-auth: a whitespace-only env var is absent, so it
+    // cannot shadow the valid login file in the tier below.
+    const value = env[name]?.trim()
     if (value !== undefined && value.length > 0) return value
   }
   const readFile = sources.readFile ?? defaultReadFile

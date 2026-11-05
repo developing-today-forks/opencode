@@ -75,9 +75,13 @@ export const parseCredentialsFile = (contents: string): ClaudeCodeCredential | u
   const oauth = (parsed as Record<string, unknown>).claudeAiOauth
   if (typeof oauth !== "object" || oauth === null) return undefined
   const { accessToken, expiresAt } = oauth as Record<string, unknown>
-  if (typeof accessToken !== "string" || accessToken.length === 0) return undefined
+  // A blank value is no credential (the vibe-auth rule): trim, and treat
+  // whitespace-only as absent, so resolution falls through to the env tier
+  // instead of sending a Bearer of spaces.
+  const token = typeof accessToken === "string" ? accessToken.trim() : ""
+  if (token.length === 0) return undefined
   return {
-    accessToken,
+    accessToken: token,
     expiresAt: typeof expiresAt === "number" && Number.isFinite(expiresAt) ? expiresAt : undefined,
     source: "credentials-file",
   }
@@ -109,7 +113,7 @@ export const resolveCredential = async (sources: CredentialSources = {}): Promis
     if (credential !== undefined) return credential
   }
   const env = sources.env ?? process.env
-  const token = env[OAUTH_TOKEN_ENV_VAR]
+  const token = env[OAUTH_TOKEN_ENV_VAR]?.trim()
   if (token !== undefined && token.length > 0) return { accessToken: token, source: "environment" }
   return undefined
 }
