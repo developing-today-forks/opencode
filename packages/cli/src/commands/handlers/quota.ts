@@ -18,7 +18,7 @@ import { Global } from "@opencode/util/global"
 import { Effect, Option } from "effect"
 import { existsSync, readFileSync } from "node:fs"
 import { EOL, homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { parse } from "jsonc-parser"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
@@ -177,21 +177,69 @@ interface ConfigFacts {
   providerConfig: Record<string, JsonObject>
 }
 
-const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
+/**
+ * The platform system config directory, mirroring core's
+ * ConfigDiscovery.systemDirectory (packages/core/src/config/discovery.ts):
+ * managed settings there load last at runtime and override everything.
+ */
+export const quotaSystemConfigDirectory = (
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string => {
+  if (platform === "darwin") return "/Library/Application Support/opencode"
+  if (platform === "win32") return join(env.ProgramData || "C:\\ProgramData", "opencode")
+  return "/etc/opencode"
+}
+
+/** Ancestor directories of `start`, nearest first, capped so the walk is bounded. */
+const MAX_CONFIG_ANCESTORS = 64
+
+export const configAncestorDirectories = (start: string): string[] => {
+  const directories: string[] = []
+  let current = start
+  while (directories.length < MAX_CONFIG_ANCESTORS) {
+    directories.push(current)
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return directories
+}
+
+export const readConfigFacts = (
+  global: GlobalPaths,
+  options?: { cwd?: string; systemDirectory?: string; env?: NodeJS.ProcessEnv },
+): ConfigFacts => {
+  const env = options?.env ?? process.env
   const files: string[] = []
   const addCandidates = (dir: string) => {
     files.push(join(dir, "opencode.jsonc"), join(dir, "opencode.json"))
   }
   addCandidates(global.config)
-  if (process.env.OPENCODE_CONFIG) files.push(process.env.OPENCODE_CONFIG)
-  addCandidates(process.cwd())
-  addCandidates(join(process.cwd(), ".opencode"))
+  if (env.OPENCODE_CONFIG) files.push(env.OPENCODE_CONFIG)
+  // Project configs from every ancestor of the invocation directory,
+  // farthest first so nearer directories override farther ones — the
+  // runtime's merged config reads all of them (ConfigDiscovery walks up
+  // with fs.up), so a quota run from a project subdirectory must see
+  // root-level disabled_providers and provider instances (#1733). The
+  // walk is bounded (MAX_CONFIG_ANCESTORS levels, existsSync stats only,
+  // no directory reads or globs) and an unreadable layer is skipped
+  // below, so discovery stays cheap and can never hang — the #1729
+  // defect-3 unbounded-discovery cost does not come back.
+  const ancestors = configAncestorDirectories(options?.cwd ?? process.cwd())
+  for (const dir of ancestors.toReversed()) {
+    addCandidates(dir)
+    addCandidates(join(dir, ".opencode"))
+  }
+  // Managed system settings load last at runtime and override
+  // everything (packages/core/src/config.ts), so they are read last.
+  addCandidates(options?.systemDirectory ?? quotaSystemConfigDirectory(process.platform, env))
 
   const disabledProviders = new Set<string>()
   const instances = new Map<string, { base: string; name?: string }>()
   const providerConfig: Record<string, JsonObject> = {}
 
-  for (const file of files) {
+  for (const file of [...new Set(files)]) {
     let document: JsonObject | undefined
     try {
       if (!existsSync(file)) continue
