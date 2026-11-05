@@ -86,6 +86,26 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     install -Dm755 dist/cli-*/bin/opencode $out/bin/opencode
 
+    ${lib.optionalString stdenvNoCC.hostPlatform.isLinux ''
+      # onnxruntime-node's binding (embedded in the compiled binary)
+      # dlopens libonnxruntime.so.1, which no package in the closure
+      # provides: it ships inside onnxruntime-node itself, beside the
+      # binding. Ship that one library with the package and put it on
+      # the wrapper's loader path (#1727). Fail loudly if the bun
+      # isolated-install layout moves it.
+      case "$(uname -m)" in
+        x86_64) ortArch=x64 ;;
+        aarch64) ortArch=arm64 ;;
+        *) echo "no onnxruntime-node linux build for $(uname -m)" >&2; exit 1 ;;
+      esac
+      ortLib=$(echo ${finalAttrs.node_modules}/node_modules/.bun/onnxruntime-node@*/node_modules/onnxruntime-node/bin/napi-v6/linux/$ortArch/libonnxruntime.so.1)
+      if [ ! -f "$ortLib" ]; then
+        echo "libonnxruntime.so.1 not found under onnxruntime-node in node_modules (layout changed?)" >&2
+        exit 1
+      fi
+      install -Dm644 "$ortLib" $out/lib/onnxruntime/libonnxruntime.so.1
+    ''}
+
     # OpenTUI dlopens Wayland for clipboard images.
     wrapProgram $out/bin/opencode \
       --prefix PATH : ${
@@ -106,7 +126,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
             stdenv.cc.cc.lib
             zlib
           ]
-        }
+        } --prefix LD_LIBRARY_PATH : $out/lib/onnxruntime
       ''}
 
     ${lib.optionalString (mcpx != null) ''

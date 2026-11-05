@@ -140,6 +140,43 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       )
     },
   }
+  // sharp is statically imported by @huggingface/transformers but only
+  // CALLED for image inputs; its native binding cannot be located from
+  // inside a compiled binary (it resolves its .node relative to its
+  // package on disk), so loading the real package makes even TEXT
+  // embeddings fail in the packaged binary (#1727). Rewrite the one
+  // static import in transformers' dist bundle to a throwing stub, the
+  // same shape the Node bundle uses (vite.node.config.ts, #1615): text
+  // embeddings never reach it, and an image input throws this message
+  // instead of sharp's misleading install advice. A resolve-level stub
+  // is NOT equivalent here: it reshapes the split-chunk graph and
+  // breaks transformers' runtime requireFromHere("onnxruntime-node")
+  // (verified while fixing #1727). onnxruntime-node itself is NOT
+  // stubbed — it is the native-onnx backend; its shared library is
+  // shipped by the packaging (nix/opencode.nix) instead.
+  const sharpStubPlugin: BunPlugin = {
+    name: "sharp-stub",
+    setup(build) {
+      build.onLoad({ filter: /@huggingface[/\\]transformers[/\\]dist[/\\]transformers\.node\.mjs$/ }, async (args) => {
+        const source = await Bun.file(args.path).text()
+        const stub =
+          'const sharp = () => { throw new Error("sharp is unavailable in the compiled OpenCode binary; image inputs are unsupported there — text embeddings do not use sharp (#1727)") };'
+        // The dist bundle also loads onnxruntime-node through a runtime
+        // createRequire (requireFromHere), which cannot resolve the
+        // package from inside $bunfs and throws at module init. A plain
+        // static require is visible to the bundler and resolves to the
+        // same package embeddings-native imports. (The Node bundle
+        // rewrites this same call to a stub; the Bun build needs the
+        // real backend.)
+        const transformed = source
+          .replace('import sharp from "sharp";', stub)
+          .replace('requireFromHere("onnxruntime-node")', 'require("onnxruntime-node")')
+        if (transformed === source || transformed.includes('requireFromHere("onnxruntime-node")'))
+          throw new Error("Failed to rewrite the transformers sharp/onnxruntime-node loaders")
+        return { contents: transformed, loader: "js" }
+      })
+    },
+  }
   const parcelWatcherPackage = `@parcel/watcher-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi ?? "glibc"}` : ""}`
   const parcelWatcherPlugin: BunPlugin = {
     name: "parcel-watcher-binding",
@@ -160,6 +197,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     plugins: [
       appAssetsPlugin,
       solidPlugin,
+      sharpStubPlugin,
       parcelWatcherPlugin,
       opencodePtyPlugin,
       pluginRuntimePlugin,
