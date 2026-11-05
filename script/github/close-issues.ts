@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-const repo = process.env.GITHUB_REPOSITORY ?? "developing-today/opencode"
+const repo = process.env.GITHUB_REPOSITORY ?? "developing-today-forks/opencode"
 const days = 60
 const msg = `To stay organized issues are automatically closed after ${days} days of no activity. If the issue is still relevant please open a new one.`
 const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000)

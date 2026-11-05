@@ -6,7 +6,7 @@ concurrency:
   queue: max
 
 # Daily automated upstream sync, conflict resolution, feature-opportunity triage,
-# and safe merging for developing-today/opencode. The sync runs as an OpenCode
+# and safe merging for developing-today-forks/opencode. The sync runs as an OpenCode
 # session launched via pm-dispatch (the pm-dispatch-start reusable action from
 # developing-today/code); the Jules leg is retired fleet-wide.
 
@@ -86,7 +86,7 @@ jobs:
             ### 3. FEATURE OPPORTUNITY TRIAGE & ISSUE CREATION
             - Inspect the newly merged upstream commits (`git log ... --grep="^feat"`).
             - Identify if any new upstream capabilities, refactors, or UI surfaces could be adopted or built upon by our fork's features (such as model routing, tier-aware pooling, token cost accounting, quota tracking, or MCPX).
-            - For each identified high-value synergy, create a comprehensive GitHub issue using `gh issue create --repo developing-today/opencode` containing:
+            - For each identified high-value synergy, create a comprehensive GitHub issue using `gh issue create --repo developing-today-forks/opencode` containing:
               - Clear title and summary
               - Upstream commit references
               - Architectural context and user story

@@ -2,7 +2,7 @@
 #
 # opencode module — shared options.
 #
-# Canonical home: developing-today/opencode, nix/modules (opencode
+# Canonical home: developing-today-forks/opencode, nix/modules (opencode
 # #1511 — the service mode originates with opencode, the same way
 # the mcpx daemon modules originate with mcpx in
 # developing-today/code, pkgs/mcpx/modules). Imported by every

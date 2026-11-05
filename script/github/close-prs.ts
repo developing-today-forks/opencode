@@ -2,7 +2,7 @@
 
 import { parseArgs } from "util"
 
-const defaultRepo = process.env.GITHUB_REPOSITORY ?? "developing-today/opencode"
+const defaultRepo = process.env.GITHUB_REPOSITORY ?? "developing-today-forks/opencode"
 const defaultAgeMonths = 1
 const defaultThreshold = 2
 const defaultSleepMs = 20_000

@@ -7,7 +7,7 @@ name: main-broken
 # Breakage-ID so the fleet queue owns the breakage at top priority.
 #
 # Breakage-ID = first 12 hex of
-#   sha256("developing-today/opencode|<workflow>|<sorted failing job names>")
+#   sha256("developing-today-forks/opencode|<workflow>|<sorted failing job names>")
 #
 # DISPATCH HANDOFF: the Jules leg is retired fleet-wide (this repo
 # never had a Jules API key secret, so the Jules-first step of the
@@ -86,7 +86,7 @@ jobs:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          REPO="developing-today/opencode"
+          REPO="developing-today-forks/opencode"
           DRY="$INPUT_DRY_RUN"
           RUN_ID="$INPUT_RUN_ID"
           if [ "$EVENT_NAME" = "workflow_run" ]; then

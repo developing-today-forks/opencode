@@ -57,7 +57,7 @@ function reconcile(input: {
       FIXTURE_DIR: dir,
       LOSER: String(input.loser),
       SURVIVOR: String(input.survivor),
-      REPO: "developing-today/opencode",
+      REPO: "developing-today-forks/opencode",
       BID: "test-breakage",
       RUN_URL: run(input.runID),
       NOW: "2026-11-01T00:00:00Z",
@@ -71,7 +71,7 @@ function reconcile(input: {
   }
 }
 
-const run = (id: number) => `https://github.com/developing-today/opencode/actions/runs/${id}`
+const run = (id: number) => `https://github.com/developing-today-forks/opencode/actions/runs/${id}`
 
 describe("main-broken race-loser reconcile run links (#1314)", () => {
   test("staged three-watcher reconcile forwards inherited run links", () => {
