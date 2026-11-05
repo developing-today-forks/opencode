@@ -140,6 +140,64 @@ it.effect("stream: SSE chunks become text + usage, and the only auth header is t
   }),
 )
 
+// Oracle: a local capture of the real mistral-vibe 3.1.0 wire — every
+// chat/completions request carries
+// metadata: {call_source: "vibe_code", host_kind: "local",
+// call_type: "main_call", session_id}. call_source is the metering key
+// for the Vibe quota marts; session_id is per-session and not stamped.
+it.effect("wire body carries the binary's attribution stamp (metadata.call_source meters Vibe usage)", () =>
+  Effect.gen(function* () {
+    const bodies: Array<string> = []
+    yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      Effect.provide(
+        dynamicResponse((input) =>
+          Effect.gen(function* () {
+            const { call } = yield* observe([], input)
+            bodies.push(call.body)
+            return input.respond(sseEvents(chunk({ content: "ok" }, "stop")), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          }),
+        ),
+      ),
+    )
+    expect(bodies).toHaveLength(1)
+    const body = JSON.parse(bodies[0] ?? "{}") as { metadata?: Record<string, unknown> }
+    expect(body.metadata).toEqual({ call_source: "vibe_code", host_kind: "local", call_type: "main_call" })
+  }),
+)
+
+it.effect("caller-supplied metadata wins over the stamp, per key", () =>
+  Effect.gen(function* () {
+    const stamped = Vibe.configure({
+      apiKey: "fixture-key",
+      http: { body: { metadata: { call_type: "sub_call", session_id: "sess-1" } } },
+    }).model("mistral-vibe-cli-latest")
+    const bodies: Array<string> = []
+    yield* LLMClient.generate(LLM.request({ model: stamped, prompt: "hi" })).pipe(
+      Effect.provide(
+        dynamicResponse((input) =>
+          Effect.gen(function* () {
+            const { call } = yield* observe([], input)
+            bodies.push(call.body)
+            return input.respond(sseEvents(chunk({ content: "ok" }, "stop")), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          }),
+        ),
+      ),
+    )
+    expect(bodies).toHaveLength(1)
+    const body = JSON.parse(bodies[0] ?? "{}") as { metadata?: Record<string, unknown> }
+    expect(body.metadata).toEqual({
+      call_source: "vibe_code",
+      host_kind: "local",
+      call_type: "sub_call",
+      session_id: "sess-1",
+    })
+  }),
+)
+
 it.effect("credential resolution feeds the auth header (keyring tier, via injected sources)", () =>
   Effect.gen(function* () {
     const keyed = Vibe.configure({

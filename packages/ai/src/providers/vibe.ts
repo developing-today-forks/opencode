@@ -6,15 +6,19 @@
 // its preset api_base (https://api.mistral.ai/v1) is exactly this repo's
 // MistralChat route, so the provider reuses that protocol unchanged and
 // differs from the plain `mistral` provider only in branding, model
-// presets/defaults, and credential resolution: the key comes from the
-// binary's own resolution (env -> ~/.vibe/.env -> OS keyring) via
-// vibe-auth.ts, i.e. the credential the one-time `vibe --setup` browser
-// sign-in provisions.
+// presets/defaults, the attribution stamp below, and credential
+// resolution: the key comes from the binary's own resolution
+// (env -> ~/.vibe/.env -> OS keyring) via vibe-auth.ts, i.e. the
+// credential the one-time `vibe --setup` browser sign-in provisions.
+// The binary also stamps every request with a `metadata` attribution
+// object (verified against a capture of the real mistral-vibe 3.1.0
+// wire): `call_source` is the metering key for the Vibe quota marts, so
+// the stamp is part of the emulation, not decoration.
 import type { ProviderPackage } from "../provider-package.js"
 import { MistralChat } from "../protocols/mistral-chat.js"
 import { Auth } from "../route/auth.js"
 import type { RouteDefaultsInput } from "../route/client.js"
-import { ProviderID, type ModelID } from "../schema/index.js"
+import { mergeJsonRecords, ProviderID, type ModelID } from "../schema/index.js"
 import { VibeAuth, type CredentialSources } from "./vibe-auth.js"
 
 export const id = ProviderID.make("vibe")
@@ -83,6 +87,20 @@ export const MODELS: ReadonlyArray<ModelPreset> = [
 export const route = MistralChat.route.with({ provider: id })
 export const routes = [route]
 
+/**
+ * The constant part of the binary's per-request attribution stamp
+ * (`metadata: {call_source: "vibe_code", host_kind: "local",
+ * call_type: "main_call", session_id}`). `call_source` is the metering
+ * key for the Vibe quota marts. `session_id` is per-session state, not
+ * a route constant, so it is deliberately absent here — a caller that
+ * supplies one passes it through the same body merge.
+ */
+export const ATTRIBUTION_METADATA = {
+  call_source: "vibe_code",
+  host_kind: "local",
+  call_type: "main_call",
+} as const
+
 const presetFor = (modelID: string) => MODELS.find((preset) => preset.id === modelID || preset.alias === modelID)
 
 /** The preset's request defaults sit UNDER the caller's explicit config. */
@@ -103,12 +121,20 @@ const withPresetDefaults = (input: Config, modelID: string): Config => {
 }
 
 const configuredRoute = (input: Config) => {
-  const { baseURL, auth, apiKey, sources, ...rest } = input
+  const { baseURL, auth, apiKey, sources, http, ...rest } = input
   return MistralChat.route.with({
     ...rest,
     provider: id,
     endpoint: { baseURL: baseURL ?? MistralChat.DEFAULT_BASE_URL },
     auth: VibeAuth.vibeAuth({ auth, apiKey, sources }),
+    // The attribution stamp rides as a route-default http.body overlay,
+    // UNDER caller config: route defaults merge under model/request
+    // http options, and the transport overlays the merged http.body
+    // onto the protocol body (bodyWithOverlay) — so the wire body
+    // always carries the stamp, and caller-supplied metadata wins per
+    // key. The pre-merge here keeps that true even when the caller
+    // configured http on the provider itself.
+    http: { ...http, body: mergeJsonRecords({ metadata: ATTRIBUTION_METADATA }, http?.body) },
   })
 }
 
