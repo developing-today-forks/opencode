@@ -405,3 +405,64 @@ it.effect("Command Code stream: a stream ending before its finish event fails lo
     if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("no finish event")
   }),
 )
+
+it.effect("Command Code stream: a nameless tool-call fails loudly instead of vanishing (#1756)", () =>
+  Effect.gen(function* () {
+    const result = yield* LLMClient.generate(
+      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+    ).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "tool-call", toolCallId: "call_1", input: { city: "Oslo" } },
+            { type: "finish", finishReason: "tool-calls" },
+          ),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolName")
+  }),
+)
+
+it.effect("Command Code stream: an id-less tool-call fails loudly instead of emitting an empty id (#1756)", () =>
+  Effect.gen(function* () {
+    const result = yield* LLMClient.generate(
+      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+    ).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "tool-call", toolName: "get_weather", input: { city: "Oslo" } },
+            { type: "finish", finishReason: "tool-calls" },
+          ),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolCallId")
+  }),
+)
+
+it.effect("Command Code stream: duplicate id-less tool-calls fail on the first one (#1756)", () =>
+  Effect.gen(function* () {
+    const result = yield* LLMClient.generate(
+      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+    ).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "tool-call", toolName: "get_weather", input: { city: "Oslo" } },
+            { type: "tool-call", toolName: "get_weather", input: { city: "Bergen" } },
+            { type: "finish", finishReason: "tool-calls" },
+          ),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolCallId")
+  }),
+)
