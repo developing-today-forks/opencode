@@ -1,5 +1,5 @@
-import type { QuotaContext } from "./types.js"
-import { envOf } from "./utils.js"
+import type { JsonObject, JsonValue, QuotaContext } from "./types.js"
+import { asObject, envOf, isJsonObject, parseJsonValue } from "./utils.js"
 
 /**
  * Console-session reads through the laptop browser's Chrome DevTools
@@ -31,8 +31,30 @@ interface CdpTarget {
 }
 
 interface WsClient {
-  send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+  send: (method: string, params?: JsonObject) => Promise<JsonObject>
   close: () => void
+}
+
+/** Decode one /json target entry: the DevTools list is wire JSON, so fields are read, never assumed. */
+const decodeTarget = (value: JsonValue): CdpTarget | null => {
+  const record = asObject(value)
+  if (!record) return null
+  return {
+    id: typeof record.id === "string" ? record.id : undefined,
+    type: typeof record.type === "string" ? record.type : undefined,
+    url: typeof record.url === "string" ? record.url : undefined,
+    webSocketDebuggerUrl: typeof record.webSocketDebuggerUrl === "string" ? record.webSocketDebuggerUrl : undefined,
+  }
+}
+
+const decodeTargets = (value: JsonValue): CdpTarget[] => {
+  if (!Array.isArray(value)) return []
+  const targets: CdpTarget[] = []
+  for (const entry of value) {
+    const target = decodeTarget(entry)
+    if (target) targets.push(target)
+  }
+  return targets
 }
 
 export const cdpBaseOf = (ctx: QuotaContext): string => {
@@ -40,37 +62,32 @@ export const cdpBaseOf = (ctx: QuotaContext): string => {
   return (ctx.cdpBase ?? env.OPENCODE_QUOTA_CDP_URL ?? "http://127.0.0.1:19222").replace(/\/+$/, "")
 }
 
-const httpJson = async (url: string, init?: RequestInit): Promise<unknown> => {
+const httpJson = async (url: string, init?: RequestInit): Promise<JsonValue> => {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) })
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  return response.json()
+  const parsed: JsonValue = await response.json()
+  return parsed
 }
 
 const connectWs = (wsUrl: string): Promise<WsClient> =>
   new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl)
-    const pending = new Map<number, (value: Record<string, unknown>) => void>()
+    const pending = new Map<number, (value: JsonObject) => void>()
     let id = 0
     ws.onmessage = (event: MessageEvent) => {
-      try {
-        const message = JSON.parse(String(event.data)) as {
-          id?: number
-          result?: Record<string, unknown>
-          error?: unknown
-        }
-        if (message.id && pending.has(message.id)) {
-          const settle = pending.get(message.id) as (value: Record<string, unknown>) => void
-          pending.delete(message.id)
-          settle(message.error ? { error: message.error } : (message.result ?? {}))
-        }
-      } catch {
-        // A non-JSON frame carries no answer any caller waits on.
-      }
+      const message = asObject(parseJsonValue(String(event.data)))
+      if (!message) return
+      const messageId = typeof message.id === "number" ? message.id : null
+      if (messageId === null || !pending.has(messageId)) return
+      const settle = pending.get(messageId)
+      if (!settle) return
+      pending.delete(messageId)
+      settle(message.error ? { error: message.error } : (asObject(message.result) ?? {}))
     }
     ws.onopen = () =>
       resolve({
         send: (method, params = {}) =>
-          new Promise<Record<string, unknown>>((res) => {
+          new Promise<JsonObject>((res) => {
             const next = ++id
             pending.set(next, res)
             ws.send(JSON.stringify({ id: next, method, params }))
@@ -80,7 +97,7 @@ const connectWs = (wsUrl: string): Promise<WsClient> =>
     ws.onerror = () => reject(new Error("websocket error"))
   })
 
-const evaluate = async (client: WsClient, expression: string): Promise<unknown> => {
+const evaluate = async (client: WsClient, expression: string): Promise<JsonValue> => {
   const result = await client.send("Runtime.evaluate", {
     expression,
     returnByValue: true,
@@ -89,8 +106,7 @@ const evaluate = async (client: WsClient, expression: string): Promise<unknown> 
   if (result.exceptionDetails) {
     throw new Error(`page eval exception: ${JSON.stringify(result.exceptionDetails).slice(0, 300)}`)
   }
-  const inner = (result.result as Record<string, unknown> | undefined)?.value
-  return inner
+  return asObject(result.result)?.value ?? null
 }
 
 const waitForPage = async (client: WsClient, origin: string): Promise<string> => {
@@ -121,7 +137,7 @@ export const cdpPageFetch = async (
   const base = cdpBaseOf(ctx)
   let targets: CdpTarget[]
   try {
-    targets = (await httpJson(`${base}/json/list`)) as CdpTarget[]
+    targets = decodeTargets(await httpJson(`${base}/json/list`))
   } catch (error) {
     throw new Error(
       `cdp-unavailable: CDP ${base}/json/list unreachable: ${error instanceof Error ? error.message : String(error)}`,
@@ -131,11 +147,12 @@ export const cdpPageFetch = async (
   let createdId: string | undefined
   if (!page?.webSocketDebuggerUrl) {
     try {
-      const created = (await httpJson(`${base}/json/new?${encodeURIComponent(`${origin}/`)}`, {
-        method: "PUT",
-      })) as CdpTarget
+      const created = decodeTarget(
+        await httpJson(`${base}/json/new?${encodeURIComponent(`${origin}/`)}`, { method: "PUT" }),
+      )
+      if (!created) throw new Error("DevTools /json/new returned an undecodable target")
       createdId = created.id
-      targets = (await httpJson(`${base}/json/list`)) as CdpTarget[]
+      targets = decodeTargets(await httpJson(`${base}/json/list`))
       page =
         targets.find((t) => t.id === createdId) ??
         targets.find((t) => t.type === "page" && typeof t.url === "string" && t.url.startsWith(origin))
@@ -170,13 +187,13 @@ export const cdpPageFetch = async (
     })()`
     const raw = await evaluate(client, expression)
     const results: Record<string, CdpFetchResult> = {}
-    if (raw && typeof raw === "object") {
-      for (const [path, value] of Object.entries(raw as Record<string, unknown>)) {
-        const record = value as { status?: number; url?: string; text?: string }
+    if (isJsonObject(raw)) {
+      for (const [path, value] of Object.entries(raw)) {
+        const record = asObject(value)
         results[path] = {
-          status: typeof record.status === "number" ? record.status : 0,
-          url: typeof record.url === "string" ? record.url : "",
-          text: typeof record.text === "string" ? record.text : "",
+          status: typeof record?.status === "number" ? record.status : 0,
+          url: typeof record?.url === "string" ? record.url : "",
+          text: typeof record?.text === "string" ? record.text : "",
         }
       }
     }

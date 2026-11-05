@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
+import type { JsonObject, JsonValue, QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
 import { cdpPageFetch, isSessionExpiredStatus } from "../cdp.js"
 import {
   asNonEmptyString,
@@ -11,6 +11,7 @@ import {
   fetchOf,
   formatMoney,
   getAuthEntry,
+  parseJsonValue,
   projectAuth,
   readQuotaJson,
   resolveWindowLabel,
@@ -65,11 +66,11 @@ const teamIdOf = (ctx: QuotaContext, pageUrl: string): string => {
 // ---- portal mapping (fixture-tested against the 2026-10-27 payload) ----
 
 export const parseSubscriptionQuota = (
-  payload: unknown,
+  payload: JsonValue,
 ): { tier: string | null; windows: Record<string, QuotaWindow> } | null => {
   const quota = asObject(asObject(payload)?.subscription_quota)
   if (!quota) return null
-  const num = (value: unknown): number | null => {
+  const num = (value: JsonValue | undefined): number | null => {
     if (typeof value !== "string" && typeof value !== "number") return null
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : null
@@ -106,7 +107,7 @@ export const parseSubscriptionQuota = (
   }
 }
 
-export const parseBillingBanner = (payload: unknown): number | null => {
+export const parseBillingBanner = (payload: JsonValue): number | null => {
   const minor = asObject(payload)?.remaining_minor_units
   if (typeof minor !== "number" || !Number.isFinite(minor) || minor < 0) return null
   if (asObject(payload)?.currency !== "USD") return null
@@ -117,29 +118,28 @@ export const parseBillingBanner = (payload: unknown): number | null => {
 
 const readMuseAccountToken = (ctx: QuotaContext): string | null => {
   try {
-    const parsed = JSON.parse(readFileSync(join(ctx.homeDir ?? homedir(), ".config", "muse", "auth.json"), "utf8")) as {
-      providers?: { meta?: { access_token?: unknown } }
-    }
-    return asNonEmptyString(parsed?.providers?.meta?.access_token) ?? null
+    const parsed = parseJsonValue(readFileSync(join(ctx.homeDir ?? homedir(), ".config", "muse", "auth.json"), "utf8"))
+    const meta = asObject(asObject(asObject(parsed)?.providers)?.meta)
+    return asNonEmptyString(meta?.access_token) ?? null
   } catch {
     return null
   }
 }
 
 type KeyOutcome =
-  | { kind: "usage"; body: Record<string, unknown> }
+  | { kind: "usage"; body: JsonObject }
   | { kind: "exhausted"; resetAt: number | null; limitKind: string | null; tier: string | null; message: string | null }
   | { kind: "unauthorized" }
   | { kind: "inactive" }
   | { kind: "error"; failureClass: string; message: string }
 
-const errorMessageOf = (body: Record<string, unknown> | null): string | null =>
+const errorMessageOf = (body: JsonObject | null): string | null =>
   asNonEmptyString(asObject(body?.error)?.message) ??
   asNonEmptyString(body?.message) ??
   asNonEmptyString(body?.detail) ??
   null
 
-const readQuotaErrorDetail = (body: Record<string, unknown> | null) => {
+const readQuotaErrorDetail = (body: JsonObject | null) => {
   const quota = asObject(body?.quota)
   const resetRaw = quota?.resetsAtMs ?? quota?.resets_at ?? quota?.resetsAt ?? body?.resetsAtMs ?? body?.resets_at
   return {
@@ -177,7 +177,7 @@ const requestPlanUsage = async (ctx: QuotaContext, bearer: string): Promise<KeyO
     }
   }
 
-  const readBody = async (): Promise<Record<string, unknown> | null> => {
+  const readBody = async (): Promise<JsonObject | null> => {
     try {
       return asObject(await readQuotaJson(response))
     } catch {
@@ -201,12 +201,12 @@ const requestPlanUsage = async (ctx: QuotaContext, bearer: string): Promise<KeyO
   return { kind: "usage", body }
 }
 
-const toUsedPercent = (value: unknown): number | null => {
+const toUsedPercent = (value: JsonValue | undefined): number | null => {
   const percent = toNumber(value)
   return percent === null ? null : Math.min(100, Math.max(0, percent))
 }
 
-const keyUsageResult = (body: Record<string, unknown>): QuotaResult => {
+const keyUsageResult = (body: JsonObject): QuotaResult => {
   const subsUsage = asObject(body.subs_usage)
   const windows: Record<string, QuotaWindow> = {}
   const rolling = asObject(subsUsage?.window)

@@ -1,4 +1,4 @@
-import type { QuotaProvider } from "../types.js"
+import type { QuotaProvider, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -29,7 +29,7 @@ export const aliases = ["openrouter"]
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 const PERIOD_SECONDS: Record<string, number> = { daily: 86400, weekly: 604800, monthly: 30 * 86400 }
 
-export const resolveResetAt = (limitReset: unknown, nowMs: number): number | null => {
+export const resolveResetAt = (limitReset: JsonValue | undefined, nowMs: number): number | null => {
   const now = new Date(nowMs)
   const y = now.getUTCFullYear()
   const m = now.getUTCMonth()
@@ -87,7 +87,7 @@ export const provider: QuotaProvider = {
         })
       }
 
-      const payload = (await readQuotaJson(response)) as { data?: unknown }
+      const payload = asObject(await readQuotaJson(response))
       const data = asObject(payload?.data)
       if (data === null) {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
@@ -126,7 +126,8 @@ export const provider: QuotaProvider = {
         usedPercent = null
         valueLabel = `$${formatMoney(usageMonthly)} spent`
       } else {
-        const used = Math.max(0, limit - (limitRemaining as number))
+        // limitRemaining is non-null here: the null case returned above.
+        const used = Math.max(0, limit - (limitRemaining ?? 0))
         const percent = limit > 0 ? (used / limit) * 100 : null
         usedPercent = percent === null ? null : Math.min(100, percent)
         valueLabel = `$${formatMoney(used)} / $${formatMoney(limit)}`

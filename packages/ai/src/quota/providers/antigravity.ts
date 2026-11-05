@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { AntigravityAuth } from "../../providers/antigravity-auth.js"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
+import type { JsonValue, QuotaContext, QuotaProvider, QuotaResult, QuotaWindow } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -13,6 +13,7 @@ import {
   fetchOf,
   getAuthEntry,
   projectAuth,
+  parseJsonValue,
   projectCredentialValue,
   readQuotaJson,
   toNumber,
@@ -62,9 +63,14 @@ interface AntigravityAuth {
   origin: "keyring" | "file" | "store"
 }
 
-const parseGoogleRefreshToken = (raw: unknown) => {
+const parseGoogleRefreshToken = (raw: JsonValue | undefined) => {
   const refreshToken = asNonEmptyString(raw)
-  if (!refreshToken) return { refreshToken: null as string | null, projectId: null as string | null, managedProjectId: null as string | null }
+  const empty: { refreshToken: string | null; projectId: string | null; managedProjectId: string | null } = {
+    refreshToken: null,
+    projectId: null,
+    managedProjectId: null,
+  }
+  if (!refreshToken) return empty
   const [token = "", project = "", managed = ""] = refreshToken.split("|")
   return {
     refreshToken: asNonEmptyString(token) ?? null,
@@ -73,12 +79,12 @@ const parseGoogleRefreshToken = (raw: unknown) => {
   }
 }
 
-const readJsonFile = (filePath: string): unknown => {
+const readJsonFile = (filePath: string): JsonValue | null => {
   try {
     const raw = readFileSync(filePath, "utf8")
     const trimmed = raw.trim()
     if (!trimmed) return null
-    return JSON.parse(trimmed)
+    return parseJsonValue(trimmed)
   } catch {
     return null
   }
@@ -121,12 +127,15 @@ const keyringAuth = async (ctx: QuotaContext): Promise<AntigravityAuth | null> =
       { env, timeout: 15_000, maxBuffer: 1 << 20 },
       (error, out) => {
         if (error) return resolve(null)
-        try {
-          const creds = JSON.parse(out) as { token?: { access_token?: string; refresh_token?: string } }
-          resolve(creds.token ?? null)
-        } catch {
-          resolve(null)
-        }
+        const tokenRecord = asObject(asObject(parseJsonValue(out))?.token)
+        resolve(
+          tokenRecord
+            ? {
+                access_token: asNonEmptyString(tokenRecord.access_token),
+                refresh_token: asNonEmptyString(tokenRecord.refresh_token),
+              }
+            : null,
+        )
       },
     )
   })
@@ -224,7 +233,7 @@ const fetchAntigravity = async (
   path: string,
   accessToken: string,
   projectId: string | undefined,
-): Promise<unknown> => {
+): Promise<JsonValue> => {
   const body = projectId ? { project: projectId } : {}
   for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
     try {
@@ -255,7 +264,7 @@ interface ParsedBucket {
   window: QuotaWindow
 }
 
-const parseBucket = (bucket: unknown): ParsedBucket => {
+const parseBucket = (bucket: JsonValue): ParsedBucket => {
   const record = asObject(bucket)
   const remainingFraction = toNumber(record?.remainingFraction)
   const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
@@ -288,8 +297,9 @@ interface ModelGroup {
   bucketWeekly: ParsedBucket | null
 }
 
-const transformSummary = (summaryPayload: unknown): ModelGroup[] => {
-  const groups = Array.isArray(asObject(summaryPayload)?.groups) ? (asObject(summaryPayload)?.groups as unknown[]) : []
+const transformSummary = (summaryPayload: JsonValue): ModelGroup[] => {
+  const rawGroups = asObject(summaryPayload)?.groups
+  const groups: JsonValue[] = Array.isArray(rawGroups) ? rawGroups : []
   const modelGroupWindows: ModelGroup[] = []
   for (const rawGroup of groups) {
     const group = asObject(rawGroup)
@@ -317,7 +327,7 @@ const transformSummary = (summaryPayload: unknown): ModelGroup[] => {
 }
 
 const transformModels = (
-  modelsPayload: unknown,
+  modelsPayload: JsonValue,
   modelGroupWindows: ModelGroup[],
 ): Record<string, { windows: Record<string, QuotaWindow> }> => {
   const rawModels = asObject(asObject(modelsPayload)?.models) ?? {}

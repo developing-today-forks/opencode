@@ -1,4 +1,4 @@
-import type { QuotaContext, QuotaProvider, QuotaResult } from "../types.js"
+import type { JsonValue, QuotaContext, QuotaProvider, QuotaResult } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -45,7 +45,7 @@ const CONSOLE_WINDOW_METERS: Record<string, string> = { "5h": "fiveHour", weekly
 
 type WindowMap = Record<string, ReturnType<typeof toUsageWindow>>
 
-export const parseOpenCodeGoUsage = (payload: unknown): WindowMap => {
+export const parseOpenCodeGoUsage = (payload: JsonValue): WindowMap => {
   const usage = asObject(payload) ? asObject(asObject(payload)?.usage) : null
   if (!usage) return {}
   const windows: WindowMap = {}
@@ -60,13 +60,13 @@ export const parseOpenCodeGoUsage = (payload: unknown): WindowMap => {
   return windows
 }
 
-const toMicroCents = (value: unknown): number | null => {
+const toMicroCents = (value: JsonValue | undefined): number | null => {
   const amount = toNumber(value)
   if (amount === null || amount < 0) return null
   return amount
 }
 
-export const parseConsoleGoUsage = (payload: unknown): WindowMap => {
+export const parseConsoleGoUsage = (payload: JsonValue): WindowMap => {
   const access = asObject(payload) ? asObject(asObject(payload)?.access) : null
   const meters = access ? asObject(access.meters) : null
   if (!meters) return {}
@@ -83,7 +83,7 @@ export const parseConsoleGoUsage = (payload: unknown): WindowMap => {
   return windows
 }
 
-export const parseConsoleBillingBalance = (payload: unknown): number | null => {
+export const parseConsoleBillingBalance = (payload: JsonValue): number | null => {
   const microCents = toMicroCents(asObject(payload)?.availableMicroCents)
   if (microCents === null) return null
   return microCents / MICRO_CENTS_PER_DOLLAR

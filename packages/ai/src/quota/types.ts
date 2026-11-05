@@ -34,6 +34,15 @@ export interface QuotaUsage {
   usageAvailability?: string
 }
 
+/**
+ * A decoded JSON document — the named domain type every provider's
+ * payload parsers accept. Raw wire/store text is decoded into this
+ * shape once, at the I/O boundary (readQuotaJson / parseJsonValue);
+ * nothing downstream handles bare `unknown`.
+ */
+export type JsonObject = { [key: string]: JsonValue }
+export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject
+
 export type QuotaCredentialSource = "claude-code" | "opencode" | "environment"
 
 export interface QuotaResult {
@@ -111,7 +120,7 @@ export interface QuotaContext {
   disabledProviders: ReadonlySet<string>
   instances: ReadonlyMap<string, QuotaInstance>
   /** Provider definitions from merged config (`provider`/`providers` sections), for base-URL style lookups. */
-  providerConfig: Record<string, Record<string, unknown>>
+  providerConfig: Record<string, JsonObject>
   fetchImpl?: typeof fetch
   /** Chrome DevTools Protocol base for console-session reads (Meta portal, Mistral admin console). */
   cdpBase?: string

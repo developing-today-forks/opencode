@@ -1,4 +1,4 @@
-import type { QuotaContext, QuotaProvider, QuotaResult } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -34,7 +34,7 @@ const getApiKey = (ctx: QuotaContext): string | null => {
   return stored ?? asNonEmptyString(envOf(ctx).COMMAND_CODE_API_KEY) ?? null
 }
 
-const requestJson = async (ctx: QuotaContext, path: string, apiKey: string): Promise<unknown> => {
+const requestJson = async (ctx: QuotaContext, path: string, apiKey: string): Promise<JsonValue> => {
   const response = await fetchOf(ctx)(`${API_BASE_URL}${path}`, {
     headers: {
       Accept: "application/json",
@@ -56,7 +56,7 @@ const toBalanceWindow = (value: number) =>
 /** The Go plan's included monthly credits. */
 export const MONTHLY_INCLUDED_CREDITS = 10
 
-export const parseCommandCodeCredits = (payload: unknown) => {
+export const parseCommandCodeCredits = (payload: JsonValue) => {
   const root = asObject(payload)
   const credits = asObject(root?.credits)
   const limits = asObject(root?.windowLimits)

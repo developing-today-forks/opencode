@@ -1,4 +1,6 @@
 import type {
+  JsonObject,
+  JsonValue,
   QuotaAuthEntry,
   QuotaContext,
   QuotaCredentialRow,
@@ -8,16 +10,19 @@ import type {
   QuotaWindow,
 } from "./types.js"
 
-export const asObject = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === "object" ? (value as Record<string, unknown>) : null
+export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
 
-export const asNonEmptyString = (value: unknown): string | undefined => {
+export const asObject = (value: JsonValue | undefined): JsonObject | null =>
+  value !== undefined && isJsonObject(value) ? value : null
+
+export const asNonEmptyString = (value: JsonValue | undefined): string | undefined => {
   if (typeof value !== "string") return undefined
   const trimmed = value.trim()
   return trimmed === "" ? undefined : trimmed
 }
 
-export const toNumber = (value: unknown): number | null => {
+export const toNumber = (value: JsonValue | undefined): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string") {
     const parsed = Number(value)
@@ -26,7 +31,7 @@ export const toNumber = (value: unknown): number | null => {
   return null
 }
 
-export const toTimestamp = (value: unknown): number | null => {
+export const toTimestamp = (value: JsonValue | undefined): number | null => {
   if (!value) return null
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return null
@@ -39,7 +44,7 @@ export const toTimestamp = (value: unknown): number | null => {
   return null
 }
 
-export const normalizeTimestamp = (value: unknown): number | null => {
+export const normalizeTimestamp = (value: JsonValue | undefined): number | null => {
   if (typeof value !== "number" || !Number.isFinite(value)) return null
   return value < 1_000_000_000_000 ? value * 1000 : value
 }
@@ -101,10 +106,11 @@ export const toUsageWindow = (input: {
 }): QuotaWindow => {
   const resetAt = input.resetAt ?? null
   const resetFormatted = hasResetTimestamp(resetAt) ? formatResetTime(resetAt) : null
-  const hasFiniteUsedPercent = typeof input.usedPercent === "number" && Number.isFinite(input.usedPercent)
+  const usedPercent = input.usedPercent
+  const hasFiniteUsedPercent = typeof usedPercent === "number" && Number.isFinite(usedPercent)
   return {
-    usedPercent: input.usedPercent,
-    remainingPercent: hasFiniteUsedPercent ? Math.max(0, 100 - (input.usedPercent as number)) : null,
+    usedPercent,
+    remainingPercent: hasFiniteUsedPercent ? Math.max(0, 100 - usedPercent) : null,
     windowSeconds: input.windowSeconds ?? null,
     resetAfterSeconds: calculateResetAfterSeconds(resetAt),
     resetAt,
@@ -154,19 +160,32 @@ export const buildResult = (input: {
  */
 export const QUOTA_RESPONSE_MAX_BYTES = 1 * 1024 * 1024
 
-export const readQuotaJson = async (response: Response): Promise<unknown> => {
+export const readQuotaJson = async (response: Response): Promise<JsonValue> => {
   const text = await response.text()
   if (text.length > QUOTA_RESPONSE_MAX_BYTES) {
     throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
   }
-  return JSON.parse(text.replace(/^\uFEFF/, ""))
+  // JSON.parse yields exactly the JsonValue grammar; the annotation
+  // records that contract at the boundary.
+  const parsed: JsonValue = JSON.parse(text.replace(/^\uFEFF/, ""))
+  return parsed
 }
 
-export const isTimeoutError = (error: unknown, signal?: AbortSignal): boolean =>
-  error instanceof DOMException &&
-  (error.name === "TimeoutError" || (error.name === "AbortError" && (signal?.aborted ?? false)))
+/** Decode JSON text (a store file, a CLI's stdout) into a JsonValue, or null when it does not parse. */
+export const parseJsonValue = (text: string): JsonValue | null => {
+  try {
+    const parsed: JsonValue = JSON.parse(text.replace(/^\uFEFF/, ""))
+    return parsed
+  } catch {
+    return null
+  }
+}
 
-export const errorText = (error: unknown): string => (error instanceof Error ? error.message : "Request failed")
+export const isTimeoutError = (cause: unknown, signal?: AbortSignal): boolean =>
+  cause instanceof DOMException &&
+  (cause.name === "TimeoutError" || (cause.name === "AbortError" && (signal?.aborted ?? false)))
+
+export const errorText = (cause: unknown): string => (cause instanceof Error ? cause.message : "Request failed")
 
 /** One stored credential value → legacy auth.json entry shape. */
 export const projectCredentialValue = (value: QuotaCredentialValue): QuotaAuthEntry => {
