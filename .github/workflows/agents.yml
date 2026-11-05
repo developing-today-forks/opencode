@@ -59,7 +59,7 @@ jobs:
       contents: read
     steps:
       # The pm-dispatch action family is loaded from this checkout rather
-      # than as `developing-today/code/.github/actions/...@main`; the
+      # than through a remote action reference; the
       # remote form is what fails with the `_staging` archive error. The
       # checkout lands at .pm-central because pm-dispatch-task's own nested
       # steps load pm-dispatch-start / pm-dispatch-queue from that same
