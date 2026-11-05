@@ -155,6 +155,8 @@ const addWindow = (
   input: { percent: number | null; resetAt: number | null; valueLabel?: string | null; windowSeconds?: number | null },
 ) => {
   if (input.percent === null && !input.valueLabel) return
+  // Keep the first entry, don't overwrite with duplicates
+  if (target[key]) return
   target[key] = toUsageWindow({
     usedPercent: input.percent,
     windowSeconds: input.windowSeconds ?? null,
@@ -180,9 +182,12 @@ export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; mode
     } else if (limit.kind === "weekly_all") {
       addWindow(windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
     } else if (limit.kind === "weekly_scoped" && modelName) {
-      const modelWindows: WindowMap = {}
-      addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
-      if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
+      // Initialize model entry if it doesn't exist
+      if (!models[modelName]) {
+        models[modelName] = { windows: {} }
+      }
+      // Add window to existing model entry (addWindow will keep first if duplicate)
+      addWindow(models[modelName].windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
     }
   }
 

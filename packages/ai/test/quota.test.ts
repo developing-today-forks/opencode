@@ -314,6 +314,57 @@ describe("claude usage transform (#1750)", () => {
     expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
     expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
   })
+
+  test("duplicate session limits keep the first entry", () => {
+    const { windows } = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resets },
+        { kind: "session", percent: 80, resets_at: resets },
+      ],
+    })
+    expect(windows["5h"]?.usedPercent).toBe(20)
+  })
+
+  test("duplicate weekly_all limits keep the first entry", () => {
+    const { windows } = toClaudeUsage({
+      limits: [
+        { kind: "weekly_all", percent: 30, resets_at: resets },
+        { kind: "weekly_all", percent: 70, resets_at: resets },
+      ],
+    })
+    expect(windows["7d"]?.usedPercent).toBe(30)
+  })
+
+  test("duplicate weekly_scoped limits for same model keep the first entry", () => {
+    const { models } = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resets, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 60, resets_at: resets, scope: { model: { display_name: "Claude Sonnet" } } },
+      ],
+    })
+    expect(models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+  })
+
+  test("duplicate weekly_scoped limits for different models both survive", () => {
+    const { models } = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resets, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 40, resets_at: resets, scope: { model: { display_name: "Claude Opus" } } },
+      ],
+    })
+    expect(models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+    expect(models["Claude Opus"]?.windows["7d"]?.usedPercent).toBe(40)
+  })
+
+  test("null-percent duplicate does not overwrite (first survives)", () => {
+    const { windows } = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resets },
+        { kind: "session", percent: null, resets_at: resets },
+      ],
+    })
+    expect(windows["5h"]?.usedPercent).toBe(20)
+  })
 })
 
 describe("opendesign coding-plan windows (#1750)", () => {
