@@ -86,6 +86,32 @@ describe("meta portal subscription-quota mapping", () => {
     expect(parsed?.windows.weekly?.resetAt).toBe(1793980800 * 1000)
   })
 
+  test("a payload with no window_resets_at still parses (live 2026-11-05 shape)", () => {
+    // Observed live 2026-11-05 after re-login: the rolling window
+    // had not started (used "0") and the portal omitted
+    // window_resets_at entirely; weekly was over its limit. The
+    // parser must map this, not fall through to the key endpoint's
+    // empty post-roll state.
+    const live = {
+      subscription_quota: {
+        tier: "Muse Code High Usage",
+        as_of: 1793896168,
+        window_weighted_used: "0",
+        window_weighted_limit: "100000000000",
+        window_duration_secs: 18000,
+        weekly_weighted_used: "300549363810",
+        weekly_weighted_limit: "300000000000",
+        weekly_resets_at: 1794182400,
+      },
+    }
+    const parsed = parseSubscriptionQuota(live)
+    expect(parsed?.tier).toBe("Muse Code High Usage")
+    expect(parsed?.windows["5h"]?.usedPercent).toBe(0)
+    expect(parsed?.windows["5h"]?.resetAt).toBeNull()
+    expect(parsed?.windows.weekly?.usedPercent).toBe(100)
+    expect(parsed?.windows.weekly?.resetAt).toBe(1794182400 * 1000)
+  })
+
   test("a missing subscription_quota object maps to null", () => {
     expect(parseSubscriptionQuota({})).toBeNull()
     expect(parseSubscriptionQuota({ subscription_quota: { window_weighted_used: "1" } })).toBeNull()

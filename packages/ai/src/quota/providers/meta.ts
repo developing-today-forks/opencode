@@ -77,9 +77,14 @@ export const parseSubscriptionQuota = (
   const windowReset = toNumber(quota.window_resets_at)
   const weeklyReset = toNumber(quota.weekly_resets_at)
   const durationSecs = toNumber(quota.window_duration_secs)
+  // The reset timestamps are NOT part of the null gate: the live
+  // portal omits window_resets_at while the rolling window has not
+  // started (observed 2026-11-05: window_weighted_used "0" and no
+  // window_resets_at field at all). An absent reset is an honest
+  // null resetAt on that window, not an unparseable payload.
   if (
     windowUsed === null || windowLimit === null || weeklyUsed === null || weeklyLimit === null ||
-    windowReset === null || weeklyReset === null || windowLimit === 0 || weeklyLimit === 0
+    windowLimit === 0 || weeklyLimit === 0
   ) {
     return null
   }
@@ -91,12 +96,12 @@ export const parseSubscriptionQuota = (
       [windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"]: toUsageWindow({
         usedPercent: pct(windowUsed, windowLimit),
         windowSeconds,
-        resetAt: windowReset * 1000,
+        resetAt: windowReset === null ? null : windowReset * 1000,
       }),
       weekly: toUsageWindow({
         usedPercent: pct(weeklyUsed, weeklyLimit),
         windowSeconds: WEEKLY_SECONDS,
-        resetAt: weeklyReset * 1000,
+        resetAt: weeklyReset === null ? null : weeklyReset * 1000,
       }),
     },
   }
