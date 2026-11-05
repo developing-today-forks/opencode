@@ -135,6 +135,15 @@ const loadModel = (snapshotDir: string, onnxFile: string): Promise<LoadedModel> 
     }
   })()
   loadedModels.set(key, pending)
+  // A failed load must not brick the backend for the process lifetime
+  // (#1567): evict the entry when the load rejects, so the next call
+  // retries against the (possibly fixed) snapshot. Successful loads keep
+  // the shared/cached behavior; the rejection still reaches every caller
+  // holding `pending`, and this handler only keeps that rejection from
+  // surfacing as unhandled on the eviction branch.
+  pending.catch(() => {
+    if (loadedModels.get(key) === pending) loadedModels.delete(key)
+  })
   return pending
 }
 
