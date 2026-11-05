@@ -1,6 +1,7 @@
 {
   lib,
   stdenvNoCC,
+  stdenv,
   callPackage,
   bun,
   nodejs,
@@ -9,6 +10,7 @@
   models-dev,
   ripgrep,
   wayland,
+  zlib,
   installShellFiles,
   versionCheckHook,
   writableTmpDirAsHomeHook,
@@ -96,7 +98,15 @@ stdenvNoCC.mkDerivation (finalAttrs: {
           ++ lib.optional stdenvNoCC.hostPlatform.isDarwin sysctl
         )
       } ${lib.optionalString stdenvNoCC.hostPlatform.isLinux ''
-        --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ wayland ]}
+        --prefix LD_LIBRARY_PATH : ${
+          lib.makeLibraryPath [
+            wayland
+            # onnxruntime-node / sharp (native-onnx embeddings, #1727) dlopen
+            # libstdc++.so.6 and libz.so.1; the packaged closure must provide them.
+            stdenv.cc.cc.lib
+            zlib
+          ]
+        }
       ''}
 
     ${lib.optionalString (mcpx != null) ''

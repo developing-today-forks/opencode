@@ -42,13 +42,15 @@
  * (spike: import ~26 ms / +0 MB; first call ~1.2-1.5 s, +~380 MB RSS
  * with the 311 MB int8 model resident).
  *
- * Packaging note (step-2 finding, also on #1554): the native bindings
- * this module loads — onnxruntime-node's .node, and sharp's, which
+ * Packaging note (step-2 finding, also on #1554; resolved for the nix
+ * package in #1727): the native bindings this module loads —
+ * onnxruntime-node's .node, and sharp's, which
  * @huggingface/transformers loads transitively — need libstdc++
  * (libstdc++.so.6) and zlib (libz.so.1) on the process loader path.
  * Bare dev shells on NixOS need LD_LIBRARY_PATH with the gcc-lib and
  * zlib store paths (the same paths ~/local-embed/run.sh carries);
- * the packaged server's nix closure must provide them.
+ * the packaged server provides them: nix/opencode.nix puts
+ * stdenv.cc.cc.lib and zlib on the wrapper's LD_LIBRARY_PATH (Linux).
  *
  * Node bundle (packages/cli/vite.node.config.ts, #1615): the native
  * bindings cannot be inlined there — onnxruntime-node's loader
