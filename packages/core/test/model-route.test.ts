@@ -2593,6 +2593,26 @@ describe("ModelRoute demotion policy (experimental.model_route_demotion, #1151)"
     expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
   })
 
+  test("a Location registering later with a wider window still counts earlier quota events (#1699)", () => {
+    const now = Date.now()
+    // Two quota failures land while no wide-window Location is registered.
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    // A third failure five hours later is the pruning moment: under the old
+    // record-time retention (the registered readers' union, 4h by default)
+    // recording it discarded the first two events for good.
+    ModelRoute.failed(target, policy, now + 5 * 3_600_000, quota)
+    // Only now does the wider-window Location activate — no restart, so no
+    // ledger re-seed can recover anything the live path pruned.
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 3, windowMs: 10 * 3_600_000 }), "/proj-late"))
+    // All three failures are inside its 10h window, so it demotes.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-late")).toBe(true)
+    // A narrower Location still judges only its own window over the retained
+    // events: just the latest failure is inside the default 4h window, so
+    // the wider retention does not demote for it.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
   test("removing a Location's registration restores the defaults for it", () => {
     const off = ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/proj-gone")
     off()

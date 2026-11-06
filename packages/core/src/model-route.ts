@@ -1116,27 +1116,6 @@ export const demotionPolicy = (location?: string): DemotionPolicy => {
   }
 }
 
-/** The widest demotion window any registered Location judges by. Quota events are one
- * shared history (the hot cache over the route_attempt ledger's failure records), so
- * recording retains the union of windows; `demoted` applies the judging Location's own
- * window over what is retained. With nothing configured this is exactly the fallback
- * window, as before. */
-const retainedDemotionWindow = () => {
-  let window = activeSettings().quota.windowMs
-  for (const read of demotionReaders.values()) {
-    const configured = read()?.windowMs
-    if (configured !== undefined && configured > window) window = configured
-  }
-  // The union covers both config layers (#1484): a Location whose wide demotion window
-  // comes from its routes settings (not model_route_demotion) extends retention too,
-  // mirroring retainedNetworkWindowMs over the settings readers.
-  for (const read of settingsReaders.values()) {
-    const configured = read()?.demotion?.windowMs
-    if (configured !== undefined && configured > window) window = configured
-  }
-  return window
-}
-
 /** Give-ups among a target's recent requests. With a credentialID, the serving credential's own
  * history counts (#870): credential failures are recorded only in credentialHealth, so a
  * target-level read would call a repeatedly failing credential steady forever. */
@@ -1180,11 +1159,21 @@ export const demoted = (target: Model.Ref, now = Date.now(), credentialID?: stri
   return recent.length >= policy.threshold
 }
 
+/** Records one quota event in the hot cache. Retention is the full supported
+ * horizon (ModelRouteLog.MAX_DEMOTION_WINDOW_MS), exactly as `seedDemotion`
+ * replays the ledger — never the window of whichever Locations happen to be
+ * registered at record time (#1699): a Location with a wider demotion window
+ * can activate later in a long-running process, and pruning against the
+ * then-current retention would discard failures its policy still counts,
+ * unrecoverably (the durable ledger only re-enters this cache at restart).
+ * Judging still applies each Location's own window over the retained cache
+ * in `demoted`, so the wider retention never demotes a target a narrower
+ * policy would not. */
 const recordQuota = (
   target: Model.Ref,
   now: number,
   credentialID?: string,
-  retentionMs = retainedDemotionWindow(),
+  retentionMs = ModelRouteLog.MAX_DEMOTION_WINDOW_MS,
 ) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
   const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retentionMs)
