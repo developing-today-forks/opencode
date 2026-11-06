@@ -78,6 +78,10 @@ export const provider: QuotaProvider = {
       const balanceInfo =
         positiveBalances.find((info) => infoField(info, "currency") === "USD") ??
         positiveBalances.find((info) => infoField(info, "currency") === "CNY") ??
+        positiveBalances.find((info) => {
+          const currency = infoField(info, "currency")
+          return currency !== "USD" && currency !== "CNY"
+        }) ??
         balanceInfos.find((info) => infoField(info, "currency") === "USD") ??
         balanceInfos.find((info) => infoField(info, "currency") === "CNY") ??
         null
@@ -97,9 +101,13 @@ export const provider: QuotaProvider = {
         })
       }
 
-      const isCny = balanceInfo ? infoField(balanceInfo, "currency") === "CNY" : false
-      const symbol = isCny ? "¥" : "$"
-      const valueLabel = `${symbol}${formatMoney(totalBalance)}`
+      const currency = balanceInfo ? infoField(balanceInfo, "currency") : undefined
+      const valueLabel =
+        currency === "USD"
+          ? `$${formatMoney(totalBalance)}`
+          : currency === "CNY"
+            ? `¥${formatMoney(totalBalance)}`
+            : `${typeof currency === "string" ? `${currency} ` : ""}${formatMoney(totalBalance)}`
 
       return buildResult({
         providerId,
