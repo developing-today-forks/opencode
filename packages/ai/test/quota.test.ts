@@ -549,6 +549,35 @@ describe("codex quota window mapping (#1762)", () => {
     expect(result.usage?.windows["5h-secondary"]?.usedPercent).toBe(80)
   })
 
+  test("non-positive durations publish as unknown duration, never negative labels (#1848)", async () => {
+    const negative = await fetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: -3600, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(negative.ok).toBe(true)
+    expect(negative.usage?.windows["-1h"]).toBeUndefined()
+    expect(negative.usage?.windows.tokens?.usedPercent).toBe(10)
+    expect(negative.usage?.windows.tokens?.windowSeconds).toBeNull()
+    expect(negative.usage?.windows.tokens?.resetAt).toBe(reset * 1000)
+    expect(negative.usage?.windows.weekly?.usedPercent).toBe(80)
+
+    const zero = await fetchWith({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 0, reset_at: reset } },
+    })
+    expect(zero.usage?.windows.tokens?.windowSeconds).toBeNull()
+
+    const bothNegative = await fetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: -3600, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: -3600, reset_at: reset },
+      },
+    })
+    expect(bothNegative.usage?.windows["tokens-primary"]?.usedPercent).toBe(10)
+    expect(bothNegative.usage?.windows["tokens-secondary"]?.usedPercent).toBe(80)
+  })
+
   test("an empty window object mints no phantom window", async () => {
     const result = await fetchWith({
       rate_limit: {
