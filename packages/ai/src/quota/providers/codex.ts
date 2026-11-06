@@ -212,13 +212,16 @@ export const provider: QuotaProvider = {
     const auth = projectAuth(ctx)
     if (entryWithToken(getAuthEntry(auth, aliases))) return true
     // Instance integrations (openai.main / openai.alternate) hold the accounts.
+    // Only active rows count (#1811): fetchQuota's instance loop requires
+    // r.active and projectAuth projects active rows only, so an inactive
+    // credential must not list this provider as configured here either.
     for (const [instanceId, instance] of ctx.instances) {
       if (!aliases.includes(instance.base)) continue
-      const row = ctx.credentials.find((r) => r.integrationID === instanceId)
+      const row = ctx.credentials.find((r) => r.integrationID === instanceId && r.active)
       if (row && entryWithToken(projectCredentialValue(row.value))) return true
     }
     return ctx.credentials.some(
-      (row) => aliases.includes(row.integrationID) && entryWithToken(projectCredentialValue(row.value)),
+      (row) => row.active && aliases.includes(row.integrationID) && entryWithToken(projectCredentialValue(row.value)),
     )
   },
   fetchQuota: async (ctx) => {
