@@ -3,7 +3,7 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { toNumber, toTimestamp } from "../src/quota/utils.js"
+import { normalizeTimestamp, toNumber, toTimestamp } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -1321,5 +1321,19 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     )
     const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
     expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["weekly", "5h"])
+  })
+})
+
+describe("normalizeTimestamp non-positive handling (#1857)", () => {
+  test("non-positive spellings convert to null, never 1969/1970 credential expiries", () => {
+    expect(normalizeTimestamp(-5000)).toBeNull()
+    expect(normalizeTimestamp(-1893456000000)).toBeNull()
+    expect(normalizeTimestamp(0)).toBeNull()
+  })
+
+  test("valid positive timestamps convert exactly as before (controls)", () => {
+    expect(normalizeTimestamp(1893456000)).toBe(1893456000000)
+    expect(normalizeTimestamp(1893456000000)).toBe(1893456000000)
+    expect(normalizeTimestamp(undefined)).toBeNull()
   })
 })
