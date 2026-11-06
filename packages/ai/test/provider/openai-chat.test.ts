@@ -2251,7 +2251,7 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
-  it.effect("applies model-family compatibility defaults behind multi-family gateways", () =>
+  it.effect("does not detect model families in the shared protocol; explicit compatibility entries carry door defaults", () =>
     Effect.gen(function* () {
       const gateways = ["cline-pass", "opendesign", "opencode-go"] as const
       const tool = ToolDefinition.make({ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } })
@@ -2284,86 +2284,79 @@ describe("OpenAI Chat route", () => {
           strict: tools?.[0]?.function !== undefined && "strict" in tools[0].function,
         }
       }
+      const familyIDs = [
+        "glm-5.3",
+        "zai/glm-5.3",
+        "GLM-5.3",
+        "glm-4.5",
+        "kimi-k2.6",
+        "moonshotai/kimi-k2.6",
+        "moonshot-v1-8k",
+        "gemini-2.5-flash",
+        "google/gemini-3.8-flash",
+        "deepseek-chat",
+        "deepseek/deepseek-chat",
+        "deepseek-v3.2",
+      ]
 
-      // GLM behind a gateway gets the direct-ZAI decisions: max_tokens, no
-      // store, strict field sent, and tool_stream for non-4.5 models.
-      for (const id of ["glm-5.3", "zai/glm-5.3", "GLM-5.3"]) {
-        const direct = yield* prepare("zai", "https://api.z.ai/api/paas/v4", id)
-        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(direct.body))
-        expect(direct.body).toMatchObject({ max_tokens: 20, tool_stream: true })
-        expect(direct.body).not.toHaveProperty("store")
+      // Pinning test (#1824): with no explicit compatibility, a family-shaped
+      // model id gets the upstream-default wire fields on an official
+      // provider AND behind the gateway doors alike — the shared protocol
+      // no longer keys any behavior off the model-id family.
+      for (const id of familyIDs) {
+        const official = yield* prepare("openai", "https://api.openai.com/v1", id)
+        expect(official.body).toMatchObject({ max_completion_tokens: 20, store: false })
+        expect(official.body).not.toHaveProperty("tool_stream")
+        expect(official.body.tools?.[0]?.function).toHaveProperty("strict", false)
+        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(official.body))
       }
 
-      // The GLM 4.5 exclusions from tool_stream survive behind gateways,
-      // including vendor-prefixed ids, while the other defaults still apply.
-      for (const id of ["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v", "zai/glm-4.5"]) {
-        for (const prepared of yield* viaGateway(id)) {
-          expect(prepared.body).toMatchObject({ max_tokens: 20 })
-          expect(prepared.body).not.toHaveProperty("tool_stream")
-          expect(prepared.body).not.toHaveProperty("store")
-        }
-      }
-
-      // Kimi/Moonshot behind a gateway gets the direct-Moonshot decisions:
-      // max_tokens, no store, and no strict field on tools.
-      for (const id of ["kimi-k2.6", "moonshotai/kimi-k2.6", "Kimi-K3", "moonshot-v1-8k"]) {
-        const direct = yield* prepare("moonshotai", "https://api.moonshot.ai/v1", id)
-        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(direct.body))
-        expect(direct.body).toMatchObject({ max_tokens: 20 })
-        expect(direct.body.tools?.[0]?.function).not.toHaveProperty("strict")
-      }
-
-      // Gemini behind a gateway keeps the direct-Google decisions:
-      // max_completion_tokens, no store, strict field sent.
-      for (const id of ["gemini-2.5-flash", "google/gemini-3.8-flash"]) {
-        const direct = yield* prepare("google", "https://generativelanguage.googleapis.com/v1beta/openai", id)
-        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(direct.body))
-        expect(direct.body).toMatchObject({ max_completion_tokens: 20 })
-        expect(direct.body).not.toHaveProperty("store")
-      }
-
-      // DeepSeek behind a gateway gets the direct-DeepSeek decisions:
-      // max_tokens and no store.
-      for (const id of ["deepseek-chat", "deepseek/deepseek-chat", "deepseek-v3.2", "deepseek-reasoner"]) {
-        const direct = yield* prepare("deepseek", "https://api.deepseek.com/v1", id)
-        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(direct.body))
-        expect(direct.body).toMatchObject({ max_tokens: 20 })
-        expect(direct.body).not.toHaveProperty("store")
-      }
-
-      // Family names embedded in a larger segment are not families: the
-      // classifier is anchored to a whole id segment, so these keep the
-      // generic gateway defaults.
-      for (const id of ["not-glm-5.3", "xglm-5.3", "my-kimi-k2.6", "not-gemini-2.5-flash", "not-deepseek-chat", "future-model"]) {
-        for (const prepared of yield* viaGateway(id)) {
-          expect(prepared.body).toMatchObject({ max_completion_tokens: 20, store: false })
-          expect(prepared.body).not.toHaveProperty("tool_stream")
-          expect(prepared.body.tools?.[0]?.function).toHaveProperty("strict", false)
-        }
-      }
-
-      // Explicit compatibility overrides win over family detection,
-      // including explicit false values.
+      // The gateway doors' family defaults now arrive as explicit per-model
+      // compatibility entries from the catalog/config layer (#1824); with
+      // those entries the wire fields match what family detection produced.
+      // GLM entry: max_tokens, no store, strict sent, tool_stream on.
       for (const prepared of yield* viaGateway("glm-5.3", {
-        zaiToolStream: false,
-        maxTokensField: "max_completion_tokens",
-        supportsStore: true,
-        supportsStrictMode: false,
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
       })) {
-        expect(prepared.body).toMatchObject({ max_completion_tokens: 20, store: false })
-        expect(prepared.body).not.toHaveProperty("tool_stream")
-        expect(prepared.body.tools?.[0]?.function).not.toHaveProperty("strict")
-      }
-      for (const prepared of yield* viaGateway("kimi-k2.6", {
-        supportsStrictMode: true,
-        supportsStore: true,
-        maxTokensField: "max_completion_tokens",
-      })) {
-        expect(prepared.body).toMatchObject({ max_completion_tokens: 20, store: false })
+        expect(prepared.body).toMatchObject({ max_tokens: 20, tool_stream: true })
+        expect(prepared.body).not.toHaveProperty("store")
         expect(prepared.body.tools?.[0]?.function).toHaveProperty("strict", false)
       }
-      for (const prepared of yield* viaGateway("future-model", { zaiToolStream: true })) {
-        expect(prepared.body).toMatchObject({ tool_stream: true })
+      // GLM 4.5 entry: tool streaming excluded.
+      for (const prepared of yield* viaGateway("glm-4.5", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("tool_stream")
+        expect(prepared.body).not.toHaveProperty("store")
+      }
+      // Kimi entry: max_tokens, no store, no strict field on tools.
+      for (const prepared of yield* viaGateway("kimi-k2.6", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        supportsStrictMode: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
+        expect(prepared.body.tools?.[0]?.function).not.toHaveProperty("strict")
+      }
+      // Gemini entry: no store; the token field and strict stay at defaults.
+      for (const prepared of yield* viaGateway("gemini-2.5-flash", { supportsStore: false })) {
+        expect(prepared.body).toMatchObject({ max_completion_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
+        expect(prepared.body.tools?.[0]?.function).toHaveProperty("strict", false)
+      }
+      // DeepSeek entry: max_tokens, no store.
+      for (const prepared of yield* viaGateway("deepseek-chat", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
       }
     }),
   )
