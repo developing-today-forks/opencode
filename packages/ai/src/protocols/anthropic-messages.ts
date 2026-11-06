@@ -34,8 +34,16 @@ import { Lifecycle } from "./utils/lifecycle.js"
 import { ToolStream } from "./utils/tool-stream.js"
 
 const ADAPTER = "anthropic-messages"
-export const DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
-export const PATH = "/messages"
+// The protocol's endpoint render appends PATH ("/messages") to this
+// base, so the base is the API origin only - "https://api.anthropic.com/v1"
+// here produced https://api.anthropic.com/v1/v1/messages at runtime
+// (Anthropic 404), which broke every AnthropicMessages consumer that
+// relied on the default (notably the claude-code provider, #6117).
+export const DEFAULT_BASE_URL = "https://api.anthropic.com"
+// NOTE: the path carries the /v1 prefix - Endpoint.render concatenates
+// baseURL + path with no de-duplication, and DEFAULT_BASE_URL above is
+// the bare origin, so the version segment lives here exactly once.
+export const PATH = "/v1/messages"
 export const DEFAULT_MAX_TOKENS = 32_000
 const MIN_THINKING_BUDGET = 1_024
 const DEFAULT_EFFORT = "high"
