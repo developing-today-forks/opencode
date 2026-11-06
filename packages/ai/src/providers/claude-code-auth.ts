@@ -346,7 +346,23 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     url: `${OAUTH_AUTHORIZE_URL}?${params.toString()}`,
     instructions: SIGN_IN_INSTRUCTIONS,
     callback: (pasted: string) => {
-      inflight ??= exchangeAndPersist(pasted)
+      if (inflight === undefined) {
+        const attempt = exchangeAndPersist(pasted)
+        inflight = attempt
+        // A failed attempt must not poison the sign-in (#1868): the
+        // memo deduplicates concurrent calls, but once an attempt
+        // rejects — a bad paste, a state mismatch, a failed exchange —
+        // it is cleared, so a later paste runs a fresh exchange on
+        // this same sign-in (same PKCE/state) instead of returning
+        // the cached rejection forever. Success stays memoized: the
+        // authorization code is single-use, and the persisted
+        // credential is the result. The sibling bridges clear their
+        // inflight the same way (antigravity-auth loadToken,
+        // vibe-auth loadApiKey).
+        attempt.catch(() => {
+          if (inflight === attempt) inflight = undefined
+        })
+      }
       return inflight
     },
   }
