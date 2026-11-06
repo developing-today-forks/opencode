@@ -514,18 +514,18 @@ const step: (
   // and anything further is a no-op (the bundle's consumeStream keeps
   // reading to end-of-stream the same way).
   if (state.emittedFinish) return Effect.succeed([state, []] as const)
-  // A tool-call event without a name or an id is malformed gateway
+  // A tool-call or tool-result event without a name or an id is malformed gateway
   // output (#1756): it used to vanish silently (nameless) or be
   // emitted with a colliding empty id. Fail the stream loudly, the
   // same contract as the truncated-stream and invalid-tool-input
   // failures — there is no safe fallback identity to invent.
-  if (event.type === "tool-call") {
+  if (event.type === "tool-call" || event.type === "tool-result") {
     const missing = !event.toolName ? "toolName" : !event.toolCallId ? "toolCallId" : null
     if (missing !== null) {
       return Effect.fail(
         ProviderShared.eventError(
           state.route,
-          `Command Code tool-call event is missing its ${missing}; malformed tool-call events fail the stream`,
+          `Command Code ${event.type} event is missing its ${missing}; malformed ${event.type} events fail the stream`,
           ProviderShared.encodeJson(event),
         ),
       )
