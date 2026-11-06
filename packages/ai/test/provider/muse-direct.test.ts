@@ -294,6 +294,41 @@ it.effect("subscription and payment exchange states are hard errors with no infe
   }),
 )
 
+it.effect("an over-cap key-exchange response is rejected instead of buffered whole (#1893)", () =>
+  Effect.gen(function* () {
+    const handler = (calls: Array<Call>) => (input: HandlerInput) =>
+      observe(calls, input).pipe(Effect.map(() => input.respond(textStream("unreachable"))))
+
+    // Oversized SUCCESS body: valid JSON with a minted key, padded past the 1 MiB cap.
+    MuseDirectAuth.invalidate()
+    const bigOk = fakeExchange(() => ({ api_key: MINTED_KEY, pad: "x".repeat(2_000_000) }))
+    const directOk = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: { readFile: () => accountFile, fetchFn: bigOk.fetchFn },
+    })
+    const okCalls: Array<Call> = []
+    const okError = yield* generate(directOk.model("muse-spark-1.3-contributor"), { prompt: "Hello" }, handler(okCalls)).pipe(
+      Effect.flip,
+    )
+    expect(String(okError)).toContain("exceeded")
+    expect(okCalls).toHaveLength(0)
+
+    // Oversized ERROR body: the bounded read rejects it before the HTTP-error slice.
+    MuseDirectAuth.invalidate()
+    const bigErrFetch = (async () => new Response("E".repeat(2_000_000), { status: 500 })) as typeof fetch
+    const directErr = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: { readFile: () => accountFile, fetchFn: bigErrFetch },
+    })
+    const errCalls: Array<Call> = []
+    const errError = yield* generate(directErr.model("muse-spark-1.3-contributor"), { prompt: "Hello" }, handler(errCalls)).pipe(
+      Effect.flip,
+    )
+    expect(String(errError)).toContain("exceeded")
+    expect(errCalls).toHaveLength(0)
+  }),
+)
+
 it.effect("an api_key-only auth file is used directly, with no exchange", () =>
   Effect.gen(function* () {
     MuseDirectAuth.invalidate()
