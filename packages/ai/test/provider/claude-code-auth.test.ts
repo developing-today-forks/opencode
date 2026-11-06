@@ -364,8 +364,9 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     const { sources, calls } = harness()
     const signIn = await beginClaudeCodeSignIn(sources)
     await expect(signIn.callback("   ")).rejects.toBeInstanceOf(ClaudeCodeSignInError)
-    const again = await beginClaudeCodeSignIn(sources)
-    await expect(again.callback("auth-code-1#wrong-state")).rejects.toThrow("state mismatch")
+    // The state mismatch is judged on its own paste, on the SAME
+    // sign-in: a failed callback does not cache its rejection (#1868).
+    await expect(signIn.callback("auth-code-1#wrong-state")).rejects.toThrow("state mismatch")
     expect(calls).toHaveLength(0)
   })
 
@@ -447,6 +448,39 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     expect(JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)).toEqual({
       claudeAiOauth: { accessToken: "tok-old" },
     })
+  })
+
+  test("a retry after a failed paste succeeds on the same sign-in (#1868)", async () => {
+    const { sources, calls } = harness()
+    const signIn = await beginClaudeCodeSignIn(sources)
+    await expect(signIn.callback("   ")).rejects.toBeInstanceOf(ClaudeCodeSignInError)
+    await expect(signIn.callback("auth-code-1#wrong-state")).rejects.toThrow("state mismatch")
+    const credential = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`)
+    expect(credential).toMatchObject({ accessToken: "tok-signed-in" })
+    expect(calls).toHaveLength(1)
+  })
+
+  test("a retry after a failed exchange runs a fresh exchange (#1868)", async () => {
+    let attempts = 0
+    const flaky: typeof fetch = async () => {
+      attempts++
+      if (attempts === 1)
+        return new Response(JSON.stringify({ error: "invalid_grant" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        })
+      return new Response(
+        JSON.stringify({ access_token: "tok-second-try", refresh_token: "ref-second", expires_in: 3600 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )
+    }
+    const { sources } = harness({}, flaky)
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const state = stateFrom(signIn.url)
+    await expect(signIn.callback(`bad-code#${state}`)).rejects.toBeInstanceOf(ClaudeCodeSignInError)
+    const credential = await signIn.callback(`good-code#${state}`)
+    expect(credential).toMatchObject({ accessToken: "tok-second-try" })
+    expect(attempts).toBe(2)
   })
 
   test("concurrent callbacks run exactly one token exchange", async () => {
