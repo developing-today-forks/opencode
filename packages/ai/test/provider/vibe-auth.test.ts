@@ -10,6 +10,7 @@ import {
   parseDotEnv,
   resolveApiKey,
   vibeAuth,
+  type ShadowDiagnostic,
   type CredentialSources,
 } from "../../src/providers/vibe-auth.js"
 
@@ -152,5 +153,64 @@ describe("vibeAuth - the Vibe CLI's User-Agent, stamped after the transport merg
     const headers = await apply(vibeAuth({ sources: { env: { MISTRAL_API_KEY: "env-key" } } }))
     expect(headers["user-agent"]).toBe(CLI_USER_AGENT)
     expect(headers.authorization).toBe("Bearer " + "env-key")
+  })
+})
+
+describe("resolveApiKey — shadow diagnostic (#1809)", () => {
+  const capture = () => {
+    const seen: ShadowDiagnostic[] = []
+    return { seen, onShadowDiagnostic: (diagnostic: ShadowDiagnostic) => void seen.push(diagnostic) }
+  }
+
+  test("environment win over an existing keyring entry emits the diagnostic", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: { MISTRAL_API_KEY: "env-key" },
+      readFile: noFile,
+      keyringLookup: keyringWith({ [KEYRING_SERVICE]: "keyring-key" }),
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("env-key")
+    expect(seen).toEqual([{ winningTier: "environment", shadowedService: KEYRING_SERVICE }])
+    // The diagnostic names the tier and the shadowed service only — no
+    // part of either credential value may appear in it.
+    expect(JSON.stringify(seen)).not.toContain("env-key")
+    expect(JSON.stringify(seen)).not.toContain("keyring-key")
+  })
+
+  test(".env file win over an existing keyring entry emits the diagnostic", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: {},
+      readFile: () => "MISTRAL_API_KEY=" + "file-key",
+      keyringLookup: keyringWith({ [LEGACY_KEYRING_SERVICE]: "legacy-key" }),
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("file-key")
+    expect(seen).toEqual([{ winningTier: "dotenv-file", shadowedService: LEGACY_KEYRING_SERVICE }])
+  })
+
+  test("keyring win emits no shadow diagnostic", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: {},
+      readFile: noFile,
+      keyringLookup: keyringWith({ [KEYRING_SERVICE]: "keyring-key" }),
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("keyring-key")
+    expect(seen).toEqual([])
+  })
+
+  test("environment win with no keyring entry does not claim a shadow", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: { MISTRAL_API_KEY: "env-key" },
+      readFile: noFile,
+      keyringLookup: async () => undefined,
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("env-key")
+    expect(seen).toEqual([])
   })
 })
