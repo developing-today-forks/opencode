@@ -12,6 +12,7 @@ import { ModelRoute } from "../../model-route.js"
 import { Provider } from "../../provider.js"
 import { Variant } from "../../variant.js"
 import { configuredInstances } from "../../plugin/provider/instance.js"
+import { settingsConflicts } from "../../plugin/provider/configured.js"
 import { ConfigEntryObserver } from "./entry-observer.js"
 
 export const Plugin = define({
@@ -24,6 +25,19 @@ export const Plugin = define({
       ["providers", "model"],
       ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload())),
     )
+    // Loud startup warning for package-seating conflicts (#1858): the first document
+    // declaring a provider's package seats it; a later document naming a different
+    // package for the same provider has its settings for that provider ignored in
+    // the transforms below (and in foldSettings), so it cannot hijack the provider.
+    for (const conflict of settingsConflicts(loaded.entries))
+      yield* Effect.logWarning(
+        "config declares a conflicting package for a provider; the conflicting document's settings for that provider are ignored",
+        {
+          providerID: conflict.providerID,
+          seatedPackage: conflict.seatedPackage,
+          conflictingPackage: conflict.conflictingPackage,
+        },
+      )
     yield* ctx.integration.transform((integrations) => {
       const instances = configuredInstances(loaded.entries)
       for (const [id, provider] of configuredProviders(loaded.entries)) {
@@ -72,9 +86,9 @@ export const Plugin = define({
       // later document's baseURL is seen, so a per-document gate lets that clone resurrect
       // the pin the later document was meant to replace (#501).
       const baseURLProviders = new Set(
-        items.filter(([, item]) => item.settings?.baseURL !== undefined).map(([id]) => id),
+        items.filter(([, item, conflict]) => !conflict && item.settings?.baseURL !== undefined).map(([id]) => id),
       )
-      for (const [id, item] of items) {
+      for (const [id, item, conflict] of items) {
         const providerID = id
         const current = providers.get(providerID)
         const source = providers.get(item.canonical ?? current?.provider.canonical ?? providerID)
@@ -96,10 +110,11 @@ export const Plugin = define({
               provider.activation = "enabled"
             if (item.canonical !== undefined) provider.canonical = item.canonical
             if (item.name) provider.name = item.name
-            if (item.package !== undefined) provider.package = item.package
+            if (!conflict && item.package !== undefined) provider.package = item.package
             if (item.compatibility !== undefined)
               provider.compatibility = { ...provider.compatibility, ...item.compatibility }
-            if (item.settings !== undefined) provider.settings = Provider.mergeOverlay(provider.settings, item.settings)
+            if (!conflict && item.settings !== undefined)
+              provider.settings = Provider.mergeOverlay(provider.settings, item.settings)
             if (item.headers !== undefined) provider.headers = Provider.mergeHeaders(provider.headers, item.headers)
             if (item.body !== undefined) provider.body = Provider.mergeOverlay(provider.body, item.body)
           })
@@ -268,7 +283,22 @@ export function applyModelConfig(
 }
 
 function configuredProviders(entries: readonly Entry[]) {
-  return entries
-    .filter((entry): entry is Document => entry.type === "document")
-    .flatMap((file) => Object.entries(file.info.providers ?? {}))
+  // Package seating (#1858): the first document declaring a provider's package
+  // seats it; a later document declaring a different package for the same
+  // provider is flagged conflicted so its package/settings are not applied.
+  const seated = new Map<string, string>()
+  const result: Array<[string, ConfigProvider.Info, boolean]> = []
+  for (const entry of entries) {
+    if (entry.type !== "document") continue
+    for (const [id, info] of Object.entries(entry.info.providers ?? {})) {
+      let conflict = false
+      if (info.package !== undefined) {
+        const current = seated.get(id)
+        if (current === undefined) seated.set(id, info.package)
+        else if (current !== info.package) conflict = true
+      }
+      result.push([id, info, conflict])
+    }
+  }
+  return result
 }
