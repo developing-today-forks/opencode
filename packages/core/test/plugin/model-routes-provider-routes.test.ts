@@ -210,4 +210,36 @@ describe("provider routes in the plugin pipeline (production collapse shape)", (
       expect(groupSeat(terra!).index).toBeGreaterThan(0)
     }),
   )
+
+  // #1720: a provider route is addressable as a provider of its own, not only as a seat.
+  it.effect("registers each member-offered model under the route id with the seat-identical group", () =>
+    Effect.gen(function* () {
+      const credentials = yield* Credential.Service
+      yield* credentials.create({ integrationID: Integration.ID.make("openai"), value: chatgpt("main-token") })
+      yield* credentials.create({
+        integrationID: Integration.ID.make("openai.alternate"),
+        value: chatgpt("alternate-token"),
+      })
+      const warnings: string[] = []
+      const warn = console.warn
+      console.warn = (...args: unknown[]) => void warnings.push(args.join(" "))
+      yield* addPlugins(entries()).pipe(Effect.ensuring(Effect.sync(() => (console.warn = warn))))
+
+      const models = yield* Model.Service
+      const direct = yield* models.get(Provider.ID.make("openai-plan"), Model.ID.make("gpt-6-luna"))
+      expect(direct).toBeDefined()
+      const definition = ModelRoute.definition(direct!)
+      expect(definition).toBeDefined()
+      expect(definition!.id).toBe(Model.ID.make("openai-plan/gpt-6-luna"))
+      expect(refs(definition!)).toEqual(["openai.alternate/gpt-6-luna", "openai/gpt-6-luna"])
+      expect(definition!.nodes.some((node) => node.providerRoute === "openai-plan")).toBe(true)
+      expect(definition!.nodes.find((node) => node.providerRoute === "openai-plan")?.selection).toBe("ordered")
+      // The route's own models do not include one no member offers.
+      expect(yield* models.get(Provider.ID.make("openai-plan"), Model.ID.make("not-a-model"))).toBeUndefined()
+      // The synthetic route provider must not read as a concrete provider colliding with the
+      // route that created it when the model transform re-expands the seats.
+      expect(warnings.filter((line) => line.includes("openai-plan"))).toEqual([])
+      expect(refs((yield* definitionOf("terra-plan"))!)).toContain("openai/gpt-6.1-terra")
+    }),
+  )
 })

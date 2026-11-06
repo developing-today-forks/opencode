@@ -225,8 +225,9 @@ export const policy = (input?: {
   }
 }
 
+/** The route definition a model carries. Route models under the routes provider carry one, and so
+ * do the direct-addressing models a configured provider route registers under its own id (#1720). */
 export const definition = (model: Model.Info): Definition | undefined => {
-  if (model.providerID !== PROVIDER_ID) return
   const value = model.settings?.[SETTING]
   const result = Schema.decodeUnknownOption(Definition)(value)
   return result._tag === "Some" ? result.value : undefined
