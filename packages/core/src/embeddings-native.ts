@@ -58,15 +58,14 @@
  * (packages/cli/script/build.ts) — its binding cannot be located
  * from inside $bunfs, and text embeddings never reach it.
  *
- * Node bundle (packages/cli/vite.node.config.ts, #1615): the native
- * bindings cannot be inlined there — onnxruntime-node's loader
- * dynamically requires its .node file, which the bundler cannot
- * resolve, and the throw lands at bundle initialisation. The Node
- * build therefore stubs onnxruntime-node (and sharp, which
- * @huggingface/transformers loads) out of the bundle: this backend
- * is unavailable under Node and any use throws a clear error there.
- * It stays available under the Bun build, which resolves the real
- * packages from node_modules.
+ * Node bundle (#1792): the default registration is native-onnx after
+ * the #1690 flip, but native embeddings are explicitly unsupported in
+ * this bundle. The embeddings service checks the Node-bundle build
+ * marker and raises that contract at its surface before calling this
+ * module. vite.node.config.ts still stubs onnxruntime-node and sharp
+ * so the bundle starts without native bindings; those stubs remain a
+ * backstop for accidental direct use. Native embeddings stay supported
+ * under the Bun build, which resolves the real packages from node_modules.
  */
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
