@@ -45,6 +45,29 @@ it.effect("Command Code route points at the CLI's own gateway endpoint, not the 
   }),
 )
 
+it.effect("a catalog-seeded hosted Provider API baseURL never reaches the wire", () =>
+  Effect.gen(function* () {
+    const seeded = Commandcode.model("deepseek/deepseek-v4-flash", {
+      apiKey: "user_fixturekey",
+      baseURL: "https://api.commandcode.ai/provider/v1",
+    })
+    const seededRequest = LLM.request({ model: seeded, prompt: "Hello" })
+    const seededCompiled = yield* compileRequest(seededRequest)
+    expect(
+      Endpoint.render(seeded.route.endpoint, { request: seededRequest, body: seededCompiled.body }).toString(),
+    ).toBe("https://api.commandcode.ai/alpha/generate")
+    const custom = Commandcode.model("deepseek/deepseek-v4-flash", {
+      apiKey: "user_fixturekey",
+      baseURL: "http://127.0.0.1:18904",
+    })
+    const customRequest = LLM.request({ model: custom, prompt: "Hello" })
+    const customCompiled = yield* compileRequest(customRequest)
+    expect(
+      Endpoint.render(custom.route.endpoint, { request: customRequest, body: customCompiled.body }).toString(),
+    ).toBe("http://127.0.0.1:18904/alpha/generate")
+  }),
+)
+
 it.effect("the request body matches the CLI bundle's createModelClient envelope", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(

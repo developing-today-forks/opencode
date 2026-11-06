@@ -85,12 +85,33 @@ export const MODELS: ReadonlyArray<ModelPreset> = [
 export const route = CommandCode.route
 export const routes = [route]
 
+/**
+ * The models.dev catalog entry for this provider id describes the hosted
+ * Provider API of the vendor (https://api.commandcode.ai/provider/v1, for
+ * the @ai-sdk/openai-compatible package), and the catalog layer seeds that
+ * URL as the baseURL setting of the provider. This native provider does
+ * not speak that API - its wire is the /alpha/generate endpoint of the CLI
+ * on https://api.commandcode.ai - so a seeded hosted-API base URL must
+ * never reach the endpoint: requests addressed to the hosted base plus
+ * /alpha/generate return 404 (verified live 2026-11-06 against the
+ * deployed build, whose sessions failed with the verbatim gateway error
+ * naming POST https://api.commandcode.ai/provider/v1/alpha/generate as
+ * not a registered API route). An explicitly configured base URL for any
+ * other target (a test listener, a mirror) is honored unchanged.
+ */
+export const HOSTED_PROVIDER_API_BASE_URL = "https://api.commandcode.ai/provider/v1"
+
+const resolveBaseURL = (baseURL: string | undefined): string => {
+  if (baseURL === undefined) return CommandCode.DEFAULT_BASE_URL
+  return baseURL.replace(/\/+$/, "") === HOSTED_PROVIDER_API_BASE_URL ? CommandCode.DEFAULT_BASE_URL : baseURL
+}
+
 const configuredRoute = (input: Config) => {
   const { baseURL, auth, apiKey, sources, cliVersion, ...rest } = input
   return CommandCode.route.with({
     ...rest,
     provider: id,
-    endpoint: { baseURL: baseURL ?? CommandCode.DEFAULT_BASE_URL },
+    endpoint: { baseURL: resolveBaseURL(baseURL) },
     auth: CommandCodeAuth.commandCodeAuth({ auth, apiKey, sources, cliVersion }),
   })
 }
