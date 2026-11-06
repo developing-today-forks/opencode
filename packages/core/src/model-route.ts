@@ -293,6 +293,41 @@ export const credentialCooldownUntil = (target: Model.Ref, credentialID: string,
 
 export const credentialCoolingDown = (target: Model.Ref, credentialID: string, now = Date.now()) =>
   credentialCooldownUntil(target, credentialID, now) > now
+
+/** Infra holds: stops planted by transport path failures (DNS, refused connections) whose
+ * request never reached a provider API. Kept apart from `health` on purpose: an infra
+ * failure is not evidence about the provider, so it never increments a bench's escalation
+ * count, plants no quota evidence, and gates no pool — it only holds the target out of
+ * candidacy on a short fixed cadence while the path is broken (Drew 2026-11-06: an error
+ * "because it can't route like our dns" must not be treated the same as a provider error).
+ * The hold itself is the probe schedule: after it lapses the next pick tests the path, and
+ * the first success on the target clears the hold (see `completed`). Planted at target
+ * scope — a path failure does not care which credential would have served. */
+interface InfraHold {
+  until: number
+  failures: number
+}
+const infraHolds = new Map<string, InfraHold>()
+const INFRA_LADDER_MS = [30_000, 60_000, 120_000, 240_000]
+const INFRA_CAP_MS = 300_000
+
+const infraHoldUntil = (id: string, now: number) => {
+  const hold = infraHolds.get(id)
+  // An expired hold stops holding but keeps its failure count: the cadence ladder is
+  // per path, not per hold, so a path that breaks again right after a lapse resumes
+  // the ladder instead of restarting it. The entry itself is bounded by the map cap
+  // and cleared by a success or a health reset.
+  return hold && hold.until > now ? hold.until : 0
+}
+
+const plantInfraHold = (target: Model.Ref, now: number) => {
+  const id = key(target)
+  const failures = (infraHolds.get(id)?.failures ?? 0) + 1
+  const until = now + Math.min(INFRA_LADDER_MS[Math.min(failures - 1, INFRA_LADDER_MS.length - 1)]!, INFRA_CAP_MS)
+  infraHolds.set(id, { until, failures })
+  while (infraHolds.size > HEALTH_LIMIT) infraHolds.delete(infraHolds.keys().next().value!)
+  logHealth(target, "infra-hold", `path failure #${failures}; held while the route heals`, until)
+}
 const HEALTH_LIMIT = 2_000
 // Recent finished requests per target (true = answered). A target with at most one give-up in this
 // window is steady: a single failure there is treated as transient before the route moves on.
@@ -335,7 +370,9 @@ const logHealth = (
     | "quota-gated"
     | "quota-readmitted"
     | "bench-probe"
-    | "bench-probe-release",
+    | "bench-probe-release"
+    | "infra-hold"
+    | "infra-cleared",
   reason: string,
   until?: number,
   credentialID?: string,
@@ -418,7 +455,11 @@ export const coolingDown = (target: Model.Ref, now = Date.now(), location?: stri
 export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: string) => {
   const state = health.get(key(target))
   if (state) recover(target, state, now)
-  return Math.max(state?.cooldownUntil ?? 0, providerCooldownUntil(target.providerID, now, location))
+  return Math.max(
+    state?.cooldownUntil ?? 0,
+    providerCooldownUntil(target.providerID, now, location),
+    infraHoldUntil(key(target), now),
+  )
 }
 
 const MAX_COOLDOWN_MS = 86_400_000
@@ -428,6 +469,14 @@ const MAX_COOLDOWN_MS = 86_400_000
 export interface FailureHint {
   readonly retryAfterMs?: number
   readonly quota?: boolean
+  /** The quota window reset the provider stated in its error text (absolute ms), for
+   * providers that state it nowhere else (Antigravity's "Resets in 81h35m49s"). Bound to
+   * the bench like a snapshot-derived reset (#1806 mechanism 4, #1828). */
+  readonly quotaResetAtMs?: number
+  /** A transport path failure whose OS code proves the request never reached a provider
+   * API (DNS failure, refused connection): an infra hold, not a provider-health signal —
+   * it plants no bench and feeds no quota accounting (#1828). */
+  readonly infra?: boolean
   /** A local transport failure with no provider HTTP response. */
   readonly network?: boolean
   /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
@@ -497,6 +546,55 @@ const armBenchProbe = (target: Model.Ref, credentialID: string | undefined, rese
   if (state.benchReason !== "quota" && state.benchReason !== "quota retry-after") return
   if (state.benchQuotaResetAt !== undefined && state.benchQuotaResetAt <= resetAt) return
   state.benchQuotaResetAt = resetAt
+}
+
+/** The reset a quota bench is bounded by: the earliest trustworthy one known — a snapshot
+ * derivation or the reset the provider stated in the error text itself (#1828). */
+const statedQuotaResetAt = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location: string | undefined,
+  hint: FailureHint | undefined,
+): number | undefined => {
+  if (!hint?.quota) return undefined
+  const derived = quotaResetAt(target, credentialID, now, location)
+  const stated = hint.quotaResetAtMs !== undefined && hint.quotaResetAtMs > now ? hint.quotaResetAtMs : undefined
+  return derived === undefined ? stated : stated === undefined ? derived : Math.min(derived, stated)
+}
+
+/** Releases quota-class benches in one scope on a measured increase: a fresh, known quota
+ * reading that is not full is the provider's own word that headroom is back, so a bench
+ * planted by an earlier exhaustion stops holding the scope out instead of waiting for its
+ * reset (Drew 2026-11-06: providers stop trying when quota is burned "until it shows an
+ * increase"). Only quota-class benches release — auth, unknown-error and slow benches keep
+ * their timers, and balance holds keep their stricter increase-over-baseline rule. The
+ * caller guarantees the reading is known and fresh; a stale or unknown reading never
+ * reaches here, so a failed quota read can never free a scope by accident. */
+const releaseQuotaBenches = (inScope: (id: string) => boolean, now: number) => {
+  const release = (id: string, state: HealthState, credentialID?: string) => {
+    if (state.cooldownUntil <= now) return
+    if (state.benchReason !== "quota" && state.benchReason !== "quota retry-after") return
+    state.cooldownUntil = 0
+    state.consecutiveFailures = 0
+    state.benchReason = undefined
+    state.benchQuotaResetAt = undefined
+    state.probeClaimedAt = undefined
+    state.probeClaimToken = undefined
+    const base = credentialID ? id.slice(0, id.lastIndexOf("#")) : id
+    const slash = base.indexOf("/")
+    const target = ref({ providerID: base.slice(0, slash), model: base.slice(slash + 1) })
+    logHealth(
+      target,
+      "quota-readmitted",
+      `bench released on a measured quota increase${credentialID ? ` credential:${credentialID}` : ""}`,
+      undefined,
+      credentialID,
+    )
+  }
+  for (const [id, state] of health) if (inScope(id)) release(id, state)
+  for (const [id, state] of credentialHealth)
+    if (inScope(id)) release(id, state, id.slice(id.lastIndexOf("#") + 1))
 }
 
 const probeDueState = (state: HealthState | undefined, now: number) =>
@@ -608,6 +706,130 @@ export const activeBenches = (now = Date.now()): ActiveBench[] => {
   for (const [id, state] of health) collect(id, state)
   for (const [id, state] of credentialHealth) collect(id, state, id.slice(id.lastIndexOf("#") + 1))
   return benches.toSorted((left, right) => left.until - right.until)
+}
+
+/** The availability classes of #1828: why a provider/credential/target is stopped, in the
+ * vocabulary of the resume rule that frees it. */
+export type AvailabilityClass = "quota" | "balance" | "rate-limit" | "auth" | "unknown" | "infra" | "slow"
+
+/** One stop in force, as the availability surface reports it: what is stopped, which class
+ * holds it, until when (absent for increase-only balance holds — no timer frees those),
+ * and the resume rule that ends it. */
+export interface AvailabilityEntry {
+  readonly providerID: string
+  readonly modelID?: string
+  readonly credentialID?: string
+  readonly class: AvailabilityClass
+  readonly reason: string
+  readonly until?: number
+  readonly resume: "reset" | "increase" | "retry-after" | "timer" | "path"
+}
+
+/** Every stop in force at `now`, merged from all four mechanisms that can hold a provider
+ * back — benches, quota gates and balance holds, provider rate-limit window holds, and
+ * infra holds — so one readout answers "which providers are available, and for the rest:
+ * why, until when, and what resumes them" (#1828). Absence from the list means available.
+ * The effective stop for a leaf is the latest `until` among its entries; a balance entry
+ * carries no `until` because only a measured increase frees it. Reading it changes
+ * nothing. */
+export const availability = (now = Date.now()): AvailabilityEntry[] => {
+  const entries = new Map<string, AvailabilityEntry>()
+  const put = (entry: AvailabilityEntry) => {
+    const id = `${entry.providerID}/${entry.modelID ?? ""}#${entry.credentialID ?? ""}:${entry.class}`
+    const prior = entries.get(id)
+    if (prior && (prior.until ?? Number.POSITIVE_INFINITY) >= (entry.until ?? Number.POSITIVE_INFINITY)) return
+    entries.set(id, entry)
+  }
+  const benchClass = (reason: string): { class: AvailabilityClass; resume: AvailabilityEntry["resume"] } =>
+    reason === "quota" || reason === "quota retry-after"
+      ? { class: "quota", resume: "reset" }
+      : reason === "retry-after"
+        ? { class: "rate-limit", resume: "retry-after" }
+        : reason === "auth"
+          ? { class: "auth", resume: "timer" }
+          : reason === "slow"
+            ? { class: "slow", resume: "timer" }
+            : { class: "unknown", resume: "timer" }
+  for (const bench of activeBenches(now)) {
+    const mapped = benchClass(bench.reason)
+    put({
+      providerID: bench.providerID,
+      modelID: bench.modelID,
+      ...(bench.credentialID ? { credentialID: bench.credentialID } : {}),
+      class: mapped.class,
+      reason: bench.reason,
+      until: bench.until,
+      resume: mapped.resume,
+    })
+  }
+  for (const [id, state] of limits) {
+    if (state.until <= now) continue
+    const hash = id.lastIndexOf("#")
+    const base = hash === -1 ? id : id.slice(0, hash)
+    const slash = base.indexOf("/")
+    put({
+      providerID: base.slice(0, slash),
+      modelID: base.slice(slash + 1),
+      ...(hash === -1 ? {} : { credentialID: id.slice(hash + 1) }),
+      class: "rate-limit",
+      reason: "provider rate-limit window",
+      until: state.until,
+      resume: "retry-after",
+    })
+  }
+  const gate = (state: QuotaGateState, credentialID?: string) => {
+    // A balance hold subsumes the gate that carries it: the same stop seen twice is one
+    // stop, and its resume rule is the hold's (a measured increase), not the gate's reset.
+    if (state.balanceHold)
+      put({
+        providerID: state.target.providerID,
+        modelID: state.target.id as string,
+        ...(credentialID ? { credentialID } : {}),
+        class: "balance",
+        reason: "balance exhausted; held until a measured increase",
+        resume: "increase",
+      })
+    else if (state.gated)
+      put({
+        providerID: state.target.providerID,
+        modelID: state.target.id as string,
+        ...(credentialID ? { credentialID } : {}),
+        class: "quota",
+        reason: "quota known-full",
+        ...(state.actualResetAt !== undefined && state.actualResetAt > now ? { until: state.actualResetAt } : {}),
+        resume: "reset",
+      })
+    if (state.timedGateUntil !== undefined && state.timedGateUntil > now)
+      put({
+        providerID: state.target.providerID,
+        modelID: state.target.id as string,
+        ...(credentialID ? { credentialID } : {}),
+        class: "rate-limit",
+        reason: "attempt-reported rate limit",
+        until: state.timedGateUntil,
+        resume: "retry-after",
+      })
+  }
+  for (const [credentialID, state] of credentialQuota) gate(state, credentialID)
+  for (const state of providerQuota.values()) gate(state)
+  for (const [id, hold] of infraHolds) {
+    if (hold.until <= now) continue
+    const slash = id.indexOf("/")
+    put({
+      providerID: id.slice(0, slash),
+      modelID: id.slice(slash + 1),
+      class: "infra",
+      reason: "transport path failure (DNS / connection refused)",
+      until: hold.until,
+      resume: "path",
+    })
+  }
+  return [...entries.values()].toSorted(
+    (left, right) =>
+      left.providerID.localeCompare(right.providerID) ||
+      (left.modelID ?? "").localeCompare(right.modelID ?? "") ||
+      left.class.localeCompare(right.class),
+  )
 }
 
 /** How many distinct quota evidence sources of one pool must be out before the pool itself is pulled:
@@ -793,7 +1015,7 @@ const benchProbeScope = (
     now,
     hint,
     credentialID,
-    hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
+    statedQuotaResetAt(target, credentialID, now, location, hint),
     location,
   )
 }
@@ -866,6 +1088,19 @@ export const failed = (
     logHealth(target, "network-suspect", "transport failures across unrelated providers; target cooldowns cleared")
     return
   }
+  // An infra failure never reached a provider API: it plants no bench, feeds no quota
+  // accounting, and never escalates the target's error standing. It holds the target out
+  // of candidacy on the infra cadence while the path is broken, and hands back any probe
+  // claim this pick spent — the scope it claimed was never actually tested.
+  if (hint?.infra) {
+    plantInfraHold(target, now)
+    if (probeClaim) {
+      releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+      if (probeClaim.credentialID)
+        releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
+    }
+    return
+  }
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   if (credentialID) {
@@ -876,7 +1111,7 @@ export const failed = (
       now,
       hint,
       credentialID,
-      hint?.quota ? quotaResetAt(target, credentialID, now, location) : undefined,
+      statedQuotaResetAt(target, credentialID, now, location, hint),
       location,
     )
     // The pick may also have claimed the target scope and a different probe credential (#1486):
@@ -896,7 +1131,7 @@ export const failed = (
     now,
     hint,
     undefined,
-    hint?.quota ? quotaResetAt(target, undefined, now, location) : undefined,
+    statedQuotaResetAt(target, undefined, now, location, hint),
     location,
   )
   // A credential-scope claim from the same pick settles here too (#1486).
@@ -1439,6 +1674,10 @@ const observeCredentialQuotaState = (
       credentialID,
     )
   if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  // A fresh, known, not-full reading is a measured increase for the scope: quota-class
+  // benches planted by earlier exhaustion release on it, not only at their reset (#1828).
+  if (!full && QuotaSnapshot.known(snapshot) && now - snapshot.observedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS)
+    releaseQuotaBenches((id) => id.endsWith(`#${credentialID}`), now)
 }
 
 export const observeCredentialQuota = (
@@ -1618,6 +1857,10 @@ export const observeProviderQuota = (
   if (!full) {
     removeAdjustment(`quota:${target.providerID}`)
     if (previous?.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
+    // Same measured-increase release as the credential path (#1828): this provider's
+    // target-level quota benches end on a fresh known not-full reading.
+    if (QuotaSnapshot.known(snapshot) && now - snapshot.observedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS)
+      releaseQuotaBenches((id) => id.startsWith(`${target.providerID}/`) && !id.includes("#"), now)
   }
 }
 
@@ -1885,6 +2128,9 @@ export const completed = (
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
+  // A success on the target is the path-health signal: any infra hold on it clears.
+  if (infraHolds.delete(key(target)))
+    logHealth(target, "infra-cleared", "a success on the target cleared the infra hold")
   // A stale completion (an older pick's late success after a newer pick re-claimed) must not
   // end the newer claim's bench (#1486): the outstanding token no longer names this pick.
   if (!probeClaim || state.probeClaimedAt === undefined || state.probeClaimToken === probeClaim.token)
@@ -1918,6 +2164,7 @@ export const resetHealth = () => {
   adjustments = []
   health.clear()
   credentialHealth.clear()
+  infraHolds.clear()
   credentialQuota.clear()
   providerQuota.clear()
   quotaEvents.clear()

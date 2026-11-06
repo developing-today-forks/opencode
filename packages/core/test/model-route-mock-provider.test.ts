@@ -37,7 +37,7 @@ const failure = async (mock: MockProvider, target: ModelRoute.Target, credential
 }
 
 describe("MockProvider wire fidelity", () => {
-  test("the Antigravity wall classifies as a retryable rate limit with the reset in its text", async () => {
+  test("the Antigravity wall is a retryable rate limit on the wire, quota in the hint, reset in its text", async () => {
     const mock = new MockProvider()
     const target = ref("antigravity-direct", "claude-sonnet-5-5")
     mock.set(target, MockScenarios.antigravityQuotaWall())
@@ -46,12 +46,17 @@ describe("MockProvider wire fidelity", () => {
     expect(error.reason.http?.status).toBe(429)
     expect(isRetryable(error)).toBe(true)
     // The reset lives only in the message text; the runner's hint extraction must find it,
-    // or the cooldown cannot be driven by the stated reset (#1806 mechanism 4).
+    // or the cooldown cannot be driven by the stated reset (#1806 mechanism 4). And the
+    // condition itself — a spent quota window — must classify as quota in the hint even
+    // though the wire tag is RateLimit, so it benches exactly like Mistral's tagged
+    // QuotaExceeded instead of as an ordinary rate limit (#1828 classification parity).
     const hint = SessionStep.failureHint(error)
-    expect(hint.quota).toBe(false)
+    expect(hint.quota).toBe(true)
     expect(hint.retryAfterMs).toBeDefined()
     const expected = (81 * 3600 + 35 * 60 + 49) * 1000
     expect(Math.abs(hint.retryAfterMs! - expected)).toBeLessThan(60_000)
+    expect(hint.quotaResetAtMs).toBeDefined()
+    expect(Math.abs(hint.quotaResetAtMs! - (Date.now() + expected))).toBeLessThan(60_000)
   })
 
   test("a quota-coded answer classifies as QuotaExceeded and is not same-target retryable", async () => {
