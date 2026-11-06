@@ -108,7 +108,7 @@ export const Plugin = define({
         input: input.schema,
         execute: (input: any, context: Tool.Context) =>
           Effect.tryPromise({
-            try: async () => definition.execute(input, legacyContext(location, context)),
+            try: async (signal) => definition.execute(input, legacyContext(location, context, signal)),
             catch: (error) =>
               new Tool.Error({
                 message: error instanceof globalThis.Error ? error.message : String(error),
@@ -211,14 +211,16 @@ function watchTarget(file: string): Promise<Watcher.WatchInput> {
   )
 }
 
-function legacyContext(location: Location.Interface, context: Tool.Context) {
+function legacyContext(location: Location.Interface, context: Tool.Context, signal: AbortSignal) {
   return {
     sessionID: context.sessionID,
     messageID: context.messageID,
     agent: context.agent,
     directory: location.directory,
     worktree: location.project.directory,
-    abort: new AbortController().signal,
+    // The real tryPromise interruption signal (#1784): it fires when
+    // tool execution is interrupted, replacing the never-aborted stub.
+    abort: signal,
   }
 }
 
