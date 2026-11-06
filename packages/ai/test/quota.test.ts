@@ -3,7 +3,7 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { normalizeTimestamp, toNumber, toTimestamp } from "../src/quota/utils.js"
+import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -1432,5 +1432,30 @@ describe("normalizeTimestamp non-positive handling (#1857)", () => {
     expect(normalizeTimestamp(1893456000)).toBe(1893456000000)
     expect(normalizeTimestamp(1893456000000)).toBe(1893456000000)
     expect(normalizeTimestamp(undefined)).toBeNull()
+  })
+})
+
+describe("readQuotaJson byte cap (#1877)", () => {
+  // The cap is denominated in bytes (QUOTA_RESPONSE_MAX_BYTES, the error
+  // message), so enforcement must measure UTF-8 bytes — text.length
+  // counts UTF-16 code units and under-counts multi-byte bodies ~3x.
+  test("rejects an ASCII body just over the byte cap", async () => {
+    const body = JSON.stringify("a".repeat(QUOTA_RESPONSE_MAX_BYTES))
+    await expect(readQuotaJson(new Response(body))).rejects.toThrow("Quota response exceeded")
+  })
+
+  test("rejects a multi-byte body whose character count is under the cap but whose byte count is over it", async () => {
+    // 400,002 characters, 1,200,002 UTF-8 bytes: under the cap in code
+    // units, over it in bytes.
+    const body = JSON.stringify("\u20AC".repeat(400_000))
+    expect(body.length).toBeLessThan(QUOTA_RESPONSE_MAX_BYTES)
+    expect(new TextEncoder().encode(body).length).toBeGreaterThan(QUOTA_RESPONSE_MAX_BYTES)
+    await expect(readQuotaJson(new Response(body))).rejects.toThrow("Quota response exceeded")
+  })
+
+  test("accepts a multi-byte body under the cap in bytes", async () => {
+    const body = JSON.stringify({ note: "\u20AC".repeat(1_000) })
+    const parsed = await readQuotaJson(new Response(body))
+    expect(parsed).toEqual({ note: "\u20AC".repeat(1_000) })
   })
 })
