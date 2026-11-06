@@ -6,6 +6,7 @@ import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/pr
 import { toNumber } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
@@ -1049,5 +1050,77 @@ describe("blank credentials are not configured (#1831)", () => {
     expect(result.configured).toBe(false)
     expect(result.error).toBe("Not configured")
     expect(calls).toEqual([])
+  })
+})
+
+describe("antigravity quota bucket labelling (#1768)", () => {
+  // Payloads mirror the triage probe for #1768 (task 10760).
+  const summaryWith = (buckets: unknown[]) => ({ groups: [{ displayName: "Gemini", buckets }] })
+
+  test("per-label happy path: FIVE_HOUR and WEEKLY publish under their own labels", () => {
+    const groups = transformSummary(
+      summaryWith([
+        { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
+        { window: "WEEKLY", remainingFraction: 0.25, resetTime: "2026-11-12T00:00:00Z" },
+      ]) as never,
+    )
+    expect(groups).toHaveLength(1)
+    expect(groups[0].windows["5h"]?.usedPercent).toBe(50)
+    expect(groups[0].windows.weekly?.usedPercent).toBe(75)
+    expect(groups[0].bucket5h?.remainingFraction).toBe(0.5)
+    expect(groups[0].bucketWeekly?.remainingFraction).toBe(0.25)
+  })
+
+  test("an unrecognized window string is skipped, never published as a fabricated 5h window", () => {
+    const groups = transformSummary(
+      summaryWith([
+        { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
+        { window: "MONTHLY", remainingFraction: 0.9, resetTime: "2026-12-01T00:00:00Z" },
+      ]) as never,
+    )
+    expect(Object.keys(groups[0].windows)).toEqual(["5h"])
+    expect(groups[0].windows["5h"]?.usedPercent).toBe(50)
+    expect(groups[0].bucket5h?.remainingFraction).toBe(0.5)
+    expect(parseBucket({ window: "MONTHLY", remainingFraction: 0.9 } as never)).toBeNull()
+  })
+
+  test("same-label collisions keep the first entry for windows, bucket5h, and bucketWeekly", () => {
+    const groups = transformSummary(
+      summaryWith([
+        { window: "WEEKLY", remainingFraction: 0.25, resetTime: "2026-11-12T00:00:00Z" },
+        { window: "7D", remainingFraction: 0.75, resetTime: "2026-11-13T00:00:00Z" },
+      ]) as never,
+    )
+    expect(groups[0].windows.weekly?.usedPercent).toBe(75)
+    expect(groups[0].bucketWeekly?.remainingFraction).toBe(0.25)
+  })
+
+  test("a missing remainingFraction propagates as unknown, not as fully remaining", () => {
+    const parsed = parseBucket({ window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" } as never)
+    expect(parsed?.remainingFraction).toBeNull()
+    expect(parsed?.window.usedPercent).toBeNull()
+  })
+
+  test("weekly-constrained ordering requires both fractions present", () => {
+    const groups = transformSummary(
+      summaryWith([
+        { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
+        { window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" },
+      ]) as never,
+    )
+    const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
+    // Unknown weekly fraction never constrains: default order is 5h first.
+    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["5h", "weekly"])
+  })
+
+  test("a known near-exhausted weekly fraction still puts weekly first (control)", () => {
+    const groups = transformSummary(
+      summaryWith([
+        { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
+        { window: "WEEKLY", remainingFraction: 0.0005, resetTime: "2026-11-12T00:00:00Z" },
+      ]) as never,
+    )
+    const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
+    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["weekly", "5h"])
   })
 })
