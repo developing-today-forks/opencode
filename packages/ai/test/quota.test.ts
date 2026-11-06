@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
-import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
+import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
 import { toNumber } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
@@ -198,6 +198,63 @@ describe("groq reset duration parsing", () => {
     expect(parseGroqResetSeconds("14h12m")).toBe(14 * 3600 + 12 * 60)
     expect(parseGroqResetSeconds(null)).toBeNull()
     expect(parseGroqResetSeconds("soon")).toBeNull()
+  })
+
+  test("rejects partially-consumed or malformed durations (#1793)", () => {
+    expect(parseGroqResetSeconds("1h30")).toBeNull()
+    expect(parseGroqResetSeconds("2m59.56")).toBeNull()
+    expect(parseGroqResetSeconds("59s trailing")).toBeNull()
+    expect(parseGroqResetSeconds("-30s")).toBeNull()
+    expect(parseGroqResetSeconds("1m1m")).toBeNull()
+  })
+})
+
+describe("groq quota header parsing (#1793)", () => {
+  const fetchWith = (headers: Record<string, string>) =>
+    groqProvider.fetchQuota({
+      credentials: [{ id: "row-1", integrationID: "groq", active: true, value: { type: "key", key: "gsk-fixture" } }],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () => new Response("{}", { status: 200, headers }),
+      env: {},
+    })
+
+  test("negative remaining mints no window", async () => {
+    const result = await fetchWith({ "x-ratelimit-limit-requests": "100", "x-ratelimit-remaining-requests": "-5" })
+    expect(result.ok).toBe(false)
+    expect(result.usage?.windows.requests_daily).toBeUndefined()
+  })
+
+  test("hex limit and exponent remaining mint no window", async () => {
+    const hex = await fetchWith({ "x-ratelimit-limit-requests": "0x64", "x-ratelimit-remaining-requests": "50" })
+    expect(hex.ok).toBe(false)
+    expect(hex.usage?.windows.requests_daily).toBeUndefined()
+    const exp = await fetchWith({ "x-ratelimit-limit-requests": "100", "x-ratelimit-remaining-requests": "1e1" })
+    expect(exp.ok).toBe(false)
+    expect(exp.usage?.windows.requests_daily).toBeUndefined()
+  })
+
+  test("a malformed reset header yields a window with resetAt null", async () => {
+    const result = await fetchWith({
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "40",
+      "x-ratelimit-reset-requests": "1h30",
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.requests_daily?.usedPercent).toBe(60)
+    expect(result.usage?.windows.requests_daily?.resetAt).toBeNull()
+  })
+
+  test("plain counts and a well-formed reset still publish a window", async () => {
+    const result = await fetchWith({
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "40",
+      "x-ratelimit-reset-requests": "2m59.56s",
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.requests_daily?.usedPercent).toBe(60)
+    expect(result.usage?.windows.requests_daily?.resetAt).not.toBeNull()
   })
 })
 
