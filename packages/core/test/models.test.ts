@@ -273,6 +273,78 @@ describe("ModelsDev Service", () => {
     }),
   )
 
+  it.live("attaches gateway-door compatibility entries to family-shaped door models only (#1824)", () =>
+    Effect.gen(function* () {
+      const base = fixture.acme.models["acme-1"]
+      const model = (id: string) => ({ ...base, id, name: id, interleaved: undefined })
+      const cache = makeCache()
+      writeCache(cache, {
+        "opencode-go": {
+          id: "opencode-go",
+          name: "OpenCode Go",
+          env: ["OPENCODE_API_KEY"],
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://opencode.ai/inference/go/openai/v1",
+          models: {
+            "glm-5.3": model("glm-5.3"),
+            "glm-4.5": model("glm-4.5"),
+            "kimi-k2.6": model("kimi-k2.6"),
+            "gemini-2.5-flash": model("gemini-2.5-flash"),
+            "deepseek-v4-pro": model("deepseek-v4-pro"),
+            "future-model": model("future-model"),
+          },
+        },
+        "cline-pass": {
+          id: "cline-pass",
+          name: "Cline Pass",
+          env: ["CLINE_API_KEY"],
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://api.cline.bot/api/v1",
+          models: { "cline-pass/glm-5.3": model("cline-pass/glm-5.3") },
+        },
+        acme: { ...fixture.acme, models: { "glm-5.3": model("glm-5.3") } },
+      })
+      const state = yield* Ref.make(initialState)
+      const result = yield* provided(
+        state,
+        cache,
+        ModelsDev.Service.use((s) => s.get()),
+      )
+      const byProvider = new Map(result.map((snapshot) => [String(snapshot.info.id), snapshot]))
+      const compat = (provider: string, id: string) =>
+        byProvider.get(provider)?.models.find((item) => String(item.id) === id)?.compatibility
+      expect(compat("opencode-go", "glm-5.3")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
+      })
+      expect(compat("opencode-go", "glm-4.5")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: false,
+      })
+      expect(compat("opencode-go", "kimi-k2.6")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        supportsStrictMode: false,
+      })
+      expect(compat("opencode-go", "gemini-2.5-flash")).toEqual({ supportsStore: false })
+      expect(compat("opencode-go", "deepseek-v4-pro")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+      })
+      expect(compat("opencode-go", "future-model")).toBeUndefined()
+      expect(compat("cline-pass", "cline-pass/glm-5.3")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
+      })
+      // The same family-shaped id on a non-door provider carries no entry:
+      // family defaults are a door catalog property, not a protocol rule.
+      expect(compat("acme", "glm-5.3")).toBeUndefined()
+    }),
+  )
+
   it.live("maps models.dev npm packages onto native packages", () =>
     Effect.gen(function* () {
       const cache = makeCache()

@@ -205,21 +205,53 @@ const binaryIntel = async () => {
       // No early exit (#1633): every GOCSPX run in the binary is a
       // candidate, and runs can appear anywhere in the file. Matches are
       // collected from the stable region (all but the last 256 chars,
-      // which carry into the next chunk) so a run split across a chunk
-      // boundary is matched whole, never as a truncated prefix.
-      const collect = (text: string, flush: boolean) => {
-        const stable = flush ? text : text.slice(0, -256)
-        for (const match of stable.matchAll(/GOCSPX-[A-Za-z0-9_-]{10,}/g)) runs.add(match[0])
+      // which carry into the next chunk). A match that REACHES the end
+      // of the stable region may continue into the carry region, so it
+      // is not collected yet: collect returns its start index and the
+      // carry begins there instead, so the next pass (or the final
+      // flush) sees the run from its first char and matches it whole —
+      // never a truncated prefix, and never lost when the part inside
+      // the stable region is shorter than the match minimum (#1822).
+      const collect = (text: string, flush: boolean): number => {
+        const stableEnd = flush ? text.length : Math.max(0, text.length - 256)
+        const stable = text.slice(0, stableEnd)
+        let pending = -1
+        for (const match of stable.matchAll(/GOCSPX-[A-Za-z0-9_-]{10,}/g)) {
+          if (!flush && match.index + match[0].length === stableEnd) {
+            pending = match.index
+            continue
+          }
+          runs.add(match[0])
+        }
+        if (!flush && pending < 0) {
+          // A run can also hide BELOW the match minimum at the boundary:
+          // only a fragment of it (or of the GOCSPX- literal itself) sits
+          // inside the stable region, so matchAll cannot see it yet.
+          // Defer from the fragment start the same way, or the carry —
+          // which starts after it — would cut the run's head off and the
+          // run would be lost entirely.
+          const fragment = stable.match(/GOCSPX-[A-Za-z0-9_-]*$/)
+          if (fragment) pending = stable.length - fragment[0].length
+          else {
+            for (let k = Math.min(6, stable.length); k >= 1; k--) {
+              if (stable.endsWith("GOCSPX-".slice(0, k))) {
+                pending = stable.length - k
+                break
+              }
+            }
+          }
+        }
         if (ua === FALLBACK_UA) {
           const match = text.match(/antigravity\/cli\/[0-9.]+ \(aidev_client;[^)]*\)/)
           if (match) ua = match[0]
         }
+        return pending
       }
       while ((read = readSync(fd, chunk, 0, chunk.length, position)) > 0) {
         position += read
         const text = carry + chunk.toString("latin1", 0, read)
-        collect(text, false)
-        carry = text.slice(-256)
+        const pending = collect(text, false)
+        carry = pending >= 0 ? text.slice(pending) : text.slice(-256)
       }
       collect(carry, true)
     } finally {
