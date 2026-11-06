@@ -92,6 +92,8 @@
  *     the literal weekly entry at both collision sites).
  *     parseSubscriptionQuota's absent/non-positive-reset-is-null
  *     case conforms to rule 3 and is pinned by the matrix (#1855).
+     A zero or negative limit drops only that window (rule 4),
+     pinned by the matrix (#1849).
  *   mistral — parseMistralBudget (exported; wraps the module-private
  *     parseBudget). KNOWN-LOSSY: #1785 (usedPercent clamped while
  *     usedAmount is derived from the raw percentage, so a window's
