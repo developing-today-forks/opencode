@@ -37,6 +37,7 @@
 // hold).
 import { Effect } from "effect"
 import { Headers } from "effect/http"
+import { readBoundedResponseText } from "@opencode/util/http-body"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
 
@@ -47,6 +48,8 @@ export const KEY_EXCHANGE_PATH = "/muse-code/key"
 export const MINTED_KEY_TTL_MS = 10 * 60 * 1000
 /** Deadline for the key exchange; the endpoint returns a small JSON struct. */
 export const KEY_EXCHANGE_TIMEOUT_MS = 15_000
+/** Byte cap for the key-exchange response body; the claude-code exchange's cap (#1862). */
+export const KEY_EXCHANGE_RESPONSE_MAX_BYTES = 1024 * 1024
 
 export const NOT_SIGNED_IN_MESSAGE =
   "Muse account credential unavailable: no usable providers.meta credential in the Muse auth file " +
@@ -148,7 +151,11 @@ export const exchangeMintedKey = async (accountToken: string, sources: Credentia
     body: JSON.stringify({ onboard: false }),
     signal: AbortSignal.timeout(sources.exchangeTimeoutMs ?? KEY_EXCHANGE_TIMEOUT_MS),
   })
-  const text = await response.text()
+  const text = await readBoundedResponseText(
+    response,
+    KEY_EXCHANGE_RESPONSE_MAX_BYTES,
+    () => new Error(`Muse key exchange response exceeded ${KEY_EXCHANGE_RESPONSE_MAX_BYTES} bytes`),
+  )
   if (!response.ok) throw new Error(`Muse key exchange failed: HTTP ${response.status}: ${text.slice(0, 200)}`)
   let body: unknown
   try {
