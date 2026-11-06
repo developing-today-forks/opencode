@@ -91,15 +91,33 @@ const parseExpiry = (value: unknown) => {
   return Number.isNaN(parsed) ? 0 : parsed
 }
 
-const findSecretTool = async (): Promise<string> => {
+/**
+ * Why a missing secret-tool fails the way it does (#1825): the
+ * antigravity credential lives in the Secret Service keyring and this
+ * bridge reads it with libsecret's secret-tool — there is no file/env
+ * tier for this provider — so the error names the binary and the
+ * supported remedies instead of surfacing as an opaque throw.
+ */
+export const SECRET_TOOL_NOT_FOUND_MESSAGE =
+  "secret-tool not found: the antigravity credential is stored in the Secret Service keyring " +
+  "(service \"gemini\", username \"antigravity\") and is read with libsecret's secret-tool, which is not " +
+  "installed on this host. Install libsecret (or set SECRET_TOOL_PATH to a secret-tool binary); " +
+  "the keyring entry itself is written by signing in with the agy CLI."
+
+export const AGY_SECRET_EXTRACTION_MESSAGE =
+  "could not extract OAuth client secret from agy binary: token refresh reads the client secret " +
+  "from the agy CLI binary's bytes, and no GOCSPX candidate was found. Install the agy CLI " +
+  "(or set AGY_BIN to its path) so the binary is present on this host."
+
+export const findSecretTool = async (nixStoreDir = "/nix/store"): Promise<string> => {
   const { accessSync, constants, readdirSync } = await import("node:fs")
   const { join } = await import("node:path")
   const candidates: string[] = []
   if (process.env.SECRET_TOOL_PATH) candidates.push(process.env.SECRET_TOOL_PATH)
   for (const dir of (process.env.PATH ?? "").split(":")) if (dir) candidates.push(join(dir, "secret-tool"))
   try {
-    for (const store of readdirSync("/nix/store").filter((entry) => entry.includes("libsecret")).sort())
-      candidates.push(join("/nix/store", store, "bin", "secret-tool"))
+    for (const store of readdirSync(nixStoreDir).filter((entry) => entry.includes("libsecret")).sort())
+      candidates.push(join(nixStoreDir, store, "bin", "secret-tool"))
   } catch {}
   for (const candidate of candidates) {
     try {
@@ -107,7 +125,7 @@ const findSecretTool = async (): Promise<string> => {
       return candidate
     } catch {}
   }
-  throw new Error("secret-tool not found (set SECRET_TOOL_PATH)")
+  throw new Error(SECRET_TOOL_NOT_FOUND_MESSAGE)
 }
 
 /**
@@ -299,7 +317,7 @@ export const refresh = (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_
       catch: (cause) => cause,
     })
     if (clientSecrets.length === 0)
-      return yield* Effect.fail(new Error("could not extract OAuth client secret from agy binary"))
+      return yield* Effect.fail(new Error(AGY_SECRET_EXTRACTION_MESSAGE))
     // Try the last accepted candidate first, then the rest in scan order.
     const ordered =
       winningSecret && clientSecrets.includes(winningSecret)
@@ -358,7 +376,7 @@ export const refresh = (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_
         return token
       }
     }
-    return yield* Effect.fail(lastInvalidClient ?? new Error("could not extract OAuth client secret from agy binary"))
+    return yield* Effect.fail(lastInvalidClient ?? new Error(AGY_SECRET_EXTRACTION_MESSAGE))
   })
 
 const loadToken = (): Promise<TokenState> => {

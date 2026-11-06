@@ -3,8 +3,17 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Deferred, Effect, Fiber } from "effect"
+import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
-import { FALLBACK_UA, parseKeyringCreds, refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
+import {
+  AGY_SECRET_EXTRACTION_MESSAGE,
+  FALLBACK_UA,
+  findSecretTool,
+  parseKeyringCreds,
+  refresh,
+  SECRET_TOOL_NOT_FOUND_MESSAGE,
+  TOKEN_REFRESH_MAX_RESPONSE_BYTES,
+} from "../../src/providers/antigravity-auth.js"
 import { handlerLayer, observe } from "../lib/http.js"
 import { it } from "../lib/effect.js"
 
@@ -192,6 +201,51 @@ describe("Antigravity client-secret candidates (#1633)", () => {
 
       expect(error.message).toContain("invalid_grant")
       expect(sent).toHaveLength(1)
+    }),
+  )
+})
+
+describe("Antigravity missing-binary errors name the alternatives (#1825)", () => {
+  test("findSecretTool fails naming secret-tool and the remedies when no binary exists", async () => {
+    const savedPath = process.env.PATH
+    const savedToolPath = process.env.SECRET_TOOL_PATH
+    delete process.env.SECRET_TOOL_PATH
+    process.env.PATH = fixtureDir
+    try {
+      // Empty nix-store dir + a PATH with no secret-tool + no explicit
+      // path: the missing case, simulated deterministically on any host.
+      const error = await findSecretTool(join(fixtureDir, "empty-nix-store")).catch((cause) => cause)
+      expect(error).toBeInstanceOf(Error)
+      expect(error.message).toBe(SECRET_TOOL_NOT_FOUND_MESSAGE)
+      expect(error.message).toContain("secret-tool")
+      expect(error.message).toContain("SECRET_TOOL_PATH")
+      expect(error.message).toContain("libsecret")
+      expect(error.message).toContain("agy CLI")
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedToolPath === undefined) delete process.env.SECRET_TOOL_PATH
+      else process.env.SECRET_TOOL_PATH = savedToolPath
+    }
+  })
+
+  it.effect("refresh fails naming the agy binary and AGY_BIN when no secret can be extracted", () =>
+    Effect.gen(function* () {
+      const path = join(fixtureDir, "agy-no-secret")
+      writeFileSync(path, "fixture binary with no embedded client secret")
+      chmodSync(path, 0o755)
+      process.env.AGY_BIN = path
+      try {
+        const error = yield* refresh("refresh-fixture").pipe(
+          Effect.provide(FetchHttpClient.layer),
+          Effect.flip,
+        )
+        expect(error.message).toBe(AGY_SECRET_EXTRACTION_MESSAGE)
+        expect(error.message).toContain("could not extract OAuth client secret from agy binary")
+        expect(error.message).toContain("AGY_BIN")
+      } finally {
+        process.env.AGY_BIN = fixtureBin
+      }
     }),
   )
 })
