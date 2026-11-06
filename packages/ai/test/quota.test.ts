@@ -184,6 +184,34 @@ describe("meta portal subscription-quota mapping", () => {
     expect(parsed?.windows.weekly?.resetAt).toBe(1794182400 * 1000)
   })
 
+  test("a non-positive portal reset publishes an honest null resetAt, not a 1969 date (#1855)", () => {
+    // The resets used to be multiplied raw (seconds * 1000) with no
+    // positivity check, bypassing the shared toTimestamp guard
+    // (#1845): "-5000" published resetAt -5000000 with a 1969-12-31
+    // formatted date and resetAfterSeconds 0, and "0" published the
+    // epoch. A non-positive reset nulls the field (rule 3), exactly
+    // like an absent one; the figures of the window still publish.
+    const withReset = (patch: Record<string, unknown>) =>
+      parseSubscriptionQuota({ subscription_quota: { ...payload.subscription_quota, ...patch } })
+
+    const negativeWindow = withReset({ window_resets_at: -5000 })
+    expect(negativeWindow?.windows["5h"]?.usedPercent).toBeCloseTo(1.02, 6)
+    expect(negativeWindow?.windows["5h"]?.resetAt).toBeNull()
+    expect(negativeWindow?.windows["5h"]?.resetAfterSeconds).toBeNull()
+    expect(negativeWindow?.windows.weekly?.resetAt).toBe(1793980800 * 1000)
+
+    const zeroWindow = withReset({ window_resets_at: "0" })
+    expect(zeroWindow?.windows["5h"]?.resetAt).toBeNull()
+
+    const negativeWeekly = withReset({ weekly_resets_at: -86400 })
+    expect(negativeWeekly?.windows.weekly?.usedPercent).toBeCloseTo(8.83, 6)
+    expect(negativeWeekly?.windows.weekly?.resetAt).toBeNull()
+    expect(negativeWeekly?.windows["5h"]?.resetAt).toBe(1793552400 * 1000)
+
+    const zeroWeekly = withReset({ weekly_resets_at: 0 })
+    expect(zeroWeekly?.windows.weekly?.resetAt).toBeNull()
+  })
+
   test("a missing subscription_quota object maps to null", () => {
     expect(parseSubscriptionQuota({})).toBeNull()
     expect(parseSubscriptionQuota({ subscription_quota: { window_weighted_used: "1" } })).toBeNull()
