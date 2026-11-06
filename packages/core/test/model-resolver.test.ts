@@ -1739,7 +1739,7 @@ describe("ModelResolver routes", () => {
       Effect.gen(function* () {
         const first = yield* resolver.resolveModel(direct)
         expect(targetOf(first)).toBe("pa")
-        expect(first.routing?.routeID).toBe("mistral-plan/luna")
+        expect(first.routing?.routeID).toBe(ID.make("mistral-plan/luna"))
         const next = yield* first.routing!.fallback()
         expect(next ? targetOf(next) : undefined).toBe("pb")
       }),

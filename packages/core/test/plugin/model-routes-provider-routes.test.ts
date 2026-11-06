@@ -230,7 +230,7 @@ describe("provider routes in the plugin pipeline (production collapse shape)", (
       expect(direct).toBeDefined()
       const definition = ModelRoute.definition(direct!)
       expect(definition).toBeDefined()
-      expect(definition!.id).toBe("openai-plan/gpt-6-luna")
+      expect(definition!.id).toBe(Model.ID.make("openai-plan/gpt-6-luna"))
       expect(refs(definition!)).toEqual(["openai.alternate/gpt-6-luna", "openai/gpt-6-luna"])
       expect(definition!.nodes.some((node) => node.providerRoute === "openai-plan")).toBe(true)
       expect(definition!.nodes.find((node) => node.providerRoute === "openai-plan")?.selection).toBe("ordered")
