@@ -8,6 +8,7 @@ import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
+import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
 import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
@@ -603,6 +604,76 @@ describe("cline-pass quota mapping (#1769)", () => {
     const unknown = await fetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
     expect(unknown.ok).toBe(false)
     expect(unknown.error).toBe("No quota data in response")
+  })
+})
+
+describe("deepseek quota mapping (#1800)", () => {
+  const fetchWith = (payload: unknown) =>
+    deepseekProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "deepseek", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  test("uses a positive balance in another currency when USD and CNY are absent", async () => {
+    const result = await fetchWith({ balance_infos: [{ currency: "EUR", total_balance: "100" }] })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("EUR 100.00")
+  })
+
+  test("a positive third-currency balance wins over zero USD", async () => {
+    const result = await fetchWith({
+      balance_infos: [
+        { currency: "USD", total_balance: 0 },
+        { currency: "GBP", total_balance: "80" },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("GBP 80.00")
+  })
+
+  test("a positive third-currency balance wins over negative USD", async () => {
+    const result = await fetchWith({
+      balance_infos: [
+        { currency: "USD", total_balance: -5 },
+        { currency: "GBP", total_balance: "80" },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("GBP 80.00")
+  })
+
+  test("positive USD stays ahead of positive CNY", async () => {
+    const result = await fetchWith({
+      balance_infos: [
+        { currency: "CNY", total_balance: "50" },
+        { currency: "USD", total_balance: "25" },
+      ],
+    })
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("$25.00")
+
+    const cnyOnly = await fetchWith({ balance_infos: [{ currency: "CNY", total_balance: "50" }] })
+    expect(cnyOnly.usage?.windows.credits_balance?.valueLabel).toBe("¥50.00")
+  })
+
+  test("keeps the non-positive USD fallback when no positive balance exists", async () => {
+    const result = await fetchWith({ balance_infos: [{ currency: "USD", total_balance: 0 }] })
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
+  })
+
+  test("missing or empty balance_infos returns the no-data error", async () => {
+    for (const payload of [{}, { balance_infos: [] }]) {
+      const result = await fetchWith(payload)
+      expect(result.ok).toBe(false)
+      expect(result.error).toBe("No quota data in response")
+      expect(result.usage).toBeNull()
+    }
   })
 })
 
