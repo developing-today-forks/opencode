@@ -34,6 +34,7 @@ packages/core/src/model-route.ts :: const total = candidateIndexes.reduce((sum, 
 packages/core/src/model-route.ts :: const trace = tracedWeightOf(definition.targets[child.leaf], node.weights[position] ?? 1, now, { :: safe: numeric index into a weight array
 packages/core/src/model-route.ts :: draw -= weights[index] ?? 1 :: safe: numeric index into a weight array
 packages/core/src/model-route.ts :: node.selection === "round-robin" ? (tiers?.[position]?.weight ?? 1) : (effective[position] ?? 1), :: safe: numeric index into a weight array (round-robin ternary form since #1277)
+packages/core/src/model-route.ts :: const until = now + Math.min(INFRA_LADDER_MS[Math.min(failures - 1, INFRA_LADDER_MS.length - 1)]!, INFRA_CAP_MS) :: safe: numeric index into the module-local const ladder array — failures is the in-module infra-hold counter, always an integer >= 1 in plantInfraHold, clamped to [0, length-1] by Math.min; a numeric index cannot name a prototype member (#1841)
 packages/core/src/plugin/command.ts :: (prompt.arguments ?? []).map((argument, index) => [argument.name, args[index] ?? ""]), :: safe: numeric index into an array
 packages/core/src/plugin/tool-input-repair.ts :: ? (tuple[index] ?? (Array.isArray(schema.prefixItems) ? schema.items : schema.additionalItems)) :: safe: numeric index into an array
 packages/core/src/ripgrep/binary.ts :: const config = PLATFORM[platformKey] :: safe: key is the internally composed `${process.arch}-${process.platform}` (#833)
