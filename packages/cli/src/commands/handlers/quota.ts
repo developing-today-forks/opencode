@@ -382,6 +382,15 @@ export const collectNamedQuotaGroups = async (
 export const quotaRunSucceeded = (groups: { results: QuotaResult[] }[]): boolean =>
   groups.every((group) => group.results.some((result) => result.ok))
 
+/**
+ * Human-readable percent: providers compute usedPercent as an unrounded
+ * division ((used / limit) * 100), so the raw number prints with full
+ * float noise (33.33333333333333% used). Presentation rounds to at most
+ * 2 decimal places, trailing zeros trimmed by the number-to-string
+ * conversion; --json keeps the full-precision value (#1797).
+ */
+const formatPercent = (value: number): string => String(Math.round(value * 100) / 100)
+
 export const renderQuotaResults = (results: QuotaResult[]): string => {
   const lines: string[] = []
   for (const result of results) {
@@ -402,7 +411,7 @@ export const renderQuotaResults = (results: QuotaResult[]): string => {
     }
     for (const [label, window] of windows) {
       const value = Number.isFinite(window?.usedPercent)
-        ? `${window.usedPercent}% used`
+        ? `${formatPercent(window.usedPercent as number)}% used`
         : (window?.valueLabel ?? "unknown")
       const detail = Number.isFinite(window?.usedPercent) && window?.valueLabel ? ` (${window.valueLabel})` : ""
       const reset = window?.resetAtFormatted ? `, resets ${window.resetAtFormatted}` : ""
@@ -412,7 +421,7 @@ export const renderQuotaResults = (results: QuotaResult[]): string => {
     if (models && !Array.isArray(models)) {
       for (const [model, entry] of Object.entries(models)) {
         const parts = Object.entries(entry.windows ?? {}).map(([label, window]) =>
-          Number.isFinite(window?.usedPercent) ? `${label} ${window.usedPercent}%` : `${label} ${window?.valueLabel ?? "unknown"}`,
+          Number.isFinite(window?.usedPercent) ? `${label} ${formatPercent(window.usedPercent as number)}%` : `${label} ${window?.valueLabel ?? "unknown"}`,
         )
         if (parts.length > 0) lines.push(`  ${model}: ${parts.join(" · ")}`)
       }
