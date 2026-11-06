@@ -30,7 +30,7 @@ interface Failures extends Record<keyof Domains, unknown> {
 }
 
 type Callback<Event, Error> = (event: Event) => Effect.Effect<void, Error>
-type Entry = { readonly callback: Function; readonly options?: ModelHookOptions }
+type Entry = { readonly callback: Function; readonly options?: ModelHookOptions; readonly owner?: string }
 
 const eventProviderID = (event: unknown) => {
   if (typeof event !== "object" || event === null || !("model" in event)) return undefined
@@ -50,6 +50,7 @@ export interface Interface {
     name: Name,
     callback: Callback<Domains[Domain][Name], Failures[Domain][Name]>,
     options?: ModelHookOptions,
+    owner?: string,
   ) => Effect.Effect<State.Registration, never, Scope.Scope>
   readonly trigger: <Domain extends keyof Domains, Name extends keyof Domains[Domain] & keyof Failures[Domain]>(
     domain: Domain,
@@ -67,11 +68,11 @@ const layer = Layer.effect(
     const key = (domain: keyof Domains, name: PropertyKey) => `${domain}.${String(name)}`
 
     const register: Interface["register"] = Effect.fn("PluginHooks.register")(
-      function* (domain, name, callback, options) {
+      function* (domain, name, callback, options, owner) {
         const scope = yield* Scope.Scope
         const id = key(domain, name)
         let active = true
-        const entry = { callback, options }
+        const entry = { callback, options, owner }
         callbacks.set(id, [...(callbacks.get(id) ?? []), entry])
         const dispose = Effect.sync(() => {
           if (!active) return
@@ -86,10 +87,29 @@ const layer = Layer.effect(
     )
 
     const trigger: Interface["trigger"] = Effect.fnUntraced(function* (domain, name, event) {
+      // Routing ownership (#1858): a session model.request hook that rewrites the
+      // baseURL for a provider it is not scoped to is the hijack shape — the hook
+      // may belong to an unrelated plugin naming no provider at all. The rewrite
+      // still applies (routing hooks are a supported feature), but it is never
+      // silent: warn with the owning plugin id and the provider id.
+      const providerID = eventProviderID(event)
+      const trackBaseURL =
+        domain === "session" && name === "model.request" && typeof event === "object" && event !== null && "baseURL" in event
       for (const entry of callbacks.get(key(domain, name)) ?? []) {
-        if (entry.options?.providerID !== undefined && entry.options.providerID !== eventProviderID(event)) continue
+        if (entry.options?.providerID !== undefined && entry.options.providerID !== providerID) continue
+        const before = trackBaseURL ? (event as { baseURL?: string }).baseURL : undefined
         const result: Effect.Effect<void, Failures[typeof domain][typeof name]> = entry.callback(event)
         yield* result
+        if (trackBaseURL && entry.options?.providerID !== providerID) {
+          const after = (event as { baseURL?: string }).baseURL
+          if (after !== before)
+            yield* Effect.logWarning("model.request hook rewrote baseURL for a provider it is not scoped to", {
+              pluginID: entry.owner ?? "unknown",
+              providerID,
+              from: before,
+              to: after,
+            })
+        }
       }
       return event
     })
