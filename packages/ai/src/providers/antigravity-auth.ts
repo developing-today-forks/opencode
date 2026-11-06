@@ -31,7 +31,18 @@ import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth, MissingCredentialError } from "../route/auth.js"
 
 const OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-const FALLBACK_UA = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
+/**
+ * The agy CLI's wire User-Agent when the binary scan below cannot read
+ * one out of the installed binary. Current agy builds CONSTRUCT this
+ * string at runtime (no literal copy exists in the binary - verified
+ * against both installed builds, 2026-11-06), so for them this constant
+ * is the effective identity and must move with the installed CLI. The
+ * value below was captured from the wire of the fleet's installed CLI
+ * (~/.gemini/bin/agy 1.5.0 - the install `findAgyBinary` prefers) on
+ * 2026-11-06; the grammar (version + changelist) is the CLI's own.
+ */
+export const FALLBACK_UA =
+  "antigravity/cli/1.5.0 (aidev_client; os_type=linux; arch=amd64; cl=1013440158; auth_method=consumer)"
 
 /**
  * Deadline + size cap for the token-refresh exchange (#1469). The token

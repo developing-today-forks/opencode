@@ -200,6 +200,19 @@ const loadApiKeyEffect = (sources?: CredentialSources) =>
   })
 
 /**
+ * The User-Agent the mistral-vibe binary presents on its API requests:
+ * `Mistral-Vibe/<version>` - NOT the User-Agent of the Mistral SDK it
+ * builds on (captured from the installed CLI's own wire, 2026-11-06).
+ * The version tracks the fleet's installed release (mistral-vibe
+ * 3.1.0, the uv-tool install in ~/.local/share/uv/tools); move it when
+ * that install moves. Stamped in auth, after the transport's header
+ * merge, for the same reason as claude-code-auth: a session request's
+ * own harness User-Agent would otherwise override it and the wire
+ * would present OpenCode's identity, not Vibe's.
+ */
+export const CLI_USER_AGENT = "Mistral-Vibe/3.1.0"
+
+/**
  * Bearer auth whose credential is the vibe binary's own sign-in credential,
  * resolved exactly as the binary resolves it. An explicit `auth` override
  * wins; an explicit static `apiKey` is accepted for tests/offline use.
@@ -210,11 +223,22 @@ export const vibeAuth = (input: {
   readonly sources?: CredentialSources
 }) => {
   if (input.auth) return input.auth
-  if (input.apiKey !== undefined) return Auth.bearer(input.apiKey)
+  if (input.apiKey !== undefined)
+    return Auth.custom((authInput) =>
+      Effect.succeed(
+        Headers.setAll(authInput.headers, {
+          authorization: `Bearer ${input.apiKey as string}`,
+          "user-agent": CLI_USER_AGENT,
+        }),
+      ),
+    )
   return Auth.custom((authInput) =>
     Effect.gen(function* () {
       const apiKey = yield* loadApiKeyEffect(input.sources)
-      return Headers.setAll(authInput.headers, { authorization: `Bearer ${apiKey}` })
+      return Headers.setAll(authInput.headers, {
+        authorization: `Bearer ${apiKey}`,
+        "user-agent": CLI_USER_AGENT,
+      })
     }).pipe(
       Effect.mapError(
         (cause) =>
