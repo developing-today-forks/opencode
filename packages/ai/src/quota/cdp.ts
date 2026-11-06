@@ -90,6 +90,20 @@ export const connectWs = (wsUrl: string, requestTimeoutMs: number = CDP_REQUEST_
     const pending = new Map<number, PendingRequest>()
     let id = 0
     let opened = false
+    // Connection-establishment bound (#1895): the request timeout above
+    // only bounds sends AFTER open, and a handshake that stalls (the
+    // endpoint accepts TCP but never completes the upgrade) fires
+    // neither onopen nor onerror/onclose — without this timer the
+    // connect, and the cdpPageFetch awaiting it, hang forever. The same
+    // bound value is reused: it is this file's per-operation bound.
+    const connectTimer = setTimeout(() => {
+      if (opened) return
+      try {
+        ws.close()
+      } catch {}
+      reject(new Error(`CDP websocket connect timed out after ${requestTimeoutMs}ms`))
+    }, requestTimeoutMs)
+    ;(connectTimer as { unref?: () => void }).unref?.()
     const settleAll = (error: Error) => {
       for (const entry of pending.values()) {
         clearTimeout(entry.timer)
@@ -110,6 +124,7 @@ export const connectWs = (wsUrl: string, requestTimeoutMs: number = CDP_REQUEST_
     }
     ws.onopen = () => {
       opened = true
+      clearTimeout(connectTimer)
       resolve({
         send: (method, params = {}) =>
           new Promise<JsonObject>((res, rej) => {
@@ -136,11 +151,13 @@ export const connectWs = (wsUrl: string, requestTimeoutMs: number = CDP_REQUEST_
     }
     ws.onerror = () => {
       const error = new Error("websocket error")
+      clearTimeout(connectTimer)
       if (!opened) reject(error)
       settleAll(error)
     }
     ws.onclose = () => {
       const error = new Error("websocket closed")
+      clearTimeout(connectTimer)
       if (!opened) reject(error)
       settleAll(error)
     }

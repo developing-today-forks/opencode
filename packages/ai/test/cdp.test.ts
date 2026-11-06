@@ -123,6 +123,68 @@ describe("cdp websocket request bounds (#1803)", () => {
     }
   })
 
+  test("a stalled handshake rejects within the bound (#1895)", async () => {
+    // A raw TCP endpoint that accepts the connection and never speaks:
+    // the WebSocket handshake can neither complete nor fail, so without
+    // a connect bound connectWs never settles.
+    const { createServer } = await import("node:net")
+    const server = createServer((socket) => {
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen))
+    try {
+      const address = server.address()
+      const port = typeof address === "object" && address !== null ? address.port : 0
+      const started = Date.now()
+      await expect(connectWs(`ws://127.0.0.1:${port}/devtools/page/page-1`, 150)).rejects.toThrow(
+        "connect timed out after 150ms",
+      )
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      server.close()
+    }
+  })
+
+  test("cdpPageFetch surfaces a stalled handshake as cdp-unavailable", async () => {
+    const { createServer } = await import("node:net")
+    const stall = createServer((socket) => {
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolveListen) => stall.listen(0, "127.0.0.1", resolveListen))
+    const stallAddress = stall.address()
+    const stallPort = typeof stallAddress === "object" && stallAddress !== null ? stallAddress.port : 0
+    let httpPort = 0
+    const http = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url)
+        const origin = `http://127.0.0.1:${httpPort}`
+        if (url.pathname === "/json/list")
+          return Response.json([
+            {
+              id: "page-1",
+              type: "page",
+              url: `${origin}/`,
+              webSocketDebuggerUrl: `ws://127.0.0.1:${stallPort}/devtools/page/page-1`,
+            },
+          ])
+        return new Response("not found", { status: 404 })
+      },
+    })
+    httpPort = http.port
+    try {
+      const ctx = quotaCtx({ cdpBase: `http://127.0.0.1:${httpPort}`, cdpRequestTimeoutMs: 200 })
+      const started = Date.now()
+      await expect(cdpPageFetch(ctx, `http://127.0.0.1:${httpPort}`, ["/api/thing"])).rejects.toThrow(
+        "cdp-unavailable:",
+      )
+      expect(Date.now() - started).toBeLessThan(10_000)
+    } finally {
+      http.stop(true)
+      stall.close()
+    }
+  })
+
   test("cdpPageFetch surfaces a wedged evaluate as cdp-unavailable and runs its cleanup", async () => {
     const fake = startFakeCdp("wedge-after-location")
     try {
