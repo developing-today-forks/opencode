@@ -2,10 +2,18 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
+  ClaudeCodeSignInError,
   NOT_SIGNED_IN_MESSAGE,
+  OAUTH_AUTHORIZE_URL,
+  OAUTH_CLIENT_ID,
+  OAUTH_REDIRECT_URI,
+  OAUTH_TOKEN_URL,
+  beginClaudeCodeSignIn,
   claudeCodeAuth,
+  expiredMessage,
   parseCredentialsFile,
   resolveCredential,
+  writeCredential,
   type CredentialSources,
 } from "../../src/providers/claude-code-auth.js"
 import { ClaudeCodeMessages } from "../../src/protocols/claude-code-messages.js"
@@ -151,7 +159,8 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
       }),
     ).catch((cause: unknown) => cause)
     expect(JSON.stringify(error)).toContain("expired")
-    expect(JSON.stringify(error)).toContain("Run `claude`")
+    expect(JSON.stringify(error)).toContain("in-product sign-in")
+    expect(JSON.stringify(error)).not.toContain("Run `claude`")
   })
 
   test("an expired file credential with a valid env token sends the env token (#1752)", async () => {
@@ -226,5 +235,198 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
     )
     expect(headers["user-agent"]).toBe(ClaudeCodeMessages.CLI_USER_AGENT)
     expect(headers.authorization).toBe("Bearer " + "tok-static")
+  })
+})
+
+describe("messages — no message instructs running the `claude` binary (#1852)", () => {
+  test("the not-signed-in and expired messages name the in-product sign-in", () => {
+    expect(NOT_SIGNED_IN_MESSAGE).not.toContain("Run `claude`")
+    expect(NOT_SIGNED_IN_MESSAGE).toContain("in-product")
+    expect(expiredMessage(1_000)).not.toContain("Run `claude`")
+    expect(expiredMessage(1_000)).toContain("in-product sign-in")
+  })
+})
+
+describe("writeCredential — the shared atomic write helper (#1852)", () => {
+  test("writes the full blob via temp+rename, preserving unrelated fields", async () => {
+    const writes: Array<{ path: string; contents: string }> = []
+    const renames: Array<{ from: string; to: string }> = []
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      readFile: () => JSON.stringify({ otherTool: { keep: true }, claudeAiOauth: { stale: "x", accessToken: "old" } }),
+      writeFile: async (path, contents) => {
+        writes.push({ path, contents })
+      },
+      renameFile: async (from, to) => {
+        renames.push({ from, to })
+      },
+      randomValues: (length) => new Uint8Array(length).fill(7),
+    }
+    await writeCredential(sources, { accessToken: "tok-new", refreshToken: "ref-new", expiresAt: 42 })
+    expect(writes).toHaveLength(1)
+    expect(writes[0]!.path).toStartWith("/fixture/claude-dir/.credentials.json.tmp-")
+    expect(renames).toEqual([{ from: writes[0]!.path, to: "/fixture/claude-dir/.credentials.json" }])
+    const written = JSON.parse(writes[0]!.contents)
+    expect(written.otherTool).toEqual({ keep: true })
+    expect(written.claudeAiOauth).toEqual({
+      stale: "x",
+      accessToken: "tok-new",
+      refreshToken: "ref-new",
+      expiresAt: 42,
+    })
+  })
+})
+
+describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () => {
+  const deterministic = (length: number) => Uint8Array.from({ length }, (_, i) => i % 251)
+  const stateFrom = (url: string) => new URL(url).searchParams.get("state")!
+
+  const harness = (overrides: Partial<CredentialSources> = {}, fetchImpl?: typeof fetch) => {
+    const store = new Map<string, string>()
+    const calls: Array<{ url: string; body: string }> = []
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => 1_000_000,
+      randomValues: deterministic,
+      readFile: (path) => store.get(path),
+      writeFile: async (path, contents) => {
+        store.set(path, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      fetchFn:
+        fetchImpl ??
+        (async (url: string | URL | Request, init?: RequestInit) => {
+          calls.push({ url: String(url), body: String(init?.body ?? "") })
+          return new Response(
+            JSON.stringify({
+              access_token: "tok-signed-in",
+              refresh_token: "ref-signed-in",
+              expires_in: 3600,
+              subscription_type: "pro",
+              scope: "user:inference user:profile",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )
+        }),
+      ...overrides,
+    }
+    return { sources, store, calls }
+  }
+
+  test("the authorize URL carries the verified flow constants and a PKCE S256 challenge", async () => {
+    const { sources } = harness()
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const url = new URL(signIn.url)
+    expect(url.origin + url.pathname).toBe(OAUTH_AUTHORIZE_URL)
+    expect(url.searchParams.get("code")).toBe("true")
+    expect(url.searchParams.get("client_id")).toBe(OAUTH_CLIENT_ID)
+    expect(url.searchParams.get("response_type")).toBe("code")
+    expect(url.searchParams.get("redirect_uri")).toBe(OAUTH_REDIRECT_URI)
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256")
+    expect(url.searchParams.get("code_challenge")!.length).toBeGreaterThan(20)
+    expect(url.searchParams.get("state")).toBeTruthy()
+    expect(signIn.instructions).toContain("code#state")
+  })
+
+  test("callback exchanges the pasted code, persists atomically, and the credential resolves", async () => {
+    const { sources, store, calls } = harness()
+    store.set("/fixture/claude-dir/.credentials.json", JSON.stringify({ otherTool: { keep: true } }))
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const credential = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`)
+    expect(credential).toEqual({ accessToken: "tok-signed-in", expiresAt: 4_600_000, source: "credentials-file" })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe(OAUTH_TOKEN_URL)
+    const body = new URLSearchParams(calls[0]!.body)
+    expect(body.get("grant_type")).toBe("authorization_code")
+    expect(body.get("code")).toBe("auth-code-1")
+    expect(body.get("client_id")).toBe(OAUTH_CLIENT_ID)
+    expect(body.get("redirect_uri")).toBe(OAUTH_REDIRECT_URI)
+    expect(body.get("code_verifier")!.length).toBeGreaterThan(20)
+    const written = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    expect(written.otherTool).toEqual({ keep: true })
+    expect(written.claudeAiOauth).toEqual({
+      accessToken: "tok-signed-in",
+      refreshToken: "ref-signed-in",
+      expiresAt: 4_600_000,
+      subscriptionType: "pro",
+      scopes: ["user:inference", "user:profile"],
+    })
+    await expect(resolveCredential(sources)).resolves.toMatchObject({ accessToken: "tok-signed-in" })
+  })
+
+  test("a malformed paste and a state mismatch fail named, with no exchange", async () => {
+    const { sources, calls } = harness()
+    const signIn = await beginClaudeCodeSignIn(sources)
+    await expect(signIn.callback("   ")).rejects.toBeInstanceOf(ClaudeCodeSignInError)
+    const again = await beginClaudeCodeSignIn(sources)
+    await expect(again.callback("auth-code-1#wrong-state")).rejects.toThrow("state mismatch")
+    expect(calls).toHaveLength(0)
+  })
+
+  test("an exchange failure persists nothing", async () => {
+    const failing = async () =>
+      new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      })
+    const { sources, store } = harness({}, failing as typeof fetch)
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(ClaudeCodeSignInError)
+    expect(String(error)).toContain("400")
+    expect(String(error)).not.toContain("tok-")
+    expect(store.size).toBe(0)
+  })
+
+  test("a write failure after exchange discards the tokens and leaves the file untouched", async () => {
+    const { sources, store } = harness({
+      writeFile: async () => {
+        throw new Error("disk full")
+      },
+    })
+    store.set("/fixture/claude-dir/.credentials.json", JSON.stringify({ claudeAiOauth: { accessToken: "tok-old" } }))
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(ClaudeCodeSignInError)
+    expect(String(error)).toContain("discarded")
+    expect(String(error)).not.toContain("tok-signed-in")
+    expect(JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)).toEqual({
+      claudeAiOauth: { accessToken: "tok-old" },
+    })
+  })
+
+  test("concurrent callbacks run exactly one token exchange", async () => {
+    const { sources, calls } = harness()
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const pasted = `auth-code-1#${stateFrom(signIn.url)}`
+    const [first, second] = await Promise.all([signIn.callback(pasted), signIn.callback(pasted)])
+    expect(first).toEqual(second)
+    expect(calls).toHaveLength(1)
+  })
+
+  test("tokens are never logged during sign-in", async () => {
+    const logged: Array<string> = []
+    const original = { log: console.log, info: console.info, warn: console.warn, error: console.error }
+    console.log = (...args: Array<unknown>) => logged.push(args.join(" "))
+    console.info = console.log
+    console.warn = console.log
+    console.error = console.log
+    try {
+      const { sources } = harness()
+      const signIn = await beginClaudeCodeSignIn(sources)
+      await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`)
+    } finally {
+      console.log = original.log
+      console.info = original.info
+      console.warn = original.warn
+      console.error = original.error
+    }
+    expect(logged.join(" ")).not.toContain("tok-signed-in")
+    expect(logged.join(" ")).not.toContain("ref-signed-in")
   })
 })
