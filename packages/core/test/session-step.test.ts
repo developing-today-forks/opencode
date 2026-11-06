@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import {
   AIError,
+  AuthenticationError,
   HttpRateLimitDetails,
   InvalidRequestError,
   LanguageModel,
@@ -2501,6 +2502,173 @@ describe("the route log and pool health time the model's response, not the step 
       expect(
         step.attempt.time_ended - step.attempt.time_started - (step.attempt.response_ms ?? Number.NaN),
       ).toBeGreaterThanOrEqual(WAIT_MS / 2)
+    }),
+  )
+})
+
+// #1806: the failover gate must admit every failure class that indicts the target, not
+// only retryable/auth/quota ones — a session moves to the next candidate on ANY
+// candidate error and errors only when every candidate is exhausted (Drew, 2026-11-06).
+describe("SessionStep failover classes (#1806)", () => {
+  const attemptWith = (error: AIError, serveFallback: boolean) =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const sessionID = Session.ID.create()
+      const assistantMessageID = SessionMessage.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "failover-classes",
+          directory: "/project",
+          version: "test",
+        })
+        .run()
+      const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+      const cost = [
+        {
+          input: Money.USDPerMillionTokens.make(1),
+          output: Money.USDPerMillionTokens.make(2),
+          cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+        },
+      ]
+      const limit = { context: 100_000, output: 1_000 }
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const fallback = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      let fallbackCalls = 0
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("failover-classes"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => {
+            fallbackCalls++
+            return Effect.succeed(serveFallback ? fallback : undefined)
+          },
+        },
+      })
+      yield* llm.push(TestLLM.failAfter(error))
+      const result = yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: (_cause, _error, retry) =>
+            Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+      return { result, fallbackCalls, fallback }
+    })
+
+  it.effect("fails over on an authentication failure (the not-signed-in class)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new AuthenticationError({ message: "Claude Code is not signed in on this machine" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on a quota-exhausted failure", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new QuotaExceededError({ message: "Individual quota reached" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on an unclassified InvalidRequest (a model the provider no longer serves)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new InvalidRequestError({ message: "model not found" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on a target-side timeout", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new TimeoutError({ message: "provider timed out" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("does not fail over a context-overflow InvalidRequest — size recovery owns the request", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls } = yield* attemptWith(
+        new AIError({
+          reason: new InvalidRequestError({ message: "context length exceeded", classification: "context-overflow" }),
+        }),
+        true,
+      )
+      expect(fallbackCalls).toBe(0)
+      if (Exit.isSuccess(result)) expect(result.value._tag).not.toBe("Failover")
+    }),
+  )
+
+  it.effect("errors once with the candidate's failure when every candidate is exhausted", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls } = yield* attemptWith(
+        new AIError({ reason: new InvalidRequestError({ message: "model not found" }) }),
+        false,
+      )
+      expect(fallbackCalls).toBe(1)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(JSON.stringify(result.cause)).toContain("model not found")
     }),
   )
 })
