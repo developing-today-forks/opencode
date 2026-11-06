@@ -214,6 +214,8 @@ export interface QuotaContext {
   fetchImpl?: typeof fetch
   /** Chrome DevTools Protocol base for console-session reads (Meta portal, Mistral admin console). */
   cdpBase?: string
+  /** Per-request timeout for CDP WebSocket requests; defaults to `CDP_REQUEST_TIMEOUT_MS` in cdp.ts. */
+  cdpRequestTimeoutMs?: number
   homeDir?: string
   /** The OpenCode config directory (antigravity accounts file lives here). */
   configDir?: string

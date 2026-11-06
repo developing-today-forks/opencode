@@ -69,32 +69,81 @@ const httpJson = async (url: string, init?: RequestInit): Promise<JsonValue> => 
   return parsed
 }
 
-const connectWs = (wsUrl: string): Promise<WsClient> =>
+/**
+ * Per-request bound for a DevTools WebSocket request, consistent with
+ * this file's other bounds (10s HTTP `AbortSignal.timeout`, 20s
+ * page-wait deadline, 5s page close): a wedged renderer must never
+ * leave a request — or the `cdpPageFetch` awaiting it — pending
+ * forever. Shortened in tests via `QuotaContext.cdpRequestTimeoutMs`.
+ */
+export const CDP_REQUEST_TIMEOUT_MS = 10_000
+
+interface PendingRequest {
+  resolve: (value: JsonObject) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+export const connectWs = (wsUrl: string, requestTimeoutMs: number = CDP_REQUEST_TIMEOUT_MS): Promise<WsClient> =>
   new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl)
-    const pending = new Map<number, (value: JsonObject) => void>()
+    const pending = new Map<number, PendingRequest>()
     let id = 0
+    let opened = false
+    const settleAll = (error: Error) => {
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer)
+        entry.reject(error)
+      }
+      pending.clear()
+    }
     ws.onmessage = (event: MessageEvent) => {
       const message = asObject(parseJsonValue(String(event.data)))
       if (!message) return
       const messageId = typeof message.id === "number" ? message.id : null
       if (messageId === null || !pending.has(messageId)) return
-      const settle = pending.get(messageId)
-      if (!settle) return
+      const entry = pending.get(messageId)
+      if (!entry) return
       pending.delete(messageId)
-      settle(message.error ? { error: message.error } : (asObject(message.result) ?? {}))
+      clearTimeout(entry.timer)
+      entry.resolve(message.error ? { error: message.error } : (asObject(message.result) ?? {}))
     }
-    ws.onopen = () =>
+    ws.onopen = () => {
+      opened = true
       resolve({
         send: (method, params = {}) =>
-          new Promise<JsonObject>((res) => {
+          new Promise<JsonObject>((res, rej) => {
             const next = ++id
-            pending.set(next, res)
-            ws.send(JSON.stringify({ id: next, method, params }))
+            const timer = setTimeout(() => {
+              pending.delete(next)
+              rej(new Error(`CDP request ${method} timed out after ${requestTimeoutMs}ms`))
+            }, requestTimeoutMs)
+            ;(timer as { unref?: () => void }).unref?.()
+            pending.set(next, { resolve: res, reject: rej, timer })
+            try {
+              ws.send(JSON.stringify({ id: next, method, params }))
+            } catch (error) {
+              clearTimeout(timer)
+              pending.delete(next)
+              rej(error instanceof Error ? error : new Error(String(error)))
+            }
           }),
-        close: () => ws.close(),
+        close: () => {
+          settleAll(new Error("websocket closed"))
+          ws.close()
+        },
       })
-    ws.onerror = () => reject(new Error("websocket error"))
+    }
+    ws.onerror = () => {
+      const error = new Error("websocket error")
+      if (!opened) reject(error)
+      settleAll(error)
+    }
+    ws.onclose = () => {
+      const error = new Error("websocket closed")
+      if (!opened) reject(error)
+      settleAll(error)
+    }
   })
 
 const evaluate = async (client: WsClient, expression: string): Promise<JsonValue> => {
@@ -167,7 +216,7 @@ export const cdpPageFetch = async (
   }
   let client: WsClient | undefined
   try {
-    client = await connectWs(page.webSocketDebuggerUrl)
+    client = await connectWs(page.webSocketDebuggerUrl, ctx.cdpRequestTimeoutMs ?? CDP_REQUEST_TIMEOUT_MS)
     const pageUrl = await waitForPage(client, origin)
     const expression = `(async () => {
       const paths = ${JSON.stringify(paths)};
@@ -201,6 +250,15 @@ export const cdpPageFetch = async (
       if (!results[path]) results[path] = { status: 0, url: "", text: "" }
     }
     return { results, pageUrl }
+  } catch (error) {
+    // A request that timed out or a socket that died mid-fetch is the
+    // cdp-unavailable class, like the reachability failures above, so
+    // callers classify it instead of hanging or misreading it as data.
+    // Page-eval exceptions keep their own class.
+    if (error instanceof Error && error.message.startsWith("page eval exception")) throw error
+    throw new Error(
+      `cdp-unavailable: CDP page fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
   } finally {
     client?.close()
     if (createdId) {
