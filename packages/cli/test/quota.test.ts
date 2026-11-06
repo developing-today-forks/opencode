@@ -60,6 +60,25 @@ describe("quota human rendering", () => {
     expect(rendered).toContain("vibe: 0.04% used ($0.06 / $150)")
   })
 
+  test("rounds unrounded percents to at most 2 decimal places (#1797)", () => {
+    const third = (100 / 300) * 100
+    const rendered = renderQuotaResults([
+      {
+        ...okResult,
+        usage: {
+          windows: { weekly: window(third) },
+          models: { "some-model": { windows: { weekly: window(third) } } },
+        },
+      },
+    ])
+    expect(rendered).toContain("weekly: 33.33% used")
+    expect(rendered).toContain("some-model: weekly 33.33%")
+    expect(rendered).not.toContain("33.333")
+    // Whole and already-round percents print without padding.
+    const whole = renderQuotaResults([{ ...okResult, usage: { windows: { weekly: window(100) } } }])
+    expect(whole).toContain("weekly: 100% used")
+  })
+
   test("renders an error block without inventing windows", () => {
     const rendered = renderQuotaResults([errorResult])
     expect(rendered).toContain("Meta Model API (meta): Subscription quota exhausted")
