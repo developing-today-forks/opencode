@@ -212,6 +212,33 @@ describe("meta portal subscription-quota mapping", () => {
     expect(zeroWeekly?.windows.weekly?.resetAt).toBeNull()
   })
 
+  test("a zero or negative limit drops only that window; null only when neither survives (#1849)", () => {
+    const withQuota = (patch: Record<string, unknown>) =>
+      parseSubscriptionQuota({ subscription_quota: { ...payload.subscription_quota, ...patch } })
+
+    const control = withQuota({})
+    expect(Object.keys(control?.windows ?? {}).sort()).toEqual(["5h", "weekly"])
+    expect(control?.windows["5h"]?.usedPercent).toBeCloseTo(1.02, 6)
+    expect(control?.windows.weekly?.usedPercent).toBeCloseTo(8.83, 6)
+
+    const zeroWindow = withQuota({ window_weighted_limit: "0" })
+    expect(Object.keys(zeroWindow?.windows ?? {})).toEqual(["weekly"])
+    expect(zeroWindow?.windows.weekly?.usedPercent).toBeCloseTo(8.83, 6)
+    expect(zeroWindow?.tier).toBe("Muse Code High Usage")
+
+    const zeroWeekly = withQuota({ weekly_weighted_limit: 0 })
+    expect(Object.keys(zeroWeekly?.windows ?? {})).toEqual(["5h"])
+    expect(zeroWeekly?.windows["5h"]?.usedPercent).toBeCloseTo(1.02, 6)
+
+    const negativeWindow = withQuota({ window_weighted_limit: "-100" })
+    expect(Object.keys(negativeWindow?.windows ?? {})).toEqual(["weekly"])
+
+    const negativeWeekly = withQuota({ weekly_weighted_limit: "-100" })
+    expect(Object.keys(negativeWeekly?.windows ?? {})).toEqual(["5h"])
+
+    expect(withQuota({ window_weighted_limit: "0", weekly_weighted_limit: "-1" })).toBeNull()
+  })
+
   test("a missing subscription_quota object maps to null", () => {
     expect(parseSubscriptionQuota({})).toBeNull()
     expect(parseSubscriptionQuota({ subscription_quota: { window_weighted_used: "1" } })).toBeNull()

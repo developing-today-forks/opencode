@@ -86,29 +86,31 @@ export const parseSubscriptionQuota = (
   // non-positive reset is likewise an honest null, never a
   // 1969/1970 date published by a raw seconds multiplication
   // (the #1845 disposition, which this parser previously bypassed).
-  if (
-    windowUsed === null || windowLimit === null || weeklyUsed === null || weeklyLimit === null ||
-    windowLimit === 0 || weeklyLimit === 0
-  ) {
-    return null
-  }
+  if (windowUsed === null || windowLimit === null || weeklyUsed === null || weeklyLimit === null) return null
+  // A non-positive limit has no percentage to derive (rule 4, no
+  // figure no window): that window alone is dropped, the other still
+  // publishes, and the parse is null only when neither survives. A
+  // negative limit used to clamp to a fabricated 0% / 100% headroom
+  // window; a zero limit used to null the whole payload.
   const pct = (used: number, limit: number) => Math.min(100, Math.max(0, (used / limit) * 100))
   const windowSeconds = durationSecs !== null && durationSecs > 0 ? durationSecs : null
-  return {
-    tier: asNonEmptyString(quota.tier) ?? null,
-    windows: {
-      [windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"]: toUsageWindow({
-        usedPercent: pct(windowUsed, windowLimit),
-        windowSeconds,
-        resetAt: toTimestamp(windowReset),
-      }),
-      weekly: toUsageWindow({
-        usedPercent: pct(weeklyUsed, weeklyLimit),
-        windowSeconds: WEEKLY_SECONDS,
-        resetAt: toTimestamp(weeklyReset),
-      }),
-    },
+  const windows: Record<string, QuotaWindow> = {}
+  if (windowLimit > 0) {
+    windows[windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"] = toUsageWindow({
+      usedPercent: pct(windowUsed, windowLimit),
+      windowSeconds,
+      resetAt: toTimestamp(windowReset),
+    })
   }
+  if (weeklyLimit > 0) {
+    windows.weekly = toUsageWindow({
+      usedPercent: pct(weeklyUsed, weeklyLimit),
+      windowSeconds: WEEKLY_SECONDS,
+      resetAt: toTimestamp(weeklyReset),
+    })
+  }
+  if (Object.keys(windows).length === 0) return null
+  return { tier: asNonEmptyString(quota.tier) ?? null, windows }
 }
 
 export const parseBillingBanner = (payload: JsonValue): number | null => {
