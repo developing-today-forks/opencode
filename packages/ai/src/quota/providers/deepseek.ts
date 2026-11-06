@@ -1,5 +1,6 @@
 import type { QuotaProvider, JsonValue } from "../types.js"
 import {
+  asNonEmptyString,
   buildResult,
   errorText,
   fetchOf,
@@ -31,11 +32,11 @@ export const provider: QuotaProvider = {
   aliases,
   isConfigured: (ctx) => {
     const entry = getAuthEntry(projectAuth(ctx), aliases)
-    return Boolean(entry?.key)
+    return Boolean(asNonEmptyString(entry?.key))
   },
   fetchQuota: async (ctx) => {
     const entry = getAuthEntry(projectAuth(ctx), aliases)
-    const apiKey = entry?.key
+    const apiKey = asNonEmptyString(entry?.key)
 
     if (!apiKey) {
       return buildResult({ providerId, providerName, ok: false, configured: false, error: "Not configured" })
