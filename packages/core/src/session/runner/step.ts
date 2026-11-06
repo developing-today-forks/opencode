@@ -130,9 +130,27 @@ export const captureRateLimit = (target: ModelRoute.Target, credentialID?: strin
   return { capture, options: seen.options }
 }
 
+/** Text that states a quota window (or a credit balance) is spent, as opposed to a
+ * momentary rate limit: providers that report exhaustion without a quota tag (Antigravity's
+ * "Individual quota reached") must land in the same class as a `QuotaExceeded` tag, or the
+ * identical condition benches two different ways depending on the door (#1806). Deliberately
+ * narrower than `exhaustionText` below: that one only opens the quota-failure gate path,
+ * while this one decides the bench class, so plain rate-limit phrasing stays out. */
+const quotaText =
+  /individual quota|quota (?:exhausted|reached|exceeded)|insufficient credits|insufficient balance|insufficient funds|out of credits|usage limit (?:exceeded|reached)|reached your (?:usage|quota|plan) limit/i
+
+/** Transport OS codes that prove a request never reached a provider API: the name did not
+ * resolve, or nothing listened at the far end (a dead local service or proxy). Those are
+ * path failures — the fleet's DNS, a local proxy, the server itself — not provider health,
+ * so they take the infra hold instead of a bench (#1828). Ambiguous codes (resets, generic
+ * timeouts) stay on the ordinary network path: they can be the provider's own doing. */
+const INFRA_TRANSPORT_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"])
+
 /** Cooldown input from a provider error: a stated retry-after, an exhausted quota, or an
  * authentication refusal (the `Authentication` tag, an HTTP 401/403, or the org-disabled
- * refusal shape), which cannot heal by itself and so takes the long first bench. */
+ * refusal shape), which cannot heal by itself and so takes the long first bench. A quota
+ * stated only in the error text classifies as quota too, with the stated reset bound to the
+ * bench; a transport path failure classifies as infra. */
 export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
@@ -149,6 +167,8 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     reason._tag === "Transport" &&
     reason.code === "Timeout" &&
     reason.message?.startsWith("No response output within ")
+  const text = `${reason.message ?? ""} ${reason.body ?? ""}`
+  const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
   return {
     retryAfterMs:
       reason.retryAfterMs ??
@@ -156,12 +176,23 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
       (clientTimeoutMessage
         ? undefined
         : ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now())),
-    quota: reason._tag === "QuotaExceeded",
+    quota,
+    // Optional hint fields are omitted when unset, never present-but-undefined — the
+    // same convention the route policy follows.
+    ...(quota
+      ? { quotaResetAtMs: ModelRouteLimits.resetAtFromMessage(reason.message ?? reason.body, Date.now()) }
+      : {}),
+    ...(reason._tag === "Transport" &&
+    reason.http === undefined &&
+    !clientTimeoutMessage &&
+    INFRA_TRANSPORT_CODES.has(reason.code ?? "")
+      ? { infra: true }
+      : {}),
     auth:
       reason._tag === "Authentication" ||
       reason.http?.status === 401 ||
       reason.http?.status === 403 ||
-      /organization has disabled/i.test(`${reason.message ?? ""} ${reason.body ?? ""}`),
+      /organization has disabled/i.test(text),
     network: reason._tag === "Transport" && reason.http === undefined && !clientTimeoutMessage,
   }
 }

@@ -107,6 +107,10 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
     }
     return {
       benches: ModelRoute.activeBenches(now),
+      // The #1828 availability readout: every stop in force (benches, quota gates and
+      // balance holds, rate-limit windows, infra holds) with its class and resume rule.
+      // Absence of a provider here means it is available.
+      availability: ModelRoute.availability(now),
       targets,
       hedges,
       predictions,
