@@ -536,6 +536,23 @@ export const make = Effect.gen(function* () {
         // failing: it never counts against route health, quota or cooldown state, it is
         // never retried on the same target, but the request does fail over (#1084).
         const policyFailure = llmFailure !== undefined && llmFailure.reason._tag === "ContentPolicy"
+        // #1806: a failure can indict the target without being retryable, an auth refusal,
+        // or a quota tag — a deterministic rejection naming the target's own configuration
+        // (a model the provider no longer serves arrives as an unclassified InvalidRequest),
+        // a target-side timeout, an operation this target does not support, a route that
+        // does not resolve. Those are availability classes the routeFailure test above does
+        // not admit, and they cascade like any other target failure: a session moves to the
+        // next candidate on ANY candidate error and errors only when every candidate is
+        // exhausted (Drew, 2026-11-06). Classified InvalidRequest failures (context
+        // overflow, payload too large) indict the request, not the target — size recovery
+        // owns them, and every candidate would reject the same request identically — so
+        // they stay out.
+        const cascadeFailure =
+          llmFailure !== undefined &&
+          (llmFailure.reason._tag === "Timeout" ||
+            llmFailure.reason._tag === "UnsupportedOperation" ||
+            llmFailure.reason._tag === "NoRoute" ||
+            (llmFailure.reason._tag === "InvalidRequest" && llmFailure.reason.classification === undefined))
         // A content-filter finish is the same refusal delivered as a finish reason rather
         // than an error: the attempt is recorded as a policy rejection (below), never as a
         // success or a general failure (#1084).
@@ -672,7 +689,7 @@ export const make = Effect.gen(function* () {
         // to it. That case cascades through the Continue outcome below when a retry is
         // authorized -- a new assistant message whose re-selection sees the target marked
         // failed above; a hook that declines any further request ends the turn, as instructed.
-        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure) && !sameTargetRetry) {
+        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure || cascadeFailure) && !sameTargetRetry) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
