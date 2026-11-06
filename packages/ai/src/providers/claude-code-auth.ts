@@ -44,6 +44,7 @@
 // of silently degrading — the fail-closed floor of code#6117.
 import { Effect } from "effect"
 import { Headers } from "effect/http"
+import { deadlineSignal, readBoundedResponseText } from "@opencode/util/http-body"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
 import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
@@ -71,6 +72,9 @@ export const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 export const OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
 export const OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 export const OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
+export const OAUTH_TOKEN_RESPONSE_MAX_BYTES = 1024 * 1024
+
+const OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 15_000
 
 export const SIGN_IN_INSTRUCTIONS =
   "Open the authorize URL in a browser on any device, complete the claude.ai sign-in, " +
@@ -98,6 +102,8 @@ export interface CredentialSources {
   readonly renameFile?: (from: string, to: string) => Promise<void>
   /** Fetch used for the OAuth token exchange (tests); defaults to the global fetch. */
   readonly fetchFn?: typeof fetch
+  /** Override for the token-exchange deadline (tests); defaults to 15 seconds. */
+  readonly tokenExchangeTimeoutMs?: number
   /** Random bytes for PKCE/state/temp names (tests); defaults to crypto.getRandomValues. */
   readonly randomValues?: (length: number) => Uint8Array
   readonly now?: () => number
@@ -283,6 +289,7 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      signal: deadlineSignal(undefined, sources.tokenExchangeTimeoutMs ?? OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS),
       body: new URLSearchParams({
         grant_type: "authorization_code",
         client_id: OAUTH_CLIENT_ID,
@@ -298,7 +305,19 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     })
     if (!response.ok)
       throw new ClaudeCodeSignInError(`Claude Code sign-in token exchange failed with HTTP ${response.status}.`)
-    const data: unknown = await response.json().catch(() => undefined)
+    let data: unknown
+    try {
+      data = JSON.parse(
+        await readBoundedResponseText(response, OAUTH_TOKEN_RESPONSE_MAX_BYTES, () =>
+          new ClaudeCodeSignInError(
+            `Claude Code sign-in token exchange response exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes.`,
+          ),
+        ),
+      )
+    } catch (cause) {
+      if (cause instanceof ClaudeCodeSignInError) throw cause
+      data = undefined
+    }
     const tokens = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {}
     const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
     if (accessToken.length === 0)

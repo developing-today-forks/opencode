@@ -7,6 +7,7 @@ import {
   OAUTH_AUTHORIZE_URL,
   OAUTH_CLIENT_ID,
   OAUTH_REDIRECT_URI,
+  OAUTH_TOKEN_RESPONSE_MAX_BYTES,
   OAUTH_TOKEN_URL,
   beginClaudeCodeSignIn,
   claudeCodeAuth,
@@ -380,6 +381,54 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     expect(error).toBeInstanceOf(ClaudeCodeSignInError)
     expect(String(error)).toContain("400")
     expect(String(error)).not.toContain("tok-")
+    expect(store.size).toBe(0)
+  })
+
+  test("a stalled token endpoint times out as a named error and persists nothing", async () => {
+    let signal: AbortSignal | null | undefined
+    const fetchFn: typeof fetch = async (_input, init) => {
+      const requestSignal = init?.signal
+      signal = requestSignal
+      return await new Promise<Response>((_resolve, reject) => {
+        if (!requestSignal) throw new Error("token exchange did not receive a deadline signal")
+        requestSignal.addEventListener("abort", () => reject(requestSignal.reason), { once: true })
+      })
+    }
+    const { sources, store } = harness({ tokenExchangeTimeoutMs: 10 }, fetchFn)
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(error).toBeInstanceOf(ClaudeCodeSignInError)
+    expect(String(error)).not.toContain("tok-")
+    expect(store.size).toBe(0)
+  })
+
+  test("an oversized success body fails named and persists nothing", async () => {
+    const oversizedToken = "x".repeat(OAUTH_TOKEN_RESPONSE_MAX_BYTES)
+    const fetchFn: typeof fetch = async () =>
+      new Response(JSON.stringify({ access_token: oversizedToken }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    const { sources, store } = harness({}, fetchFn)
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(ClaudeCodeSignInError)
+    expect(String(error)).toContain(`exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes`)
+    expect(String(error)).not.toContain(oversizedToken)
+    expect(store.size).toBe(0)
+  })
+
+  test.each([
+    ["non-JSON", "not json"],
+    ["token-less", JSON.stringify({ refresh_token: "ref-only" })],
+  ])("a %s success body fails named", async (_label, body) => {
+    const fetchFn: typeof fetch = async () => new Response(body, { status: 200 })
+    const { sources, store } = harness({}, fetchFn)
+    const signIn = await beginClaudeCodeSignIn(sources)
+    const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(ClaudeCodeSignInError)
+    expect(String(error)).toContain("no access token")
     expect(store.size).toBe(0)
   })
 
