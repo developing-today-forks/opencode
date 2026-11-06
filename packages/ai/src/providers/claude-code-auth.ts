@@ -32,10 +32,14 @@
 // failure below fires exactly as before.
 //
 // The credential is read IN PLACE, fresh per request, never copied into
-// the fork's credential store, never written back, and never logged. This
-// provider deliberately does NOT refresh the token: the refresh token is
-// the CLI's, a refresh here would rotate it out from under the CLI, and
-// renewal of an expired login is the interactive `claude` sign-in. An
+// the fork's credential store, and never logged. The one write to the
+// file is the in-provider OAuth sign-in below (#1852): it writes the
+// FULL claudeAiOauth blob atomically (temp file + rename, 0600) through
+// the single write helper, preserving unrelated fields, so a provider
+// sign-in and a CLI sign-in stay interchangeable. This provider
+// deliberately does NOT refresh the token: the refresh token is
+// the CLI's, a refresh here would rotate it out from under the CLI
+// (renewal is task 10996's half of #1818). An
 // expired credential therefore fails LOUDLY (see claudeCodeAuth) instead
 // of silently degrading — the fail-closed floor of code#6117.
 import { Effect } from "effect"
@@ -49,13 +53,33 @@ export const CREDENTIALS_FILE_NAME = ".credentials.json"
 
 export const NOT_SIGNED_IN_MESSAGE =
   "Claude Code is not signed in on this machine: no OAuth credential in ~/.claude/.credentials.json " +
-  `and no ${OAUTH_TOKEN_ENV_VAR} in the environment. Run \`claude\` once and complete the claude.ai sign-in.`
+  `and no ${OAUTH_TOKEN_ENV_VAR} in the environment. Use the claude-code provider's in-product ` +
+  "sign-in to complete the claude.ai OAuth sign-in."
 
 export const expiredMessage = (expiresAt: number) =>
   "The Claude Code OAuth credential in ~/.claude/.credentials.json expired at " +
   `${new Date(expiresAt).toISOString()} and this provider does not refresh the CLI's login. ` +
-  "Run `claude` and complete the sign-in to renew it; until then claude-code requests fail closed " +
+  "Renew it with the claude-code provider's in-product sign-in; until then claude-code requests fail closed " +
   "rather than falling back to the CLI or an API key."
+
+// In-provider OAuth sign-in initiation (#1852) — the flow constants are
+// the Claude Code client's own, verified against the CLI and public
+// implementations of the same client (#1818 triage): the authorize page
+// is hosted, displays `code#state` for the user to paste back, and no
+// localhost listener is involved.
+export const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+export const OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
+export const OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+export const OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
+
+export const SIGN_IN_INSTRUCTIONS =
+  "Open the authorize URL in a browser on any device, complete the claude.ai sign-in, " +
+  "and paste the code#state value the hosted page displays back to complete sign-in."
+
+/** A sign-in failure with a named, token-free message. */
+export class ClaudeCodeSignInError extends Error {
+  override readonly name = "ClaudeCodeSignInError"
+}
 
 export interface ClaudeCodeCredential {
   readonly accessToken: string
@@ -68,6 +92,14 @@ export interface ClaudeCodeCredential {
 export interface CredentialSources {
   readonly env?: Readonly<Record<string, string | undefined>>
   readonly readFile?: (path: string) => string | undefined | Promise<string | undefined>
+  /** Raw file write used by the atomic credential write (tests); defaults to fs writeFile with mode 0600. */
+  readonly writeFile?: (path: string, contents: string) => Promise<void>
+  /** Rename used by the atomic credential write (tests); defaults to fs rename. */
+  readonly renameFile?: (from: string, to: string) => Promise<void>
+  /** Fetch used for the OAuth token exchange (tests); defaults to the global fetch. */
+  readonly fetchFn?: typeof fetch
+  /** Random bytes for PKCE/state/temp names (tests); defaults to crypto.getRandomValues. */
+  readonly randomValues?: (length: number) => Uint8Array
   readonly now?: () => number
   /** Directory holding .credentials.json (defaults to $CLAUDE_CONFIG_DIR or ~/.claude). */
   readonly configDir?: string
@@ -134,6 +166,171 @@ export const resolveCredential = async (sources: CredentialSources = {}): Promis
     return envCredential ?? fileCredential
   }
   return envCredential
+}
+
+export interface ClaudeCodeOAuthBlob {
+  readonly accessToken: string
+  readonly refreshToken?: string
+  readonly expiresAt?: number
+  readonly subscriptionType?: string
+  readonly scopes?: ReadonlyArray<string>
+}
+
+/** Serialize the credentials file with `oauth` as its claudeAiOauth blob, preserving unrelated fields. */
+export const buildCredentialsFileContents = (existing: string | undefined, oauth: ClaudeCodeOAuthBlob): string => {
+  let top: Record<string, unknown> = {}
+  if (existing !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(existing)
+      if (typeof parsed === "object" && parsed !== null) top = parsed as Record<string, unknown>
+    } catch {
+      top = {}
+    }
+  }
+  const prior = top.claudeAiOauth
+  const priorBlob: Record<string, unknown> =
+    typeof prior === "object" && prior !== null ? (prior as Record<string, unknown>) : {}
+  return JSON.stringify({
+    ...top,
+    claudeAiOauth: {
+      ...priorBlob,
+      accessToken: oauth.accessToken,
+      ...(oauth.refreshToken === undefined ? {} : { refreshToken: oauth.refreshToken }),
+      ...(oauth.expiresAt === undefined ? {} : { expiresAt: oauth.expiresAt }),
+      ...(oauth.subscriptionType === undefined ? {} : { subscriptionType: oauth.subscriptionType }),
+      ...(oauth.scopes === undefined ? {} : { scopes: [...oauth.scopes] }),
+    },
+  })
+}
+
+const randomBytes = (sources: CredentialSources, length: number): Uint8Array =>
+  sources.randomValues ? sources.randomValues(length) : crypto.getRandomValues(new Uint8Array(length))
+
+const base64UrlEncode = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url")
+
+/**
+ * THE write helper for the shared credentials file — shared with the
+ * refresh write-back (task 10996): full-blob, atomic temp+rename, 0600.
+ * A failure leaves the original file untouched.
+ */
+export const writeCredential = async (sources: CredentialSources, oauth: ClaudeCodeOAuthBlob): Promise<void> => {
+  const path = await credentialsFilePath(sources)
+  const existing = await (sources.readFile ?? defaultReadFile)(path)
+  const contents = buildCredentialsFileContents(existing, oauth)
+  const writeFile =
+    sources.writeFile ??
+    (async (target: string, data: string) => {
+      const { writeFile: fsWriteFile } = await import("node:fs/promises")
+      await fsWriteFile(target, data, { encoding: "utf8", mode: 0o600 })
+    })
+  const renameFile =
+    sources.renameFile ??
+    (async (from: string, to: string) => {
+      const { rename } = await import("node:fs/promises")
+      await rename(from, to)
+    })
+  const suffix = Array.from(randomBytes(sources, 6), (byte) => byte.toString(16).padStart(2, "0")).join("")
+  const temp = `${path}.tmp-${process.pid}-${suffix}`
+  await writeFile(temp, contents)
+  await renameFile(temp, path)
+}
+
+const generatePKCE = async (sources: CredentialSources) => {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+  const verifier = Array.from(randomBytes(sources, 43), (byte) => chars[byte % chars.length]).join("")
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))
+  return { verifier, challenge: base64UrlEncode(new Uint8Array(digest)) }
+}
+
+export interface ClaudeCodeSignIn {
+  readonly url: string
+  readonly instructions: string
+  /** Paste the hosted page's `code#state` value; resolves only after the credential is persisted. */
+  readonly callback: (pasted: string) => Promise<ClaudeCodeCredential>
+}
+
+/**
+ * Begin an in-provider OAuth sign-in (#1852), mirroring the fork's
+ * chatgpt.ts authorize() shape — { url, instructions, callback } — with
+ * the paste-code variant (no listener), like github-copilot.ts.
+ * Tokens are never logged, and a failed write after a successful
+ * exchange discards the tokens: no in-memory-only credential exists.
+ */
+export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Promise<ClaudeCodeSignIn> => {
+  const pkce = await generatePKCE(sources)
+  const state = base64UrlEncode(randomBytes(sources, 32))
+  const params = new URLSearchParams({
+    code: "true",
+    client_id: OAUTH_CLIENT_ID,
+    response_type: "code",
+    redirect_uri: OAUTH_REDIRECT_URI,
+    state,
+    code_challenge: pkce.challenge,
+    code_challenge_method: "S256",
+  })
+  let inflight: Promise<ClaudeCodeCredential> | undefined
+  const exchangeAndPersist = async (pasted: string): Promise<ClaudeCodeCredential> => {
+    const trimmed = pasted.trim()
+    const separator = trimmed.indexOf("#")
+    const code = (separator === -1 ? trimmed : trimmed.slice(0, separator)).trim()
+    const pastedState = separator === -1 ? undefined : trimmed.slice(separator + 1).trim()
+    if (code.length === 0)
+      throw new ClaudeCodeSignInError(
+        "Malformed sign-in code: paste the full code#state value from the authorize page.",
+      )
+    if (pastedState !== undefined && pastedState !== state)
+      throw new ClaudeCodeSignInError("OAuth state mismatch: the pasted code was not issued for this sign-in attempt.")
+    const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: OAUTH_CLIENT_ID,
+        code,
+        code_verifier: pkce.verifier,
+        redirect_uri: OAUTH_REDIRECT_URI,
+        state: pastedState ?? state,
+      }).toString(),
+    }).catch((cause: unknown) => {
+      throw new ClaudeCodeSignInError(
+        `Claude Code sign-in token exchange failed to reach the token endpoint: ${cause instanceof Error ? cause.message : "network error"}`,
+      )
+    })
+    if (!response.ok)
+      throw new ClaudeCodeSignInError(`Claude Code sign-in token exchange failed with HTTP ${response.status}.`)
+    const data: unknown = await response.json().catch(() => undefined)
+    const tokens = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {}
+    const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
+    if (accessToken.length === 0)
+      throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned no access token.")
+    const now = sources.now ? sources.now() : Date.now()
+    const oauth: ClaudeCodeOAuthBlob = {
+      accessToken,
+      refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : undefined,
+      expiresAt:
+        typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in)
+          ? now + tokens.expires_in * 1000
+          : undefined,
+      subscriptionType: typeof tokens.subscription_type === "string" ? tokens.subscription_type : undefined,
+      scopes: typeof tokens.scope === "string" ? tokens.scope.split(" ").filter(Boolean) : undefined,
+    }
+    try {
+      await writeCredential(sources, oauth)
+    } catch {
+      throw new ClaudeCodeSignInError(
+        "Claude Code sign-in succeeded but the credential could not be written to ~/.claude/.credentials.json; the tokens were discarded.",
+      )
+    }
+    return { accessToken, expiresAt: oauth.expiresAt, source: "credentials-file" }
+  }
+  return {
+    url: `${OAUTH_AUTHORIZE_URL}?${params.toString()}`,
+    instructions: SIGN_IN_INSTRUCTIONS,
+    callback: (pasted: string) => {
+      inflight ??= exchangeAndPersist(pasted)
+      return inflight
+    },
+  }
 }
 
 const loadCredentialEffect = (sources: CredentialSources) =>
