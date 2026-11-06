@@ -8,6 +8,7 @@ import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
+import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
@@ -548,6 +549,63 @@ describe("cline-pass quota mapping (#1769)", () => {
   })
 })
 
+describe("openrouter quota mapping (#1799)", () => {
+  // Drive the real provider against a mocked /key response.
+  const fetchWith = (payload: unknown) =>
+    openrouterProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "openrouter", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  test("a zero limit publishes no window \u2014 the no-data contract", async () => {
+    const result = await fetchWith({
+      data: { limit: 0, limit_remaining: 0, usage_monthly: 0, limit_reset: "monthly" },
+    })
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
+  test("a zero limit with spend still publishes no window", async () => {
+    const result = await fetchWith({
+      data: { limit: 0, limit_remaining: -5, usage_monthly: 5, limit_reset: "monthly" },
+    })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
+  test("the unlimited path still publishes its monthly spent window", async () => {
+    const result = await fetchWith({ data: { limit: null, limit_remaining: null, usage_monthly: 12.5 } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.monthly?.usedPercent).toBeNull()
+    expect(result.usage?.windows.monthly?.valueLabel).toBe("$12.50 spent")
+  })
+
+  test("normal and over-limit controls keep their probed shapes", async () => {
+    const over = await fetchWith({
+      data: { limit: 100, limit_remaining: -20, usage_monthly: 120, limit_reset: "monthly" },
+    })
+    expect(over.ok).toBe(true)
+    expect(over.usage?.windows.monthly?.usedPercent).toBe(100)
+    expect(over.usage?.windows.monthly?.valueLabel).toBe("$120.00 / $100.00")
+
+    const under = await fetchWith({
+      data: { limit: 100, limit_remaining: 150, usage_monthly: 0, limit_reset: "monthly" },
+    })
+    expect(under.usage?.windows.monthly?.usedPercent).toBe(0)
+    expect(under.usage?.windows.monthly?.valueLabel).toBe("$0.00 / $100.00")
+  })
+})
+
 describe("quota window contract — shared probe matrix (#1795, design #1794 phase 1)", () => {
   // ORACLE: the window contract stated in src/quota/types.ts ("Parse
   // the window you were sent, or none", rules 1-7). The fixtures are
@@ -589,6 +647,19 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     clinePassProvider.fetchQuota({
       credentials: [
         { id: "row-1", integrationID: "cline-pass", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  const openrouterFetchWith = (payload: unknown) =>
+    openrouterProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "openrouter", active: true, value: { type: "key", key: "fixture-key" } },
       ],
       disabledProviders: new Set<string>(),
       instances: new Map(),
@@ -727,6 +798,17 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   test("rule 4 (no figure, no window): opendesign zero-limit entry and command-code balance-only payload publish nothing", () => {
     expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
     expect(parseCommandCodeCredits({ credits: { purchasedCredits: 40, freeCredits: 15 } })).toEqual({})
+  })
+
+  test("rule 4 (no figure, no window): openrouter zero-limit payload is the no-data contract (#1799)", async () => {
+    // Only the zero-limit rule-4 case is asserted for openrouter here;
+    // its #1725 resolveResetAt row stays known-lossy in the inventory.
+    const result = await openrouterFetchWith({
+      data: { limit: 0, limit_remaining: 0, usage_monthly: 0, limit_reset: "monthly" },
+    })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
   })
 
   test("rule 4 (no figure, no window): codex window with duration/reset but no used_percent is dropped", async () => {

@@ -99,6 +99,7 @@
  *   openrouter — resolveResetAt (exported from the provider module;
  *     the remaining parsing is inline in the fetch path).
  *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).
+ *     Conforming: zero-limit publishes no window (#1799, rule 4).
  *   turso — tursoWindows (exported pure window builder over the
  *     org-usage figures and TURSO_LIMITS).
  */

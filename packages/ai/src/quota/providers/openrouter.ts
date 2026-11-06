@@ -107,6 +107,15 @@ export const provider: QuotaProvider = {
       if (limit !== null && limitRemaining === null) {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
       }
+      // A zero (or negative) limit is no quota figure at all (#1799):
+      // publishing a window for it ($0.00 / $0.00, usedPercent null,
+      // ok:true) reads as headroom where there is no limit. It
+      // publishes no window — the no-data contract when it is the
+      // only data — matching contract rule 4 (types.ts) and the
+      // OpenDesign zero-limit disposition (#1750).
+      if (limit !== null && limit <= 0) {
+        return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
+      }
       const usageMonthly = toNumber(data.usage_monthly)
       if (limit === null && usageMonthly === null) {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
