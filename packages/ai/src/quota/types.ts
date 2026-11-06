@@ -70,7 +70,10 @@
  *     the phantom-window guard, #1762).
  *   command-code — parseCommandCodeCredits. Conforming
  *     (publish-truthfully over-included credits, #1744; credit
- *     balances are not windows, #1746).
+ *     balances are not windows, #1746; windowLimits windows use the
+ *     clamp-both disposition — percent and label both derive from
+ *     the clamped used figure — and a non-positive resetAt is
+ *     null, #1821).
  *   deepseek — fetch-only: balance parsing is inline in
  *     provider.fetchQuota; no exported pure parser (its only window
  *     is a credits_balance label, which carries no figure to parse).

@@ -83,11 +83,19 @@ export const parseCommandCodeCredits = (payload: JsonValue) => {
     const cap = toNumber(limit?.cap)
     if (used === null || cap === null || cap <= 0) continue
     const resetAt = toNumber(limit?.resetAt)
+    // Clamp the WHOLE window (#1821, contract rule 5): percent and label derive
+    // from one clamped used figure, so they can never contradict each other —
+    // negative used publishes 0% with '0 / <cap>', over-cap used publishes 100%
+    // with '<cap> / <cap>', and the window still publishes either way.
+    const clampedUsed = Math.min(cap, Math.max(0, used))
     windows[label] = toUsageWindow({
-      usedPercent: Math.min(100, Math.max(0, (used / cap) * 100)),
+      usedPercent: (clampedUsed / cap) * 100,
       windowSeconds,
-      resetAt: resetAt === null ? null : resetAt < 1_000_000_000_000 ? resetAt * 1000 : resetAt,
-      valueLabel: `${formatCredits(used)} / ${formatCredits(cap)}`,
+      // A non-positive reset is an invalid reset (contract rule 3): null it BEFORE
+      // the seconds/ms conversion — non-positive is non-positive in either unit
+      // spelling — so it can never publish as a 1969/1970 date.
+      resetAt: resetAt === null || resetAt <= 0 ? null : resetAt < 1_000_000_000_000 ? resetAt * 1000 : resetAt,
+      valueLabel: `${formatCredits(clampedUsed)} / ${formatCredits(cap)}`,
     })
   }
 

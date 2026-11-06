@@ -315,6 +315,43 @@ describe("command-code credit balances are not quota windows (#1746)", () => {
   })
 })
 
+describe("command-code windowLimits clamp-both disposition (#1821)", () => {
+  const fiveHour = (limit: Record<string, unknown>) =>
+    parseCommandCodeCredits({ windowLimits: { fiveHour: limit } })["5h"]
+
+  test("negative used publishes the window at 0% with the clamped label, no negative figure anywhere", () => {
+    const window = fiveHour({ used: -5, cap: 10, resetAt: 1793980800 })
+    expect(window?.usedPercent).toBe(0)
+    expect(window?.valueLabel).toBe("0 / 10")
+    expect(window?.resetAt).toBe(1793980800 * 1000)
+  })
+
+  test("over-cap used publishes the window at 100% with the clamped label", () => {
+    const window = fiveHour({ used: 15, cap: 10, resetAt: 1793980800 })
+    expect(window?.usedPercent).toBe(100)
+    expect(window?.valueLabel).toBe("10 / 10")
+  })
+
+  test("in-range used publishes percent and label unchanged", () => {
+    const window = fiveHour({ used: 5, cap: 10, resetAt: 1793980800000 })
+    expect(window?.usedPercent).toBe(50)
+    expect(window?.valueLabel).toBe("5 / 10")
+    // A millisecond-spelling reset passes through unconverted.
+    expect(window?.resetAt).toBe(1793980800000)
+  })
+
+  test("non-positive resetAt publishes resetAt null with every derived reset field null", () => {
+    for (const resetAt of [0, -5000, -5000000]) {
+      const window = fiveHour({ used: 5, cap: 10, resetAt })
+      expect(window?.usedPercent).toBe(50)
+      expect(window?.resetAt).toBeNull()
+      expect(window?.resetAfterSeconds).toBeNull()
+      expect(window?.resetAtFormatted).toBeNull()
+      expect(window?.resetAfterFormatted).toBeNull()
+    }
+  })
+})
+
   test("an empty percent field mints no 0%-used opencode-go window", () => {
     const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
     expect(parseOpenCodeGoUsage(payload)).toEqual({})
