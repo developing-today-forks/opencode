@@ -90,8 +90,8 @@
  *     exported); keyUsageResult is module-private. KNOWN-LOSSY:
  *     #1777 (a weekly-length rolling window can be overwritten by
  *     the literal weekly entry at both collision sites).
- *     parseSubscriptionQuota's absent-reset-is-null case conforms
- *     to rule 3 and is pinned by the matrix.
+ *     parseSubscriptionQuota's absent/non-positive-reset-is-null
+ *     case conforms to rule 3 and is pinned by the matrix (#1855).
  *   mistral — parseMistralBudget (exported; wraps the module-private
  *     parseBudget). KNOWN-LOSSY: #1785 (usedPercent clamped while
  *     usedAmount is derived from the raw percentage, so a window's

@@ -81,7 +81,11 @@ export const parseSubscriptionQuota = (
   // portal omits window_resets_at while the rolling window has not
   // started (observed 2026-11-05: window_weighted_used "0" and no
   // window_resets_at field at all). An absent reset is an honest
-  // null resetAt on that window, not an unparseable payload.
+  // null resetAt on that window, not an unparseable payload. The
+  // resets go through the shared toTimestamp converter (#1855): a
+  // non-positive reset is likewise an honest null, never a
+  // 1969/1970 date published by a raw seconds multiplication
+  // (the #1845 disposition, which this parser previously bypassed).
   if (
     windowUsed === null || windowLimit === null || weeklyUsed === null || weeklyLimit === null ||
     windowLimit === 0 || weeklyLimit === 0
@@ -96,12 +100,12 @@ export const parseSubscriptionQuota = (
       [windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"]: toUsageWindow({
         usedPercent: pct(windowUsed, windowLimit),
         windowSeconds,
-        resetAt: windowReset === null ? null : windowReset * 1000,
+        resetAt: toTimestamp(windowReset),
       }),
       weekly: toUsageWindow({
         usedPercent: pct(weeklyUsed, weeklyLimit),
         windowSeconds: WEEKLY_SECONDS,
-        resetAt: weeklyReset === null ? null : weeklyReset * 1000,
+        resetAt: toTimestamp(weeklyReset),
       }),
     },
   }
