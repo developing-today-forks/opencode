@@ -23,7 +23,12 @@
 //     every other provider keeps the full env block;
 //   * the CLI's client headers (`x-app: cli`, `claude-cli/<version>`
 //     User-Agent; version tracks the release this emulation was verified
-//     against — Claude Code 2.1.306, the fleet's installed CLI).
+//     against - Claude Code 2.1.306, the fleet's installed CLI). The
+//     route's static User-Agent below is only the default: session
+//     requests carry the harness's own UA in `request.http.headers`,
+//     which the transport merges over route headers, so
+//     providers/claude-code-auth.ts re-stamps CLI_USER_AGENT after the
+//     merge (auth application order) - that stamp is the wire truth.
 //
 // Everything else — tool lowering (tools / tool_choice / tool_use /
 // tool_result blocks), streaming, thinking — is the Anthropic Messages

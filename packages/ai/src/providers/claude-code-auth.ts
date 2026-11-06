@@ -42,6 +42,7 @@ import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
+import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
 
 export const OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 export const CREDENTIALS_FILE_NAME = ".credentials.json"
@@ -149,11 +150,21 @@ const loadCredentialEffect = (sources: CredentialSources) =>
   })
 
 /**
- * The provider's auth: the CLI's OAuth access token as a Bearer header.
+ * The provider's auth: the CLI's OAuth access token as a Bearer header,
+ * plus the CLI's User-Agent re-stamped over whatever the caller carried.
  * The load-bearing OAuth beta flags ride on the route's static headers
- * (see protocols/claude-code-messages.ts); this layer owns only the
- * credential itself, re-read per request so a renewed sign-in is picked
- * up without a restart.
+ * (see protocols/claude-code-messages.ts); this layer owns the credential
+ * itself, re-read per request so a renewed sign-in is picked up without
+ * a restart.
+ *
+ * The User-Agent cannot ride on the route's static headers alone:
+ * session requests carry the harness's own `opencode/<channel>/<ver>/cli`
+ * UA in `request.http.headers`, and the transport merges those OVER the
+ * route headers, so the wire would present OpenCode's identity, not the
+ * CLI's (verified against the deployed binary's requests, 2026-11-06).
+ * Auth runs after that merge, so `Headers.setAll` here is what actually
+ * reaches the wire - the same pattern antigravity-auth and
+ * commandcode-auth already use for their client identities.
  */
 export const claudeCodeAuth = (input: {
   readonly auth?: Auth.Definition
@@ -161,12 +172,23 @@ export const claudeCodeAuth = (input: {
   readonly sources?: CredentialSources
 }) => {
   if (input.auth) return input.auth
-  if (input.accessToken !== undefined) return Auth.bearer(input.accessToken)
+  if (input.accessToken !== undefined)
+    return Auth.custom((authInput) =>
+      Effect.succeed(
+        Headers.setAll(authInput.headers, {
+          authorization: `Bearer ${input.accessToken}`,
+          "user-agent": ClaudeCodeMessages.CLI_USER_AGENT,
+        }),
+      ),
+    )
   const sources = input.sources ?? {}
   return Auth.custom((authInput) =>
     loadCredentialEffect(sources).pipe(
       Effect.map((credential) =>
-        Headers.setAll(authInput.headers, { authorization: `Bearer ${credential.accessToken}` }),
+        Headers.setAll(authInput.headers, {
+          authorization: `Bearer ${credential.accessToken}`,
+          "user-agent": ClaudeCodeMessages.CLI_USER_AGENT,
+        }),
       ),
     ),
   )

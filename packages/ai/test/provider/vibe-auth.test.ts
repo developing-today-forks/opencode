@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { Headers } from "effect/http"
 import {
   API_KEY_ENV_VAR,
+  CLI_USER_AGENT,
   KEYRING_SERVICE,
   LEGACY_KEYRING_SERVICE,
   NOT_SIGNED_IN_MESSAGE,
   parseDotEnv,
   resolveApiKey,
+  vibeAuth,
   type CredentialSources,
 } from "../../src/providers/vibe-auth.js"
 
@@ -117,5 +120,37 @@ describe("resolveApiKey — the binary's resolution order", () => {
     await expect(resolveApiKey({ env: {}, readFile, keyringLookup: async () => "k" })).resolves.toBe("k")
     expect(paths[0]).toBe("/tmp/vibe-home/.env")
     expect(paths[1]).toMatch(/\/.vibe\/\.env$/)
+  })
+})
+
+describe("vibeAuth - the Vibe CLI's User-Agent, stamped after the transport merge", () => {
+  // Same merge hazard as claude-code-auth: without the auth-layer stamp,
+  // a session request's own harness UA is what reaches Mistral's wire.
+  const sessionHeaders = () => Headers.fromInput({ "User-Agent": "opencode/prod/test/cli" })
+  const apply = (auth: ReturnType<typeof vibeAuth>) =>
+    Effect.runPromise(
+      auth.apply({
+        request: {},
+        method: "POST",
+        url: "https://api.mistral.ai/v1/chat/completions",
+        body: "{}",
+        headers: sessionHeaders(),
+      }),
+    )
+
+  test("CLI_USER_AGENT is the audited binary's wire value (mistral-vibe 3.1.0)", () => {
+    expect(CLI_USER_AGENT).toBe("Mistral-Vibe/3.1.0")
+  })
+
+  test("the static apiKey path stamps the Vibe UA over the session UA", async () => {
+    const headers = await apply(vibeAuth({ apiKey: "fixture-key" }))
+    expect(headers["user-agent"]).toBe(CLI_USER_AGENT)
+    expect(headers.authorization).toBe("Bearer " + "fixture-key")
+  })
+
+  test("the env-resolved key path stamps the Vibe UA over the session UA", async () => {
+    const headers = await apply(vibeAuth({ sources: { env: { MISTRAL_API_KEY: "env-key" } } }))
+    expect(headers["user-agent"]).toBe(CLI_USER_AGENT)
+    expect(headers.authorization).toBe("Bearer " + "env-key")
   })
 })
