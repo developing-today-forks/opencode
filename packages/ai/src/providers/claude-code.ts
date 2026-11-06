@@ -6,8 +6,9 @@
 // ClaudeCodeMessages wrapper (protocols/claude-code-messages.ts), which
 // adds the OAuth-gated shape — the identity system block, the
 // claude-code/oauth beta flags, and the CLI's client headers — while
-// claude-code-auth.ts supplies the credential the one-time `claude`
-// sign-in provisions (~/.claude/.credentials.json), read in place.
+// claude-code-auth.ts supplies the credential the claude.ai OAuth
+// sign-in provisions (~/.claude/.credentials.json) — the CLI's own, or
+// the provider's in-product sign-in (#1852) — read in place.
 //
 // This replaces the retired shape seated in the deployed config: an
 // OpenAI-compatible block pointing at bin/claude-code-proxy.mjs

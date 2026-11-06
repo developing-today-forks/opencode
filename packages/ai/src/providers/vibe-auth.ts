@@ -48,6 +48,19 @@ export interface CredentialSources {
   readonly env?: Readonly<Record<string, string | undefined>>
   readonly readFile?: (path: string) => string | undefined | Promise<string | undefined>
   readonly keyringLookup?: (service: string, username: string) => Promise<string | undefined>
+  readonly onShadowDiagnostic?: (diagnostic: ShadowDiagnostic) => void
+}
+
+/**
+ * Emitted when a non-keyring tier wins while a keyring sign-in entry also
+ * exists (#1809): the winning tier's credential is what gets billed, not
+ * the sign-in credential, and that rerouting must not be silent. Carries
+ * only the winning tier and the shadowed keyring service — never any part
+ * of any credential value.
+ */
+export interface ShadowDiagnostic {
+  readonly winningTier: "environment" | "dotenv-file"
+  readonly shadowedService: string
 }
 
 /** Minimal dotenv parser: KEY=VALUE lines, `#` comments, optional `export `, optional quotes. */
@@ -137,14 +150,54 @@ const defaultReadFile = async (path: string): Promise<string | undefined> => {
   }
 }
 
+const defaultShadowDiagnostic = (diagnostic: ShadowDiagnostic): void => {
+  console.warn(
+    `vibe-auth: MISTRAL_API_KEY from the ${diagnostic.winningTier === "environment" ? "environment" : "~/.vibe/.env file"} ` +
+      `shadows the OS keyring sign-in entry (service "${diagnostic.shadowedService}"); ` +
+      "billing uses the winning tier's credential, not the sign-in credential",
+  )
+}
+
+/**
+ * Existence-only keyring probe for the non-keyring win paths (#1809): the
+ * probed value is never logged, returned, or used — only its presence
+ * decides whether the shadow diagnostic fires. Probe or sink failures
+ * never break resolution: observability must not become an auth outage.
+ */
+const reportShadowedKeyring = async (
+  sources: CredentialSources,
+  lookup: NonNullable<CredentialSources["keyringLookup"]>,
+  winningTier: ShadowDiagnostic["winningTier"],
+): Promise<void> => {
+  let shadowedService: string | undefined
+  try {
+    for (const service of [KEYRING_SERVICE, LEGACY_KEYRING_SERVICE]) {
+      if ((await lookup(service, API_KEY_ENV_VAR))?.trim()) {
+        shadowedService = service
+        break
+      }
+    }
+  } catch {
+    return
+  }
+  if (!shadowedService) return
+  try {
+    ;(sources.onShadowDiagnostic ?? defaultShadowDiagnostic)({ winningTier, shadowedService })
+  } catch {}
+}
+
 /**
  * The binary's credential resolution (tiers 1-4 above). Rejects with the
  * not-signed-in guidance when no tier holds a key.
  */
 export const resolveApiKey = async (sources: CredentialSources = {}): Promise<string> => {
   const env = sources.env ?? process.env
+  const lookup = sources.keyringLookup ?? defaultKeyringLookup
   const fromEnv = env[API_KEY_ENV_VAR]?.trim()
-  if (fromEnv) return fromEnv
+  if (fromEnv) {
+    await reportShadowedKeyring(sources, lookup, "environment")
+    return fromEnv
+  }
 
   const { join } = await import("node:path")
   const { homedir } = await import("node:os")
@@ -152,10 +205,12 @@ export const resolveApiKey = async (sources: CredentialSources = {}): Promise<st
   const contents = await (sources.readFile ?? defaultReadFile)(join(vibeHome, ".env"))
   if (contents !== undefined) {
     const fromFile = parseDotEnv(contents)[API_KEY_ENV_VAR]?.trim()
-    if (fromFile) return fromFile
+    if (fromFile) {
+      await reportShadowedKeyring(sources, lookup, "dotenv-file")
+      return fromFile
+    }
   }
 
-  const lookup = sources.keyringLookup ?? defaultKeyringLookup
   for (const service of [KEYRING_SERVICE, LEGACY_KEYRING_SERVICE]) {
     const fromKeyring = (await lookup(service, API_KEY_ENV_VAR))?.trim()
     if (fromKeyring) return fromKeyring
