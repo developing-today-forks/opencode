@@ -20,17 +20,20 @@
 // the coordinator repoints the config block at this package; nothing
 // here re-enables it.
 //
-// Live-verification status (2026-11-05): two probes in this provider's
-// exact shape (identity block first, claude-code/oauth betas, CLI
-// headers; one with the CLI's billing-header system block, models
-// claude-haiku-5-5 and claude-haiku-4-5) reached api.anthropic.com and
-// were refused 403 oauth_not_allowed_for_organization — the same
+// Live-verification status (2026-11-06): the org-level OAuth denial
+// below is RESOLVED - Drew enabled Claude Max on the account and the
+// provider's exact wire shape (identity block, claude-code/oauth
+// betas, CLI headers, OAuth bearer) now returns 200 from
+// api.anthropic.com for both the fleet model ids (claude-haiku-5-5,
+// claude-sonnet-5-5) and catalog ids. The 2026-11-05 status was:
+// two probes in this provider's exact shape reached api.anthropic.com
+// and were refused 403 oauth_not_allowed_for_organization - the same
 // org-level OAuth denial bin/claude-code-proxy.mjs documented for
-// GET /v1/models on 2026-10-28. The wire route and auth shape are the
-// CLI's real ones; what is missing is an account whose organization
-// allows OAuth API access, which is Drew's interactive sign-in
-// (code#6117, Drew-gated). Until then this provider surfaces that 403
-// as a loud provider error — it never falls back to the CLI.
+// GET /v1/models on 2026-10-28. Separately, the deployed binary's
+// requests 404ed until the AnthropicMessages DEFAULT_BASE_URL fix
+// (bare origin; the endpoint render appends "/messages", and the
+// old "/v1"-suffixed base produced /v1/v1/messages).
+
 import type { ProviderPackage } from "../provider-package.js"
 import { AnthropicMessages } from "../protocols/anthropic-messages.js"
 import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
