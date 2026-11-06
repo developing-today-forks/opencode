@@ -35,27 +35,46 @@ export const NO_QUOTA_SURFACE = "no-quota-surface"
 
 const GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 
+/**
+ * Strict plain-count parse (#1793): upstream header/duration text is
+ * accepted only as a plain non-negative decimal (digits, optional
+ * fractional part) — never via a bare Number(), which would also accept
+ * negatives, hex (0x64) and exponents (1e1) Groq never sends. Returns
+ * null for anything else, so bad data reads as absent.
+ */
+const parsePlainCount = (raw: string): number | null => {
+  const text = raw.trim()
+  if (!/^\d+(\.\d+)?$/.test(text)) return null
+  const parsed = Number(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 /** Groq reset durations spell like `2m59.56s`, `14h12m`, `7.66s`. */
 export const parseGroqResetSeconds = (raw: string | null): number | null => {
   if (!raw) return null
   const text = raw.trim()
   if (!text) return null
+  // The whole trimmed input must be a well-formed duration: one or more
+  // <count><unit> components with no separators or trailing text, each
+  // unit at most once (#1793). Partial consumption (1h30, 2m59.56,
+  // "59s trailing") and duplicates (1m1m) are malformed, not partial data.
+  if (!/^(?:\d+(?:\.\d+)?[hms])+$/.test(text)) return null
   let total = 0
-  let matched = false
-  for (const match of text.matchAll(/([\d.]+)(h|m|s)/g)) {
-    const value = Number(match[1])
-    if (!Number.isFinite(value)) return null
-    matched = true
+  const seen = new Set<string>()
+  for (const match of text.matchAll(/(\d+(?:\.\d+)?)(h|m|s)/g)) {
+    if (seen.has(match[2])) return null
+    seen.add(match[2])
+    const value = parsePlainCount(match[1])
+    if (value === null) return null
     total += match[2] === "h" ? value * 3600 : match[2] === "m" ? value * 60 : value
   }
-  return matched ? total : null
+  return total
 }
 
 const headerNumber = (headers: Headers, name: string): number | null => {
   const raw = headers.get(name)
   if (!raw) return null
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) ? parsed : null
+  return parsePlainCount(raw)
 }
 
 export const provider: QuotaProvider = {
