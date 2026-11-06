@@ -260,11 +260,16 @@ const fetchAntigravity = async (
 interface ParsedBucket {
   label: string
   seconds: number
-  remainingFraction: number
+  remainingFraction: number | null
   window: QuotaWindow
 }
 
-const parseBucket = (bucket: JsonValue): ParsedBucket => {
+// A bucket is published only when its window string is recognized
+// (#1768): an unrecognized string (e.g. MONTHLY) must not fabricate a
+// "5h" window that overwrites the real one — honest absence instead.
+// A missing remainingFraction likewise propagates as unknown (null),
+// never as an invented "fully remaining" 1.
+export const parseBucket = (bucket: JsonValue): ParsedBucket | null => {
   const record = asObject(bucket)
   const remainingFraction = toNumber(record?.remainingFraction)
   const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
@@ -272,19 +277,24 @@ const parseBucket = (bucket: JsonValue): ParsedBucket => {
   const resetAt = toTimestamp(record?.resetTime)
   const windowStr = (asNonEmptyString(record?.window) ?? asNonEmptyString(record?.bucketId) ?? "").toLowerCase()
 
-  let label = "5h"
-  let seconds = FIVE_HOUR_WINDOW_SECONDS
+  let label: string
+  let seconds: number
   if (windowStr.includes("week") || windowStr.includes("7d")) {
     label = "weekly"
     seconds = WEEKLY_WINDOW_SECONDS
-  } else if (windowStr.includes("day") || windowStr.includes("daily")) {
+  } else if (windowStr.includes("day")) {
     label = "daily"
     seconds = DAILY_WINDOW_SECONDS
+  } else if (windowStr.includes("five") || windowStr.includes("5h") || windowStr.includes("hour")) {
+    label = "5h"
+    seconds = FIVE_HOUR_WINDOW_SECONDS
+  } else {
+    return null
   }
   return {
     label,
     seconds,
-    remainingFraction: remainingFraction ?? 1,
+    remainingFraction,
     window: toUsageWindow({ usedPercent, windowSeconds: seconds, resetAt }),
   }
 }
@@ -297,7 +307,7 @@ interface ModelGroup {
   bucketWeekly: ParsedBucket | null
 }
 
-const transformSummary = (summaryPayload: JsonValue): ModelGroup[] => {
+export const transformSummary = (summaryPayload: JsonValue): ModelGroup[] => {
   const rawGroups = asObject(summaryPayload)?.groups
   const groups: JsonValue[] = Array.isArray(rawGroups) ? rawGroups : []
   const modelGroupWindows: ModelGroup[] = []
@@ -311,9 +321,13 @@ const transformSummary = (summaryPayload: JsonValue): ModelGroup[] => {
     let bucketWeekly: ParsedBucket | null = null
     for (const b of buckets) {
       const parsed = parseBucket(b)
-      windows[parsed.label] = parsed.window
-      if (parsed.label === "5h") bucket5h = parsed
-      else if (parsed.label === "weekly") bucketWeekly = parsed
+      if (!parsed) continue
+      // Same-label collisions keep the FIRST entry (#1750 convention,
+      // #1768) — a later bucket must not silently drop or overwrite
+      // the window already published for its label.
+      if (!windows[parsed.label]) windows[parsed.label] = parsed.window
+      if (parsed.label === "5h" && !bucket5h) bucket5h = parsed
+      else if (parsed.label === "weekly" && !bucketWeekly) bucketWeekly = parsed
     }
     modelGroupWindows.push({
       groupType: is3p ? "3p" : "gemini",
@@ -326,7 +340,7 @@ const transformSummary = (summaryPayload: JsonValue): ModelGroup[] => {
   return modelGroupWindows
 }
 
-const transformModels = (
+export const transformModels = (
   modelsPayload: JsonValue,
   modelGroupWindows: ModelGroup[],
 ): Record<string, { windows: Record<string, QuotaWindow> }> => {
@@ -341,10 +355,14 @@ const transformModels = (
     const matchedGroup = modelGroupWindows.find((g) => (is3p ? g.groupType === "3p" : g.groupType === "gemini"))
 
     if (matchedGroup && Object.keys(matchedGroup.windows).length > 0) {
+      // Weekly-constrained ordering requires the fractions it compares
+      // to actually be present (#1768): an unknown weekly fraction
+      // never constrains, and the weekly-vs-5h comparison needs both.
+      const weeklyFraction = matchedGroup.bucketWeekly?.remainingFraction ?? null
+      const fiveHourFraction = matchedGroup.bucket5h?.remainingFraction ?? null
       const isWeeklyConstrained =
-        matchedGroup.bucketWeekly &&
-        (matchedGroup.bucketWeekly.remainingFraction <= 0.001 ||
-          (matchedGroup.bucket5h && matchedGroup.bucketWeekly.remainingFraction < matchedGroup.bucket5h.remainingFraction))
+        weeklyFraction !== null &&
+        (weeklyFraction <= 0.001 || (fiveHourFraction !== null && weeklyFraction < fiveHourFraction))
       const reordered: Record<string, QuotaWindow> = {}
       if (isWeeklyConstrained && matchedGroup.windows.weekly) {
         reordered.weekly = matchedGroup.windows.weekly
