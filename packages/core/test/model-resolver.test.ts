@@ -1766,6 +1766,7 @@ describe("ModelResolver routes", () => {
     leaves: ReadonlyArray<ReturnType<typeof leaf>>,
     routes: ReadonlyArray<ReturnType<typeof routeAs>>,
     run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
+    integration?: unknown,
   ) => {
     const provider = Provider.Info.make({
       ...Provider.Info.empty(leaves[0].providerID),
@@ -1784,10 +1785,13 @@ describe("ModelResolver routes", () => {
             available: () => Effect.succeed(catalog),
             all: () => Effect.succeed(catalog),
           }),
-          Layer.mock(Integration.Service, {
-            revision: () => 0,
-            connection: { active: () => Effect.undefined },
-          } as never),
+          Layer.mock(
+            Integration.Service,
+            (integration ?? {
+              revision: () => 0,
+              connection: { active: () => Effect.undefined },
+            }) as never,
+          ),
           Layer.mock(Npm.Service, {}),
           Layer.mock(AISDK.Service, {} as never),
         ),
@@ -1836,6 +1840,93 @@ describe("ModelResolver routes", () => {
         const fourth = yield* third!.routing!.fallback()
         expect(fourth).toBeUndefined()
       }),
+    )
+  })
+
+  // Ported from model-route-mock-provider.test.ts (#1806): the incident's fatal
+  // resolution happened one altitude up — a wall inside the nested route, then the
+  // chain re-resolving the parent. The route-level driver deliberately does not
+  // reproduce the resolver cascade; this harness does.
+  it.effect("route chains: a wall inside a nested route does not strand the parent route's untried members (#1806)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        // The wall lands inside the nested route mid-session: both of the sub-route's
+        // members are quota-benched, so the sub-route has no servable target.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        // The fallback cascades to the parent instead of dying on the sub-route, and
+        // the parent's untried healthy member serves — no no-candidates resolution.
+        const rescued = yield* first.routing!.fallback()
+        expect(String(rescued?.routing?.routeID)).toBe("parent")
+        expect(targetOf(rescued!)).toBe("pc")
+        // Everything in the chain is now tried or walled: the cascade stops cleanly.
+        const done = yield* rescued!.routing!.fallback()
+        expect(done).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("route chains: a nested member whose active credential is walled serves on its sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const activated: string[] = []
+    let activeB = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) =>
+        Effect.succeed({ id, connections: String(id) === "pb" ? [conn("cred-a"), conn("cred-b")] : [] }),
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pb" ? conn(activeB) : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeB = String(id)
+          }),
+      },
+    }
+    return withCascadeResolver(
+      [a, b, c],
+      [sub, parent],
+      (resolver) =>
+        Effect.gen(function* () {
+          const first = yield* resolver.resolveModel(sub)
+          expect(targetOf(first)).toBe("pa")
+          // pa walls mid-session; pb's *active* credential is known-full, but its
+          // stored sibling is healthy — pb must not be judged by cred-a alone.
+          ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+          ModelRoute.observeCredentialQuota(targetB, "cred-a", {
+            planID: "pb-plan",
+            window: "monthly",
+            providerID: "pb",
+            percent: 100,
+            remaining: 0,
+            resetAt: Date.now() + 3_600_000,
+            observedAt: Date.now(),
+            stale: false,
+          })
+          const rescued = yield* first.routing!.fallback()
+          expect(String(rescued?.routing?.routeID)).toBe("sub")
+          expect(targetOf(rescued!)).toBe("pb")
+          expect(String(rescued?.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
     )
   })
 
@@ -2822,6 +2913,116 @@ describe("ModelResolver routes", () => {
           // target is unusable, so it cannot count as the non-full alternative that
           // excludes the known-full credential.
           expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-mask", 110_000))).toBe("pa")
+        }),
+      integration,
+    )
+  })
+
+  // #1806 mechanism 3: the ready filter judged a multi-credential leaf by its single
+  // active credential, so a leaf whose active credential was quota-blocked or
+  // credential-cooling was excluded even when a stored sibling could serve it.
+  const multiCredIntegration = (blocked: "quota" | "none") => {
+    const activated: string[] = []
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) =>
+        Effect.succeed({ id, connections: String(id) === "pa" ? [conn("cred-a"), conn("cred-b")] : [] }),
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pa" ? conn(activeID) : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeID = String(id)
+          }),
+      },
+    }
+    void blocked
+    return { integration, activated }
+  }
+  const fullSnapshot = (providerID: string): QuotaSnapshot.Snapshot => ({
+    planID: `${providerID}-plan`,
+    window: "monthly",
+    providerID,
+    percent: 100,
+    remaining: 0,
+    resetAt: Date.now() + 3_600_000,
+    observedAt: Date.now(),
+    stale: false,
+  })
+
+  it.effect("a leaf whose active credential is quota-blocked serves on a stored sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const { integration, activated } = multiCredIntegration("quota")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          // Served on the active credential while it is healthy.
+          const first = yield* resolver.resolveModel(route)
+          expect(String(first.routing?.credentialID)).toBe("cred-a")
+          // The active credential becomes known-full: the leaf must not be judged
+          // by it alone — the stored sibling serves, activated before the load.
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", fullSnapshot("pa"))
+          const resolved = yield* resolver.resolveModel(route)
+          expect(targetOf(resolved)).toBe("pa")
+          expect(String(resolved.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
+    )
+  })
+
+  it.effect("a leaf whose active credential is credential-cooling serves on a stored sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const { integration, activated } = multiCredIntegration("none")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const now = Date.now()
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(targetA, ModelRoute.policy(), now + index, { quota: true }, "cred-a")
+    expect(ModelRoute.credentialCooldownUntil(targetA, "cred-a")).toBeGreaterThan(Date.now())
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          expect(targetOf(resolved)).toBe("pa")
+          expect(String(resolved.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
+    )
+  })
+
+  it.effect("a leaf is out when every stored credential that could serve it is blocked (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const { integration, activated } = multiCredIntegration("quota")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", fullSnapshot("pa"))
+          ModelRoute.observeCredentialQuota(targetA, "cred-b", fullSnapshot("pa"))
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+          expect(activated).toEqual([])
         }),
       integration,
     )

@@ -655,15 +655,52 @@ export const layer = Layer.effect(
         // This snapshot is gate input only — serving attribution comes from load() itself,
         // because the active credential can change between this read and the load.
         const credentialByProvider = new Map<string, Credential.ID>()
+        // Every stored credential per target provider, active first (#1806): the ready
+        // filter below gates a leaf on its *effective* credential — the first stored
+        // credential that could actually serve it — not on the active one alone. The
+        // active-only snapshot judged a multi-credential leaf by a credential that
+        // would never serve it, stranding leaves whose active credential was
+        // credential-cooling or quota-blocked while a sibling credential was healthy.
+        const credentialsByProvider = new Map<string, Array<Credential.ID>>()
         for (const target of definition.targets) {
           if (credentialByProvider.has(target.providerID)) continue
           const provider = yield* providers.get(target.providerID)
-          const connection = yield* integrations.connection.active(
-            provider?.integrationID ?? Integration.ID.make(target.providerID),
-          )
-          if (connection?.type === "credential") credentialByProvider.set(target.providerID, connection.id)
+          const integrationID = provider?.integrationID ?? Integration.ID.make(target.providerID)
+          const connection = yield* integrations.connection.active(integrationID)
+          if (connection?.type === "credential") {
+            credentialByProvider.set(target.providerID, connection.id)
+            const info = yield* Effect.suspend(() => integrations.get(integrationID)).pipe(
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            )
+            const stored = (info?.connections ?? []).flatMap((item) =>
+              item.type === "credential" && item.id !== connection.id ? [item.id] : [],
+            )
+            credentialsByProvider.set(target.providerID, [connection.id, ...stored])
+          }
         }
         yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
+        // The credential a target's eligibility is judged by at `at`: the active one
+        // when it can serve, else the first stored sibling that can (not credential-
+        // cooling beyond a due probe, not quota-blocked). `activate` is set only in
+        // that sibling case — the pick then activates it before load, the same switch
+        // credentialFallback performs after a served failure (#6). When every stored
+        // credential is blocked, the active one is returned, so the exclusion reasons
+        // and the last-resort known-full handling below behave exactly as before.
+        const effectiveCredential = (
+          target: ModelRoute.Target,
+          at: number,
+        ): { readonly id: Credential.ID; readonly activate: boolean } | undefined => {
+          const candidates = credentialsByProvider.get(target.providerID)
+          if (!candidates || candidates.length === 0) return undefined
+          for (const id of candidates) {
+            const cooling =
+              ModelRoute.credentialCooldownUntil(target, id, at) > at && !ModelRoute.probeDue(target, id, at)
+            if (cooling) continue
+            if (ModelRoute.credentialQuotaBlocked(id, at, locationDirectory) !== undefined) continue
+            return { id, activate: id !== candidates[0] }
+          }
+          return { id: candidates[0], activate: false }
+        }
         const makeResolved = (
           current: Resolved,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
@@ -772,7 +809,7 @@ export const layer = Layer.effect(
                 definition,
                 index,
                 now,
-                (leaf) => credentialByProvider.get(definition.targets[leaf].providerID),
+                (leaf) => effectiveCredential(definition.targets[leaf], now)?.id,
                 locationDirectory,
               ),
             )
@@ -792,7 +829,7 @@ export const layer = Layer.effect(
             // reason, and only a limit-only exclusion is attributed to the limit.
             const isOverLimit = ModelRoute.overLimit(definition, index, requestTokens)
             if (isOverLimit) overLimit.add(index)
-            const credentialID = credentialByProvider.get(target.providerID)
+            const credentialID = effectiveCredential(target, now)?.id
             const limited = rules ? ModelRoute.limitedUntil(target, now, credentialID) : 0
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
@@ -838,7 +875,7 @@ export const layer = Layer.effect(
           // known-full-but-fitting target as the last resort.
           const usable = indexes.filter((index) => !overLimit.has(index))
           const nonFull = usable.filter((index) => {
-            const credentialID = credentialByProvider.get(definition.targets[index].providerID)
+            const credentialID = effectiveCredential(definition.targets[index], now)?.id
             return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
           // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
@@ -858,7 +895,7 @@ export const layer = Layer.effect(
             requestedVariant,
             unavailable,
             Math.random,
-            (index) => credentialByProvider.get(definition.targets[index].providerID),
+            (index) => effectiveCredential(definition.targets[index], now)?.id,
             locationDirectory,
           )
           if (index === undefined) break
@@ -871,7 +908,7 @@ export const layer = Layer.effect(
           // — an ordinary eligible target — are refused and change nothing. One token
           // names the pick's spend on every scope it claims (#1486).
           const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now, probeToken)
-          const probeCredential = credentialByProvider.get(target.providerID)
+          const probeCredential = effectiveCredential(target, now)?.id
           const credentialClaimed = probeCredential
             ? ModelRoute.claimBenchProbe(target, probeCredential, now, probeToken)
             : false
@@ -893,6 +930,16 @@ export const layer = Layer.effect(
                 ModelRoute.releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
             }
             continue
+          }
+          // The pick was judged on its effective credential (#1806): when that is a
+          // stored sibling of the blocked active credential, activate it before the
+          // load so the load actually serves on it — the same switch
+          // credentialFallback performs after a served failure (#6).
+          const effective = effectiveCredential(target, now)
+          if (effective?.activate) {
+            yield* Effect.suspend(() => integrations.connection.activate(effective.id)).pipe(
+              Effect.catchCause(() => Effect.void),
+            )
           }
           const targetVariants = definition.targetVariants[index]
           // A requested route variant runs the target at its remap, else at the same variant when the
