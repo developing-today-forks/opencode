@@ -72,9 +72,10 @@ const parseBudget = (raw: JsonValue | undefined): MistralBudgetWindow | null => 
   const usedPercent = toNumber(budget.usage_percentage)
   const budgetAmount = toNumber(budget.initial_budget)
   if (usedPercent === null || budgetAmount === null || budgetAmount <= 0) return null
+  const clampedUsedPercent = Math.min(100, Math.max(0, usedPercent))
   return {
-    usedPercent: Math.min(100, Math.max(0, usedPercent)),
-    usedAmount: (usedPercent / 100) * budgetAmount,
+    usedPercent: clampedUsedPercent,
+    usedAmount: (clampedUsedPercent / 100) * budgetAmount,
     budgetAmount,
     currency: asNonEmptyString(budget.currency) ?? "USD",
     resetAt: toTimestamp(budget.reset_at),
@@ -201,7 +202,7 @@ const keyValidity = async (ctx: QuotaContext, apiKey: string): Promise<string> =
 }
 
 const fetchForEntry = async (ctx: QuotaContext, entry: { key?: string } | null): Promise<QuotaResult> => {
-  const apiKey = entry?.key
+  const apiKey = asNonEmptyString(entry?.key)
   if (!apiKey) {
     return buildResult({ providerId, providerName, ok: false, configured: false, error: "Not configured" })
   }
@@ -227,7 +228,7 @@ export const provider: QuotaProvider = {
   providerName,
   aliases,
   credentialAliases: ["mistral"],
-  isConfigured: (ctx) => Boolean(getAuthEntry(projectAuth(ctx), aliases)?.key),
+  isConfigured: (ctx) => Boolean(asNonEmptyString(getAuthEntry(projectAuth(ctx), aliases)?.key)),
   fetchQuota: async (ctx) => fetchForEntry(ctx, getAuthEntry(projectAuth(ctx), aliases)),
   fetchQuotaForCredential: async (ctx, row) => fetchForEntry(ctx, projectCredentialValue(row.value)),
 }

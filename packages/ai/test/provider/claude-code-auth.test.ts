@@ -8,6 +8,7 @@ import {
   resolveCredential,
   type CredentialSources,
 } from "../../src/providers/claude-code-auth.js"
+import { ClaudeCodeMessages } from "../../src/protocols/claude-code-messages.js"
 
 const blob = (accessToken: string, expiresAt?: number) =>
   JSON.stringify({
@@ -185,6 +186,45 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
         headers: Headers.empty,
       }),
     )
+    expect(headers.authorization).toBe("Bearer " + "tok-static")
+  })
+})
+
+describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport merge", () => {
+  // Session requests carry the harness's own UA in request.http.headers,
+  // and the transport merges those over the route's static headers, so
+  // the CLI UA reaches the wire only because auth re-stamps it here.
+  const sessionHeaders = () => Headers.fromInput({ "User-Agent": "opencode/prod/test/cli" })
+
+  test("CLI_USER_AGENT is the audited binary's value (claude 2.1.306)", () => {
+    expect(ClaudeCodeMessages.CLI_USER_AGENT).toBe("claude-cli/2.1.306 (external, cli)")
+  })
+
+  test("the credentials-file path stamps the CLI UA over the session UA", async () => {
+    const headers = await Effect.runPromise(
+      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + 3_600_000), env: {} } }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: sessionHeaders(),
+      }),
+    )
+    expect(headers["user-agent"]).toBe(ClaudeCodeMessages.CLI_USER_AGENT)
+    expect(headers.authorization).toBe("Bearer " + "tok-live")
+  })
+
+  test("the static access-token path stamps the CLI UA over the session UA", async () => {
+    const headers = await Effect.runPromise(
+      claudeCodeAuth({ accessToken: "tok-static" }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: sessionHeaders(),
+      }),
+    )
+    expect(headers["user-agent"]).toBe(ClaudeCodeMessages.CLI_USER_AGENT)
     expect(headers.authorization).toBe("Bearer " + "tok-static")
   })
 })

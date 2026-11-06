@@ -9,6 +9,8 @@ import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
+import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
+import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
@@ -63,6 +65,18 @@ describe("mistral console budget mapping", () => {
     const { api, vibe } = parseMistralBudget({ result: { data: { json: {} } } })
     expect(api).toBeNull()
     expect(vibe).toBeNull()
+  })
+
+  test("clamps over-100 usage consistently for percent and amount", () => {
+    const { api } = parseMistralBudget({ usage_percentage: 150, initial_budget: 100 })
+    expect(api?.usedPercent).toBe(100)
+    expect(api?.usedAmount).toBe(100)
+  })
+
+  test("clamps negative usage consistently for percent and amount", () => {
+    const { api } = parseMistralBudget({ usage_percentage: -20, initial_budget: 50 })
+    expect(api?.usedPercent).toBe(0)
+    expect(api?.usedAmount).toBe(0)
   })
 })
 
@@ -965,5 +979,87 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     const result = await clineFetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
     expect(result.ok).toBe(false)
     expect(result.error).toBe("No quota data in response")
+  })
+})
+
+describe("blank credentials are not configured (#1831)", () => {
+  const keyCtx = (integrationID: string, key: string, calls: string[]) => ({
+    credentials: [{ id: "row-1", integrationID, active: true, value: { type: "key", key } }],
+    disabledProviders: new Set<string>(),
+    instances: new Map(),
+    providerConfig: {},
+    env: {},
+    fetchImpl: async (_url: unknown, init: { headers?: Record<string, string> }) => {
+      calls.push(init?.headers?.Authorization ?? "")
+      return new Response("{}", { status: 401, headers: { "content-type": "application/json" } })
+    },
+  })
+
+  const keyProviders = [
+    ["deepseek", deepseekProvider, "deepseek"],
+    ["groq", groqProvider, "groq"],
+    ["openrouter", openrouterProvider, "openrouter"],
+  ] as const
+
+  for (const [name, provider, integrationID] of keyProviders) {
+    test(`${name}: a whitespace-only key is not configured and is never sent`, async () => {
+      const calls: string[] = []
+      const ctx = keyCtx(integrationID, "   ", calls)
+      expect(await provider.isConfigured(ctx as never)).toBe(false)
+      const result = await provider.fetchQuota(ctx as never)
+      expect(result.configured).toBe(false)
+      expect(result.error).toBe("Not configured")
+      expect(calls).toEqual([])
+    })
+
+    test(`${name}: a real key still counts as configured (control)`, async () => {
+      const calls: string[] = []
+      const ctx = keyCtx(integrationID, "sk-fixture", calls)
+      expect(await provider.isConfigured(ctx as never)).toBe(true)
+      await provider.fetchQuota(ctx as never)
+      expect(calls).toEqual(["Bearer " + "sk-fixture"])
+    })
+  }
+
+  test("deepseek: a padded real key is sent trimmed, not verbatim", async () => {
+    const calls: string[] = []
+    const ctx = keyCtx("deepseek", "  sk-fixture  ", calls)
+    expect(await deepseekProvider.isConfigured(ctx as never)).toBe(true)
+    await deepseekProvider.fetchQuota(ctx as never)
+    expect(calls).toEqual(["Bearer " + "sk-fixture"])
+  })
+
+  test("mistral: a whitespace-only key is not configured", async () => {
+    const blank = keyCtx("mistral", "   ", [])
+    expect(await mistralProvider.isConfigured(blank as never)).toBe(false)
+    const real = keyCtx("mistral", "sk-fixture", [])
+    expect(await mistralProvider.isConfigured(real as never)).toBe(true)
+  })
+
+  test("codex: a whitespace-only access token is not configured and is never sent", async () => {
+    const calls: string[] = []
+    const ctx = {
+      credentials: [
+        {
+          id: "row-1",
+          integrationID: "openai",
+          active: true,
+          value: { type: "oauth", access: "   ", refresh: "fixture", expires: 4_102_444_800_000 },
+        },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: {},
+      fetchImpl: async (_url: unknown, init: { headers?: Record<string, string> }) => {
+        calls.push(init?.headers?.Authorization ?? "")
+        return new Response("{}", { status: 401, headers: { "content-type": "application/json" } })
+      },
+    }
+    expect(await codexProvider.isConfigured(ctx as never)).toBe(false)
+    const result = await codexProvider.fetchQuota(ctx as never)
+    expect(result.configured).toBe(false)
+    expect(result.error).toBe("Not configured")
+    expect(calls).toEqual([])
   })
 })

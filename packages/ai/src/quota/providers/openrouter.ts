@@ -47,10 +47,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
-  isConfigured: (ctx) => Boolean(getAuthEntry(projectAuth(ctx), aliases)?.key),
+  isConfigured: (ctx) => Boolean(asNonEmptyString(getAuthEntry(projectAuth(ctx), aliases)?.key)),
   fetchQuota: async (ctx) => {
     const entry = getAuthEntry(projectAuth(ctx), aliases)
-    const apiKey = entry?.key
+    const apiKey = asNonEmptyString(entry?.key)
     if (!apiKey) {
       return buildResult({ providerId, providerName, ok: false, configured: false, error: "Not configured" })
     }

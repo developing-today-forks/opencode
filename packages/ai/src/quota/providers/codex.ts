@@ -35,7 +35,7 @@ const fetchQuotaForEntry = async (
   ctx: QuotaContext,
   entry: { access?: string; token?: string; accountId?: string } | null,
 ): Promise<QuotaResult> => {
-  const accessToken = entry?.access ?? entry?.token
+  const accessToken = asNonEmptyString(entry?.access) ?? asNonEmptyString(entry?.token)
   const accountId = entry?.accountId
 
   if (!accessToken) {
@@ -200,7 +200,7 @@ const fetchQuotaForEntry = async (
 }
 
 const entryWithToken = (entry: { access?: string; token?: string } | null) =>
-  entry && (entry.access || entry.token) ? entry : null
+  entry && (asNonEmptyString(entry.access) ?? asNonEmptyString(entry.token)) ? entry : null
 
 export const provider: QuotaProvider = {
   providerId,

@@ -1,10 +1,10 @@
-import { afterAll, afterEach, describe, expect } from "bun:test"
+import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Deferred, Effect, Fiber } from "effect"
 import { TestClock } from "effect/testing"
-import { refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
+import { FALLBACK_UA, refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
 import { handlerLayer, observe } from "../lib/http.js"
 import { it } from "../lib/effect.js"
 
@@ -194,4 +194,15 @@ describe("Antigravity client-secret candidates (#1633)", () => {
       expect(sent).toHaveLength(1)
     }),
   )
+})
+
+describe("FALLBACK_UA - the audited agy wire identity", () => {
+  test("is the value captured from the installed CLI's wire (agy 1.5.0)", () => {
+    expect(FALLBACK_UA).toBe(
+      "antigravity/cli/1.5.0 (aidev_client; os_type=linux; arch=amd64; cl=1013440158; auth_method=consumer)",
+    )
+    expect(FALLBACK_UA).toMatch(
+      /^antigravity\/cli\/\d+\.\d+\.\d+ \(aidev_client; os_type=linux; arch=amd64; cl=\d+; auth_method=consumer\)$/,
+    )
+  })
 })
