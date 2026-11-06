@@ -245,15 +245,17 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       // same branch machinery #1550 uses for anyOf: anyOf for Gemini
       // targets, oneOf for Anthropic, merged with any branches the node's
       // own anyOf handling already emitted on that side. The node's other
-      // keywords stay on this node and keep applying to every branch; an
-      // ARRAY branch carries the node's items/prefixItems (or an
-      // unconstrained items, per #1548) because the proto requires items
-      // on every ARRAY schema.
+      // keywords stay on this node and keep applying to every branch —
+      // prefixItems included: the outer node is its carrier, exactly as
+      // in the non-union tuple shape, so no branch needs its own copy.
+      // An ARRAY branch therefore carries only the node's items —
+      // synthesised unconstrained ({}) when the node is prefixItems-only,
+      // by the synthesis above — because the proto requires items on
+      // every ARRAY schema (#1548).
       const branches = concrete.map((entry) => {
         const branch: Record<string, unknown> = { type: entry.toUpperCase() }
         if (entry === "array") {
           if (out.items !== undefined) branch.items = out.items
-          else if (out.prefixItems !== undefined) branch.prefixItems = out.prefixItems
           else branch.items = {}
         }
         return branch

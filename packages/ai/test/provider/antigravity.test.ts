@@ -371,6 +371,42 @@ it.effect("convertSchema expands multi-valued type unions into branches (#1556)"
   }),
 )
 
+it.effect("convertSchema keeps prefixItems on the node in type unions, branches carry items (#1820)", () =>
+  Effect.sync(() => {
+    // prefixItems is a node-level keyword (#1820, triage task 10959): in a
+    // multi-valued type union the outer node carries it — byte-identical to
+    // the non-union tuple node's shape — and the ARRAY branch carries only
+    // items: the synthesised unconstrained items for a prefixItems-only
+    // node, the real items when the node declares both.
+    const prefixOnly = { type: ["array", "string"], prefixItems: [{ type: "string" }] }
+    expect(convertSchema(prefixOnly as never)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+      anyOf: [{ type: "ARRAY", items: {} }, { type: "STRING" }],
+    })
+    expect(convertSchema(prefixOnly as never, true)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+      oneOf: [{ type: "ARRAY", items: {} }, { type: "STRING" }],
+    })
+    const itemsAndPrefix = {
+      type: ["array", "string"],
+      items: { type: "number" },
+      prefixItems: [{ type: "string" }],
+    }
+    expect(convertSchema(itemsAndPrefix as never)).toEqual({
+      items: { type: "NUMBER" },
+      prefixItems: [{ type: "STRING" }],
+      anyOf: [{ type: "ARRAY", items: { type: "NUMBER" } }, { type: "STRING" }],
+    })
+    expect(convertSchema(itemsAndPrefix as never, true)).toEqual({
+      items: { type: "NUMBER" },
+      prefixItems: [{ type: "STRING" }],
+      oneOf: [{ type: "ARRAY", items: { type: "NUMBER" } }, { type: "STRING" }],
+    })
+  }),
+)
+
 it.effect("convertSchema encodes boolean false as { not: {} } instead of inverting it (#1573)", () =>
   Effect.sync(() => {
     // Property, items/prefixItems, and branch positions: false is never,
