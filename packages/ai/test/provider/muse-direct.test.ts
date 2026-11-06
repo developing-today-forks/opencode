@@ -336,6 +336,24 @@ it.effect("a missing credential file fails closed with the named message", () =>
   }),
 )
 
+it.effect("v1-dialect effort settings normalize to reasoningEffort on the wire", () =>
+  Effect.gen(function* () {
+    const shapes: Array<MuseDirect.Settings> = [
+      JSON.parse('{"options":{"reasoning_effort":"xhigh"}}'),
+      JSON.parse('{"options":{"reasoningEffort":"high"}}'),
+      JSON.parse('{"reasoning_effort":"low"}'),
+      JSON.parse('{"reasoningEffort":"medium"}'),
+    ]
+    const expected = ["xhigh", "high", "low", "medium"]
+    for (const [index, settings] of shapes.entries()) {
+      const compiled = yield* compileRequest(
+        LLM.request({ model: MuseDirect.model("muse-spark-1.3-contributor", settings), prompt: "Hi" }),
+      )
+      expect((compiled.body as { reasoning?: { effort?: string } }).reasoning?.effort).toBe(expected[index])
+    }
+  }),
+)
+
 it.effect("parseAuthFile trims values and treats blanks and malformed files as absent", () =>
   Effect.gen(function* () {
     expect(MuseDirectAuth.parseAuthFile(authFile(`{"access_token":"  ${ACCOUNT_TOKEN}  "}`))).toEqual({

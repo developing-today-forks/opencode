@@ -42,6 +42,19 @@ export type Settings = ProviderPackage.Settings &
   ProviderOptionsInput & {
     readonly apiKey?: string
     readonly baseURL?: string
+    /**
+     * Effort in the v1 config dialect (the shape the fleet's config
+     * files write): named `reasoning_effort`, and — for model/variant
+     * overlays — nested under an `options` key by the v1 migration.
+     * Normalized to the native `reasoningEffort` option in
+     * fromSettings; the antigravity provider holds the same top-level
+     * key for the same reason.
+     */
+    readonly reasoning_effort?: string
+    readonly options?: {
+      readonly reasoningEffort?: string
+      readonly reasoning_effort?: string
+    }
   }
 
 /**
@@ -92,13 +105,15 @@ export const responses = provider.responses
 export const model: ProviderPackage.Definition<Settings, ProviderOptionsInput>["model"] = (modelID, settings) =>
   fromSettings(settings).responses(modelID)
 
-function fromSettings({ apiKey, baseURL, body, headers, ...providerOptions }: Settings) {
+function fromSettings({ apiKey, baseURL, body, headers, reasoning_effort, options, ...providerOptions }: Settings) {
+  const effort =
+    providerOptions.reasoningEffort ?? reasoning_effort ?? options?.reasoningEffort ?? options?.reasoning_effort
   return configure({
     apiKey,
     baseURL,
     headers,
     http: body === undefined ? undefined : { body },
-    providerOptions,
+    providerOptions: { ...providerOptions, ...(effort !== undefined ? { reasoningEffort: effort } : {}) },
   })
 }
 
