@@ -510,3 +510,43 @@ it.effect("Command Code stream: duplicate id-less tool-calls fail on the first o
     if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolCallId")
   }),
 )
+
+it.effect("Command Code stream: a nameless tool-result fails loudly instead of emitting an empty name (#1804)", () =>
+  Effect.gen(function* () {
+    const result = yield* LLMClient.generate(
+      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+    ).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "tool-result", toolCallId: "srv_1", output: "sunny in Oslo" },
+            { type: "finish", finishReason: "stop" },
+          ),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolName")
+  }),
+)
+
+it.effect("Command Code stream: an id-less tool-result fails loudly instead of emitting an empty id (#1804)", () =>
+  Effect.gen(function* () {
+    const result = yield* LLMClient.generate(
+      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+    ).pipe(
+      Effect.provide(
+        fixedResponse(
+          ndjson(
+            { type: "tool-result", toolName: "web_search", output: "sunny in Oslo" },
+            { type: "finish", finishReason: "stop" },
+          ),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("toolCallId")
+  }),
+)
