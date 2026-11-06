@@ -7,7 +7,11 @@ import {
   ClaudeCodeMessages,
   IDENTITY_SYSTEM_TEXT,
   OAUTH_BETA_HEADER,
+  stripGitRepoEnvLine,
 } from "../../src/protocols/claude-code-messages.js"
+import * as AnthropicMessages from "../../src/protocols/anthropic-messages.js"
+import { Auth } from "../../src/route.js"
+import { SystemPart } from "../../src/schema/index.js"
 import { compileRequest } from "../../src/route/client.js"
 import { Endpoint } from "../../src/route/endpoint.js"
 import { it } from "../lib/effect.js"
@@ -188,5 +192,111 @@ it.effect("Claude Code stream: a streamed tool_use block becomes a real client t
     expect(response.finishReason?.normalized).toBe("tool-calls")
     expect(response.usage?.inputTokens).toBe(9)
     expect(response.usage?.outputTokens).toBe(4)
+  }),
+)
+
+// #1819: Anthropic's third-party gate fingerprints the harness env
+// block by its `Is directory a git repo` line and bills
+// subscription-OAuth requests carrying it to extra usage. Oracle =
+// the issue's wire bisection against the live API: the captured
+// production request with ONLY that line removed returns 200 with
+// every other byte of the harness prompt intact; flipping the line's
+// value (yes<->no) changes nothing.
+const envBlock = (git: "yes" | "no") =>
+  [
+    "Here is some useful information about the environment you are running in:",
+    "<env>",
+    "  Working directory: /home/user",
+    "  Workspace root folder: /home/user",
+    `  Is directory a git repo: ${git}`,
+    "  Platform: linux",
+    "</env>",
+  ].join("\n")
+
+const envBlockStripped = [
+  "Here is some useful information about the environment you are running in:",
+  "<env>",
+  "  Working directory: /home/user",
+  "  Workspace root folder: /home/user",
+  "  Platform: linux",
+  "</env>",
+].join("\n")
+
+it.effect("the git-repo env line never reaches Anthropic on the claude-code route (#1819)", () =>
+  Effect.gen(function* () {
+    for (const git of ["yes", "no"] as const) {
+      const compiled = yield* compileRequest(
+        LLM.request({
+          model,
+          system: [SystemPart.make("You are a fleet agent."), SystemPart.make(envBlock(git))],
+          prompt: "hi",
+        }),
+      )
+      const system = (compiled.body as Record<string, never>).system as Array<Record<string, unknown>>
+      const texts = system.map((part) => part.text as string)
+      expect(texts[0]).toBe(IDENTITY_SYSTEM_TEXT)
+      expect(texts[1]).toBe("You are a fleet agent.")
+      // Exact-match oracle: the env block is byte-identical minus the one line.
+      expect(texts[2]).toBe(envBlockStripped)
+      expect(texts.join("\n")).not.toContain("Is directory a git repo")
+    }
+  }),
+)
+
+it.effect("a system prompt without the git-repo line compiles byte-identical (#1819)", () =>
+  Effect.gen(function* () {
+    const compiled = yield* compileRequest(
+      LLM.request({ model, system: [SystemPart.make(envBlockStripped)], prompt: "hi" }),
+    )
+    const system = (compiled.body as Record<string, never>).system as Array<Record<string, unknown>>
+    expect(system[1]).toMatchObject({ type: "text", text: envBlockStripped })
+  }),
+)
+
+it.effect("the strip is scoped to the claude-code route: the API-key Anthropic route keeps the line (#1819)", () =>
+  Effect.gen(function* () {
+    const anthropic = AnthropicMessages.route
+      .with({ endpoint: { baseURL: "https://api.anthropic.test/v1/" }, auth: Auth.header("x-api-key", "test") })
+      .model({ id: "claude-sonnet-4-5" })
+    const compiled = yield* compileRequest(
+      LLM.request({ model: anthropic, system: [SystemPart.make(envBlock("yes"))], prompt: "hi" }),
+    )
+    const system = (compiled.body as Record<string, never>).system as Array<Record<string, unknown>>
+    const texts = system.map((part) => part.text as string)
+    expect(texts.join("\n")).toContain("  Is directory a git repo: yes")
+  }),
+)
+
+it.effect("stripGitRepoEnvLine removes only whole git-repo lines, everything else preserved in order (#1819)", () =>
+  Effect.sync(() => {
+    // Invariant oracle, independently formulated: a line is removed
+    // iff its trimmed form starts with the env key and ends with
+    // yes/no — checked over generated placements, not fixed examples.
+    const filler = [
+      "<env>",
+      "  Working directory: /x",
+      "  Platform: linux",
+      "note: Is directory a git repo: maybe",
+      "</env>",
+    ]
+    let state = 42
+    const next = () => (state = (state * 1103515245 + 12345) % 2147483648)
+    for (let trial = 0; trial < 200; trial++) {
+      const lines = [...filler]
+      const inserts = next() % 3
+      for (let k = 0; k < inserts; k++) {
+        lines.splice(next() % (lines.length + 1), 0, `  Is directory a git repo: ${next() % 2 ? "yes" : "no"}`)
+      }
+      const expected = lines
+        .filter((line) => {
+          const t = line.trim()
+          return !(t.startsWith("Is directory a git repo:") && (t.endsWith("yes") || t.endsWith("no")))
+        })
+        .join("\n")
+      expect(stripGitRepoEnvLine(lines.join("\n"))).toBe(expected)
+    }
+    // A mention inside prose is not the env line and survives.
+    expect(stripGitRepoEnvLine("note: Is directory a git repo: maybe")).toBe("note: Is directory a git repo: maybe")
+    expect(stripGitRepoEnvLine("")).toBe("")
   }),
 )

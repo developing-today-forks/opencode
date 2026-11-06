@@ -16,6 +16,11 @@
 //     validates the first system text block of an OAuth request against
 //     the known Claude Code identity line, so this protocol prepends it
 //     ahead of the caller's own system parts on every request;
+//   * the harness env block WITHOUT its git-repo line: Anthropic's
+//     third-party classifier fingerprints that one line (#1819) and
+//     bills subscription-OAuth requests carrying it to extra usage, so
+//     this protocol strips exactly that line from the system parts —
+//     every other provider keeps the full env block;
 //   * the CLI's client headers (`x-app: cli`, `claude-cli/<version>`
 //     User-Agent; version tracks the release this emulation was verified
 //     against — Claude Code 2.1.306, the fleet's installed CLI).
@@ -49,14 +54,44 @@ export const CLI_USER_AGENT = "claude-cli/2.1.306 (external, cli)"
 export type OptionsInput = AnthropicMessages.OptionsInput
 export type ProviderOptionsInput = AnthropicMessages.ProviderOptionsInput
 
+/**
+ * The harness env block's git-repo line (emitted by the core
+ * `core/environment` builtin instruction): the anchor Anthropic's
+ * third-party classifier fingerprints (#1819). Matches the whole line,
+ * either value, at any indentation.
+ */
+const GIT_REPO_ENV_LINE = /^\s*Is directory a git repo: (?:yes|no)\s*$/
+
+/**
+ * Remove the git-repo env line from a system part's text. Every other
+ * line survives byte-identical and in order; text without the line is
+ * returned unchanged. Oracle: the #1819 wire bisection — the captured
+ * production request with ONLY this line removed returns 200 with the
+ * rest of the harness prompt intact; flipping its value changes nothing.
+ */
+export const stripGitRepoEnvLine = (text: string): string =>
+  text
+    .split("\n")
+    .filter((line) => !GIT_REPO_ENV_LINE.test(line))
+    .join("\n")
+
 const fromRequest = Effect.fn("ClaudeCodeMessages.fromRequest")(function* (request: LLMRequest) {
+  // Strip the git-repo env line from the system parts (#1819): with that
+  // one line present, subscription-OAuth requests are classified as a
+  // third-party app and refused (HTTP 400, billed to extra usage); the
+  // same request without it succeeds. Scoped to this route — the core
+  // instruction and every other provider keep the line.
+  const shaped = request.system.map((part) => {
+    const text = stripGitRepoEnvLine(part.text)
+    return text === part.text ? part : { ...part, text }
+  })
   // The identity block must be the first system block; a caller that
   // already leads with it (a façade replaying a captured Claude Code
   // request) is not double-stamped.
   const system =
-    request.system[0]?.text === IDENTITY_SYSTEM_TEXT
-      ? request.system
-      : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...request.system]
+    shaped[0]?.text === IDENTITY_SYSTEM_TEXT
+      ? shaped
+      : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
   return yield* AnthropicMessages.protocol.body.from(LLMRequest.update(request, { system }))
 })
 
