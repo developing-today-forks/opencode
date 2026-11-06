@@ -1,0 +1,139 @@
+import { describe, expect, test } from "bun:test"
+import { cdpPageFetch, connectWs } from "../src/quota/cdp.js"
+import type { QuotaContext } from "../src/quota/types.js"
+
+const quotaCtx = (overrides: Partial<QuotaContext>): QuotaContext => ({
+  credentials: [],
+  disabledProviders: new Set(),
+  instances: new Map(),
+  providerConfig: {},
+  ...overrides,
+})
+
+type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply"
+
+/**
+ * A fake DevTools endpoint: HTTP /json routes plus a WebSocket whose
+ * behavior is set by `mode` — never replies at all ("silent"), closes
+ * the socket on the first request ("close-on-request"), answers every
+ * request ("reply"), or answers the location probe but never the
+ * fetch evaluate ("wedge-after-location", the wedged-renderer shape
+ * from #1803).
+ */
+const startFakeCdp = (mode: FakeMode) => {
+  const closedPageIds: string[] = []
+  let created = false
+  let port = 0
+  const server = Bun.serve({
+    port: 0,
+    fetch(req, srv) {
+      const url = new URL(req.url)
+      if (url.pathname.startsWith("/devtools/")) {
+        if (srv.upgrade(req)) return undefined
+        return new Response("upgrade failed", { status: 400 })
+      }
+      const origin = `http://127.0.0.1:${port}`
+      const target = {
+        id: "page-1",
+        type: "page",
+        url: `${origin}/`,
+        webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page-1`,
+      }
+      if (url.pathname === "/json/list") return Response.json(created ? [target] : [])
+      if (url.pathname === "/json/new") {
+        created = true
+        return Response.json(target)
+      }
+      if (url.pathname.startsWith("/json/close/")) {
+        closedPageIds.push(url.pathname.slice("/json/close/".length))
+        return new Response("Target is closing")
+      }
+      return new Response("not found", { status: 404 })
+    },
+    websocket: {
+      message(ws, message) {
+        let parsed: { id?: number; params?: { expression?: string } } = {}
+        try {
+          parsed = JSON.parse(String(message))
+        } catch {
+          return
+        }
+        if (typeof parsed.id !== "number") return
+        const id = parsed.id
+        if (mode === "close-on-request") {
+          ws.close()
+          return
+        }
+        if (mode === "silent") return
+        const expression = parsed.params?.expression ?? ""
+        if (expression.includes("document.location.href")) {
+          ws.send(JSON.stringify({ id, result: { result: { value: `http://127.0.0.1:${port}/` } } }))
+          return
+        }
+        if (mode === "reply") {
+          ws.send(JSON.stringify({ id, result: { ok: true } }))
+          return
+        }
+        // wedge-after-location: the fetch evaluate is never answered.
+      },
+    },
+  })
+  port = server.port
+  return {
+    base: `http://127.0.0.1:${port}`,
+    origin: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/devtools/page/page-1`,
+    closedPageIds,
+    stop: () => server.stop(true),
+  }
+}
+
+describe("cdp websocket request bounds (#1803)", () => {
+  test("a request that gets no reply rejects within the bound", async () => {
+    const fake = startFakeCdp("silent")
+    try {
+      const client = await connectWs(fake.wsUrl, 150)
+      const started = Date.now()
+      await expect(client.send("Runtime.evaluate", { expression: "1" })).rejects.toThrow("timed out after 150ms")
+      expect(Date.now() - started).toBeLessThan(5_000)
+      client.close()
+    } finally {
+      fake.stop()
+    }
+  })
+
+  test("a socket that closes mid-request settles the pending request", async () => {
+    const fake = startFakeCdp("close-on-request")
+    try {
+      const client = await connectWs(fake.wsUrl, 30_000)
+      await expect(client.send("Runtime.evaluate", { expression: "1" })).rejects.toThrow(/websocket (closed|error)/)
+    } finally {
+      fake.stop()
+    }
+  })
+
+  test("the replying path is unchanged", async () => {
+    const fake = startFakeCdp("reply")
+    try {
+      const client = await connectWs(fake.wsUrl, 1_000)
+      await expect(client.send("Runtime.evaluate", { expression: "1" })).resolves.toEqual({ ok: true })
+      client.close()
+    } finally {
+      fake.stop()
+    }
+  })
+
+  test("cdpPageFetch surfaces a wedged evaluate as cdp-unavailable and runs its cleanup", async () => {
+    const fake = startFakeCdp("wedge-after-location")
+    try {
+      const ctx = quotaCtx({ cdpBase: fake.base, cdpRequestTimeoutMs: 200 })
+      const started = Date.now()
+      await expect(cdpPageFetch(ctx, fake.origin, ["/api/thing"])).rejects.toThrow("cdp-unavailable:")
+      expect(Date.now() - started).toBeLessThan(10_000)
+      // The finally cleanup closed the page this call created.
+      expect(fake.closedPageIds).toEqual(["page-1"])
+    } finally {
+      fake.stop()
+    }
+  })
+})
