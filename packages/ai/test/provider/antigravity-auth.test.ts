@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Deferred, Effect, Fiber } from "effect"
 import { TestClock } from "effect/testing"
-import { FALLBACK_UA, refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
+import { FALLBACK_UA, parseKeyringCreds, refresh, TOKEN_REFRESH_MAX_RESPONSE_BYTES } from "../../src/providers/antigravity-auth.js"
 import { handlerLayer, observe } from "../lib/http.js"
 import { it } from "../lib/effect.js"
 
@@ -205,4 +205,61 @@ describe("FALLBACK_UA - the audited agy wire identity", () => {
       /^antigravity\/cli\/\d+\.\d+\.\d+ \(aidev_client; os_type=linux; arch=amd64; cl=\d+; auth_method=consumer\)$/,
     )
   })
+})
+
+describe("Antigravity blank-credential rule (#1765)", () => {
+  const keyringJson = (token: Record<string, string>) => JSON.stringify({ token })
+
+  test("a whitespace-only keyring refresh_token is unexpected shape, like a missing one", () => {
+    expect(() => parseKeyringCreds(keyringJson({ refresh_token: "   ", access_token: "tok" }))).toThrow(
+      "keyring credential has unexpected shape",
+    )
+    expect(() => parseKeyringCreds(keyringJson({ access_token: "tok" }))).toThrow(
+      "keyring credential has unexpected shape",
+    )
+  })
+
+  test("a whitespace-only keyring access_token parses as absent, never cached or sent", () => {
+    const creds = parseKeyringCreds(
+      keyringJson({ refresh_token: "refresh-fixture", access_token: "   ", expiry: "2999-01-01T00:00:00.000Z" }),
+    )
+    expect(creds.accessToken).toBeUndefined()
+    expect(creds.refreshToken).toBe("refresh-fixture")
+  })
+
+  test("padded keyring tokens are trimmed before use (control)", () => {
+    const creds = parseKeyringCreds(
+      keyringJson({ refresh_token: "  refresh-fixture  ", access_token: "  tok  ", expiry: "2999-01-01T00:00:00.000Z" }),
+    )
+    expect(creds.refreshToken).toBe("refresh-fixture")
+    expect(creds.accessToken).toBe("tok")
+  })
+
+  it.effect("refresh() treats a whitespace-only access_token in the token response as no access_token", () =>
+    Effect.gen(function* () {
+      const layer = handlerLayer((input) =>
+        Effect.succeed(
+          input.respond(JSON.stringify({ access_token: "   ", expires_in: 3600 }), {
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      )
+      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
+      expect(error.message).toContain("returned no access_token")
+    }),
+  )
+
+  it.effect("refresh() trims a padded access_token in the token response (control)", () =>
+    Effect.gen(function* () {
+      const layer = handlerLayer((input) =>
+        Effect.succeed(
+          input.respond(JSON.stringify({ access_token: "  fresh-token  ", expires_in: 3600 }), {
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      )
+      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      expect(token.accessToken).toBe("fresh-token")
+    }),
+  )
 })

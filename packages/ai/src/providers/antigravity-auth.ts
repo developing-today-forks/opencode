@@ -110,6 +110,30 @@ const findSecretTool = async (): Promise<string> => {
   throw new Error("secret-tool not found (set SECRET_TOOL_PATH)")
 }
 
+/**
+ * Parse the agy keyring credential JSON, applying the blank-credential
+ * rule (#1765, the rule vibe-auth holds and #1763 extended to the other
+ * bridges): a blank value is no credential. Tokens are trimmed before
+ * use; a whitespace-only refresh_token is the unexpected-shape/absent
+ * case, and a whitespace-only access_token is absent (undefined) so it
+ * is never cached or sent as a Bearer <redacted>
+ */
+export const parseKeyringCreds = (out: string): KeyringCreds => {
+  let creds: { token?: { access_token?: string; refresh_token?: string; expiry?: string } }
+  try {
+    creds = JSON.parse(out) as { token?: { access_token?: string; refresh_token?: string; expiry?: string } }
+  } catch (cause) {
+    throw new Error(`keyring credential is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  const refreshToken = creds.token?.refresh_token?.trim()
+  if (!refreshToken) throw new Error("keyring credential has unexpected shape")
+  return {
+    accessToken: creds.token?.access_token?.trim() || undefined,
+    refreshToken,
+    expiryMs: parseExpiry(creds.token?.expiry),
+  }
+}
+
 const readKeyringCreds = async (): Promise<KeyringCreds> => {
   const { execFile } = await import("node:child_process")
   const env = { ...process.env }
@@ -122,15 +146,9 @@ const readKeyringCreds = async (): Promise<KeyringCreds> => {
     execFile(tool, ["lookup", "service", "gemini", "username", "antigravity"], { env, timeout: 15_000, maxBuffer: 1 << 20 }, (error, out) => {
       if (error) return reject(new Error(`keyring lookup failed: ${error.message}`))
       try {
-        const creds = JSON.parse(out) as { token?: { access_token?: string; refresh_token?: string; expiry?: string } }
-        if (!creds.token?.refresh_token) return reject(new Error("keyring credential has unexpected shape"))
-        resolve({
-          accessToken: creds.token.access_token,
-          refreshToken: creds.token.refresh_token,
-          expiryMs: parseExpiry(creds.token.expiry),
-        })
+        resolve(parseKeyringCreds(out))
       } catch (cause) {
-        reject(new Error(`keyring credential is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`))
+        reject(cause instanceof Error ? cause : new Error(String(cause)))
       }
     })
   })
@@ -282,8 +300,9 @@ export const refresh = (refreshToken: string, timeoutMs = TOKEN_REFRESH_TIMEOUT_
           return yield* Effect.fail(new Error(`token endpoint HTTP ${response.status}: ${text.slice(0, 200)}`))
         }
         const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(TokenResponse))(text)
-        if (!parsed.access_token) return yield* Effect.fail(new Error("token endpoint returned no access_token"))
-        return { accessToken: parsed.access_token, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
+        const accessToken = parsed.access_token?.trim()
+        if (!accessToken) return yield* Effect.fail(new Error("token endpoint returned no access_token"))
+        return { accessToken, expiryMs: Date.now() + (parsed.expires_in ?? 3600) * 1000 }
       }).pipe(
         Effect.scoped,
         Effect.timeoutOrElse({
@@ -316,8 +335,9 @@ const loadToken = (): Promise<TokenState> => {
   inflight = (async () => {
     try {
       const creds = await readKeyringCreds()
-      if (creds.accessToken && creds.expiryMs - Date.now() > 60_000) {
-        cached = { accessToken: creds.accessToken, expiryMs: creds.expiryMs }
+      const accessToken = creds.accessToken?.trim()
+      if (accessToken && creds.expiryMs - Date.now() > 60_000) {
+        cached = { accessToken, expiryMs: creds.expiryMs }
         return cached
       }
       cached = await Effect.runPromise(refresh(creds.refreshToken).pipe(Effect.provide(FetchHttpClient.layer)))
