@@ -37,8 +37,8 @@ import {
  *
  * `usage_percentage` is a percent (4.66 means 4.66% of the budget
  * consumed — verified against the console's own dollar figures
- * 2026-11-05). Each budget becomes a dollar window whose valueLabel
- * carries the used/budget dollars.
+ * 2026-11-05). Each budget becomes a window whose valueLabel carries
+ * the used/budget amounts denominated in the payload's currency.
  *
  * Session sourcing, in order: a console cookie the provider's
  * credential machinery holds (the mistral credential's
@@ -94,13 +94,19 @@ export const parseMistralBudget = (
   }
 }
 
-const budgetWindow = (budget: MistralBudgetWindow): QuotaWindow =>
-  toUsageWindow({
+const budgetWindow = (budget: MistralBudgetWindow): QuotaWindow => {
+  // Claude-style prefix (claude.ts formatSpendLabel): $ only for USD;
+  // any other payload currency denominates the label as `${currency} `.
+  // parseBudget defaults an absent currency to USD, so the $ label is
+  // byte-for-byte unchanged for USD and absent-currency budgets.
+  const prefix = budget.currency === "USD" ? "$" : `${budget.currency} `
+  return toUsageWindow({
     usedPercent: budget.usedPercent,
     windowSeconds: null,
     resetAt: budget.resetAt,
-    valueLabel: `$${formatMoney(budget.usedAmount)} / $${formatMoney(budget.budgetAmount)}`,
+    valueLabel: `${prefix}${formatMoney(budget.usedAmount)} / ${prefix}${formatMoney(budget.budgetAmount)}`,
   })
+}
 
 const windowsFromPayload = (payload: JsonValue): Record<string, QuotaWindow> | null => {
   const { api, vibe } = parseMistralBudget(payload)

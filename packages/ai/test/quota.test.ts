@@ -60,6 +60,15 @@ describe("mistral console budget mapping", () => {
     expect(vibe?.budgetAmount).toBe(150)
     expect(api?.resetAt).toBe(Date.parse("2026-12-01T00:00:00Z"))
     expect(vibe?.resetAt).toBe(Date.parse("2026-12-01T00:00:00Z"))
+    expect(api?.currency).toBe("USD")
+    expect(vibe?.currency).toBe("USD")
+  })
+
+  test("the payload currency survives parsing; an absent currency defaults to USD", () => {
+    const eur = parseMistralBudget({ usage_percentage: 10, initial_budget: 200, currency: "EUR" })
+    expect(eur.api?.currency).toBe("EUR")
+    const absent = parseMistralBudget({ usage_percentage: 10, initial_budget: 200 })
+    expect(absent.api?.currency).toBe("USD")
   })
 
   test("a payload without budgets maps to nulls, never zeros", () => {
@@ -78,6 +87,47 @@ describe("mistral console budget mapping", () => {
     const { api } = parseMistralBudget({ usage_percentage: -20, initial_budget: 50 })
     expect(api?.usedPercent).toBe(0)
     expect(api?.usedAmount).toBe(0)
+  })
+})
+
+describe("mistral budget label currency (#1805)", () => {
+  // Drive the real provider down its console-cookie path against a
+  // mocked billing.budget response, so the published window labels
+  // are the ones pool rotation actually reads.
+  const fetchWith = (budget: Record<string, unknown>) =>
+    mistralProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "mistral", active: true, value: { type: "key", key: "sk-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: { MISTRAL_ADMIN_COOKIE: "fixture-cookie" },
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ result: { data: { json: { api_budget: budget, vibe_budget: budget } } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    } as never)
+
+  test("a non-USD budget denominates both windows in the payload currency", async () => {
+    const result = await fetchWith({ usage_percentage: 10, initial_budget: 200, currency: "EUR" })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.api?.valueLabel).toBe("EUR 20.00 / EUR 200.00")
+    expect(result.usage?.windows.vibe?.valueLabel).toBe("EUR 20.00 / EUR 200.00")
+  })
+
+  test("a USD budget keeps the $ label byte-for-byte (control)", async () => {
+    const result = await fetchWith({ usage_percentage: 10, initial_budget: 200, currency: "USD" })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.api?.valueLabel).toBe("$20.00 / $200.00")
+    expect(result.usage?.windows.vibe?.valueLabel).toBe("$20.00 / $200.00")
+  })
+
+  test("an absent currency defaults to the $ label", async () => {
+    const result = await fetchWith({ usage_percentage: 10, initial_budget: 200 })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.api?.valueLabel).toBe("$20.00 / $200.00")
   })
 })
 
