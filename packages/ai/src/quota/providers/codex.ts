@@ -119,7 +119,12 @@ const fetchQuotaForEntry = async (
       if (!window) return []
       const usedPercent = clampPercent(toNumber(window.used_percent))
       if (usedPercent === null) return []
-      const windowSeconds = toNumber(window.limit_window_seconds)
+      // A non-positive duration is an unknown duration (#1848): the
+      // meta precedent (meta.ts) guards duration > 0 before labelling,
+      // so a negative/zero value publishes windowSeconds: null with
+      // the missing-duration label, never a "-1h"/"-1d" window.
+      const rawWindowSeconds = toNumber(window.limit_window_seconds)
+      const windowSeconds = rawWindowSeconds !== null && rawWindowSeconds > 0 ? rawWindowSeconds : null
       return [
         {
           role,
