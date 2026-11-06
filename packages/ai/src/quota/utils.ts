@@ -54,7 +54,11 @@ export const toTimestamp = (value: JsonValue | undefined): number | null => {
 
 export const normalizeTimestamp = (value: JsonValue | undefined): number | null => {
   if (typeof value !== "number" || !Number.isFinite(value)) return null
-  return value < 1_000_000_000_000 ? value * 1000 : value
+  const ms = value < 1_000_000_000_000 ? value * 1000 : value
+  // A non-positive expiry is null, never a 1969/1970 date — the same
+  // disposition toTimestamp carries for resets (#1845), applied to the
+  // credential-expiry converter (#1857).
+  return ms > 0 ? ms : null
 }
 
 export const clampPercent = (value: number | null): number | null =>
