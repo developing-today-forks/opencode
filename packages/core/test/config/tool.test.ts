@@ -12,7 +12,7 @@ import { PluginHost } from "@opencode/core/plugin/host"
 import { Tool } from "@opencode/core/tool"
 import { AbsolutePath } from "@opencode/core/schema"
 import { ensurePluginRuntime } from "@opencode/plugin/runtime"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { tmpdir } from "../fixture/tmpdir"
 import { it } from "../lib/effect"
 import { PluginTestLayer } from "../plugin/fixture"
@@ -67,6 +67,8 @@ export default tool({
       sessionID: context.sessionID,
       agent: context.agent,
       directory: context.directory,
+      abortIsSignal: context.abort instanceof AbortSignal,
+      abortAborted: context.abort.aborted,
     })
   },
 })
@@ -135,6 +137,10 @@ describe("ConfigToolPlugin.Plugin", () => {
           expect(JSON.stringify(context)).toContain("ses_custom_tool_test")
           // directory is the session Location's directory, not the config root.
           expect(JSON.stringify(context)).toContain('\\"directory\\":\\"/')
+          // context.abort is a real AbortSignal (#1784), not yet aborted
+          // for a normally-completing execution.
+          expect(JSON.stringify(context)).toContain('\\"abortIsSignal\\":true')
+          expect(JSON.stringify(context)).toContain('\\"abortAborted\\":false')
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ).pipe(Effect.provide(PluginTestLayer)),
@@ -171,6 +177,61 @@ describe("ConfigToolPlugin.Plugin", () => {
             yield* Effect.sleep("10 millis")
           }
           yield* Effect.die(new Error("Timed out waiting for custom tool reload"))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(Effect.provide(PluginTestLayer)),
+  )
+
+  it.live("a v1 tool observes its abort signal when execution is interrupted (#1784)", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const marker = path.join(tmp.path, "abort-observed.txt")
+          yield* writeTools(tmp.path, {
+            "abortprobe.ts": `
+              import { tool } from "@opencode-ai/plugin"
+              import fs from "node:fs"
+
+              export default tool({
+                description: "Resolve only when the abort signal fires",
+                args: {},
+                async execute(args, context) {
+                  await new Promise((resolve) => {
+                    if (context.abort.aborted) return resolve()
+                    context.abort.addEventListener("abort", () => resolve(), { once: true })
+                  })
+                  fs.writeFileSync(${JSON.stringify(marker)}, "abort-observed")
+                  return "abort-observed"
+                },
+              })
+            `,
+          })
+          const config = yield* Config.Test
+          const plugins = yield* Plugin.Service
+          const tools = yield* Tool.Service
+          yield* config.setEntries([new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })])
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+          expect((yield* tools.list()).map((tool) => tool.name)).toContain("abortprobe")
+
+          const snapshot = yield* tools.snapshot()
+          const fiber = yield* snapshot
+            .execute({
+              sessionID,
+              agent: Agent.ID.make("build"),
+              messageID: SessionMessage.ID.make("msg_custom_tool_test"),
+              call: { type: "tool-call", id: "call_custom_tool", name: "execute", input: { code: "return await tools.abortprobe({})" } },
+            })
+            .pipe(Effect.forkChild({ startImmediately: true }))
+          // Let the tool start and register its abort listener, then interrupt.
+          yield* Effect.sleep("500 millis")
+          yield* Fiber.interrupt(fiber)
+          // The tool observes the fired signal and writes its marker.
+          for (let attempt = 0; attempt < 200; attempt++) {
+            if (yield* Effect.promise(() => fs.stat(marker).then(() => true, () => false))) return
+            yield* Effect.sleep("25 millis")
+          }
+          yield* Effect.die(new Error("Tool never observed its abort signal firing"))
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ).pipe(Effect.provide(PluginTestLayer)),
