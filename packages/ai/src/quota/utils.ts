@@ -39,11 +39,15 @@ export const toTimestamp = (value: JsonValue | undefined): number | null => {
   if (!value) return null
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return null
-    return value < 1_000_000_000_000 ? value * 1000 : value
+    const ms = value < 1_000_000_000_000 ? value * 1000 : value
+    // A non-positive reset is null, never a 1969/1970 date (window
+    // contract rule 3; #1821's disposition for command-code, made
+    // shared here — #1845).
+    return ms > 0 ? ms : null
   }
   if (typeof value === "string") {
     const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? null : parsed
+    return Number.isNaN(parsed) || parsed <= 0 ? null : parsed
   }
   return null
 }
