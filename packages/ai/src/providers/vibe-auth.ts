@@ -255,17 +255,25 @@ const loadApiKeyEffect = (sources?: CredentialSources) =>
   })
 
 /**
- * The User-Agent the mistral-vibe binary presents on its API requests:
- * `Mistral-Vibe/<version>` - NOT the User-Agent of the Mistral SDK it
- * builds on (captured from the installed CLI's own wire, 2026-11-06).
- * The version tracks the fleet's installed release (mistral-vibe
- * 3.1.0, the uv-tool install in ~/.local/share/uv/tools); move it when
- * that install moves. Stamped in auth, after the transport's header
- * merge, for the same reason as claude-code-auth: a session request's
- * own harness User-Agent would otherwise override it and the wire
- * would present OpenCode's identity, not Vibe's.
+ * The User-Agent the mistral-vibe binary presents on its API requests
+ * on the built-in `mistral` backend provider (the route vibe-direct
+ * clones): `mistral-client-python/Mistral-Vibe/<version>`. The
+ * `mistral-client-python/` prefix comes from the binary's own
+ * `vibe/utils/http.py::get_user_agent(backend)`, which returns
+ * `Mistral-Vibe/{version}` and prepends `mistral-client-python/` when
+ * backend == "mistral" — wire-captured 2026-11-06 against the built-in
+ * mistral-backend provider (real Mistral Vibe CLI 3.1.0, POST
+ * /v1/chat/completions). The unprefixed form `Mistral-Vibe/3.1.0` is
+ * what a generic-backend capture produces and is NOT what the real
+ * Mistral route sends. The version tracks the fleet's installed
+ * release (mistral-vibe 3.1.0, the uv-tool install in
+ * ~/.local/share/uv/tools); move it when that install moves. Stamped
+ * in auth, after the transport's header merge, for the same reason as
+ * claude-code-auth: a session request's own harness User-Agent would
+ * otherwise override it and the wire would present OpenCode's
+ * identity, not Vibe's.
  */
-export const CLI_USER_AGENT = "Mistral-Vibe/3.1.0"
+export const CLI_USER_AGENT = "mistral-client-python/Mistral-Vibe/3.1.0"
 
 /**
  * Bearer auth whose credential is the vibe binary's own sign-in credential,
