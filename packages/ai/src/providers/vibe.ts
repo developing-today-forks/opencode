@@ -12,8 +12,15 @@
 // credential the one-time `vibe --setup` browser sign-in provisions.
 // The binary also stamps every request with a `metadata` attribution
 // object (verified against a capture of the real mistral-vibe 3.1.0
-// wire): `call_source` is the metering key for the Vibe quota marts, so
-// the stamp is part of the emulation, not decoration.
+// wire); the stamp is part of the emulation, not decoration. Billing,
+// however, follows the KEY, not the stamp (verified empirically
+// 2026-11-06): the keyring sign-in key bills the Vibe plan budget and
+// any other key bills its own budget, stamp or no stamp. Plan billing
+// therefore depends entirely on vibe-auth resolving the keyring key,
+// which requires MISTRAL_API_KEY to be ABSENT from the process env:
+// an env key wins the binary-faithful resolution and spends its own
+// budget (that collision burned the account API pool on 2026-11-05
+// and walled the mistral-plan route; root cause on #1653).
 import type { ProviderPackage } from "../provider-package.js"
 import { MistralChat } from "../protocols/mistral-chat.js"
 import { Auth } from "../route/auth.js"
