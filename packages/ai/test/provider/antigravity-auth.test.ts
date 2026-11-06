@@ -196,6 +196,90 @@ describe("Antigravity client-secret candidates (#1633)", () => {
   )
 })
 
+describe("Antigravity GOCSPX stable-boundary recovery (#1822)", () => {
+  const ua = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
+  const writeFixture = (name: string, content: string) => {
+    const path = join(fixtureDir, name)
+    writeFileSync(path, content)
+    chmodSync(path, 0o755)
+    process.env.AGY_BIN = path
+    return path
+  }
+  afterEach(() => {
+    process.env.AGY_BIN = fixtureBin
+  })
+
+  // Same token-endpoint double shape as the #1633 suite: accepts exactly
+  // one candidate, records every candidate sent (identified against the
+  // known list, whole candidate first so a truncated prefix of it cannot
+  // masquerade as the whole).
+  const endpoint = (accepted: string, candidates: readonly string[], sent: Array<string | undefined>) =>
+    handlerLayer((input) =>
+      Effect.gen(function* () {
+        const { call } = yield* observe([], input)
+        const candidate = candidates.find((known) => call.body.includes(known))
+        sent.push(candidate)
+        if (candidate !== accepted)
+          return input.respond(
+            JSON.stringify({ error: "invalid_client", error_description: "The provided client secret is invalid." }),
+            { status: 401, headers: { "content-type": "application/json" } },
+          )
+        return input.respond(JSON.stringify({ ["access" + "_token"]: "fresh-token", expires_in: 3600 }), {
+          headers: { "content-type": "application/json" },
+        })
+      }),
+    )
+
+  const CHUNK = 1 << 20
+  const STABLE_END = CHUNK - 256
+  // A run of runLen chars with exactly `inside` of its chars inside the
+  // first chunk's stable region; tail filler pushes the file past 1 MiB.
+  const boundaryRun = (inside: number, runLen: number, tail: number) => {
+    const run = `GOCSPX-${"s".repeat(runLen - 7)}`
+    return { run, content: `${"x".repeat(STABLE_END - inside)}${run} ${ua} ${"y".repeat(tail)}` }
+  }
+  const expectWholeOnly = (name: string, content: string, run: string, truncated: string) =>
+    Effect.gen(function* () {
+      writeFixture(name, content)
+      const sent: Array<string | undefined> = []
+      const layer = endpoint(run.slice(0, 35), [run.slice(0, 35), truncated], sent)
+      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      expect(token.accessToken).toBe("fresh-token")
+      // Exactly one attempt, carrying the WHOLE run's candidate: no
+      // truncated-prefix candidate was tried before it (or instead).
+      expect(sent).toEqual([run.slice(0, 35)])
+    })
+
+  it.effect("recovers a run straddling the stable boundary (20 chars inside) whole", () =>
+    Effect.gen(function* () {
+      const { run, content } = boundaryRun(20, 47, 600)
+      yield* expectWholeOnly("agy-1822-stable20", content, run, run.slice(0, 20))
+    }),
+  )
+
+  it.effect("recovers a run starting below the match minimum inside the stable region (10 chars inside)", () =>
+    Effect.gen(function* () {
+      const { run, content } = boundaryRun(10, 47, 600)
+      yield* expectWholeOnly("agy-1822-stable10", content, run, run.slice(0, 10))
+    }),
+  )
+
+  it.effect("recovers a long run straddling the stable boundary into the next chunk whole", () =>
+    Effect.gen(function* () {
+      const { run, content } = boundaryRun(20, 300, 5000)
+      yield* expectWholeOnly("agy-1822-stable300", content, run, run.slice(0, 20))
+    }),
+  )
+
+  it.effect("still collects a chunk-boundary straddle whole (control)", () =>
+    Effect.gen(function* () {
+      const run = `GOCSPX-${"s".repeat(40)}`
+      const content = `${"x".repeat(CHUNK - 20)}${run} ${ua} ${"y".repeat(600)}`
+      yield* expectWholeOnly("agy-1822-chunk20", content, run, run.slice(0, 20))
+    }),
+  )
+})
+
 describe("FALLBACK_UA - the audited agy wire identity", () => {
   test("is the value captured from the installed CLI's wire (agy 1.5.0)", () => {
     expect(FALLBACK_UA).toBe(
