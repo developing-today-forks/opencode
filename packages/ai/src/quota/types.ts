@@ -15,6 +15,92 @@
  * `resetAt` is epoch milliseconds. A provider with several stored
  * credentials emits one result per credential instance; consumers group
  * by `providerId`.
+ *
+ * THE WINDOW CONTRACT (#1794, phase 1 landed by #1795)
+ *
+ * Parse the window you were sent, or none. Every parser that puts a
+ * window into `usage.windows` owes these seven rules; the shared probe
+ * matrix in packages/ai/test/quota.test.ts pins the conforming parsers
+ * against them, with this contract as its oracle.
+ *
+ * 1. Identity is semantic; a derived label never erases a window — the
+ *    key names the window's role/kind where the payload carries one;
+ *    collisions disambiguate both keys or keep the semantic key;
+ *    overwriting a published window is a violation in every spelling.
+ * 2. Duplicates keep the first — contradictory duplicates are a payload
+ *    anomaly, not an update (the #1750/#1769 wording).
+ * 3. Missing is null, and nulls the field — not the window, and never a
+ *    number: never 0, never 1-as-fully-remaining, no fabricated default
+ *    label. An absent reset is an honest null `resetAt` on the window.
+ * 4. No figure, no window — an empty/all-null/zero-limit window-shaped
+ *    object publishes no window; only quota figures are windows
+ *    (#1746's purchasedCredits READ RULE, generalised).
+ * 5. A window's fields agree — derived fields are computed from the
+ *    published (post-disposition) values; the out-of-range disposition
+ *    (clamp vs publish-truthfully) is the provider's stated choice,
+ *    applied to the whole window, never split; out-of-range never
+ *    means the window vanishes.
+ * 6. Unknown kinds are skipped, not renamed — no fabricated familiar
+ *    label; groq's `no-quota-surface` is the same rule at result level.
+ * 7. Every pure parser is pinned against this contract — one shared
+ *    probe matrix (duplicate, collision, unknown kind, missing figure,
+ *    empty object, out-of-range) per parser, and the inventory below
+ *    stays complete: a provider with no pure parser says so, with its
+ *    reason.
+ *
+ * PARSER INVENTORY — all 13 providers in the `quotaProviders` registry
+ * (src/quota/index.ts), in registry order. "Fetch-only" means the wire
+ * parsing lives inline in the fetch path, so the parser is driven in
+ * tests through `provider.fetchQuota` with a stubbed fetch, not
+ * through an exported pure function. Known-lossy rows are marked and
+ * linked; their own issues flip them, this inventory does not fix them.
+ *
+ *   antigravity — fetch-only for exported purposes: its transforms
+ *     parseBucket / transformSummary / transformModels are
+ *     module-private. KNOWN-LOSSY: #1768 (substring-derived labels,
+ *     last-wins bucket assignment, missing remainingFraction as 1).
+ *   claude — toClaudeUsage (exported pure transform);
+ *     findClaudeCredential (credential lookup, not a window parser).
+ *     KNOWN-LOSSY: #1781 (unconditional addWindow overwrites
+ *     duplicates instead of keeping the first).
+ *   cline-pass — fetch-only: limit parsing is inline in the fetch
+ *     path; no exported pure parser. Conforming (keep-first, #1769).
+ *   codex — fetch-only: window mapping is inline in the fetch path;
+ *     no exported pure parser. Conforming (collision qualifiers and
+ *     the phantom-window guard, #1762).
+ *   command-code — parseCommandCodeCredits. Conforming
+ *     (publish-truthfully over-included credits, #1744; credit
+ *     balances are not windows, #1746).
+ *   deepseek — fetch-only: balance parsing is inline in
+ *     provider.fetchQuota; no exported pure parser (its only window
+ *     is a credits_balance label, which carries no figure to parse).
+ *   groq — parseGroqResetSeconds (exported scalar duration parser);
+ *     window construction from rate-limit headers is inline in the
+ *     fetch path.
+ *   meta — parseSubscriptionQuota, parseBillingBanner (both
+ *     exported); keyUsageResult is module-private. KNOWN-LOSSY:
+ *     #1777 (a weekly-length rolling window can be overwritten by
+ *     the literal weekly entry at both collision sites).
+ *     parseSubscriptionQuota's absent-reset-is-null case conforms
+ *     to rule 3 and is pinned by the matrix.
+ *   mistral — parseMistralBudget (exported; wraps the module-private
+ *     parseBudget). KNOWN-LOSSY: #1785 (usedPercent clamped while
+ *     usedAmount is derived from the raw percentage, so a window's
+ *     fields can disagree — rule 5).
+ *   opencode-go — parseOpenCodeGoUsage, parseConsoleGoUsage,
+ *     parseConsoleBillingBalance (all exported). KNOWN-LOSSY:
+ *     #1725 (unpinned remainder; a window is dropped when resetAt
+ *     is null instead of nulling the field — rule 3 decision is
+ *     that issue's, per design #1794 phase 3).
+ *   opendesign — parseCodingPlanWindows (exported);
+ *     normalizeOpenDesignCredential (credential normalization, not a
+ *     window parser). Conforming (keep-first, zero-limit publishes
+ *     nothing, unknown durations skipped, #1750).
+ *   openrouter — resolveResetAt (exported from the provider module;
+ *     the remaining parsing is inline in the fetch path).
+ *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).
+ *   turso — tursoWindows (exported pure window builder over the
+ *     org-usage figures and TURSO_LIMITS).
  */
 
 export interface QuotaWindow {
