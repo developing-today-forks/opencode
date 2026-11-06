@@ -201,7 +201,7 @@ const keyValidity = async (ctx: QuotaContext, apiKey: string): Promise<string> =
 }
 
 const fetchForEntry = async (ctx: QuotaContext, entry: { key?: string } | null): Promise<QuotaResult> => {
-  const apiKey = entry?.key
+  const apiKey = asNonEmptyString(entry?.key)
   if (!apiKey) {
     return buildResult({ providerId, providerName, ok: false, configured: false, error: "Not configured" })
   }
@@ -227,7 +227,7 @@ export const provider: QuotaProvider = {
   providerName,
   aliases,
   credentialAliases: ["mistral"],
-  isConfigured: (ctx) => Boolean(getAuthEntry(projectAuth(ctx), aliases)?.key),
+  isConfigured: (ctx) => Boolean(asNonEmptyString(getAuthEntry(projectAuth(ctx), aliases)?.key)),
   fetchQuota: async (ctx) => fetchForEntry(ctx, getAuthEntry(projectAuth(ctx), aliases)),
   fetchQuotaForCredential: async (ctx, row) => fetchForEntry(ctx, projectCredentialValue(row.value)),
 }
