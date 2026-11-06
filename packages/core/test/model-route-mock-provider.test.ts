@@ -397,7 +397,8 @@ describe("stated-reset cooldowns (#1806 mechanism 4)", () => {
   // service's cascade (model-resolver.ts), which this route-level driver deliberately does
   // not reproduce; the scenario needs a resolver-service harness (mocked Provider/Model
   // layers, as in session-runner-model.test.ts) and is the acceptance core of #1806.
-  test.skip("route chains: a wall inside a nested route does not strand the parent route's untried members (#1806)", () => {
-    throw new Error("pending #1806: needs the resolver-service cascade harness")
-  })
+  // Ported (#1806): "route chains: a wall inside a nested route does not strand the
+  // parent route's untried members" now lives in model-resolver.test.ts, in the
+  // resolver-service harness (withCascadeResolver) this comment called for — both as
+  // the pure cascade scenario and combined with the multi-credential eligibility fix.
 })
