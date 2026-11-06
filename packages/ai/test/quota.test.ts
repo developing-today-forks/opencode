@@ -11,6 +11,7 @@ import { provider as clinePassProvider } from "../src/quota/providers/cline-pass
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
+import { readFileSync } from "node:fs"
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from
@@ -544,5 +545,248 @@ describe("cline-pass quota mapping (#1769)", () => {
     const unknown = await fetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
     expect(unknown.ok).toBe(false)
     expect(unknown.error).toBe("No quota data in response")
+  })
+})
+
+describe("quota window contract — shared probe matrix (#1795, design #1794 phase 1)", () => {
+  // ORACLE: the window contract stated in src/quota/types.ts ("Parse
+  // the window you were sent, or none", rules 1-7). The fixtures are
+  // payload shapes; the model is the contract itself, not any one
+  // provider's current behaviour. Each test names its rule. Only the
+  // already-conforming parsers are asserted here — opendesign
+  // parseCodingPlanWindows, cline-pass (via provider.fetchQuota),
+  // codex (via provider.fetchQuota), command-code
+  // parseCommandCodeCredits, and meta parseBillingBanner /
+  // parseSubscriptionQuota's conforming cases. Known-lossy parsers
+  // are NOT asserted as conforming: antigravity (#1768), meta's
+  // collision sites (#1777), claude duplicates (#1781), mistral field
+  // consistency (#1785), and opencode-go + openrouter (#1725) live in
+  // the types.ts inventory as known-lossy until their own issues land
+  // and flip their rows. If a conforming parser's disposition changes
+  // without the contract changing, a case here must fail.
+
+  const reset = 1893456000
+
+  const codexFetchWith = (payload: unknown) =>
+    codexProvider.fetchQuota({
+      credentials: [
+        {
+          id: "row-1",
+          integrationID: "openai",
+          active: true,
+          value: { type: "oauth", access: "tok-fixture", refresh: "fixture", expires: 4_102_444_800_000 },
+        },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  const clineFetchWith = (payload: unknown) =>
+    clinePassProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "cline-pass", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  test("rule 7: the registry still holds exactly the 13 inventoried providers, in inventory order", () => {
+    // Read the registry source instead of importing index.js: the
+    // index pulls every provider's runtime dependencies, which this
+    // parser suite deliberately does not need. The variable-to-id
+    // mapping is each provider module's exported providerId.
+    const indexSource = readFileSync(new URL("../src/quota/index.ts", import.meta.url), "utf8")
+    const registryBody = indexSource.match(/export const quotaProviders[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? ""
+    const variableToId: Record<string, string> = {
+      antigravity: "antigravity",
+      claude: "claude",
+      clinePass: "cline-pass",
+      codex: "codex",
+      commandCode: "command-code",
+      deepseek: "deepseek",
+      groq: "groq",
+      meta: "meta",
+      mistral: "mistral",
+      opencodeGo: "opencode-go",
+      opendesign: "opendesign",
+      openrouter: "openrouter",
+      turso: "turso",
+    }
+    const ids = registryBody
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((variable) => variableToId[variable])
+    expect(ids).toEqual([
+      "antigravity",
+      "claude",
+      "cline-pass",
+      "codex",
+      "command-code",
+      "deepseek",
+      "groq",
+      "meta",
+      "mistral",
+      "opencode-go",
+      "opendesign",
+      "openrouter",
+      "turso",
+    ])
+  })
+
+  test("rule 1 (collision): codex equal durations qualify both keys instead of overwriting", async () => {
+    const result = await codexFetchWith({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 18000, reset_at: reset },
+      },
+    })
+    expect(result.usage?.windows["5h"]).toBeUndefined()
+    expect(result.usage?.windows["5h-primary"]?.usedPercent).toBe(10)
+    expect(result.usage?.windows["5h-secondary"]?.usedPercent).toBe(80)
+  })
+
+  test("rule 2 (duplicates keep-first): opendesign duplicate durations publish the first entry", () => {
+    const windows = parseCodingPlanWindows({
+      windows: [
+        { durationSeconds: 18000, limitCredits: 100, remainingCredits: 25 },
+        { durationSeconds: 18000, limitCredits: 100, remainingCredits: 0 },
+      ],
+    })
+    expect(windows?.["5h"]?.usedPercent).toBe(75)
+  })
+
+  test("rule 2 (duplicates keep-first): cline-pass duplicate weekly entries publish the first entry", async () => {
+    const result = await clineFetchWith({
+      data: {
+        limits: [
+          { type: "weekly", percentUsed: 42 },
+          { type: "weekly", percentUsed: 7 },
+        ],
+      },
+    })
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(42)
+  })
+
+  test("rule 3 (missing is null): meta subscription quota keeps the window and nulls an absent reset", () => {
+    const parsed = parseSubscriptionQuota({
+      subscription_quota: {
+        tier: "Muse Code High Usage",
+        window_weighted_used: "0",
+        window_weighted_limit: "100000000000",
+        window_duration_secs: 18000,
+        weekly_weighted_used: "8830000000",
+        weekly_weighted_limit: "100000000000",
+        weekly_resets_at: 1793980800,
+      },
+    })
+    expect(parsed?.windows["5h"]?.usedPercent).toBe(0)
+    expect(parsed?.windows["5h"]?.resetAt).toBeNull()
+    expect(parsed?.windows.weekly?.resetAt).toBe(1793980800 * 1000)
+  })
+
+  test("rule 3 (missing is null): command-code window without a reset publishes resetAt null, not no window", () => {
+    const windows = parseCommandCodeCredits({ windowLimits: { fiveHour: { used: 5, cap: 10 } } })
+    expect(windows["5h"]?.usedPercent).toBe(50)
+    expect(windows["5h"]?.resetAt).toBeNull()
+  })
+
+  test("rule 3 (missing figure is null): meta billing banner with no figure maps to null, never 0", () => {
+    expect(parseBillingBanner({ currency: "USD" })).toBeNull()
+    expect(parseBillingBanner({ remaining_minor_units: "", currency: "USD" })).toBeNull()
+  })
+
+  test("rule 3/4 (missing figure): cline-pass entry with no percent publishes no window for that kind", async () => {
+    const result = await clineFetchWith({
+      data: {
+        limits: [{ type: "five_hour" }, { type: "weekly", percentUsed: 20 }],
+      },
+    })
+    expect(result.usage?.windows["5h"]).toBeUndefined()
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(20)
+  })
+
+  test("rule 4 (no figure, no window): codex empty window object mints no phantom window", async () => {
+    const result = await codexFetchWith({
+      rate_limit: {
+        primary_window: {},
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["weekly"])
+  })
+
+  test("rule 4 (no figure, no window): opendesign zero-limit entry and command-code balance-only payload publish nothing", () => {
+    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    expect(parseCommandCodeCredits({ credits: { purchasedCredits: 40, freeCredits: 15 } })).toEqual({})
+  })
+
+  test("rule 4 (no figure, no window): codex window with duration/reset but no used_percent is dropped", async () => {
+    const result = await codexFetchWith({
+      rate_limit: {
+        primary_window: { limit_window_seconds: 18000, reset_at: reset },
+        secondary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: reset },
+      },
+    })
+    expect(result.usage?.windows["5h"]).toBeUndefined()
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(80)
+  })
+
+  test("rule 5 (fields agree, out-of-range): command-code over-included credits publish truthfully at 0% used", () => {
+    const windows = parseCommandCodeCredits({ credits: { monthlyCredits: 25 } })
+    expect(windows.monthly?.usedPercent).toBe(0)
+    expect(windows.monthly?.valueLabel).toContain("25")
+  })
+
+  test("rule 5 (fields agree, out-of-range): opendesign over-remaining clamps the percent and keeps the real figures in the label", () => {
+    const windows = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
+    })
+    expect(windows?.["5h"]?.usedPercent).toBe(0)
+    expect(windows?.["5h"]?.valueLabel).toBe("150 / 100 credits")
+  })
+
+  test("rule 5 (fields agree, out-of-range): meta over-limit weekly clamps to 100 and the window does not vanish", () => {
+    const parsed = parseSubscriptionQuota({
+      subscription_quota: {
+        window_weighted_used: "1000000000",
+        window_weighted_limit: "100000000000",
+        window_duration_secs: 18000,
+        weekly_weighted_used: "300549363810",
+        weekly_weighted_limit: "300000000000",
+        weekly_resets_at: 1793980800,
+      },
+    })
+    expect(parsed?.windows.weekly?.usedPercent).toBe(100)
+  })
+
+  test("rule 5 (out-of-range): cline-pass percent above 100 clamps and the window does not vanish", async () => {
+    const result = await clineFetchWith({ data: { limits: [{ type: "five_hour", percentUsed: 150 }] } })
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(100)
+  })
+
+  test("rule 5 (out-of-range): codex percent above 100 clamps and the window does not vanish", async () => {
+    const result = await codexFetchWith({
+      rate_limit: { primary_window: { used_percent: 150, limit_window_seconds: 18000, reset_at: reset } },
+    })
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(100)
+  })
+
+  test("rule 6 (unknown kinds skipped, not renamed): opendesign unknown duration publishes no familiar label", () => {
+    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+  })
+
+  test("rule 6 (unknown kinds skipped, not renamed): cline-pass unknown limit type publishes no window", async () => {
+    const result = await clineFetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
   })
 })
