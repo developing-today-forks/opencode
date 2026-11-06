@@ -74,11 +74,9 @@ export const parseDotEnv = (contents: string): Readonly<Record<string, string>> 
     if (eq <= 0) continue
     const key = statement.slice(0, eq).trim()
     let value = statement.slice(eq + 1).trim()
-    if (
-      value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
-    ) {
-      value = value.slice(1, -1)
+    const quoted = value.match(/^(['"])(.*)\1(?:[ \t]+#.*)?$/)
+    if (quoted) {
+      value = quoted[2]
     } else {
       // Unquoted values may carry a trailing comment (`KEY=value # note`).
       const comment = value.indexOf(" #")
@@ -96,7 +94,9 @@ const findSecretTool = async (): Promise<string> => {
   if (process.env.SECRET_TOOL_PATH) candidates.push(process.env.SECRET_TOOL_PATH)
   for (const dir of (process.env.PATH ?? "").split(":")) if (dir) candidates.push(join(dir, "secret-tool"))
   try {
-    for (const store of readdirSync("/nix/store").filter((entry) => entry.includes("libsecret")).sort())
+    for (const store of readdirSync("/nix/store")
+      .filter((entry) => entry.includes("libsecret"))
+      .sort())
       candidates.push(join("/nix/store", store, "bin", "secret-tool"))
   } catch {}
   for (const candidate of candidates) {
