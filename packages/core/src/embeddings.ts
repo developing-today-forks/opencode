@@ -13,21 +13,21 @@ export * as Embeddings from "./embeddings.js"
  * adding a registration; its dimension comes from the registration,
  * never from an assumption in this layer.
  *
- * A registration also names its backend kind. The HTTP kind (the
- * default, and the only kind the translation above describes) is
- * served by an OpenAI-compatible sidecar; the native-onnx kind
- * (#1554) runs the model's ONNX graph in this process instead (see
- * embeddings-native.ts). The kinds are interchangeable to every
- * layer above the service: same parse, same response shape, same
- * ledger row. A registration flips kind deliberately, never by
- * default.
+ * A registration also names its backend kind. The HTTP kind is served
+ * by an OpenAI-compatible sidecar; the native-onnx kind (#1554) runs
+ * the model's ONNX graph in this process instead (see
+ * embeddings-native.ts). The default registration uses native-onnx
+ * after the deliberate step-3 flip (#1690). The kinds are
+ * interchangeable to every layer above the service: same parse, same
+ * response shape, same ledger row. The Node bundle explicitly does not
+ * support native-onnx; the Bun build is the supported route.
  *
- * Backends speak the OpenAI embeddings shape over HTTP, exactly like
- * the messaging embedding client: the service POSTs to
- * `<baseURL>/embeddings` and validates what comes back (count, order,
- * and that each vector's length is the registered dimension — or the
- * caller-requested supported dimension — so a misbehaving backend
- * fails loudly instead of returning wrong-shaped vectors).
+ * The HTTP backend speaks the OpenAI embeddings shape over HTTP,
+ * exactly like the messaging embedding client: the service POSTs to
+ * `<baseURL>/embeddings`. Both backends return that same shape, and the
+ * service validates count, order, and vector dimensions so a
+ * misbehaving backend fails loudly instead of returning wrong-shaped
+ * vectors.
  *
  * Varied lengths: the door passes the caller's input array through
  * faithfully — no truncation, padding or chunking at this layer.
@@ -103,11 +103,11 @@ export interface EmbeddingModel {
 
 /**
  * The embedding catalog. First registration (Drew, 2026-11-02:
- * "support embeddings using local snowflake"): a LOCAL Snowflake
- * Arctic Embed backend — an OpenAI-compatible embedder served on the
- * same machine (dev backend: the laptop service in ~/local-embed,
- * ONNX int8 weights from Snowflake/snowflake-arctic-embed-m-v2.0).
- * Local means local: no hosted embeddings API is registered here.
+ * "support embeddings using local snowflake"): local Snowflake Arctic
+ * Embed, originally served by an OpenAI-compatible sidecar and now
+ * using the native-onnx backend by default (#1690). Its HTTP settings
+ * remain for the sidecar transition; no hosted embeddings API is
+ * registered here.
  * Arctic Embed m-v2.0 is 768-dimensional and supports Matryoshka
  * truncation to 256, which the local backend honors.
  */
@@ -305,6 +305,12 @@ export const layer = Layer.effect(
         const result = yield* Effect.result(
           Effect.gen(function* () {
             if (input.model.backend?.kind === "native-onnx") {
+              if (process.env.OPENCODE_NODE_BUNDLE === "1")
+                return yield* Effect.fail(
+                  new Error(
+                    "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
+                  ),
+                )
               const native = yield* Effect.tryPromise({
                 try: () =>
                   embedNative({

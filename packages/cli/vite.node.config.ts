@@ -67,20 +67,18 @@ function runtimeRequirePlugin(): Plugin {
  * inlineDynamicImports flattens into the startup graph) and via
  * @huggingface/transformers, which also statically imports sharp.
  *
- * Following the fffNodePlugin precedent above, both specifiers resolve to
- * stubs in this bundle ONLY (the Bun build never sees this config): module
- * load succeeds, and any actual use throws a clear error. That is safe
- * because the native-onnx embeddings backend is opt-in per registration
- * (core embeddings.ts: it becomes a backend only by the deliberate #1554
- * step-3 flip, which has not happened — every registered model uses the
- * HTTP backend), and image loading via sharp is likewise only reached on
- * an actual image embed. The NEXT native dependency pulled into core must
- * be stubbed or externalised here the same way — the graph guard in
- * nativeStubGraphPlugin fails the build if the real packages re-enter.
+ * The default embedding registration is native-onnx after the deliberate
+ * #1690 flip. Per #1792's triaged contract, native-onnx embeddings are
+ * explicitly unsupported in this Node bundle; core checks the build marker
+ * and rejects at the embeddings surface before reaching these bindings.
+ * Both specifiers still resolve to stubs here (the Bun build never sees
+ * this config), keeping startup safe and acting as a backstop for accidental
+ * direct use. The graph guard below fails the build if the real packages
+ * re-enter or the onnxruntime-node stub disappears.
  */
 function nativeStubPlugin(): Plugin {
   const message =
-    "native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; the native-onnx embeddings backend runs under the Bun build only (#1615)"
+    "native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)"
   return {
     name: "opencode:native-stub",
     enforce: "pre",
@@ -96,7 +94,7 @@ function nativeStubPlugin(): Plugin {
       // to the same stub, like runtimeRequirePlugin rewrites Turndown.
       const normalized = id.replaceAll("\\", "/")
       if (normalized.endsWith("/@huggingface/transformers/src/backends/onnx-node.js"))
-        return `const unavailable = () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; the native-onnx embeddings backend runs under the Bun build only (#1615)") }
+        return `const unavailable = () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") }
 class Tensor { constructor() { unavailable() } }
 const InferenceSession = { create: unavailable }
 export default { InferenceSession, Tensor, env: {} }`
@@ -104,7 +102,7 @@ export default { InferenceSession, Tensor, env: {} }`
       // the same loader survives as a single requireFromHere call assigned
       // to onnx_node_default: swap just that call for the stub object.
       if (!normalized.endsWith("/@huggingface/transformers/dist/transformers.node.mjs")) return
-      const stub = `({ InferenceSession: { create: () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; the native-onnx embeddings backend runs under the Bun build only (#1615)") } }, Tensor: class { constructor() { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; the native-onnx embeddings backend runs under the Bun build only (#1615)") } }, env: {} })`
+      const stub = `({ InferenceSession: { create: () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, Tensor: class { constructor() { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, env: {} })`
       const transformed = code.replace('requireFromHere("onnxruntime-node")', stub)
       if (transformed === code) this.error("Failed to rewrite the transformers onnxruntime-node loader")
       return transformed
@@ -117,8 +115,7 @@ const InferenceSession = { create: unavailable }
 const env = {}
 export { InferenceSession, Tensor, env }
 export default { InferenceSession, Tensor, env }`
-      if (id === "\0opencode:sharp-stub")
-        return `export default () => { throw new Error(${JSON.stringify(message)}) }`
+      if (id === "\0opencode:sharp-stub") return `export default () => { throw new Error(${JSON.stringify(message)}) }`
     },
   }
 }
@@ -136,9 +133,13 @@ function nativeStubGraphPlugin(): Plugin {
         (id) => id.includes("/node_modules/onnxruntime-node/") || id.includes("/node_modules/sharp/"),
       )
       if (leaked.length > 0)
-        this.error(`Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`)
+        this.error(
+          `Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`,
+        )
       if (!ids.some((id) => id.includes("opencode:onnxruntime-node-stub")))
-        this.error("Node bundle graph is missing the onnxruntime-node stub (#1615): embeddings-native left the graph or the stub plugin stopped resolving")
+        this.error(
+          "Node bundle graph is missing the onnxruntime-node stub (#1615): embeddings-native left the graph or the stub plugin stopped resolving",
+        )
     },
   }
 }
@@ -368,6 +369,7 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       OPENCODE_ARTIFACT: JSON.stringify("cli-node"),
       ...(input.highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(input.highlights) } : {}),
       OPENCODE_LIBC: input.target.platform === "linux" ? JSON.stringify("glibc") : "undefined",
+      "process.env.OPENCODE_NODE_BUNDLE": JSON.stringify("1"),
       FFF_LIBC: input.target.platform === "linux" ? JSON.stringify("gnu") : "undefined",
       "process.env.WS_NO_BUFFER_UTIL": JSON.stringify("1"),
     },

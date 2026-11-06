@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import {
+  DEFAULT_EMBEDDING_MODEL,
   EMBEDDING_MODELS,
   Embeddings,
   embeddingModelEntries,
@@ -12,6 +13,7 @@ import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { testEffect } from "./lib/effect"
+import { withEnv } from "./fixture/env"
 
 // ---------------------------------------------------------- registry + translation
 
@@ -167,6 +169,21 @@ ModelRouteLog.setSink((event) => {
 })
 
 const it = testEffect(Embeddings.layer.pipe(Layer.provide(FetchHttpClient.layer)))
+
+it.effect("rejects native-onnx embeddings at the surface in the Node bundle", () =>
+  withEnv({ OPENCODE_NODE_BUNDLE: "1" }, () =>
+    Effect.gen(function* () {
+      const embeddings = yield* Embeddings.Service
+      const result = yield* Effect.result(embeddings.embed({ model: DEFAULT_EMBEDDING_MODEL, inputs: ["hello"] }))
+      expect(result._tag).toBe("Failure")
+      if (result._tag === "Failure") {
+        expect(result.failure.message).toBe(
+          "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
+        )
+      }
+    }),
+  ),
+)
 
 it.effect("embeds through the door against a stub backend and records a route_attempt row", () =>
   Effect.gen(function* () {
