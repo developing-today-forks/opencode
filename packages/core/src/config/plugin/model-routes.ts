@@ -98,7 +98,9 @@ export const Plugin = define({
     yield* ctx.provider.transform((providers) => {
       if (providers.get(ModelRoute.PROVIDER_ID)) return
       const routes = configuredRoutes(loaded.entries)
-      if (routes.size === 0) return
+      // Provider routes are addressable directly (#1720), so a config declaring only
+      // provider routes still has work to do here.
+      if (routes.size === 0 && declaredProviderRouteIDs(loaded.entries).size === 0) return
       const windows = configuredWindows(loaded.entries)
       const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
       const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
@@ -115,14 +117,47 @@ export const Plugin = define({
       // definitions alone: a route whose targets are all transform-created (#1001)
       // has no model yet, and the model transform below can only create it if this
       // provider exists in the model editor's candidate set.
-      providers.add({
-        info: {
-          ...Provider.Info.empty(ModelRoute.PROVIDER_ID),
-          name: "OpenCode routes",
-          activation: "enabled",
-        },
-        models,
-      })
+      if (routes.size > 0)
+        providers.add({
+          info: {
+            ...Provider.Info.empty(ModelRoute.PROVIDER_ID),
+            name: "OpenCode routes",
+            activation: "enabled",
+          },
+          models,
+        })
+
+      // Direct provider-route sessions (#1720): a session addressing `<route>/<model>`
+      // finds no catalog entry, because expansion only consumes a provider route when
+      // a model route seats it. Register each member-offered model under the route id
+      // itself, carrying the seat-identical group definition, so direct sessions
+      // resolve through the same selection, weights, health, and failover machinery.
+      // Built from the pre-synthetic definitions above, so the new records never
+      // shadow the provider route at expansion the way a same-named concrete
+      // provider would.
+      const directByRoute = new Map<string, Model.Info[]>()
+      for (const model of buildProviderRouteModels(
+        providerRoutes,
+        routes,
+        definitions,
+        windows,
+        globalSchedules,
+        ctx.location.directory,
+      )) {
+        const key = String(model.providerID)
+        const list = directByRoute.get(key) ?? []
+        list.push(model)
+        directByRoute.set(key, list)
+      }
+      for (const [routeID, routeModels] of directByRoute)
+        providers.add({
+          info: {
+            ...Provider.Info.empty(Provider.ID.make(routeID)),
+            name: routeID,
+            activation: "enabled",
+          },
+          models: routeModels,
+        })
     })
 
     // Pools are built by the provider transform above, which runs before any model
@@ -141,7 +176,7 @@ export const Plugin = define({
         if (!current) continue
         const providerRoutes = configuredProviderRoutes(
           loaded.entries,
-          new Set(models.provider.list().map((record) => record.provider.id)),
+          concreteProviderIDs(models, loaded.entries),
           routes,
         )
         const next = retargetDefinition(current, routes, models, windows, providerRoutes)
@@ -173,7 +208,7 @@ export const Plugin = define({
       if (missing.length > 0) {
         const providerRoutes = configuredProviderRoutes(
           loaded.entries,
-          new Set(models.provider.list().map((record) => record.provider.id)),
+          concreteProviderIDs(models, loaded.entries),
           routes,
         )
         const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
@@ -235,6 +270,9 @@ function routeModel(
   nodes: ModelRoute.Node[],
   globalSchedules: readonly ModelRoute.WeightRule[],
   directory?: string,
+  /** Direct-addressing identity (#1720): the provider the model is catalogued under and the
+   * route id its definition (decision records, health, usage) is keyed by. */
+  direct?: { readonly providerID: Provider.ID; readonly routeID: string },
 ): Model.Info {
   const first = expanded[0].model
   // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
@@ -244,11 +282,11 @@ function routeModel(
   const health = ModelRoute.policy(route.health, directory)
   const targetCacheFormats = expanded.map((target) => (target.cacheFormat ? { cacheFormat: target.cacheFormat } : {}))
   return Model.Info.make({
-    ...Model.Info.default(ModelRoute.PROVIDER_ID, Model.ID.make(id)),
+    ...Model.Info.default(direct?.providerID ?? ModelRoute.PROVIDER_ID, Model.ID.make(id)),
     name: route.name?.trim() || id,
     settings: {
       [ModelRoute.SETTING]: {
-        id: Model.ID.make(id),
+        id: Model.ID.make(direct?.routeID ?? id),
         ...(route.system ? { system: route.system } : {}),
         targets: expanded.map((target) => target.ref),
         targetVariants: expanded.map((target) => ({
@@ -310,6 +348,74 @@ function routeModel(
         : {}),
     },
   })
+}
+
+/** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
+ * Expansion only consumes a provider route when a model route seats it, so a session
+ * addressing the route provider directly finds no catalog entry and dies as
+ * provider.no-route. Each model the route's members offer gets a synthetic model under
+ * the route id carrying the same group definition a seat would expand to — selection,
+ * weights, windows, schedules, health, and failover included — so direct sessions
+ * resolve through the identical machinery. */
+export function buildProviderRouteModels(
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  globalSchedules: readonly ModelRoute.WeightRule[] = [],
+  directory?: string,
+): Model.Info[] {
+  const models: Model.Info[] = []
+  for (const [routeID, providerRoute] of providerRoutes) {
+    const offered = new Set<string>()
+    for (const member of providerRoute.providers)
+      for (const [modelID] of definitions.get(Provider.ID.make(member)) ?? []) offered.add(modelID)
+    for (const modelID of offered) {
+      const synthID = `${routeID}/${modelID}`
+      const synthRoutes = new Map(routes)
+      const synthRoute = {
+        targets: [{ model: { providerID: routeID, model: modelID } }],
+        selection: providerRoute.selection,
+        autonomy: "rules",
+      } as unknown as ConfigModelRoutes.Route
+      synthRoutes.set(synthID, synthRoute)
+      const { leaves: expanded, nodes } = expand(synthID, synthRoutes, definitions, windows, providerRoutes)
+      // No servable leaf (every member's copy disabled): leave the model unregistered so
+      // the miss branch can diagnose no-eligible-member instead of serving a dead entry.
+      if (expanded.length === 0) continue
+      models.push(
+        routeModel(modelID, synthRoute, expanded, nodes, globalSchedules, directory, {
+          providerID: Provider.ID.make(routeID),
+          routeID: synthID,
+        }),
+      )
+    }
+  }
+  return models
+}
+
+/** The provider ids that are concrete: every catalogued provider except the direct-addressing
+ * records a configured provider route registered under its own id (#1720), which would
+ * otherwise read as a concrete provider colliding with the route that created them. */
+function concreteProviderIDs(models: ModelCatalogEditor, entries: readonly Entry[]) {
+  const declared = declaredProviderRouteIDs(entries)
+  return new Set(
+    models.provider
+      .list()
+      .filter((record) => !isDirectRouteProvider(declared, record))
+      .map((record) => record.provider.id),
+  )
+}
+
+/** Whether a catalogued provider is the direct-addressing record a provider route registered
+ * under its own id (#1720): a route id whose models all carry a route definition. */
+function isDirectRouteProvider(
+  routeIDs: Iterable<string>,
+  record: { readonly provider: { readonly id: Provider.ID }; readonly models: ReadonlyMap<string, Model.Info> },
+) {
+  return (
+    new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
+  )
 }
 
 function configuredTuning(entries: readonly Entry[]) {
@@ -391,7 +497,7 @@ function settingsConfig(
   }
 }
 
-function configuredRoutes(entries: readonly Entry[]) {
+export function configuredRoutes(entries: readonly Entry[]) {
   const routes = new Map<string, ConfigModelRoutes.Route>()
   entries
     .filter((entry): entry is Document => entry.type === "document")
@@ -399,6 +505,21 @@ function configuredRoutes(entries: readonly Entry[]) {
       Object.entries(entry.info.experimental?.routes?.models ?? {}).forEach(([id, route]) => routes.set(id, route))
     })
   return routes
+}
+
+/** The provider-route ids the config declares, before validation: the reference set for
+ * direct-addressing diagnostics (#1720). A declared id that validation drops (concrete
+ * provider collision, configured-route collision, no concrete members) is still a route
+ * the user meant, so the miss branch can name why it does not resolve instead of the
+ * generic unknown-provider error. */
+export function declaredProviderRouteIDs(entries: readonly Entry[]) {
+  const declared = new Set<string>()
+  entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .forEach((entry) => {
+      Object.keys(entry.info.experimental?.routes?.providers ?? {}).forEach((id) => declared.add(id))
+    })
+  return declared
 }
 
 /** The configured provider entries for the routes provider itself, in document
@@ -936,8 +1057,13 @@ function currentDefinitions(
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
 ) {
+  // The direct-addressing records of a provider route (#1720) are not concrete providers: left in,
+  // they would shadow the provider route at expansion and collapse every seat onto themselves.
   const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
-    editor.provider.list().map((record) => [record.provider.id, record.models] as const),
+    editor.provider
+      .list()
+      .filter((record) => !isDirectRouteProvider(providerRoutes.keys(), record))
+      .map((record) => [record.provider.id, record.models] as const),
   )
   const targeted = new Set<Provider.ID>()
   for (const route of routes.values()) {

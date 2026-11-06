@@ -112,10 +112,10 @@ export class UnsupportedCompactionError extends Schema.TaggedError<UnsupportedCo
 
 export class RouteUnavailableError extends Schema.TaggedError<RouteUnavailableError>()(
   "SessionRunnerModel.RouteUnavailableError",
-  { routeID: ID },
+  { routeID: ID, providerID: Schema.optional(Provider.ID) },
 ) {
   override get message() {
-    return `No model is available for route ${ModelRoute.PROVIDER_ID}/${this.routeID}`
+    return `No model is available for route ${this.providerID ?? ModelRoute.PROVIDER_ID}/${this.routeID}`
   }
 }
 
@@ -1206,11 +1206,11 @@ export const layer = Layer.effect(
       })
 
     const resolveSelected = (selected: Info, variant?: VariantID, sessionID?: string, requestTokens?: number) => {
-      if (selected.providerID !== ModelRoute.PROVIDER_ID)
-        return load(selected, variant).pipe(Effect.map((loaded) => loaded.resolved))
       const definition = ModelRoute.definition(selected)
+      if (selected.providerID !== ModelRoute.PROVIDER_ID && !definition)
+        return load(selected, variant).pipe(Effect.map((loaded) => loaded.resolved))
       if (!definition || definition.targets.length === 0)
-        return Effect.fail(new RouteUnavailableError({ routeID: selected.id }))
+        return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
       const requestedVariant = variant === "default" ? undefined : variant
       if (requestedVariant && !selected.variants.some((item) => item.id === requestedVariant))
         return Effect.fail(
@@ -1255,7 +1255,7 @@ export const layer = Layer.effect(
             ? Effect.succeed(resolved)
             : cascade.loadErrors.length > 0
               ? Effect.fail(cascade.loadErrors[0])
-              : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
+              : Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID })),
         ),
       )
     }

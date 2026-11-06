@@ -1724,6 +1724,44 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  // #1720: a configured provider route registers direct-addressing models under its own
+  // provider id; the resolver routes any definition-carrying model, whatever its provider.
+  it.effect("resolves a direct provider-route model through its members and falls over (#1720)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const direct = Info.make({
+      ...routed([a, b], { ...ordered, id: "mistral-plan/luna" }),
+      providerID: Provider.ID.make("mistral-plan"),
+      id: ID.make("luna"),
+    })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(direct)
+        expect(targetOf(first)).toBe("pa")
+        expect(first.routing?.routeID).toBe("mistral-plan/luna")
+        const next = yield* first.routing!.fallback()
+        expect(next ? targetOf(next) : undefined).toBe("pb")
+      }),
+    )
+  })
+
+  it.effect("names the provider-route id when a direct provider-route model has no targets (#1720)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const direct = Info.make({
+      ...routed([a], { ...single, targets: [], targetVariants: [], nodes: [], id: "mistral-plan/luna" }),
+      providerID: Provider.ID.make("mistral-plan"),
+      id: ID.make("luna"),
+    })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        const error = yield* resolver.resolveModel(direct).pipe(Effect.flip)
+        expect(error.message).toBe("No model is available for route mistral-plan/luna")
+      }),
+    )
+  })
+
   it.effect("a target's declared cache format overrides the model's own compatibility", () => {
     ModelRoute.resetHealth()
     const a = model(Provider.aisdk("@ai-sdk/openai"), {
