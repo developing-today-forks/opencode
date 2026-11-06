@@ -55,6 +55,12 @@
  * through an exported pure function. Known-lossy rows are marked and
  * linked; their own issues flip them, this inventory does not fix them.
  *
+ * Shared converter: `toTimestamp` (utils.ts) returns null for
+ * non-positive timestamps in both its numeric and string spellings
+ * (#1845) — #1821's command-code disposition, generalised to every
+ * provider parsing resets through the shared converter, so no
+ * consumer can publish a 1969/1970 resetAt or fields derived from one.
+ *
  *   antigravity — fetch-only for exported purposes: its transforms
  *     parseBucket / transformSummary / transformModels are
  *     module-private. KNOWN-LOSSY: #1768 (substring-derived labels,

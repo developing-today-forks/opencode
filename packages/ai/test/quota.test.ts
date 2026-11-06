@@ -3,7 +3,7 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { toNumber } from "../src/quota/utils.js"
+import { toNumber, toTimestamp } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -320,6 +320,49 @@ describe("groq quota header parsing (#1793)", () => {
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.requests_daily?.usedPercent).toBe(60)
     expect(result.usage?.windows.requests_daily?.resetAt).not.toBeNull()
+  })
+})
+
+describe("toTimestamp non-positive handling (#1845)", () => {
+  test("non-positive numeric spellings convert to null, never 1969/1970 dates", () => {
+    expect(toTimestamp(-5000)).toBeNull()
+    expect(toTimestamp(-5_000_000_000_000)).toBeNull()
+    expect(toTimestamp(0)).toBeNull()
+  })
+
+  test("strings parsing to <= 0 ms convert to null, including the epoch spelling", () => {
+    expect(toTimestamp("1970-01-01T00:00:00.000Z")).toBeNull()
+    expect(toTimestamp("1969-12-31T23:59:59.000Z")).toBeNull()
+  })
+
+  test("valid positive timestamps convert exactly as before (controls)", () => {
+    expect(toTimestamp(1893456000)).toBe(1893456000000)
+    expect(toTimestamp(1893456000000)).toBe(1893456000000)
+    expect(toTimestamp("2030-01-01T00:00:00.000Z")).toBe(Date.parse("2030-01-01T00:00:00.000Z"))
+    expect(toTimestamp(undefined)).toBeNull()
+    expect(toTimestamp("not-a-date")).toBeNull()
+  })
+
+  test("opencode-go: a non-positive reset publishes no window (existing drop-on-null behaviour)", () => {
+    // Interaction with #1725, stated not decided: parseOpenCodeGoUsage
+    // already drops a window whose resetAt is null, so a bogus
+    // non-positive reset now follows that existing path instead of
+    // publishing a 1969 reset. #1725 keeps the broader rule-3 call.
+    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: -5000 } } })).toEqual({})
+    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: "1970-01-01T00:00:00.000Z" } } })).toEqual({})
+    const control = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: 1893456000 } } })
+    expect(control["5h"]?.resetAt).toBe(1893456000000)
+  })
+
+  test("turso: non-positive period bounds derive neither a reset nor a windowSeconds", () => {
+    const mapped = tursoWindows(
+      { organization: { usage: { rows_read: 250_000_000, rows_written: 1_000_000, storage_bytes: 2_500_000_000, bytes_synced: 0, databases: 44 } } },
+      { plan: "scaler", current_period_start: -10000, current_period_end: -5000 },
+    )
+    const window = Object.values(mapped?.windows ?? {})[0]
+    expect(window).toBeDefined()
+    expect(window?.resetAt).toBeNull()
+    expect(window?.windowSeconds).toBeNull()
   })
 })
 
