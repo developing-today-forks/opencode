@@ -66,6 +66,18 @@ describe("mistral console budget mapping", () => {
     expect(api).toBeNull()
     expect(vibe).toBeNull()
   })
+
+  test("clamps over-100 usage consistently for percent and amount", () => {
+    const { api } = parseMistralBudget({ usage_percentage: 150, initial_budget: 100 })
+    expect(api?.usedPercent).toBe(100)
+    expect(api?.usedAmount).toBe(100)
+  })
+
+  test("clamps negative usage consistently for percent and amount", () => {
+    const { api } = parseMistralBudget({ usage_percentage: -20, initial_budget: 50 })
+    expect(api?.usedPercent).toBe(0)
+    expect(api?.usedAmount).toBe(0)
+  })
 })
 
 describe("meta portal subscription-quota mapping", () => {
