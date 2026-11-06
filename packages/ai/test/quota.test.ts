@@ -540,6 +540,44 @@ describe("codex quota window mapping (#1762)", () => {
   })
 })
 
+describe("codex isConfigured active credentials (#1811)", () => {
+  const oauth = { type: "oauth", access: "tok-fixture", refresh: "fixture", expires: 4_102_444_800_000 } as const
+  const ctxWith = (credentials: unknown[], instances = new Map()) => ({
+    credentials,
+    disabledProviders: new Set<string>(),
+    instances,
+    providerConfig: {},
+    env: {},
+  })
+
+  test("an inactive direct credential does not count as configured", async () => {
+    const ctx = ctxWith([{ id: "row-1", integrationID: "openai", active: false, value: oauth }])
+    expect(await codexProvider.isConfigured(ctx as never)).toBe(false)
+    const result = await codexProvider.fetchQuota({ ...ctx, fetchImpl: async () => new Response("{}") } as never)
+    expect(result.configured).toBe(false)
+  })
+
+  test("an inactive instance credential does not count as configured", async () => {
+    const ctx = ctxWith(
+      [{ id: "row-2", integrationID: "openai.main", active: false, value: oauth }],
+      new Map([["openai.main", { base: "openai" }]]),
+    )
+    expect(await codexProvider.isConfigured(ctx as never)).toBe(false)
+    const result = await codexProvider.fetchQuota({ ...ctx, fetchImpl: async () => new Response("{}") } as never)
+    expect(result.configured).toBe(false)
+  })
+
+  test("active direct and active instance credentials still count as configured", async () => {
+    const direct = ctxWith([{ id: "row-3", integrationID: "openai", active: true, value: oauth }])
+    expect(await codexProvider.isConfigured(direct as never)).toBe(true)
+    const instance = ctxWith(
+      [{ id: "row-4", integrationID: "openai.main", active: true, value: oauth }],
+      new Map([["openai.main", { base: "openai" }]]),
+    )
+    expect(await codexProvider.isConfigured(instance as never)).toBe(true)
+  })
+})
+
 describe("cline-pass quota mapping (#1769)", () => {
   // Drive the real provider against a stubbed usage-limits response.
   const fetchWith = (payload: unknown) =>
