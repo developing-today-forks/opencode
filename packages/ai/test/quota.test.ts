@@ -1187,11 +1187,15 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // codex (via provider.fetchQuota), command-code
   // parseCommandCodeCredits, and meta parseBillingBanner /
   // parseSubscriptionQuota's conforming cases. Known-lossy parsers
-  // are NOT asserted as conforming: antigravity (#1768), meta's
-  // collision sites (#1777), claude duplicates (#1781), mistral field
-  // consistency (#1785), and opencode-go + openrouter (#1725) live in
-  // the types.ts inventory as known-lossy until their own issues land
-  // and flip their rows. If a conforming parser's disposition changes
+  // are NOT asserted as conforming: meta's collision sites (#1777),
+  // claude duplicates (#1781), and opencode-go + openrouter (#1725)
+  // live in the types.ts inventory as known-lossy until their own
+  // issues land and flip their rows. Antigravity (#1768) and mistral
+  // (#1785) have landed and flipped to conforming: they are not in
+  // this matrix — their rule-7 pins are their dedicated describes
+  // in this file (the antigravity quota bucket labelling (#1768)
+  // describe and the mistral console budget mapping describe). If a
+  // conforming parser's disposition changes
   // without the contract changing, a case here must fail.
 
   const reset = 1893456000
