@@ -891,6 +891,59 @@ describe("codex quota window mapping (#1762)", () => {
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("12.5")
   })
+
+  test("spend-control window: percent and label derive from one clamped used figure (#1882)", async () => {
+    const control = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 40, limit: 100, used_percent: 40 } },
+    })
+    expect(control.ok).toBe(true)
+    expect(control.usage?.windows.credits?.usedPercent).toBe(40)
+    expect(control.usage?.windows.credits?.valueLabel).toBe("40 / 100 used")
+
+    const negative = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: -5, limit: 100, used_percent: -5 } },
+    })
+    expect(negative.usage?.windows.credits?.usedPercent).toBe(0)
+    expect(negative.usage?.windows.credits?.valueLabel).toBe("0 / 100 used")
+
+    // Over-limit disposition (#1882, #1821 rule 5): clamped label at
+    // 100% — never "150 / 100 used" beside a clamped percent.
+    const overLimit = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 150, limit: 100, used_percent: 150 } },
+    })
+    expect(overLimit.usage?.windows.credits?.usedPercent).toBe(100)
+    expect(overLimit.usage?.windows.credits?.valueLabel).toBe("100 / 100 used")
+
+    // Label-only payload (no used_percent): the percent is derived
+    // from the same clamped figures, so the label is never the only
+    // — and never a contradictory — figure published.
+    const labelOnly = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 150, limit: 100 } },
+    })
+    expect(labelOnly.usage?.windows.credits?.usedPercent).toBe(100)
+    expect(labelOnly.usage?.windows.credits?.valueLabel).toBe("100 / 100 used")
+  })
+
+  test("spend-control window: a non-positive limit never renders as a denominator (#1882)", async () => {
+    const zeroLimit = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 5, limit: 0, used_percent: 25 } },
+    })
+    expect(zeroLimit.ok).toBe(true)
+    expect(zeroLimit.usage?.windows.credits?.usedPercent).toBe(25)
+    expect(zeroLimit.usage?.windows.credits?.valueLabel).toBeUndefined()
+
+    const zeroLimitNoPercent = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 5, limit: 0 } },
+    })
+    expect(zeroLimitNoPercent.ok).toBe(false)
+    expect(zeroLimitNoPercent.error).toBe("No quota data in response")
+  })
 })
 
 describe("codex isConfigured active credentials (#1811)", () => {
