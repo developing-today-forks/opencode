@@ -267,6 +267,13 @@ export const provider: QuotaProvider = {
     }
 
     const { windows, models } = toClaudeUsage(payload)
+    // No usable quota data at all: the sibling providers' no-data
+    // contract (codex #1762 names ClinePass/DeepSeek/OpenRouter), not
+    // ok:true with empty windows — an empty-but-successful row reads
+    // downstream as a healthy account with no limits (#1915).
+    if (Object.keys(windows).length === 0 && Object.keys(models).length === 0) {
+      return withMetadata(failure("No quota data in response"), credential)
+    }
     const usage = Object.keys(models).length > 0 ? { windows, models } : { windows }
     return withMetadata(
       buildResult({
