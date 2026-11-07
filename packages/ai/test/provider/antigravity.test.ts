@@ -509,6 +509,31 @@ it.effect("convertSchema leaves enum/items/prefixItems-only roots self-describin
   }),
 )
 
+it.effect("convertSchema leaves constraint-only roots self-describing (#1950)", () =>
+  Effect.sync(() => {
+    // A root whose only keyword constrains one non-object type describes
+    // that type: minItems/maxItems constrain arrays, minLength/maxLength/
+    // pattern constrain strings, minimum/maximum constrain numbers.
+    // Forcing type OBJECT onto it narrows it to objects only and strands
+    // the keyword on a type it can never reach — the #1901 defect, one
+    // keyword family past that fix's guard. Both targets behave alike.
+    for (const anthropic of [false, true]) {
+      expect(convertSchema({ minItems: 2 } as never, anthropic)).toEqual({ minItems: 2 })
+      expect(convertSchema({ maxItems: 3 } as never, anthropic)).toEqual({ maxItems: 3 })
+      expect(convertSchema({ minLength: 2 } as never, anthropic)).toEqual({ minLength: 2 })
+      expect(convertSchema({ maxLength: 5 } as never, anthropic)).toEqual({ maxLength: 5 })
+      expect(convertSchema({ pattern: "^a+$" } as never, anthropic)).toEqual({ pattern: "^a+$" })
+      expect(convertSchema({ minimum: 5 } as never, anthropic)).toEqual({ minimum: 5 })
+      expect(convertSchema({ minimum: 5, maximum: 9 } as never, anthropic)).toEqual({ minimum: 5, maximum: 9 })
+    }
+    // Controls: object keywords still take the OBJECT default — a
+    // minProperties root constrains objects, and the empty schema is the
+    // unconstrained parameters shape the default exists for.
+    expect(convertSchema({ minProperties: 1 } as never)).toEqual({ minProperties: 1, type: "OBJECT" })
+    expect(convertSchema({} as never)).toEqual({ type: "OBJECT" })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
