@@ -126,7 +126,6 @@ export function treesOnDisk(root: string, names: readonly string[]): string[] {
       const rel = relative(root, path).split(sep).join("/")
       if (
         names.includes(entry.name) &&
-        rel.split("/").length >= 3 &&
         (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
       ) {
         trees.push(rel)
@@ -135,7 +134,7 @@ export function treesOnDisk(root: string, names: readonly string[]): string[] {
       walk(path)
     }
   }
-  for (const top of ["packages", "services"]) if (existsSync(join(root, top))) walk(join(root, top))
+  for (const top of ["packages", "services", "sdks", "github"]) if (existsSync(join(root, top))) walk(join(root, top))
   return trees.toSorted()
 }
 

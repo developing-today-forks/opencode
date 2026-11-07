@@ -69,6 +69,11 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
+  "packages/script/src",
+  // Escaped trees from issue #1758: sdks/vscode/src, github/script, sdks/vscode/script
+  "sdks/vscode/src",
+  "github/script",
+  "sdks/vscode/script",
 ]
 /** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
 export const SCAN_ROOT = "packages/core/src"

@@ -10,6 +10,10 @@ import {
   staleEntries,
   treesOnDisk,
   unlistedHits,
+  scriptTreesOnDisk,
+  srcTreesOnDisk,
+  unscannedScriptTrees,
+  unscannedSrcTrees,
   type GateDefinition,
   type Hit,
 } from "./gate-harness"
@@ -142,5 +146,54 @@ describe("gate declarations", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("treesOnDisk discovers package trees under sdks/ and github/ (#1758)", () => {
+  const root = join(import.meta.dir, "..")
+  
+  test("discovers sdks/vscode/src package tree", () => {
+    const trees = srcTreesOnDisk(root)
+    expect(trees).toContain("sdks/vscode/src")
+  })
+  
+  test("discovers github/script package tree", () => {
+    const trees = scriptTreesOnDisk(root)
+    expect(trees).toContain("github/script")
+  })
+  
+  test("discovers sdks/vscode/script package tree", () => {
+    const trees = scriptTreesOnDisk(root)
+    expect(trees).toContain("sdks/vscode/script")
+  })
+  
+  test("treesOnDisk with 'src' finds trees in sdks/", () => {
+    const trees = treesOnDisk(root, ["src"])
+    expect(trees).toContain("sdks/vscode/src")
+  })
+  
+  test("treesOnDisk with 'script' finds trees in sdks/ and github/", () => {
+    const trees = treesOnDisk(root, ["script", "scripts"])
+    expect(trees).toContain("github/script")
+    expect(trees).toContain("sdks/vscode/script")
+  })
+})
+
+describe("escaped trees from issue #1758 verification", () => {
+  const root = join(import.meta.dir, "..")
+  
+  test("sdks/vscode/src is discovered by srcTreesOnDisk", () => {
+    const trees = srcTreesOnDisk(root)
+    expect(trees).toContain("sdks/vscode/src")
+  })
+  
+  test("github/script is discovered by scriptTreesOnDisk", () => {
+    const trees = scriptTreesOnDisk(root)
+    expect(trees).toContain("github/script")
+  })
+  
+  test("sdks/vscode/script is discovered by scriptTreesOnDisk", () => {
+    const trees = scriptTreesOnDisk(root)
+    expect(trees).toContain("sdks/vscode/script")
   })
 })

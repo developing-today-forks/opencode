@@ -123,6 +123,11 @@ export const SCAN_ROOTS: string[] = [
   "packages/ui/script",
   "packages/util/script",
   "services/www/script",
+  "packages/script",
+  // Escaped trees from issue #1758: sdks/vscode/src, github/script, sdks/vscode/script
+  "sdks/vscode/src",
+  "github/script",
+  "sdks/vscode/script",
 ]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"
