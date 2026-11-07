@@ -21,10 +21,12 @@
 // an env key wins the binary-faithful resolution and spends its own
 // budget (that collision burned the account API pool on 2026-11-05
 // and walled the mistral-plan route; root cause on #1653).
+import { Effect } from "effect"
 import type { ProviderPackage } from "../provider-package.js"
 import { MistralChat } from "../protocols/mistral-chat.js"
 import { Auth } from "../route/auth.js"
 import type { RouteDefaultsInput } from "../route/client.js"
+import { HttpTransport, type Transport, type TransportPrepareInput } from "../route/transport/index.js"
 import { mergeJsonRecords, ProviderID, type ModelID } from "../schema/index.js"
 import { VibeAuth, type CredentialSources } from "./vibe-auth.js"
 
@@ -131,6 +133,59 @@ const withPresetDefaults = (input: Config, modelID: string): Config => {
   }
 }
 
+// =============================================================================
+// Transport: Mistral Chat SSE with Vibe's single auth retry (#1900).
+// Shape chosen for #1900 (the muse-direct/antigravity transport shape):
+// on a 401 the cached credential is invalidated, the request is
+// re-prepared so auth re-resolves the credential from its sources, and
+// the request is retried exactly once. This is VibeAuth.invalidate()'s
+// production caller: without it the process-global cache in vibe-auth
+// served a rotated or revoked key forever, so every request 401'd until
+// the host process restarted. The wrapper lives on the Vibe route only;
+// the plain mistral provider keeps the unwrapped MistralChat transport.
+// Explicit-source calls bypass the process cache (vibe-auth), so for
+// them invalidation is a no-op and re-preparation re-reads the sources.
+// =============================================================================
+const sse = MistralChat.httpTransport
+
+const isUnauthorized = (error: { readonly reason: { readonly _tag: string } }) =>
+  error.reason._tag === "Authentication" &&
+  (error.reason as { http?: { status?: number } }).http?.status === 401
+
+// The MistralChat route's Prepared type is the SSE transport's own, so
+// the prepare input (needed to re-prepare on a 401) cannot ride inside
+// the prepared value the way the muse-direct/antigravity transports
+// carry it; it is keyed by the prepared instance instead.
+const prepareInputs = new WeakMap<
+  HttpTransport.HttpPrepared<string>,
+  TransportPrepareInput<MistralChat.MistralBody>
+>()
+
+export const transport: Transport<MistralChat.MistralBody, HttpTransport.HttpPrepared<string>, string> = {
+  id: sse.id,
+  prepare: (input) =>
+    sse.prepare(input).pipe(
+      Effect.tap((http) =>
+        Effect.sync(() => {
+          prepareInputs.set(http, input)
+        }),
+      ),
+    ),
+  execute: (prepared, request, runtime, options) =>
+    Effect.gen(function* () {
+      const first = yield* Effect.result(sse.execute(prepared, request, runtime, options))
+      if (first._tag === "Success") return first.success
+      if (!isUnauthorized(first.failure)) return yield* first.failure
+      const input = prepareInputs.get(prepared)
+      if (!input) return yield* first.failure
+      VibeAuth.invalidate()
+      const retried = yield* sse
+        .prepare(input)
+        .pipe(Effect.flatMap((http) => sse.execute(http, request, runtime, options)))
+      return retried
+    }),
+}
+
 const configuredRoute = (input: Config) => {
   const { baseURL, auth, apiKey, sources, http, ...rest } = input
   return MistralChat.route.with({
@@ -138,6 +193,7 @@ const configuredRoute = (input: Config) => {
     provider: id,
     endpoint: { baseURL: baseURL ?? MistralChat.DEFAULT_BASE_URL },
     auth: VibeAuth.vibeAuth({ auth, apiKey, sources }),
+    transport,
     // The attribution stamp rides as a route-default http.body overlay,
     // UNDER caller config: route defaults merge under model/request
     // http options, and the transport overlays the merged http.body
