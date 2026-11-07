@@ -8,6 +8,7 @@ import {
   listConfiguredQuotaProviders,
   parseJsonValue,
   resolveQuotaProviderName,
+  toNumber,
   type JsonObject,
   type JsonValue,
   type QuotaContext,
@@ -47,8 +48,10 @@ import { errorMessage } from "../../util/error"
 const DEFAULT_QUOTA_TIMEOUT_MS = 30_000
 
 const quotaTimeoutMs = (): number => {
-  const parsed = Number(process.env.OPENCODE_QUOTA_TIMEOUT_MS)
-  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : DEFAULT_QUOTA_TIMEOUT_MS
+  const parsed = toNumber(process.env.OPENCODE_QUOTA_TIMEOUT_MS)
+  return parsed !== null && Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647
+    ? parsed
+    : DEFAULT_QUOTA_TIMEOUT_MS
 }
 
 interface GlobalPaths {
@@ -189,7 +192,7 @@ const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
 
   const disabledProviders = new Set<string>()
   const instances = new Map<string, { base: string; name?: string }>()
-  const providerConfig: Record<string, JsonObject> = {}
+  const providerConfig = Object.create(null) as Record<string, JsonObject>
 
   for (const file of files) {
     let document: JsonObject | undefined
@@ -215,7 +218,7 @@ const readConfigFacts = (global: GlobalPaths): ConfigFacts => {
       for (const [id, definition] of Object.entries(section)) {
         if (!isJsonObject(definition)) continue
         const record = definition
-        providerConfig[id] = { ...(providerConfig[id] ?? {}), ...record }
+        providerConfig[id] = { ...providerConfig[id], ...record }
         const base = typeof record.instanceOf === "string" ? record.instanceOf : undefined
         if (base) {
           instances.set(id, {

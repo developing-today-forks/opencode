@@ -196,10 +196,9 @@ const resolveCandidates = async (ctx: QuotaContext): Promise<AntigravityAuth[]> 
 // ---- wire ----
 
 const antigravityHeaders = (): Record<string, string> => {
-  const osNames: Record<string, string> = { win32: "windows", darwin: "darwin", linux: "linux" }
-  const archNames: Record<string, string> = { x64: "amd64", arm64: "arm64" }
-  const os = osNames[process.platform]
-  const platformPart = os ? `${os}/${archNames[process.arch] ?? "amd64"}` : "windows/amd64"
+  const os = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : undefined
+  const arch = process.arch === "arm64" ? "arm64" : "amd64"
+  const platformPart = os ? `${os}/${arch}` : "windows/amd64"
   return {
     "User-Agent": `antigravity/${ANTIGRAVITY_CLIENT_VERSION} ${platformPart}`,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",

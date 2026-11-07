@@ -1,5 +1,12 @@
 import type { JsonObject, JsonValue, QuotaContext } from "./types.js"
-import { asObject, envOf, isJsonObject, parseJsonValue } from "./utils.js"
+import {
+  asObject,
+  envOf,
+  isJsonObject,
+  parseJsonValue,
+  QUOTA_RESPONSE_MAX_BYTES,
+  readQuotaJson,
+} from "./utils.js"
 
 /**
  * Console-session reads through the laptop browser's Chrome DevTools
@@ -64,9 +71,11 @@ export const cdpBaseOf = (ctx: QuotaContext): string => {
 
 const httpJson = async (url: string, init?: RequestInit): Promise<JsonValue> => {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) })
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  const parsed: JsonValue = await response.json()
-  return parsed
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {})
+    throw new Error(`HTTP ${response.status} for ${url}`)
+  }
+  return readQuotaJson(response)
 }
 
 const connectWs = (wsUrl: string): Promise<WsClient> =>
@@ -172,13 +181,38 @@ export const cdpPageFetch = async (
     const expression = `(async () => {
       const paths = ${JSON.stringify(paths)};
       const out = {};
+      const readBoundedText = async (response) => {
+        const reader = response.body?.getReader();
+        if (!reader) return "";
+        const decoder = new TextDecoder();
+        let bytes = 0;
+        let text = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            bytes += value.byteLength;
+            if (bytes > ${QUOTA_RESPONSE_MAX_BYTES}) {
+              throw new Error("Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes");
+            }
+            text += decoder.decode(value, { stream: true });
+          }
+          return text + decoder.decode();
+        } catch (error) {
+          await reader.cancel().catch(() => {});
+          throw error;
+        } finally {
+          reader.releaseLock();
+        }
+      };
       for (const path of paths) {
         try {
           const r = await fetch(new URL(path, ${JSON.stringify(origin)}).toString(), {
             headers: { Accept: "application/json" },
             credentials: "include",
+            signal: AbortSignal.timeout(10_000),
           });
-          out[path] = { status: r.status, url: r.url, text: await r.text() };
+          out[path] = { status: r.status, url: r.url, text: await readBoundedText(r) };
         } catch (e) {
           out[path] = { status: 0, url: "", text: "", error: String(e) };
         }
@@ -204,7 +238,10 @@ export const cdpPageFetch = async (
   } finally {
     client?.close()
     if (createdId) {
-      await fetch(`${base}/json/close/${createdId}`, { signal: AbortSignal.timeout(5_000) }).catch(() => undefined)
+      const closed = await fetch(`${base}/json/close/${createdId}`, { signal: AbortSignal.timeout(5_000) }).catch(
+        () => undefined,
+      )
+      await closed?.body?.cancel().catch(() => undefined)
     }
   }
 }

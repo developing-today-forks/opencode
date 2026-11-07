@@ -3,6 +3,31 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds } from "../src/quota/providers/groq.js"
+import { QUOTA_RESPONSE_MAX_BYTES, readQuotaJson } from "../src/quota/utils.js"
+
+describe("bounded quota JSON reader", () => {
+  test("parses a streamed response body", async () => {
+    await expect(readQuotaJson(new Response('{"ok":true}'))).resolves.toEqual({ ok: true })
+  })
+
+  test("caps UTF-8 bytes before decoding rather than checking string length afterward", async () => {
+    const value = `"${"é".repeat(Math.floor(QUOTA_RESPONSE_MAX_BYTES / 2) + 1)}"`
+    let cancelled = false
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(value))
+        },
+        cancel() {
+          cancelled = true
+        },
+      }),
+    )
+
+    await expect(readQuotaJson(response)).rejects.toThrow(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+    expect(cancelled).toBe(true)
+  })
+})
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from

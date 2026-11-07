@@ -6,6 +6,7 @@ import {
   getAuthEntry,
   isTimeoutError,
   projectAuth,
+  toNumber,
   toUsageWindow,
 } from "../utils.js"
 
@@ -43,8 +44,8 @@ export const parseGroqResetSeconds = (raw: string | null): number | null => {
   let total = 0
   let matched = false
   for (const match of text.matchAll(/([\d.]+)(h|m|s)/g)) {
-    const value = Number(match[1])
-    if (!Number.isFinite(value)) return null
+    const value = toNumber(match[1])
+    if (value === null) return null
     matched = true
     total += match[2] === "h" ? value * 3600 : match[2] === "m" ? value * 60 : value
   }
@@ -54,8 +55,7 @@ export const parseGroqResetSeconds = (raw: string | null): number | null => {
 const headerNumber = (headers: Headers, name: string): number | null => {
   const raw = headers.get(name)
   if (!raw) return null
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) ? parsed : null
+  return toNumber(raw)
 }
 
 export const provider: QuotaProvider = {

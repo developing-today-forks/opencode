@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaCredentialSource, JsonValue } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -56,13 +56,6 @@ interface ClaudeCredential {
   expiresAt: number | null
   planLabel: string | null
   source: "keychain" | "credentials-file" | "opencode-auth" | "env"
-}
-
-const SOURCE_MAP: Record<ClaudeCredential["source"], QuotaCredentialSource> = {
-  keychain: "claude-code",
-  "credentials-file": "claude-code",
-  "opencode-auth": "opencode",
-  env: "environment",
 }
 
 const claudeConfigDirectory = (ctx: QuotaContext): string => {
@@ -120,7 +113,8 @@ const withMetadata = (result: QuotaResult, credential: ClaudeCredential): QuotaR
   ...(credential.expiresAt !== null
     ? { credentialExpiresAt: new Date(credential.expiresAt).toISOString() }
     : {}),
-  credentialSource: SOURCE_MAP[credential.source],
+  credentialSource:
+    credential.source === "opencode-auth" ? "opencode" : credential.source === "env" ? "environment" : "claude-code",
 })
 
 // ---- usage payload transforms (providers/claude/transforms.js) ----

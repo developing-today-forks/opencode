@@ -70,11 +70,7 @@ export const parseSubscriptionQuota = (
 ): { tier: string | null; windows: Record<string, QuotaWindow> } | null => {
   const quota = asObject(asObject(payload)?.subscription_quota)
   if (!quota) return null
-  const num = (value: JsonValue | undefined): number | null => {
-    if (typeof value !== "string" && typeof value !== "number") return null
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
+  const num = (value: JsonValue | undefined): number | null => toNumber(value)
   const windowUsed = num(quota.window_weighted_used)
   const windowLimit = num(quota.window_weighted_limit)
   const weeklyUsed = num(quota.weekly_weighted_used)
