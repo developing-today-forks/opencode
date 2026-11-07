@@ -14,7 +14,7 @@ import { provider as openrouterProvider } from "../src/quota/providers/openroute
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider } from "../src/quota/providers/meta.js"
-import { toClaudeUsage } from "../src/quota/providers/claude.js"
+import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
 import { readFileSync } from "node:fs"
 
@@ -664,6 +664,38 @@ describe("claude usage transform (#1750)", () => {
     expect(legacy.windows["7d"]).toBeUndefined()
     expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
     expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
+  })
+})
+
+describe("claude quota no-data contract (#1915)", () => {
+  // Drive the real provider against a stubbed usage response, with the
+  // env credential as the only source (homeDir names no credentials file).
+  const fetchWith = (payload: unknown) =>
+    claudeProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-test-home",
+    } as never)
+
+  test("a 200 payload with no usable quota data is the no-data contract, not ok:true with empty windows", async () => {
+    for (const payload of [{}, { limits: [] }, { limits: [{ kind: "session", resets_at: "2026-12-01T00:00:00Z" }] }]) {
+      const result = await fetchWith(payload)
+      expect(result.ok).toBe(false)
+      expect(result.configured).toBe(true)
+      expect(result.error).toBe("No quota data in response")
+      expect(result.usage).toBeNull()
+    }
+  })
+
+  test("a real figure still publishes its window (control)", async () => {
+    const result = await fetchWith({ five_hour: { utilization: 10, resets_at: "2026-12-01T00:00:00Z" } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(10)
   })
 })
 
