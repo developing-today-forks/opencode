@@ -300,6 +300,34 @@ describe("DigitalOceanPlugin", () => {
     }),
   )
 
+  it.live("rejects an over-cap token POST body and releases the listener (#1954)", () =>
+    Effect.gen(function* () {
+      const fixture = yield* discovery
+      fixture.remote.status = 503
+      yield* fixture.install
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const attempt = yield* integrations.oauth.connect({ integrationID, methodID })
+      const url = new URL(attempt.url)
+      const response = yield* Effect.promise(() =>
+        fetch("http://localhost:1456/auth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify({
+            access_token: "x".repeat(100_000),
+            expires_in: "3600",
+            state: url.searchParams.get("state"),
+          }),
+        }),
+      )
+      expect(response.status).toBe(413)
+      expect(yield* status(attempt)).toMatchObject({ status: "failed", message: "OAuth callback body too large" })
+      expect(yield* credentials.list(integrationID)).toEqual([])
+      const next = yield* integrations.oauth.connect({ integrationID, methodID })
+      yield* integrations.oauth.cancel({ integrationID, attemptID: next.attemptID })
+    }),
+  )
+
   const invalid = [
     {
       name: "mismatched state",
