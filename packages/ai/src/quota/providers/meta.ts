@@ -218,20 +218,29 @@ const toUsedPercent = (value: JsonValue | undefined): number | null => {
 const keyUsageResult = (body: JsonObject): QuotaResult => {
   const subsUsage = asObject(body.subs_usage)
   const windows: Record<string, QuotaWindow> = {}
+  // A window object with no usable used_percent carries no quota
+  // figure, so it publishes no window (#1907; contract rule 4, the
+  // codex #1762 disposition for the identical shape): an empty
+  // window object used to mint a phantom all-null window beside the
+  // real one, and two empty objects made an all-null answer read as
+  // a successful quota read instead of reaching the no-data /
+  // post-roll dispositions below.
   const rolling = asObject(subsUsage?.window)
-  if (rolling) {
+  const rollingPercent = rolling ? toUsedPercent(rolling.used_percent) : null
+  if (rolling && rollingPercent !== null) {
     const durationMinutes = toNumber(rolling.window_duration_mins)
     const windowSeconds = durationMinutes !== null && durationMinutes > 0 ? durationMinutes * 60 : null
     windows[windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"] = toUsageWindow({
-      usedPercent: toUsedPercent(rolling.used_percent),
+      usedPercent: rollingPercent,
       windowSeconds,
       resetAt: toTimestamp(rolling.resets_at),
     })
   }
   const weekly = asObject(subsUsage?.weekly)
-  if (weekly) {
+  const weeklyPercent = weekly ? toUsedPercent(weekly.used_percent) : null
+  if (weekly && weeklyPercent !== null) {
     windows.weekly = toUsageWindow({
-      usedPercent: toUsedPercent(weekly.used_percent),
+      usedPercent: weeklyPercent,
       windowSeconds: WEEKLY_SECONDS,
       resetAt: toTimestamp(weekly.resets_at),
     })
