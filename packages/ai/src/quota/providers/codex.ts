@@ -159,9 +159,22 @@ const fetchQuotaForEntry = async (
     if (spendLimit) {
       const used = toNumber(spendLimit.used)
       const limit = toNumber(spendLimit.limit)
+      // Clamp the WHOLE window (#1882, contract rule 5 — the #1821
+      // command-code shape): when both figures parse and the limit is
+      // positive, percent and label derive from one clamped used
+      // figure, so they can never contradict — negative used publishes
+      // 0% with "0 / <limit> used", over-limit used publishes 100%
+      // with "<limit> / <limit> used" (the clamped-label disposition
+      // for over-limit). A non-positive limit is no denominator at
+      // all: the label is dropped, and only a usable used_percent
+      // can still publish the window.
+      const clampedUsed = used !== null && limit !== null && limit > 0 ? Math.min(limit, Math.max(0, used)) : null
       const valueLabel =
-        used !== null && limit !== null ? `${used.toFixed(0)} / ${limit.toFixed(0)} used` : null
-      const usedPercent = clampPercent(toNumber(spendLimit.used_percent))
+        clampedUsed !== null && limit !== null ? `${clampedUsed.toFixed(0)} / ${limit.toFixed(0)} used` : null
+      const usedPercent =
+        clampedUsed !== null && limit !== null
+          ? (clampedUsed / limit) * 100
+          : clampPercent(toNumber(spendLimit.used_percent))
       if (usedPercent !== null || valueLabel !== null) {
         windows.credits = toUsageWindow({
           usedPercent,
