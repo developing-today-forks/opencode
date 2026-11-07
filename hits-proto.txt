@@ -1,0 +1,75 @@
+packages/ai/src/protocols/anthropic-messages.ts :: name: SERVER_TOOL_RESULT_NAMES[block.type],
+packages/ai/src/protocols/bedrock-converse.ts :: const redactedChunks = state.reasoningRedactedContent[index] ?? []
+packages/ai/src/protocols/cartesia-speech.ts :: const container = Object.hasOwn(CONTAINERS, format) ? CONTAINERS[format] : undefined
+packages/ai/src/protocols/cohere-chat.ts :: tool_choice: TOOL_CHOICE[request.toolChoice?.type ?? "auto"],
+packages/ai/src/protocols/deepgram-speech.ts :: const headerless = Object.hasOwn(HEADERLESS_ENCODINGS, headerlessKey) ? HEADERLESS_ENCODINGS[headerlessKey] : undefined
+packages/ai/src/protocols/deepgram-speech.ts :: request.format === undefined || !Object.hasOwn(FORMATS, request.format) ? undefined : FORMATS[request.format]
+packages/ai/src/protocols/elevenlabs-speech.ts :: (Object.hasOwn(OUTPUT_FORMATS, requested) ? OUTPUT_FORMATS[requested] : undefined)
+packages/ai/src/protocols/elevenlabs-speech.ts :: const encoding = Object.hasOwn(PCM_CODECS, codec) ? PCM_CODECS[codec] : undefined
+packages/ai/src/protocols/gemini.ts :: ProviderShared.sumTokens(...requests.map((usage) => usage[field] ?? undefined))
+packages/ai/src/protocols/meta-responses.ts :: if (!done.item || completedItems.has(done.item.id) || completedItems.has(state.outputItems[index] ?? "")) continue
+packages/ai/src/protocols/open-responses.ts :: Object.hasOwn(ITEM_ID_PREFIX, type) ? (ITEM_ID_PREFIX[type] ?? "item") : "item"
+packages/ai/src/protocols/open-responses.ts :: event.output_index === undefined ? event.item_id : (state.outputItems[event.output_index] ?? event.item_id)
+packages/ai/src/protocols/openai-chat.ts :: const fallbackTool = tools[fallback] ?? pendingTools[fallback]
+packages/ai/src/protocols/replicate-images.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/ai/src/protocols/replicate-images.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/ai/src/protocols/utils/bedrock-media.ts :: const documentFormat = Object.hasOwn(DOCUMENT_FORMATS, mime) ? DOCUMENT_FORMATS[mime as keyof typeof DOCUMENT_FORMATS] : undefined
+packages/ai/src/protocols/utils/bedrock-media.ts :: const imageFormat = Object.hasOwn(IMAGE_FORMATS, mime) ? IMAGE_FORMATS[mime as keyof typeof IMAGE_FORMATS] : undefined
+packages/ai/src/protocols/utils/speech-stream.ts :: items: texts.map((text, index) => ({ text, startSeconds: starts[index] ?? 0, endSeconds: ends[index] ?? 0 })),
+packages/ai/src/protocols/utils/speech-stream.ts :: mediaType: Object.hasOwn(CONTAINER_MEDIA_TYPES, format) ? CONTAINER_MEDIA_TYPES[format] : undefined,
+packages/ai/src/protocols/utils/speech-stream.ts :: mediaType: mediaType ?? (Object.hasOwn(PCM_MEDIA_TYPES, encoding) ? PCM_MEDIA_TYPES[encoding] : undefined),
+packages/ai/src/route/executor.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/ai/src/route/executor.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/ai/src/route/media-protocol.ts :: ? new FAILURES[failure]({ message, body, http })
+packages/ai/src/schema/events.ts :: const current = state.toolInputs[event.id] ?? { name: event.name, namespace: event.namespace, text: "" }
+packages/ai/src/schema/events.ts :: const current = state.toolInputs[event.id] ?? { name: event.name, namespace: event.namespace, text: "" }
+packages/ai/src/utils/media-type.ts :: (Object.hasOwn(EXTENSION_ALIASES, type) ? EXTENSION_ALIASES[type] : undefined) ??
+packages/ai/src/utils/media-type.ts :: return Object.hasOwn(EXTENSIONS, extension) ? EXTENSIONS[extension] : undefined
+packages/core/src/aisdk-native.ts :: const hostTable = (providerID: string) => (Object.hasOwn(HOSTS, providerID) ? HOSTS[providerID] : undefined)
+packages/core/src/aisdk-native.ts :: return Object.hasOwn(PACKAGES, npm) ? PACKAGES[npm] : undefined
+packages/core/src/codemode/catalog.ts :: const namespaces = [...Map.groupBy(flattened.tools, (tool) => tool.path.split(".", 1)[0] ?? tool.path)]
+packages/core/src/database/drizzle/internal/drizzle-utils.ts :: node[pathChunk] = (node[pathChunk] ?? {}) as Record<string, unknown>
+packages/core/src/database/v1-migration.bun.ts :: .map((name) => `\`${name}\` is now \`${RENAMED_TOOLS[name]}\``)
+packages/core/src/database/v1-migration.bun.ts :: ? [`The \`${renamed[0]}\` tool is now \`${RENAMED_TOOLS[renamed[0]]}\` and must be called by that name.`]
+packages/core/src/embeddings-native.ts :: for (let index = 0; index < dimensions; index++) sliced[index] = full[index] ?? 0
+packages/core/src/form.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/core/src/form.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/core/src/generate.ts :: if (typeof path === "string" && !path.endsWith(DOOR_PATHS[dialect])) return undefined
+packages/core/src/github-copilot/chat/openai-compatible-chat-language-model.ts :: Object.entries(providerOptions?.[this.providerOptionsName] ?? {}).filter(
+packages/core/src/messaging/vars.ts :: return args[name] ?? args.to
+packages/core/src/model-route-limits.ts :: for (const [, amount, unit] of text.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h|d)/g)) total += Number(amount) * UNITS[unit]
+packages/core/src/model-route-limits.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/core/src/model-route-limits.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/core/src/model-route-limits.ts :: total += Number(amount) * (RELATIVE_UNITS[unit] ?? 1_000)
+packages/core/src/model-route-schedule.ts :: dayOfWeek: SHORT_DAYS[values.weekday.toLowerCase()] ?? 0,
+packages/core/src/model-route-schedule.ts :: return Object.hasOwn(DAY_NAMES, text) ? DAY_NAMES[text] : undefined
+packages/core/src/model-route-schedule.ts :: window.daysOfWeek?.length ? window.daysOfWeek.map((day) => DAY_LABELS[day]).join(", ") : "every day"
+packages/core/src/model-route.ts :: [...from].toSorted((left, right) => (effective[right] ?? 1) - (effective[left] ?? 1))
+packages/core/src/model-route.ts :: const base = node.weights[position] ?? 1
+packages/core/src/model-route.ts :: const base = node.weights[position] ?? 1
+packages/core/src/model-route.ts :: const score = (state.scores.get(index) ?? 0) + (weights[index] ?? 1)
+packages/core/src/model-route.ts :: const total = candidateIndexes.reduce((sum, index) => sum + (weights[index] ?? 1), 0)
+packages/core/src/model-route.ts :: const total = candidateIndexes.reduce((sum, index) => sum + (weights[index] ?? 1), 0)
+packages/core/src/model-route.ts :: const trace = tracedWeightOf(definition.targets[child.leaf], node.weights[position] ?? 1, now, {
+packages/core/src/model-route.ts :: draw -= weights[index] ?? 1
+packages/core/src/model-route.ts :: node.selection === "round-robin" ? (tiers?.[position]?.weight ?? 1) : (effective[position] ?? 1),
+packages/core/src/muse-attestation.ts :: const alias = ALIASES[name]
+packages/core/src/plugin/command.ts :: (prompt.arguments ?? []).map((argument, index) => [argument.name, args[index] ?? ""]),
+packages/core/src/plugin/tool-input-repair.ts :: ? (tuple[index] ?? (Array.isArray(schema.prefixItems) ? schema.items : schema.additionalItems))
+packages/core/src/ripgrep/binary.ts :: const config = PLATFORM[platformKey]
+packages/core/src/session/compaction.ts :: const step = SHRINK_STEPS[rejections]
+packages/core/src/session/runner/publish-llm-event.ts :: const failure = INPUT_FAILURES[reason]
+packages/core/src/shell/parse.ts :: !raw.includes("`$") && /['"`]/.test(raw) ? (item.words[index] ?? raw) : raw.replaceAll("`$", "\0")
+packages/core/src/shell/parse.ts :: const arity = Object.hasOwn(ARITY, key) ? ARITY[key] : undefined
+packages/core/src/shell/scan.ts :: (/^(?:(?:dis_)?(?:functions|[gs]?aliases)|options|commands)$/.test(name) && "[=:".includes(input[colon] ?? "")))
+packages/core/src/shell/scan.ts :: (state.context.dialect !== "bash" && ZSH_PRECOMMANDS.has(state.words[name] ?? ""))
+packages/core/src/shell/scan.ts :: BASH_PRECOMMANDS.has(state.words[name] ?? "") ||
+packages/core/src/shell/scan.ts :: else while (/\d/.test(input[cursor] ?? "")) cursor++
+packages/core/src/shell/scan.ts :: return { value: POWERSHELL_ESCAPES[char] ?? char, end: next }
+packages/core/src/shell/scan.ts :: value += BASH_ANSI_ESCAPES[escaped]
+packages/core/src/shell/scan.ts :: while (/\d/.test(input[cursor] ?? "")) cursor++
+packages/core/src/systemone.ts :: const gatewayBase = (process.env[GATEWAY_BASE_ENV] ?? DEFAULT_GATEWAY_BASE).replace(/\/+$/, "")
+packages/core/src/tool/plugin/route-usage.ts :: rows: (history?.windowSessionTargets[index] ?? []).flatMap((row) =>
+packages/core/src/util/slug.ts :: ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)],
+packages/core/src/util/slug.ts :: NOUNS[Math.floor(Math.random() * NOUNS.length)],
+packages/core/src/variant.ts :: ? PROTOCOLS[model.package]

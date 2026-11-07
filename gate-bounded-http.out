@@ -1,0 +1,24 @@
+$ bun script/check-bounded-http.ts
+Unlisted bounded-http candidate at packages/cli/src/commands/handlers/api.ts:70:
+  const text = await response.text()
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Unlisted bounded-http candidate at packages/cli/src/commands/handlers/api.ts:121:
+  const text = await response.text()
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Unlisted bounded-http candidate at packages/cli/script/build.ts:258:
+  fetch(checksumsUrl, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Unlisted bounded-http candidate at packages/cli/script/build.ts:259:
+  fetch(url, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Unlisted bounded-http candidate at packages/cli/script/build.ts:264:
+  const [data, checksums] = await Promise.all([response.arrayBuffer(), checksumsResponse.text()])
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Unlisted bounded-http candidate at packages/cli/script/build.ts:277:
+  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, {
+  Bound it at the site (deadlineSignal / AbortSignal.timeout + readBoundedResponseText / readExcerptResponseText / collectBoundedResponseBody), or add its disposition to script/check-bounded-http.allowlist.txt.
+Stale allowlist entry (the line no longer matches a sweep pattern): packages/cli/src/commands/handlers/api.ts :: return (await response.json()) as OpenApi
+Stale allowlist entry (the line no longer matches a sweep pattern): packages/cli/src/commands/handlers/api.ts :: const output = await response.text()
+Stale allowlist entry (the line no longer matches a sweep pattern): packages/cli/script/build.ts :: const response = await fetch(url, {
+Stale allowlist entry (the line no longer matches a sweep pattern): packages/cli/script/build.ts :: const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`)
+error: script "check:bounded-http" exited with code 1

@@ -1,0 +1,15 @@
+$ bun script/check-proto-reads.ts
+Unlisted prototype-chain read candidate at packages/core/src/generate.ts:171:
+  if (typeof path === "string" && !path.endsWith(DOOR_PATHS[dialect])) return undefined
+  Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to script/check-proto-reads.allowlist.txt.
+Unlisted prototype-chain read candidate at packages/core/src/embeddings-native.ts:139:
+  for (let index = 0; index < dimensions; index++) sliced[index] = full[index] ?? 0
+  Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to script/check-proto-reads.allowlist.txt.
+Unlisted prototype-chain read candidate at packages/core/src/systemone.ts:235:
+  const gatewayBase = (process.env[GATEWAY_BASE_ENV] ?? DEFAULT_GATEWAY_BASE).replace(/\/+$/, "")
+  Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to script/check-proto-reads.allowlist.txt.
+Unlisted prototype-chain read candidate at packages/core/src/muse-attestation.ts:90:
+  const alias = ALIASES[name]
+  Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to script/check-proto-reads.allowlist.txt.
+Stale allowlist entry (the line no longer matches a sweep pattern): packages/core/src/model-route-tuning.ts :: total += Number(amount) * (unit[name] ?? 1_000)
+error: script "check:proto-reads" exited with code 1

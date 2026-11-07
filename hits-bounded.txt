@@ -1,0 +1,357 @@
+packages/ai/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/ai/script/recording-cost-report.ts :: const readJson = async (file: string) => JSON.parse(await Bun.file(file).text()) as unknown
+packages/ai/script/recording-cost-report.ts :: const response = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(MODELS_DEV_FETCH_TIMEOUT_MS) })
+packages/app/src/composer/attachments/attachments.ts :: const bytes = new Uint8Array(await file.slice(0, 4096).arrayBuffer())
+packages/app/src/home/projects/controller.tsx :: await file.text(),
+packages/app/src/runtime/persistence/drafts.test.ts :: const id = `blob-${await blob.text().then((text) => Bun.hash(text).toString(16))}`
+packages/app/src/runtime/persistence/drafts.ts :: ? new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()))
+packages/app/src/runtime/persistence/drafts.ts :: const blob = await fetch(item.dataUrl).then((response) => response.blob())
+packages/app/src/runtime/persistence/drafts.ts :: const data = await fetch(blob.id).then((response) => response.blob())
+packages/app/src/runtime/persistence/drafts.ts :: const data = kept ? kept.blob : await fetch(url!).then((response) => response.blob())
+packages/app/src/runtime/persistence/drafts.ts :: else if (url) sources.set(id, { blob: () => fetch(url).then((response) => response.blob()) })
+packages/app/src/runtime/persistence/drafts.ts :: return remember(chunks, id, blob ? await blob.text() : "")
+packages/app/src/runtime/server/request-queue.test.ts :: await expect(input.queue.fetch("http://server/api/session", { signal: controller.signal })).rejects.toBeInstanceOf(
+packages/app/src/runtime/server/request-queue.test.ts :: const aborted = input.queue.fetch("http://server/api/second", { signal: controller.signal })
+packages/app/src/runtime/server/request-queue.test.ts :: const create = input.queue.fetch("http://server/api/worktree?location[directory]=%2Fa", { method: "POST" })
+packages/app/src/runtime/server/request-queue.test.ts :: const dead = input.queue.fetch("http://server/api/dead")
+packages/app/src/runtime/server/request-queue.test.ts :: const next = input.queue.fetch("http://server/api/next")
+packages/app/src/runtime/server/request-queue.test.ts :: const request = input.queue.fetch("http://server/api/slow", { signal: controller.signal })
+packages/app/src/runtime/server/request-queue.test.ts :: const response = input.queue.fetch("http://server/api/session")
+packages/app/src/runtime/server/request-queue.test.ts :: const responses = Array.from({ length: 12 }, (_, index) => input.queue.fetch(`http://server/api/${index}`))
+packages/app/src/runtime/server/request-queue.test.ts :: const responses = ["/api/a", "/api/b", "/api/c"].map((path) => input.queue.fetch(`http://server${path}`))
+packages/app/src/runtime/server/request-queue.test.ts :: const responses = paths.map((path) => input.queue.fetch(`http://server${path}`))
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/info").catch(() => undefined)
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree/refresh?location[directory]=%2Fa", { method: "POST" }),
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree?location[directory]=%2Fa"),
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree?location[directory]=%2Fa").catch(() => undefined)
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree?location[directory]=%2Fa", { method: "DELETE" }),
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree?location[directory]=%2Fb").catch(() => undefined)
+packages/app/src/runtime/server/request-queue.test.ts :: input.queue.fetch("http://server/api/worktree?location[directory]=%2Fc").catch(() => undefined)
+packages/app/src/runtime/server/request-queue.test.ts :: void input.queue.fetch("http://server/api/event")
+packages/app/src/runtime/server/request-queue.test.ts :: void input.queue.fetch("http://server/api/first")
+packages/app/src/runtime/server/request-queue.test.ts :: void input.queue.fetch("http://server/api/session")
+packages/app/src/session/timeline/turn-diffs.ts :: void fetch()
+packages/app/src/theme-preload.test.ts :: const src = await Bun.file(new URL("../public/oc-theme-preload.js", import.meta.url)).text()
+packages/cli/script/app-assets.ts :: const body = Buffer.from(await Bun.file(path.join(root, "dist", key)).arrayBuffer())
+packages/cli/script/build-node.ts :: const data = new Uint8Array(await response.arrayBuffer())
+packages/cli/script/build-node.ts :: const expected = (await sums.text())
+packages/cli/script/build-node.ts :: fetch(`${base}/${filename}`, { signal: AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS) }),
+packages/cli/script/build-node.ts :: fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS) }),
+packages/cli/script/build.ts :: const [data, checksums] = await Promise.all([response.arrayBuffer(), checksumsResponse.text()])
+packages/cli/script/build.ts :: const data: unknown = await response.json()
+packages/cli/script/build.ts :: const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, {
+packages/cli/script/build.ts :: fetch(checksumsUrl, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+packages/cli/script/build.ts :: fetch(url, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+packages/cli/script/publish-aur.ts :: `sha256sums=('${new Bun.CryptoHasher("sha256").update(await license.arrayBuffer()).digest("hex")}' '${new Bun.CryptoHasher("sha256").update(shim).digest("hex")}')`,
+packages/cli/script/publish-aur.ts :: await Bun.write(path.join(outdir, ".SRCINFO"), await $`makepkg --printsrcinfo`.cwd(outdir).text())
+packages/cli/script/publish-aur.ts :: const pkg: { name: string; version: string } = await Bun.file(path.join(directory, "package.json")).json()
+packages/cli/script/publish-aur.ts :: const sha256 = new Bun.CryptoHasher("sha256").update(await archive.arrayBuffer()).digest("hex")
+packages/cli/script/publish.ts :: const item = await Bun.file(`${input.root}/${filepath}`).json()
+packages/cli/script/schema.ts :: if ((await Bun.file(target).text()) !== content) {
+packages/cli/script/service-smoke.ts :: const body: unknown = await response.json()
+packages/cli/script/service-smoke.ts :: const entry = await fetch(new URL(script, url), { signal: AbortSignal.timeout(5_000) })
+packages/cli/script/service-smoke.ts :: const html = await shell.text()
+packages/cli/script/service-smoke.ts :: const info = await Schema.decodeUnknownPromise(Service.Info)(await Bun.file(registration).json())
+packages/cli/script/service-smoke.ts :: const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(5_000) })
+packages/cli/script/service-smoke.ts :: const response = await fetch(new URL("/api/info", url), {
+packages/cli/script/service-smoke.ts :: const shell = await fetch(url, { signal: AbortSignal.timeout(5_000) })
+packages/cli/script/service-smoke.ts :: const stopRoute = await fetch(new URL("/api/service/stop", info.url), {
+packages/cli/script/service-smoke.ts :: const tokenInfo = await fetch(new URL(`/api/info?auth_token=${token}`, info.url), {
+packages/cli/script/service-smoke.ts :: const tokenOpenApi = await fetch(new URL(`/openapi.json?auth_token=${token}`, info.url), {
+packages/cli/script/service-smoke.ts :: const unauthorizedInfo = await fetch(new URL("/api/info", info.url), {
+packages/cli/script/service-smoke.ts :: const unauthorizedOpenApi = await fetch(new URL("/openapi.json", info.url), {
+packages/cli/script/service-smoke.ts :: errors.push(new Response(process.stderr).text())
+packages/cli/script/service-smoke.ts :: if (entry.status !== 200 || (await entry.text()).length === 0)
+packages/cli/script/service-smoke.ts :: if (response?.ok) return Schema.decodeUnknownPromise(ServerInfo)(await response.json())
+packages/cli/src/commands/handlers/api.test.ts :: fetch() {
+packages/cli/src/commands/handlers/api.test.ts :: fetch() {
+packages/cli/src/commands/handlers/api.ts :: const response = await fetch(new URL("/openapi.json", endpoint.url), {
+packages/cli/src/commands/handlers/api.ts :: const response = await fetch(new URL(request.path, endpoint.url), {
+packages/cli/src/commands/handlers/api.ts :: const text = await response.text()
+packages/cli/src/commands/handlers/api.ts :: const text = await response.text()
+packages/cli/src/commands/handlers/session/import.ts :: const response = await fetch(new URL("/api/experimental/session/import", endpoint), {
+packages/cli/src/commands/handlers/session/import.ts :: return fetch(url, { signal }).then((response) => {
+packages/cli/src/run/fetch.ts :: return fetch(request, { ...init, signal })
+packages/cli/src/run/fetch.ts :: return fetch(request, { ...init, timeout: false } as BunFetchRequestInit)
+packages/cli/src/services/updater.ts :: const text = await response.text()
+packages/cli/src/services/updater.ts :: fetch(
+packages/cli/src/ssh-askpass.test.ts :: expect(await new Response(child.stderr).text()).toBe("")
+packages/cli/src/ssh-askpass.test.ts :: expect(await new Response(child.stdout).text()).toBe("pässwörd\n")
+packages/cli/src/ssh-askpass.test.ts :: expect(await new Response(child.stdout).text()).toBe('passphrase"with spaces\n')
+packages/cli/src/util/io.ts :: const body = await response.text()
+packages/client/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/client/src/promise/generated/client.ts :: const bytes = new Uint8Array(await response.arrayBuffer())
+packages/client/src/promise/generated/client.ts :: return await fetch(prepared.url, prepared.init)
+packages/client/src/promise/generated/client.ts :: text = await response.text()
+packages/client/src/service-probe.ts :: const result = await fetch(new URL("/api/info", info.url), { headers: headers(endpoint), signal })
+packages/client/src/service-probe.ts :: const text = await response.text()
+packages/codemode/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/codemode/script/sync-test262.ts :: const manifest = (await Bun.file(path.join(root, "manifest.json")).json()) as {
+packages/codemode/script/sync-test262.ts :: const source = await Bun.file(path.join(from, file)).text()
+packages/console/app/script/dev-enterprise.ts :: async fetch(request) {
+packages/console/app/script/dev-enterprise.ts :: const response = await fetch(accountUrl, {
+packages/console/app/script/dev-enterprise.ts :: new Response(child.stderr).text(),
+packages/console/app/script/dev-enterprise.ts :: new Response(child.stdout).text(),
+packages/console/app/script/dev-enterprise.ts :: return z.object({ account: consoleAccountSchema.nullable() }).parse(await response.json()).account
+packages/console/app/src/component/header.tsx :: const response = await fetch(svgPath)
+packages/console/app/src/component/header.tsx :: const svgText = await response.text()
+packages/console/app/src/lib/aws.test.ts :: body: await request.clone().text(),
+packages/console/app/src/lib/aws.ts :: const res = await client.fetch("https://email.us-east-1.amazonaws.com/v2/email/outbound-emails", {
+packages/console/app/src/lib/changelog.ts :: const response = await fetch("https://api.github.com/repos/anomalyco/opencode/releases?per_page=20", {
+packages/console/app/src/lib/console-account.ts :: const response = await fetch(`${Resource.CONSOLE_CRM_LOOKUP_URL.value}`, {
+packages/console/app/src/lib/console-signup.test.ts :: async fetch(request) {
+packages/console/app/src/lib/console-signup.test.ts :: const payload = z.record(z.string(), z.unknown()).parse(await request.json())
+packages/console/app/src/lib/console-signup.test.ts :: const response = await fetch(new URL(path, server.url), {
+packages/console/app/src/lib/console-signup.test.ts :: expect(await response.json()).toMatchObject({ success: true })
+packages/console/app/src/lib/console-signup.test.ts :: return response.status === 204 ? null : response.json()
+packages/console/app/src/lib/console-signup.ts :: const data: unknown = await request.json().catch(() => null)
+packages/console/app/src/lib/emailoctopus.ts :: return fetch(`https://api.emailoctopus.com/lists/${listId}/contacts`, {
+packages/console/app/src/lib/enterprise.ts :: const body = (await request.json()) as EnterpriseFormData
+packages/console/app/src/lib/github.ts :: fetch(`${apiBaseUrl}/contributors?per_page=1`, { headers, signal }),
+packages/console/app/src/lib/github.ts :: fetch(`${apiBaseUrl}/releases`, { headers, signal }).then((res) =>
+packages/console/app/src/lib/github.ts :: fetch(apiBaseUrl, { headers, signal }).then((res) => readCappedJson(res, signal, GITHUB_META_MAX_BYTES)),
+packages/console/app/src/lib/inference-proxy.ts :: .fetch(forwarded, { redirect: "manual", signal: abortSignal })
+packages/console/app/src/lib/salesforce.test.ts :: async fetch(request, instance) {
+packages/console/app/src/lib/salesforce.test.ts :: const [output, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited])
+packages/console/app/src/lib/salesforce.test.ts :: const response = await fetch(`${server.url.origin}/services/data/v59.0/sobjects/Lead`, {
+packages/console/app/src/lib/salesforce.test.ts :: expect(await response.json()).toMatchObject({ success: true })
+packages/console/app/src/lib/salesforce.test.ts :: leads.push(await request.json())
+packages/console/app/src/lib/salesforce.ts :: const res = await fetch(`${auth.url}/services/data/v59.0/sobjects/Lead`, {
+packages/console/app/src/lib/salesforce.ts :: const res = await fetch(`${url}/services/oauth2/token`, {
+packages/console/app/src/lib/salesforce.ts :: const response = await fetch(`${auth.url}${path}`, {
+packages/console/app/src/lib/salesforce.ts :: return response.json()
+packages/console/app/src/lib/stats-proxy.test.ts :: expect(await response.text()).toBe(`{"ok":true}`)
+packages/console/app/src/lib/stats-proxy.test.ts :: expect(await response.text()).toContain(`"/data/_build/app.js"`)
+packages/console/app/src/lib/stats-proxy.ts :: const response = await fetch(targetUrl, {
+packages/console/app/src/routes/brand/index.tsx :: const response = await fetch(url)
+packages/console/app/src/routes/docs/[...path].ts :: const response = await fetch(targetUrl, {
+packages/console/app/src/routes/docs/index.ts :: const response = await fetch(targetUrl, {
+packages/console/app/src/routes/download/[channel]/[platform].ts :: const release = await fetch(
+packages/console/app/src/routes/enterprise/index.tsx :: const data = (await response.json().catch(() => null)) as { error?: string } | null
+packages/console/app/src/routes/enterprise/index.tsx :: const response = await fetch("/api/enterprise", {
+packages/console/app/src/routes/honeycomb/webhook.test.ts :: expect(await response.json()).toEqual({ message: "discord webhook failed" })
+packages/console/app/src/routes/honeycomb/webhook.test.ts :: expect(await response.json()).toEqual({ message: "sent" })
+packages/console/app/src/routes/honeycomb/webhook.ts :: const body = await input.request.json()
+packages/console/app/src/routes/honeycomb/webhook.ts :: return fetch(Resource.DISCORD_INCIDENT_WEBHOOK_URL.value, {
+packages/console/app/src/routes/openapi.json.ts :: const json = await response.json()
+packages/console/app/src/routes/openapi.json.ts :: const response = await fetch(
+packages/console/app/src/routes/proxy-timeout.test.ts :: expect(await response.text()).toBe("upstream-body")
+packages/console/app/src/routes/s/[id].ts :: const response = await fetch(targetUrl, {
+packages/console/app/src/routes/t/[...path].tsx :: const response = await fetch(targetUrl, {
+packages/containers/script/build.ts :: const pkg = await Bun.file(root).json()
+packages/core/script/benchmark-snapshot-pack.ts :: (await $`find ${path.join(store, "objects")} -path '*/objects/??/*' -type f`.quiet().text())
+packages/core/script/benchmark-snapshot-pack.ts :: const size = async (directory: string) => Number((await $`du -sk ${directory}`.quiet().text()).split("\t")[0])
+packages/core/script/benchmark-snapshot-session.ts :: const files = (await $`git ls-files -z -- '*.ts'`.cwd(directory).text()).split("\0").filter(Boolean).slice(0, 50)
+packages/core/script/benchmark-snapshot.ts :: const source = (await $`git rev-parse --show-toplevel`.cwd(import.meta.dir).text()).trim()
+packages/core/script/migration.ts :: await Bun.write(snapshot, await formatJson(await Bun.file(path.join(incremental, name, "snapshot.json")).text()))
+packages/core/script/migration.ts :: if ((await Bun.file(registry).text()) !== (await formatTypescript(renderRegistry(migrations)))) {
+packages/core/script/migration.ts :: if ((await Bun.file(schema).text()) !== (await formatTypescript(renderSchema(await generatedSql(full))))) {
+packages/core/script/migration.ts :: renderMigration(name, await Bun.file(path.join(incremental, name, "migration.sql")).text()),
+packages/core/script/migration.ts :: return Bun.file(path.join(directory, generated[0]!, "migration.sql")).text()
+packages/core/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/core/script/snapshot-parity-compare.ts :: const [left, right] = await Promise.all(process.argv.slice(2, 4).map((file) => Bun.file(file!).json()))
+packages/core/script/snapshot-parity.ts :: const stores = (await $`find ${path.join(data, "snapshot")} -mindepth 2 -maxdepth 2 -type d`.quiet().text())
+packages/core/script/update-models-snapshot.ts :: const response = await fetch(`${source}/api.json`, { signal: deadlineSignal(undefined, FETCH_DEADLINE_MS) }).catch(
+packages/core/script/wellknown-server.ts :: async fetch(request) {
+packages/core/src/aisdk.ts :: body: web.body ? await web.arrayBuffer() : undefined,
+packages/core/src/aisdk.ts :: const body = request.body ? new Uint8Array(yield* Effect.promise(() => request.arrayBuffer())) : undefined
+packages/core/src/codemode/web.ts :: const response = await globalThis.fetch(input, {
+packages/core/src/github-copilot/models.ts :: const response = await fetch(url, {
+packages/core/src/mcp/oauth.ts :: const error = yield* Effect.tryPromise(async () => parseErrorResponse(await response.clone().text())).pipe(
+packages/core/src/modal/models.ts :: const response = await fetch(url, {
+packages/core/src/oauth/page.ts :: fetch(TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:signal}).then(function(res){
+packages/core/src/persistent-pty/binary.bun.ts :: const bytes = new Uint8Array(await Bun.file(input.path).arrayBuffer())
+packages/core/src/plugin/provider/chatgpt.ts :: const response = await fetch(url, { ...init, signal })
+packages/core/src/plugin/provider/github-copilot.ts :: const response = await fetch(url, { ...init, signal })
+packages/core/src/plugin/provider/github-copilot.ts :: const text = yield* Effect.promise(() => evt.request.clone().text())
+packages/core/src/plugin/provider/gitlab.ts :: fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal }),
+packages/core/src/plugin/provider/openai.ts :: const response = await fetch(url, { ...init, signal })
+packages/core/src/plugin/provider/openai.ts :: fetch(`${issuer}/api/accounts/deviceauth/token`, {
+packages/core/src/plugin/provider/openai.ts :: fetch(`http://localhost:${port}/cancel`, {
+packages/core/src/plugin/provider/snowflake-cortex.ts :: const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text())))
+packages/core/src/plugin/provider/xai.ts :: try: (signal) => fetch(url, { ...init, signal }),
+packages/core/src/plugin/vcs/git.ts :: const list = nuls(result.text())
+packages/core/src/plugin/vcs/git.ts :: const name = result.text().trim()
+packages/core/src/plugin/vcs/git.ts :: const parts = result.text().split("\t")
+packages/core/src/plugin/vcs/git.ts :: return (yield* run(args, opts)).text()
+packages/core/src/plugin/vcs/git.ts :: return result.text().trim() || undefined
+packages/core/src/plugin/vcs/git.ts :: return result.text().trim() || undefined
+packages/core/src/plugin/vcs/git.ts :: return result.text().trim() || undefined
+packages/core/src/plugin/vcs/git.ts :: return { text: result.text(), truncated: result.truncated } satisfies Patch
+packages/core/src/plugin/vcs/git.ts :: return { text: result.text(), truncated: result.truncated } satisfies Patch
+packages/core/src/plugin/vcs/git.ts :: return { text: result.truncated ? "" : result.text(), truncated: result.truncated } satisfies Patch
+packages/core/src/plugin/vcs/git.ts :: return { text: result.truncated ? "" : result.text(), truncated: result.truncated } satisfies Patch
+packages/core/src/plugin/vcs/hg.ts :: return result.text()
+packages/core/src/plugin/vcs/hg.ts :: return result.text().trim() || undefined
+packages/core/src/plugin/vcs/hg.ts :: return result.text().trim() || undefined
+packages/core/src/plugin/vcs/hg.ts :: return { text: result.text(), truncated: result.truncated }
+packages/core/src/session/model-request.ts :: new Uint8Array(yield* Effect.promise(() => before.request.clone().arrayBuffer())),
+packages/core/src/tool/plugin/mcpx.ts :: return send(() => fetch(`${endpoint.replace(/\/+$/, "")}${path}`, init), path, timeoutMs)
+packages/desktop/scripts/bench-startup.ts :: .then((r) => r.json() as Promise<{ type: string; url: string; webSocketDebuggerUrl: string }[]>)
+packages/desktop/scripts/bench-startup.ts :: if (registration.url && (await fetch(`${registration.url}/api/info`).then((r) => r.status < 500).catch(() => false))) {
+packages/desktop/scripts/bench-startup.ts :: return fetch(`http://127.0.0.1:${port}/json`)
+packages/desktop/scripts/dev-electron.ts :: .update(await Bun.file(import.meta.filename).text())
+packages/desktop/scripts/dev-electron.ts :: .update(await Bun.file(join(electron, "package.json")).text())
+packages/desktop/scripts/dev-electron.ts :: .update(await icon.arrayBuffer())
+packages/desktop/scripts/finalize-latest-json.ts :: const rel = await fetch(`https://api.github.com/repos/${repo}/releases/${releaseId}`, {
+packages/desktop/scripts/finalize-latest-json.ts :: const res = await fetch(asset?.url ?? url, {
+packages/desktop/scripts/finalize-latest-json.ts :: return (await sigFile.text()).trim()
+packages/desktop/scripts/finalize-latest-json.ts :: return parse(await item.text())
+packages/desktop/scripts/finalize-latest-yml.ts :: return parse(await file.text())
+packages/desktop/scripts/migration.ts :: if ((await Bun.file(output).text()) !== rendered) {
+packages/desktop/scripts/migration.ts :: statements: (await Bun.file(path.join(directory, id, "migration.sql")).text())
+packages/desktop/scripts/picker.test.ts :: const direct = await fetch(new URL("/__vite_opencode_picker_client.js", url))
+packages/desktop/scripts/picker.test.ts :: const html = await fetch(new URL(path, url)).then((response) => response.text())
+packages/desktop/scripts/picker.test.ts :: expect(await direct.text()).toContain("opencodePickerUi")
+packages/desktop/scripts/picker.test.ts :: sources.map((source) => fetch(new URL(source, url)).then((response) => response.text())),
+packages/desktop/scripts/prepare.ts :: const pkg = await Bun.file("./package.json").json()
+packages/desktop/scripts/publish.ts :: return parse(await file.text(), version, files)
+packages/desktop/scripts/utils.ts :: Schema.decodeUnknownOption(Manifest)(await Bun.file(join(pkg, "package.json")).text()),
+packages/desktop/scripts/windows-installer.test.ts :: new Response(result.stderr).text(),
+packages/desktop/scripts/windows-installer.test.ts :: new Response(result.stdout).text(),
+packages/desktop/src/main/extension/assets.test.ts :: body: await response.text(),
+packages/desktop/src/main/extension/manager.ts :: const response = await net.fetch(url).catch((error) => {
+packages/desktop/src/main/files/index.ts :: const bytes = yield* Effect.promise(() => payload.arrayBuffer())
+packages/desktop/src/main/native/logging.ts :: yield* fs.writeFile(output, new Uint8Array(yield* Effect.tryPromise(() => zip.arrayBuffer())))
+packages/desktop/src/main/storage/database.test.ts :: const source = (await Bun.file(path.join(directory, migration.id, "migration.sql")).text()).replaceAll(
+packages/desktop/src/main/windows/protocol.ts :: const response = await net.fetch(pathToFileURL(file).toString(), { headers: range ? { range } : undefined })
+packages/desktop/src/renderer/html.test.ts :: const content = await Bun.file(join(import.meta.dirname, "index.html")).text()
+packages/desktop/src/renderer/html.test.ts :: const entry = await Bun.file(join(import.meta.dirname, "index.tsx")).text()
+packages/desktop/src/renderer/html.test.ts :: expect(await Bun.file(join(import.meta.dirname, file)).text()).not.toMatch(/\bfrom\s+["']@sentry\//)
+packages/desktop/src/renderer/platform/index.ts :: if (input instanceof Request) return fetch(input)
+packages/desktop/src/renderer/platform/index.ts :: return fetch(input, init)
+packages/desktop/src/renderer/platform/storage.ts :: putBlob: (blob) => blob.arrayBuffer().then(api.draftBlobPut),
+packages/function/src/api.ts :: async fetch() {
+packages/function/src/api.ts :: const body = (await c.req.json()) as {
+packages/function/src/api.ts :: return stub.fetch(c.req.raw)
+packages/function/src/discord.ts :: const response = await fetch(`${input.baseUrl ?? DISCORD_API_BASE}/channels/${input.channelId}/messages`, {
+packages/gui-extensions/src/browser/panel.fixture.tsx :: return new Uint8Array(await (await canvas.convertToBlob({ type: "image/jpeg" })).arrayBuffer())
+packages/gui-extensions/src/microsoft-office/word-images.ts :: : fetch(source).then((response) => response.blob())
+packages/gui-extensions/src/sdk/reactive.ts :: void Promise.try(() => fetch(value, controller.signal)).then(
+packages/gui-extensions/src/updater/changelog.ts :: const text = await response.text()
+packages/gui-extensions/src/updater/whats-new.tsx :: fetch(CHANGELOG_URL, { signal: ctx.signal, headers: { Accept: "application/json" } })
+packages/gui-extensions/src/wsl/sidecar.ts :: return fetch(new URL("/api/info", url), {
+packages/http-recorder/script/build.ts :: if ((await Bun.file(file).text()).includes(["import", "("].join("")))
+packages/http-recorder/script/pack.ts :: const original = await Bun.file("package.json").text()
+packages/http-recorder/src/http/recorder.ts :: body: yield* Effect.promise(() => web.text()),
+packages/http-recorder/src/websocket/recorder.ts :: if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer())
+packages/httpapi-codegen/src/index.ts :: 'async function binary(response: Response): Promise<Uint8Array> {\n  const declared = Number(response.headers.get("content-length"))\n  if (Number.isFinite(declared) && declared > maxBinaryBodyBytes) {\n    try {\n      void response.body?.cancel()?.catch(() => {})\n    } catch {}\n    throw new ClientError("ResponseTooLarge")\n  }\n  if (response.body === null) {\n    const bytes = new Uint8Array(await response.arrayBuffer())\n    if (bytes.byteLength > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n    return bytes\n  }\n  const reader = response.body.getReader()\n  const chunks: Array<Uint8Array> = []\n  let bytes = 0\n  try {\n    while (true) {\n      const next = await reader.read()\n      if (next.done) break\n      bytes += next.value.byteLength\n      if (bytes > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n      chunks.push(next.value)\n    }\n  } catch (cause) {\n    if (cause instanceof ClientError) throw cause\n    throw new ClientError("Transport", { cause })\n  } finally {\n    try {\n      void reader.cancel().catch(() => {})\n    } catch {}\n    reader.releaseLock()\n  }\n  const merged = new Uint8Array(bytes)\n  let offset = 0\n  for (const chunk of chunks) {\n    merged.set(chunk, offset)\n    offset += chunk.byteLength\n  }\n  return merged\n}\n\n' +
+packages/httpapi-codegen/src/index.ts :: return `import type { ${imports.join(", ")} } from "./types.js"\nimport { ClientError } from "./client-error.js"\n\nexport interface ClientOptions {\n  readonly baseUrl: string\n  readonly fetch?: typeof globalThis.fetch\n  readonly headers?: RequestInit["headers"]\n  /** Deadline in milliseconds for a non-SSE request, composed with any caller signal (AbortSignal.any). Defaults to defaultRequestTimeoutMs; a non-finite, non-positive or absent value takes the default. SSE subscriptions carry no total deadline. */\n  readonly requestTimeout?: number\n}\n\nexport interface RequestOptions {\n  readonly signal?: AbortSignal\n  readonly headers?: RequestInit["headers"]\n  /** Reports every chunk a streaming response receives, including keepalive comments that yield no event. */\n  readonly onActivity?: () => void\n  /** Reports the SSE id of each streamed event just before that event is yielded. */\n  readonly onEventId?: (id: string) => void\n}\n\ninterface RequestDescriptor {\n  readonly method: string\n  readonly path: string\n  readonly query?: Record<string, unknown>\n  readonly headers?: Record<string, unknown>\n  readonly body?: unknown\n  readonly successStatus: number\n  readonly declaredStatuses: ReadonlyArray<number>\n  readonly empty: boolean\n}\n\nconst maxSseEventBytes = 16 * 1024 * 1024\n\nconst maxJsonBodyBytes = 16 * 1024 * 1024\n\n/** Default deadline for a non-SSE request, in milliseconds (#1385): a stalled or slow-dripping server otherwise hangs a signal-less request forever. 120_000 matches this package's own bound for waiting on a service promise (service-timing.ts defaultEnsureTiming.promiseTimeout). The composed signal stays live through the body read, so the deadline covers headers and body alike. */\nconst defaultRequestTimeoutMs = 120_000\n\nexport function make(options: ClientOptions) {\n  const fetch = options.fetch ?? globalThis.fetch\n\n  const requestTimeout = options.requestTimeout !== undefined && Number.isFinite(options.requestTimeout) && options.requestTimeout > 0 ? options.requestTimeout : defaultRequestTimeoutMs\n\n  // Non-SSE requests only: the SSE path keeps no total deadline, so a healthy long-lived stream is never killed. A caller signal still aborts independently of the deadline.\n  const withDeadline = (requestOptions?: RequestOptions): RequestOptions => {\n    const timeout = AbortSignal.timeout(requestTimeout)\n    return Object.assign({}, requestOptions, {\n      signal: requestOptions?.signal ? AbortSignal.any([requestOptions.signal, timeout]) : timeout,\n    })\n  }\n\n  const prepare = (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {\n    // A leading slash would replace any path prefix on baseUrl, so join relative to it.\n    const baseUrl = new URL(options.baseUrl)\n    if (!baseUrl.pathname.endsWith("/")) baseUrl.pathname += "/"\n    const url = new URL(descriptor.path.slice(1), baseUrl)\n    for (const [key, value] of Object.entries(descriptor.query ?? {})) appendQuery(url.searchParams, key, value)\n    const headers = new Headers(options.headers)\n    for (const [key, value] of Object.entries(descriptor.headers ?? {})) {\n      if (value !== undefined && value !== null) headers.set(key, String(value))\n    }\n    for (const [key, value] of new Headers(requestOptions?.headers)) headers.set(key, value)\n    if (descriptor.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json")\n    return {\n      url,\n      init: {\n        method: descriptor.method,\n        signal: requestOptions?.signal,\n        headers,\n        body: descriptor.body === undefined ? undefined : JSON.stringify(descriptor.body),\n      } satisfies RequestInit,\n    }\n  }\n\n  const execute = async (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {\n    try {\n      const prepared = prepare(descriptor, requestOptions)\n      return await fetch(prepared.url, prepared.init)\n    } catch (cause) {\n      throw new ClientError("Transport", { cause })\n    }\n  }\n\n  const responseError = async (response: Response, descriptor: RequestDescriptor): Promise<never> => {\n    if (descriptor.declaredStatuses.includes(response.status)) throw declared(await json(response) as DeclaredErrorBody)\n    try {\n      await response.body?.cancel()\n    } catch {}\n    throw new ClientError("UnexpectedStatus", { cause: { status: response.status }, detail: String(response.status) })\n  }\n\n  const request = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {\n    const response = await execute(descriptor, withDeadline(requestOptions))\n    if (response.status !== descriptor.successStatus) return responseError(response, descriptor)\n    if (descriptor.empty) {\n      try {\n        await response.body?.cancel()\n      } catch {}\n      return undefined as A\n    }\n    return await json(response) as A\n  }\n\n  const sse = <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): AsyncIterable<A> => ({\n    async *[Symbol.asyncIterator]() {\n      const response = await execute(descriptor, requestOptions)\n      if (response.status !== descriptor.successStatus) await responseError(response, descriptor)\n      if (!isContentType(response, "text/event-stream")) {\n        try {\n          await response.body?.cancel()\n        } catch {}\n        throw new ClientError("UnsupportedContentType", { detail: response.headers.get("content-type") })\n      }\n      if (response.body === null) throw new ClientError("MalformedResponse")\n      const reader = response.body.getReader()\n      const decoder = new TextDecoder()\n      let buffer = ""\n      try {\n        while (true) {\n          let next: ReadableStreamReadResult<Uint8Array>\n          try {\n            next = await reader.read()\n          } catch (cause) {\n            throw new ClientError("Transport", { cause })\n          }\n          if (!next.done) requestOptions?.onActivity?.()\n          buffer += decoder.decode(next.value, { stream: !next.done })\n          if (buffer.length > maxSseEventBytes) throw new ClientError("SseEventTooLarge")\n          const trailingCarriageReturn = !next.done && buffer.endsWith("\\r")\n          if (trailingCarriageReturn) buffer = buffer.slice(0, -1)\n          buffer = buffer.replaceAll("\\r\\n", "\\n").replaceAll("\\r", "\\n")\n          if (trailingCarriageReturn) buffer += "\\r"\n          if (next.done && buffer !== "") buffer += "\\n\\n"\n          let boundary = buffer.indexOf("\\n\\n")\n          while (boundary >= 0) {\n            const block = buffer.slice(0, boundary)\n            buffer = buffer.slice(boundary + 2)\n            const data = block.split("\\n").flatMap((line) => line.startsWith("data:") ? [line.slice(5).trimStart()] : []).join("\\n")\n            const id = block.split("\\n").flatMap((line) => line.startsWith("id:") ? [line.slice(3).trimStart()] : []).pop()\n            if (data !== "") {\n              let value: A\n              try {\n                value = JSON.parse(data) as A\n              } catch (cause) {\n                throw new ClientError("MalformedResponse", { cause })\n              }\n              if (id) requestOptions?.onEventId?.(id)\n              yield value\n            }\n            boundary = buffer.indexOf("\\n\\n")\n          }\n          if (next.done) return\n        }\n      } finally {\n        try {\n          await reader.cancel()\n        } catch {}\n        reader.releaseLock()\n      }\n    },\n  })\n\n  return { ${fields.join(", ")} }\n}\n\nfunction appendQuery(params: URLSearchParams, key: string, value: unknown): void {\n  if (value === undefined) return\n  if (value === null) {\n    params.append(key, "null")\n    return\n  }\n  if (Array.isArray(value)) {\n    for (const item of value) appendQuery(params, key, item)\n    return\n  }\n  if (typeof value === "object") {\n    for (const [child, item] of Object.entries(value)) appendQuery(params, \`\${key}[\${child}]\`, item)\n    return\n  }\n  params.append(key, String(value))\n}\n\nasync function json(response: Response): Promise<unknown> {\n  if (!isContentType(response, "application/json") && !response.headers.get("content-type")?.includes("+json")) {\n    try {\n      await response.body?.cancel()\n    } catch {}\n    throw new ClientError("UnsupportedContentType", { detail: response.headers.get("content-type") })\n  }\n  const declared = Number(response.headers.get("content-length"))\n  if (Number.isFinite(declared) && declared > maxJsonBodyBytes) {\n    try {\n      void response.body?.cancel()?.catch(() => {})\n    } catch {}\n    throw new ClientError("ResponseTooLarge")\n  }\n  let text = ""\n  try {\n    if (response.body === null) {\n      text = await response.text()\n      if (new TextEncoder().encode(text).byteLength > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")\n    } else {\n      const reader = response.body.getReader()\n      const decoder = new TextDecoder()\n      let bytes = 0\n      try {\n        while (true) {\n          const next = await reader.read()\n          if (next.done) {\n            text += decoder.decode()\n            break\n          }\n          bytes += next.value.byteLength\n          if (bytes > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")\n          text += decoder.decode(next.value, { stream: true })\n        }\n      } finally {\n        try {\n          void reader.cancel().catch(() => {})\n        } catch {}\n        reader.releaseLock()\n      }\n    }\n  } catch (cause) {\n    if (cause instanceof ClientError) throw cause\n    throw new ClientError("Transport", { cause })\n  }\n  if (text === "") throw new ClientError("MalformedResponse")\n  try {\n    return JSON.parse(text)\n  } catch (cause) {\n    throw new ClientError("MalformedResponse", { cause })\n  }\n}\n\ntype DeclaredErrorBody = { readonly _tag?: string; readonly message?: string; readonly data?: { readonly message?: string } }\n\n/** Throw declared error bodies as Errors. The body's fields stay on the error, so narrowing on \`_tag\` or \`name\` still works. */\nfunction declared(body: DeclaredErrorBody) {\n  const error = Object.assign(new Error(body.message ?? body.data?.message), body)\n  if (body._tag) error.name = body._tag\n  return error\n}\n\nfunction isContentType(response: Response, expected: string) {\n  return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === expected\n}\n`
+packages/plugin-browser/script/publish.ts :: const original = await Bun.file("package.json").text()
+packages/plugin-github/script/publish.ts :: const original = await Bun.file("package.json").text()
+packages/plugin/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/posts/script/prepare-cloudflare.ts :: const config = await Bun.file(path).json()
+packages/protocol/script/generate-openapi.ts :: if ((await Bun.file(target).text()) !== document) {
+packages/protocol/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/schema/script/config-schema.ts :: ).json()
+packages/schema/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/script/src/index.ts :: const rootPkg = await Bun.file(rootPkgPath).json()
+packages/sdk/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/sdk/script/verify-package.ts :: "Packed workerd health returned " + response.status + ": " + await response.text(),
+packages/sdk/script/verify-package.ts :: async fetch() {
+packages/sdk/script/verify-package.ts :: const body = await response.json()
+packages/sdk/script/verify-package.ts :: const bundled = await Bun.file(join(consumer, "dist/worker.js")).text()
+packages/sdk/script/verify-package.ts :: const original = await Bun.file(join(directory, "package.json")).text()
+packages/sdk/script/verify-package.ts :: const runtimes = (await $`npm ls effect --all --parseable`.cwd(consumer).text()).trim().split("\n")
+packages/sdk/script/verify-package.ts :: fetch(request, env) {
+packages/sdk/script/verify-package.ts :: return env.OPENCODE.get(env.OPENCODE.idFromName("packed-consumer")).fetch(request)
+packages/server/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/server/script/workerd-probe.ts :: const text = await artifact.text()
+packages/session-ui/src/components/markdown-image.ts :: return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(await blob.text())}`
+packages/session-ui/src/import-boundaries.test.ts :: const pkg = await Bun.file(new URL("../package.json", import.meta.url)).json()
+packages/session-ui/src/import-boundaries.test.ts :: const pkg = await Bun.file(new URL("../package.json", import.meta.url)).json()
+packages/session-ui/src/import-boundaries.test.ts :: pattern.test(await Bun.file(path).text()) ? path.slice(import.meta.dir.length + 1) : undefined,
+packages/session-ui/src/timeline/terminal-work.stories.tsx :: "bun -e \"Bun.serve({ port: 4399, fetch() { return new Response(Bun.file('C:/tmp/opencode/throne-of-glass-luke.html'), { headers: { 'content-type': 'text/html' } }) } })\"",
+packages/session-ui/src/v2/components/session-progress-indicator-v2.test.ts :: await Bun.file(new URL("./session-progress-indicator-v2-1x.png", import.meta.url)).arrayBuffer(),
+packages/simulation/script/build.ts :: await transpiler.transform(await Bun.file(file).text()),
+packages/simulation/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/stats/app/src/routes/api/newsletter.test.ts :: expect(await response.json()).toEqual({ success: true })
+packages/stats/app/src/routes/api/newsletter.ts :: const response = await fetch(`https://api.emailoctopus.com/lists/${listId}/contacts`, {
+packages/stats/app/src/routes/model-catalog.ts :: return fetch(url, { signal })
+packages/stats/app/src/routes/model-catalog.ts :: return fetch(url, { signal })
+packages/stats/app/src/routes/stats-shell.tsx :: fetch(`${import.meta.env.BASE_URL}api/newsletter`, {
+packages/stats/app/src/routes/stats-shell.tsx :: return fetch(githubLink.apiHref, {
+packages/stats/app/src/routes/stats-shell.tsx :: return response.json().then(
+packages/stats/core/src/domain/catalog-identity.ts :: return fetch(CATALOG_URL, { signal })
+packages/stats/core/src/honeycomb-backfill.ts :: const text = await Bun.file(file).text()
+packages/stats/core/src/r2-sql.ts :: return Bun.fetch(
+packages/theme/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/tui/src/component/prompt/local-attachment.ts :: const content = Buffer.from(await source.slice(0, maxBytes + 1).arrayBuffer())
+packages/ui/script/build-oc2-v2-overrides.ts :: const css = await Bun.file(import.meta.dir + "/../src/styles/tokens/theme.css").text()
+packages/ui/script/build-oc2-v2-overrides.ts :: const theme = (await Bun.file(themePath).json()) as DesktopTheme
+packages/ui/script/pack.ts :: const original = await Bun.file("package.json").text()
+packages/ui/script/publish.ts :: const pkg = (await Bun.file("package.json").json()) as { name: string; version: string }
+packages/ui/script/tailwind.ts :: const colors = await Bun.file(import.meta.dir + "/colors.txt").text()
+packages/ui/src/theme/loader.ts :: const response = await fetch(url)
+packages/ui/src/theme/loader.ts :: const text = await response.text()
+packages/ui/src/theme/v2/resolve.test.ts :: const theme: DesktopTheme = await Bun.file(new URL("../themes/oc-2.json", import.meta.url)).json()
+packages/util/script/publish.ts :: const originalText = await Bun.file("package.json").text()
+packages/util/src/http-body.ts :: const text = await response.text()
+packages/util/src/http-body.ts :: const text = await response.text().catch(() => "")
+packages/util/src/retry.test.ts :: fetch(`http://127.0.0.1:${port}/api/project`).catch((cause) => {
+packages/util/src/retry.test.ts :: fetch(`http://127.0.0.1:${server.port}/api/project`).catch((cause) => {
+packages/web/src/lib/share-data.ts :: const text = await response.text()
+packages/web/src/lib/share-data.ts :: response = await fetch(`${apiUrl}/share_data?id=${id}`, { signal })
+script/changelog.ts :: ? await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+script/changelog.ts :: if (values.print) process.stdout.write(await Bun.file(file).text())
+script/check-bounded-http.test.ts :: "const a = await fetch(url)",
+script/check-bounded-http.test.ts :: "const a = await response.json()",
+script/check-bounded-http.test.ts :: "const a = await response.text()",
+script/check-bounded-http.test.ts :: "const b = await fetch(url, { signal: AbortSignal.timeout(5_000) })",
+script/check-bounded-http.test.ts :: "const b = await response.clone().json()",
+script/check-bounded-http.test.ts :: "f.ts :: const a = await fetch(url) :: bounded at the site\nf.ts :: const a = await fetch(url) :: copy-paste, same bound\n",
+script/check-bounded-http.test.ts :: "f.ts :: const a = await fetch(url) :: bounded at the site\nf.ts :: const a = await fetch(url) :: entered twice\n",
+script/check-bounded-http.test.ts :: "f.ts :: const a = await fetch(url) :: trailing note :: bounded at the site\n",
+script/check-bounded-http.test.ts :: 'const response = await fetch("https://example.com/install")',
+script/check-bounded-http.test.ts :: 'script/tool.ts :: const response = await fetch("https://example.com/tool") :: tracked by #1394\n',
+script/check-bounded-http.test.ts :: 'services/www/src/pages/install.astro :: const response = await fetch("https://example.com/install") :: tracked by #1246\n',
+script/check-bounded-http.test.ts :: ["// never call fetch(url) without a signal", "* response.text() buffers the body", "const x = 1"].join("\n"),
+script/check-bounded-http.test.ts :: const allowlist = parseAllowlist("# comment\n\nf.ts :: const a = await fetch(url) :: bounded at the site\n")
+script/check-bounded-http.test.ts :: const duplicates = scanSource("f.ts", "const a = await fetch(url)\nconst a = await fetch(url)")
+script/check-bounded-http.test.ts :: const hits = scanSource("f.ts", "const a = await fetch(url)")
+script/check-bounded-http.test.ts :: const hits = scanSource("f.ts", "const pkg = await Bun.file(path).json()")
+script/check-bounded-http.test.ts :: const hits = scanSource("script/tool.ts", 'const response = await fetch("https://example.com/tool")')
+script/check-bounded-http.test.ts :: const separatorHits = scanSource("f.ts", "const a = await fetch(url) :: trailing note")
+script/check-bounded-http.test.ts :: expect(hits[0].text).toBe("const a = await fetch(url)")
+script/check-bounded-http.test.ts :: expect(staleEntries([], allowlist)).toEqual(["f.ts :: const a = await fetch(url)"])
+script/check-bounded-http.test.ts :: expect(staleEntries(hits, twoEntries)).toEqual(["f.ts :: const a = await fetch(url)"])
+script/check-bounded-http.test.ts :: writeFileSync(join(dir, "notes.md"), 'const ignored = await fetch("https://example.com/ignored")\n')
+script/check-bounded-http.test.ts :: writeFileSync(join(dir, "tool.ts"), 'const response = await fetch("https://example.com/tool")\n')
+script/check-bounded-http.test.ts :: writeFileSync(join(pages, "install.astro"), 'const response = await fetch("https://example.com/install")\n')
+script/check-bounded-http.test.ts :: writeFileSync(join(pages, "notes.md"), 'const ignored = await fetch("https://example.com/ignored")\n')
+script/check-bounded-http.ts :: const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
+script/check-doc-env-vars.ts :: for (const file of files) for (const name of documentedVars(await Bun.file(join(root, file)).text())) found.add(name)
+script/check-numeric-boundaries.ts :: const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
+script/check-proto-reads.ts :: const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
+script/github/close-issues.ts :: (await Bun.file(new URL("../../.github/TEAM_MEMBERS", import.meta.url)).text())
+script/github/close-prs.ts :: const stderr = await new Response(proc.stderr).text()
+script/github/close-prs.ts :: const stdout = await new Response(proc.stdout).text()
+script/lint-changed.ts :: const report = JSON.parse(await $`bunx oxlint --format json ${files}`.nothrow().quiet().text()) as {
+script/profile-typecheck-packages.ts :: const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited])
+script/profile-typecheck-packages.ts :: const report = (await Bun.file(summary).json()) as {
+script/publish.ts :: const text = await file.text()
+script/publish.ts :: let pkg = await Bun.file(file).text()
+script/release.ts :: const document = await Bun.file(review).text()
+script/release.ts :: fetch(request, { ...init, timeout: false } as BunFetchRequestInit)) as typeof fetch,
+script/release.ts :: process.stdout.write(await Bun.file(review).text())
+script/sdk-docs.ts :: const sources = await Promise.all(files.map(async (file) => parse(file, await Bun.file(file).text())))
+script/sdk-docs.ts :: return (await Bun.file(file).text()).replaceAll("\r\n", "\n")
+script/stats.ts :: content = await Bun.file(file).text()
+script/turbo-json.test.ts :: const text = await Bun.file(join(import.meta.dir, "..", "turbo.json")).text()
+script/upgrade-opentui.ts :: const txt = await Bun.file(file).text()
+script/upgrade-opentui.ts :: const txt = await Bun.file(lockfile).text()
+script/upgrade-opentui.ts :: return findStaleLockfileEntriesInText(await Bun.file(lockfile).text())
+services/changelog/src/index.ts :: const response = await fetch(SOURCE_URL, {
+services/changelog/src/index.ts :: fetch(request, _env, ctx) {
+services/changelog/src/index.ts :: return cached.text()
+services/files/src/index.ts :: async fetch(request, env, ctx) {
+services/update/src/index.ts :: async fetch(request: Request, env: Env, ctx: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
+services/update/src/index.ts :: const input: unknown = await request.json().catch(() => undefined)
+services/www/script/generate-openapi.ts :: const document = await Bun.file(source).text()
+services/www/script/generate-openapi.ts :: const stale = (await Promise.all(targets.map((path) => Bun.file(path).text()))).some((value) => value !== document)
+services/www/script/prepare-cloudflare.ts :: const config = await Bun.file("dist/server/wrangler.json").json()
+services/www/script/validate-links.ts :: const html = await Bun.file(file).text()
+services/www/script/validate-links.ts :: if ((await Bun.file(target).text()).includes(`id="${id}"`)) return
+services/www/src/docs/layouts/DocsLayout.astro :: await navigator.clipboard.writeText(await response.text())
+services/www/src/docs/layouts/DocsLayout.astro :: const response = await fetch(window.location.href, { headers: { Accept: "text/markdown" } })
+services/www/src/pages/install.astro :: const response = await fetch("https://raw.githubusercontent.com/anomalyco/opencode/dev/install", {

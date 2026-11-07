@@ -1,0 +1,371 @@
+packages/ai/src/media.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/ai/src/protocols/bedrock-converse.ts :: const signature = state.reasoningSignatures[Number(index)]
+packages/ai/src/protocols/elevenlabs-speech.ts :: const parsed = rate !== undefined && /^\d+$/.test(rate) ? Number(rate) : undefined
+packages/ai/src/protocols/gemini.ts :: return match !== null && Number(match[1]) < 3
+packages/ai/src/protocols/google-transcription.ts :: decode: SchemaGetter.transform((value) => Number.parseFloat(value)),
+packages/ai/src/protocols/open-responses.ts :: const finalText = fragments.length === 1 ? itemText : summary[Number(index)]
+packages/ai/src/protocols/openai-chat.ts :: return entry ? Number(entry[0]) : undefined
+packages/ai/src/protocols/openai-images.ts :: return match ? { format, width: Number(match[1]), height: Number(match[2]) } : { format }
+packages/ai/src/protocols/openai-responses.ts :: return Number(match[1]) > 0 && Number(match[2]) > 0 ? undefined : "image dimensions must be positive integers"
+packages/ai/src/protocols/openai-responses.ts :: return match !== null && Number(match[1]) >= 6
+packages/ai/src/protocols/replicate-images.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(text)
+packages/ai/src/protocols/replicate-images.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/ai/src/protocols/replicate-images.ts :: if (time && Number(time[1]) > 23) return undefined
+packages/ai/src/protocols/replicate-images.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/ai/src/protocols/replicate-images.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/ai/src/protocols/utils/claude-model.ts :: return { family: match.family, major: Number(match.major), minor: Number(match.minor ?? 0) }
+packages/ai/src/protocols/utils/gemini-json-schema.ts :: if (key === "items") return cutLoops(value, target, safe || !(Number(schema.minItems) > 0))
+packages/ai/src/protocols/utils/partial-json.ts :: return decodeJson(`${jsonString.substring(start, index - Number(escape))}"`) as string
+packages/ai/src/protocols/utils/partial-json.ts :: return decodeJson(jsonString.substring(start, ++index - Number(escape))) as string
+packages/ai/src/protocols/utils/responses-checkpoint.ts :: ([index, id]) => id === item.id && Number(index) !== event.output_index,
+packages/ai/src/protocols/utils/speech-stream.ts :: const amount = Number(trimmed)
+packages/ai/src/protocols/utils/speech-stream.ts :: const parsed = Number(rate)
+packages/ai/src/protocols/zai-chat.ts :: return match !== null && (Number(match[1]) > 4 || (Number(match[1]) === 4 && Number(match[2] ?? 0) >= 6))
+packages/ai/src/providers/antigravity-auth.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/ai/src/route/executor.ts :: const millis = Number(millisHeader)
+packages/ai/src/route/executor.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(text)
+packages/ai/src/route/executor.ts :: const seconds = Number(value)
+packages/ai/src/route/executor.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/ai/src/route/executor.ts :: if (time && Number(time[1]) > 23) return undefined
+packages/ai/src/route/executor.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/ai/src/route/executor.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/app/src/composer/comment-note.ts :: const end = match[2] ? Number(match[2]) : match[4] ? Number(match[4]) : undefined
+packages/app/src/composer/comment-note.ts :: const start = match[2] ? Number(match[2]) : match[3] ? Number(match[3]) : undefined
+packages/app/src/composer/prompt.ts :: const parsed = Number(value)
+packages/app/src/home/scroll.ts :: const top = Number.parseFloat(getComputedStyle(header).top)
+packages/app/src/providers/connect/dialog.tsx :: const option = field().options?.[Number(value)]
+packages/app/src/runtime/i18n/language.tsx :: .map((part) => (part.type === "element" ? items[Number(part.value)] : part.value))
+packages/app/src/session/requests/session-question-dock.tsx :: const index = Number(event.key) - 1
+packages/app/src/session/timeline/virtualizer.tsx :: parseFloat(getComputedStyle(element).scrollMarginTop),
+packages/app/src/settings/about/contributors.ts :: const total = Number.parseInt(link?.match(/[?&]page=(\d+)[^>]*>;\s*rel="last"/)?.[1] ?? "", 10)
+packages/app/src/settings/providers/providers.tsx :: .toSorted((a, b) => Number(b.id === "opencode-go") - Number(a.id === "opencode-go"))
+packages/app/src/settings/search-empty.tsx :: parseFloat(style.paddingInlineEnd) -
+packages/app/src/settings/search-empty.tsx :: parseFloat(style.paddingInlineStart) -
+packages/app/src/settings/search-results.ts :: Number(!!b.item.topLevel) - Number(!!a.item.topLevel) ||
+packages/app/src/workspaces/files/path.ts :: bytes.push(parseInt(match[0], 8))
+packages/cli/src/commands/handlers/api.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/cli/src/commands/handlers/auth/form.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(value)
+packages/cli/src/commands/handlers/auth/form.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/cli/src/commands/handlers/auth/form.ts :: if (time && Number(time[1]) > 23) return false
+packages/cli/src/commands/handlers/auth/form.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/cli/src/commands/handlers/auth/form.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/cli/src/commands/handlers/auth/login.ts :: Number(b.metadata?.source === "mcp") - Number(a.metadata?.source === "mcp") ||
+packages/cli/src/commands/handlers/auth/shared.ts :: .toSorted((a, b) => Number(a.type === "key") - Number(b.type === "key"))
+packages/cli/src/commands/handlers/auth/shared.ts :: response.data.toSorted((a, b) => Number(b.id === "opencode-go") - Number(a.id === "opencode-go")),
+packages/cli/src/commands/handlers/stats.ts :: const background = Number(process.env.COLORFGBG?.split(";").at(-1))
+packages/cli/src/restart-port.ts :: const parsed = /^\d+$/.test(value.trim()) ? Number(value) : NaN
+packages/cli/src/run/run.ts :: const content = Buffer.alloc(Number(stat.size))
+packages/cli/src/run/run.ts :: return bytes.reduce((count, byte) => count + Number(byte < 9 || (byte > 13 && byte < 32)), 0) / bytes.length > 0.3
+packages/cli/src/server-process.ts :: const value = raw && /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+packages/cli/src/services/retained-image.ts :: const pid = Number(pattern.exec(name)?.[1])
+packages/cli/src/services/service-config.ts :: const port = /^\d+$/.test(text) ? Number(text) : Number.NaN
+packages/cli/src/services/service-config.ts :: return 10_000 + (Number.parseInt(Hash.fast(channel).slice(0, 8), 16) % 50_000)
+packages/cli/src/services/updater-action.ts :: return /^[0-9]+$/.test(identifier) && /^[0-9]+$/.test(other) && Number(identifier) === Number(other)
+packages/cli/src/services/updater.ts :: checks.sort((a, b) => Number(parts.includes(b.method)) - Number(parts.includes(a.method)))
+packages/cli/src/services/updater.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/cli/src/systemd.ts :: const count = Number.parseInt(env.LISTEN_FDS ?? "", 10)
+packages/cli/src/ui/integration-picker.ts :: const maxItems = Math.min(8, Math.max(2, (process.stdout.rows ?? 24) - 14 - Number(this.state === "error")))
+packages/cli/src/util/io.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/client/src/promise/generated/client.ts :: const declared = Number(response.headers.get("content-length"))
+packages/client/src/promise/generated/client.ts :: const declared = Number(response.headers.get("content-length"))
+packages/client/src/service-probe.ts :: const declared = Number(response.headers.get("content-length"))
+packages/client/src/service-timing.ts :: const value = raw && /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+packages/codemode/src/interpreter/objects.ts :: ...strings.filter((key) => parseArrayIndex(key) !== undefined).sort((a, b) => Number(a) - Number(b)),
+packages/codemode/src/interpreter/objects.ts :: const index = Number(property)
+packages/codemode/src/interpreter/objects.ts :: const length = typeof value === "number" ? value : Number(value)
+packages/codemode/src/interpreter/objects.ts :: return Number(this.toPrimitive("number"))
+packages/codemode/src/interpreter/objects.ts :: return value instanceof ToolReference ? Number.NaN : Number(value)
+packages/codemode/src/interpreter/objects.ts :: target.bytes[at] = typeof value === "number" ? value : Number(value)
+packages/codemode/src/openapi/runtime.ts :: const parsedSize = contentLength === undefined ? undefined : Number.parseInt(contentLength, 10)
+packages/codemode/src/stdlib/value.ts :: if (name === "parseFloat") return parseFloat(coerceToString(value))
+packages/codemode/src/stdlib/value.ts :: parseInt(coerceToString(text), coerceToNumber(radix)),
+packages/console/app/src/component/spotlight.tsx :: return m ? [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255] : [1, 1, 1]
+packages/console/app/src/lib/console-account.ts :: const declared = Number(response.headers.get("content-length"))
+packages/console/app/src/lib/content-negotiation.ts :: const parsed = quality ? Number(quality.slice(2)) : 1
+packages/console/app/src/lib/github.ts :: ? Number.parseInt(linkHeader.match(/&page=(\d+)>; rel="last"/)?.at(1) ?? "0")
+packages/console/app/src/lib/github.ts :: const declared = Number(response.headers.get("content-length"))
+packages/console/app/src/lib/language.ts :: const parsed = q ? Number.parseFloat(q) : 1
+packages/console/app/src/lib/salesforce.ts :: const declared = Number(response.headers.get("content-length"))
+packages/console/app/src/lib/stats-proxy.ts :: const declared = Number(response.headers.get("content-length"))
+packages/console/app/src/routes/download/[channel]/[platform].ts :: const declared = Number(response.headers.get("content-length"))
+packages/console/app/src/routes/honeycomb/webhook.ts :: const result = item.result == null ? undefined : Number(item.result)
+packages/console/function/src/log-processor.ts :: request_length: parseInt(event.event.request.headers["content-length"] ?? "0"),
+packages/core/src/codemode/web.ts :: const declared = Number(response.headers.get("content-length"))
+packages/core/src/config/plugin/command.ts :: const last = Math.max(0, ...placeholders.map((item) => Number(item.slice(1))))
+packages/core/src/config/plugin/command.ts :: const position = Number(index)
+packages/core/src/database/drizzle/sqlite-core/effect/count.ts :: return v ? Number(v) : 0
+packages/core/src/database/v1-migration.bun.ts :: bytes.push(parseInt(hex, 16))
+packages/core/src/database/v1-migration.bun.ts :: suffix = alphabet[Number(value % 62n)] + suffix
+packages/core/src/environment/exec-defaults.ts :: const mtimeMs = Number(rawMtime) * 1_000
+packages/core/src/environment/exec-defaults.ts :: const size = Number(rawSize)
+packages/core/src/filesystem.ts :: size: Number(info.size),
+packages/core/src/form.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(value)
+packages/core/src/form.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/core/src/form.ts :: if (time && Number(time[1]) > 23) return false
+packages/core/src/form.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/core/src/form.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/core/src/git.ts :: : { binary: false, additions: Number(additions), deletions: Number(deletions) },
+packages/core/src/git.ts :: Effect.map((info) => (info.type === "File" && Number(info.size) > maximum ? item : undefined)),
+packages/core/src/git.ts :: Number(entry.slice(temporaryIndexPrefix.length).split("-")[0]) < cutoff,
+packages/core/src/github-copilot/responses/openai-responses-language-model.ts :: activeItem.summaryParts[Number(summaryIndex)] = "concluded"
+packages/core/src/mcp/oauth.ts :: const redirectPort = Number(redirect?.port) || undefined
+packages/core/src/messaging.ts :: Effect.map((result) => Number(result?.count ?? 0)),
+packages/core/src/messaging.ts :: Effect.map((result) => Number(result?.count ?? 0)),
+packages/core/src/messaging.ts :: Effect.map((result) => Number(result?.count ?? 0)),
+packages/core/src/messaging.ts :: children: Number(children?.count ?? 0),
+packages/core/src/messaging.ts :: messages: Number(messages?.count ?? 0),
+packages/core/src/messaging.ts :: return new Set(flagged.filter((row) => Number(row.hidden) === 1).map((row) => row.id))
+packages/core/src/messaging.ts :: scores: new Map(Array.from(result.scores, ([key, score]) => [Number(key), score])),
+packages/core/src/messaging.ts :: topics: Number(topicCount?.count ?? 0),
+packages/core/src/messaging/embedding.ts :: const length = Number(response.headers["content-length"])
+packages/core/src/messaging/embedding.ts :: return match ? Number(match[1]) : undefined
+packages/core/src/messaging/template.ts :: if (/^\d{10}$/.test(bare)) return Number(bare) * 1_000
+packages/core/src/messaging/template.ts :: if (/^\d{13}$/.test(bare)) return Number(bare)
+packages/core/src/messaging/template.ts :: return now - Number(relative[1]) * unit
+packages/core/src/mime.ts :: const controls = bytes.reduce((count, byte) => count + Number(byte < 9 || (byte > 13 && byte < 32)), 0)
+packages/core/src/modal/models.ts :: const parsed = Number(value) * 1_000_000
+packages/core/src/model-route-limits.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(text)
+packages/core/src/model-route-limits.ts :: for (const [, amount, unit] of text.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h|d)/g)) total += Number(amount) * UNITS[unit]
+packages/core/src/model-route-limits.ts :: if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text) * 1_000
+packages/core/src/model-route-limits.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/core/src/model-route-limits.ts :: if (time && Number(time[1]) > 23) return undefined
+packages/core/src/model-route-limits.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/core/src/model-route-limits.ts :: return PLAIN_COUNT.test(text) ? Number(text) : Number.NaN
+packages/core/src/model-route-limits.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/core/src/model-route-limits.ts :: total += Number(amount) * (RELATIVE_UNITS[unit] ?? 1_000)
+packages/core/src/model-route-review.ts :: const round = (value: number | null, digits: number) => (value === null ? null : Number(value.toFixed(digits)))
+packages/core/src/model-route-schedule.ts :: const hours = Number(match[1])
+packages/core/src/model-route-schedule.ts :: const minutes = Number(match[2])
+packages/core/src/model-route-schedule.ts :: const number = typeof value === "string" && /^-?\d+$/.test(value.trim()) ? Number(value.trim()) : value
+packages/core/src/model-route-schedule.ts :: const seconds = match[3] === undefined ? 0 : Number(match[3])
+packages/core/src/model-route-schedule.ts :: dayOfMonth: Number(values.day),
+packages/core/src/model-route-schedule.ts :: if (/^0?[0-6]$/.test(text)) return Number(text)
+packages/core/src/model-route-schedule.ts :: minutes: Number(values.hour) * 60 + Number(values.minute),
+packages/core/src/model-route-schedule.ts :: month: Number(values.month),
+packages/core/src/model-route-schedule.ts :: year: Number(values.year),
+packages/core/src/persistent-pty/daemon.ts :: end: Number(frame.readBigUInt64BE(9)),
+packages/core/src/persistent-pty/daemon.ts :: start: Number(frame.readBigUInt64BE(1)),
+packages/core/src/persistent-pty/index.ts :: const parsed = Number(value.slice("pty_persistent_".length))
+packages/core/src/plugin/provider/digitalocean.ts :: return serverSeconds(Number.parseInt(text, 10), {
+packages/core/src/plugin/provider/expires.ts :: return serverSeconds(Number(value), { fallback, max: MAX_DEVICE_LIFETIME_SECONDS, oversized: "clamp" })
+packages/core/src/plugin/provider/expires.ts :: return serverSeconds(Number(value), { fallback, max: MAX_EXPIRES_IN_SECONDS, oversized: "fallback" })
+packages/core/src/plugin/provider/github-copilot.ts :: (gpt !== null && Number(gpt[1]) >= 5 && !id.startsWith("gpt-5-mini")) ||
+packages/core/src/plugin/provider/google-vertex.ts :: .toSorted((a, b) => Number(b === active) - Number(a === active) || a.localeCompare(b))
+packages/core/src/plugin/provider/openai.ts :: const major = Number(match?.[1])
+packages/core/src/plugin/provider/openai.ts :: const minor = Number(match?.[2] ?? 0)
+packages/core/src/plugin/provider/openai.ts :: const parsed = /^\d+$/.test(text) ? Number.parseInt(text, 10) : Number.NaN
+packages/core/src/plugin/provider/xai.ts :: const seconds = Number(value)
+packages/core/src/plugin/tool-input-repair.ts :: const parsed = Number(value)
+packages/core/src/plugin/vcs/git.ts :: const additions = adds === "-" ? 0 : Number.parseInt(adds || "0", 10)
+packages/core/src/plugin/vcs/git.ts :: const additions = parts[0] === "-" ? 0 : Number.parseInt(parts[0] || "0", 10)
+packages/core/src/plugin/vcs/git.ts :: const deletions = dels === "-" ? 0 : Number.parseInt(dels || "0", 10)
+packages/core/src/plugin/vcs/git.ts :: const deletions = parts[1] === "-" ? 0 : Number.parseInt(parts[1] || "0", 10)
+packages/core/src/quota-snapshot.ts :: const hour = Number(daily[1])
+packages/core/src/quota-snapshot.ts :: const minute = Number(daily[2])
+packages/core/src/session/execution/restart.ts :: pending.toSorted((a, b) => Number(a.recovery.kind === "subagent") - Number(b.recovery.kind === "subagent")),
+packages/core/src/session/projector.ts :: if (match) return `${match[1]} (fork #${Number.parseInt(match[2], 10) + 1})`
+packages/core/src/session/prompt.ts :: const parsed = Number(value)
+packages/core/src/session/prompt.ts :: if (Number(info.size) > MAX_ATTACHMENT_BYTES)
+packages/core/src/shell/scan.ts :: LINE_CONTINUATION_RE.lastIndex = Number(unit) + 1
+packages/core/src/shell/scan.ts :: colon = LINE_CONTINUATION_RE.exec(input) ? LINE_CONTINUATION_RE.lastIndex : Number(unit) + 1
+packages/core/src/shell/scan.ts :: const point = parseInt(digits, octal ? 8 : 16)
+packages/core/src/shell/scan.ts :: if (!code || Number.parseInt(code[1], 16) > 0x10ffff) return
+packages/core/src/shell/scan.ts :: return { value: String.fromCodePoint(Number.parseInt(code[1], 16)), end: next + code[0].length - 1 }
+packages/core/src/systemone.ts :: timeoutMs(Number(process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS), {
+packages/core/src/tool/html-markdown.ts :: inline(`${"#".repeat(Number(name[1]))} `)
+packages/core/src/tool/html-markdown.ts :: return match ? Number.parseInt(match[1], 10) : Number.NaN
+packages/core/src/tool/http-body.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/core/src/tool/plugin/mcpx-diagnose.ts :: const num = Number(trimmed)
+packages/core/src/tool/plugin/opencode.ts :: Number(right.providerID === own) - Number(left.providerID === own) ||
+packages/core/src/variant.ts :: const major = Number(familyFirst?.[2] ?? versionFirst?.[1])
+packages/core/src/variant.ts :: const major = Number(version?.[1])
+packages/core/src/variant.ts :: const minor = Number(familyFirst?.[3] ?? versionFirst?.[2] ?? 0)
+packages/core/src/variant.ts :: const minor = Number(version?.[2] ?? 0)
+packages/core/src/websearch.ts :: const seconds = Number(trimmed)
+packages/core/src/websearch.ts :: if (Number.isFinite(Number(trimmed))) return 60_000
+packages/desktop/src/main/extension/assets.ts :: const end = match?.[1] && match[2] ? Math.min(Number(match[2]), size - 1) : size - 1
+packages/desktop/src/main/extension/assets.ts :: const start = match?.[1] ? Number(match[1]) : match?.[2] ? Math.max(0, size - Number(match[2])) : 0
+packages/desktop/src/main/extension/manager.ts :: if (Number(response.headers.get("content-length")) > archiveLimit) {
+packages/desktop/src/main/files/attachment-picker.ts :: const bytes = new Uint8Array(Number(info.size))
+packages/desktop/src/main/files/attachment-picker.ts :: const read = Number(yield* file.read(bytes.subarray(offset)))
+packages/desktop/src/main/files/index.ts :: return { path: file, name: path.basename(file), size: Number(info.size) }
+packages/desktop/src/main/ipc-transport.test.ts :: if (!("requestId" in message) || Number(message.requestId) !== id) return
+packages/desktop/src/main/native/logging.ts :: const offset = Math.max(0, Number(info.size) - MAX_EXPORT_FILE_SIZE)
+packages/desktop/src/renderer/ipc-client.ts :: const id = Number(message.requestId)
+packages/desktop/src/renderer/ipc-client.ts :: pending.get(Number(message.requestId))?.chunk?.(message.values)
+packages/function/src/discord.ts :: const declared = Number(response.headers.get("content-length"))
+packages/gui-extensions/src/browser/chromium.ts :: ? 111 + Number(key.slice(1))
+packages/gui-extensions/src/browser/icon.ts :: .map((part) => (/^%[\da-f]{2}$/i.test(part) ? Buffer.from([parseInt(part.slice(1), 16)]) : Buffer.from(part))),
+packages/gui-extensions/src/microsoft-office/sheet-cells.ts :: const end = axis === "rows" ? Number(last) - 1 : columnIndex(last)
+packages/gui-extensions/src/microsoft-office/sheet-cells.ts :: const row = Number(match[2]) - 1
+packages/gui-extensions/src/microsoft-office/sheet-cells.ts :: const start = axis === "rows" ? Number(first) - 1 : columnIndex(first)
+packages/gui-extensions/src/ssh/askpass.test.ts :: const socket = net.createConnection(Number(bridge.env.OPENCODE_SSH_ASKPASS_PORT), "127.0.0.1", () =>
+packages/gui-extensions/src/ssh/askpass.test.ts :: const socket = yield* NodeSocket.makeNet({ host: "127.0.0.1", port: Number(env.OPENCODE_SSH_ASKPASS_PORT) })
+packages/gui-extensions/src/ssh/bootstrap.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/gui-extensions/src/ssh/bootstrap.ts :: port: Number(url.port || 80),
+packages/gui-extensions/src/ssh/command.ts :: if (flag === "-p" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535))
+packages/gui-extensions/src/updater/changelog.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/gui-extensions/src/wsl/runtime.ts :: version: Number.isNaN(Number.parseInt(version, 10)) ? null : Number.parseInt(version, 10),
+packages/httpapi-codegen/src/index.ts :: 'async function binary(response: Response): Promise<Uint8Array> {\n  const declared = Number(response.headers.get("content-length"))\n  if (Number.isFinite(declared) && declared > maxBinaryBodyBytes) {\n    try {\n      void response.body?.cancel()?.catch(() => {})\n    } catch {}\n    throw new ClientError("ResponseTooLarge")\n  }\n  if (response.body === null) {\n    const bytes = new Uint8Array(await response.arrayBuffer())\n    if (bytes.byteLength > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n    return bytes\n  }\n  const reader = response.body.getReader()\n  const chunks: Array<Uint8Array> = []\n  let bytes = 0\n  try {\n    while (true) {\n      const next = await reader.read()\n      if (next.done) break\n      bytes += next.value.byteLength\n      if (bytes > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")\n      chunks.push(next.value)\n    }\n  } catch (cause) {\n    if (cause instanceof ClientError) throw cause\n    throw new ClientError("Transport", { cause })\n  } finally {\n    try {\n      void reader.cancel().catch(() => {})\n    } catch {}\n    reader.releaseLock()\n  }\n  const merged = new Uint8Array(bytes)\n  let offset = 0\n  for (const chunk of chunks) {\n    merged.set(chunk, offset)\n    offset += chunk.byteLength\n  }\n  return merged\n}\n\n' +
+packages/httpapi-codegen/src/index.ts :: return `import type { ${imports.join(", ")} } from "./types.js"\nimport { ClientError } from "./client-error.js"\n\nexport interface ClientOptions {\n  readonly baseUrl: string\n  readonly fetch?: typeof globalThis.fetch\n  readonly headers?: RequestInit["headers"]\n  /** Deadline in milliseconds for a non-SSE request, composed with any caller signal (AbortSignal.any). Defaults to defaultRequestTimeoutMs; a non-finite, non-positive or absent value takes the default. SSE subscriptions carry no total deadline. */\n  readonly requestTimeout?: number\n}\n\nexport interface RequestOptions {\n  readonly signal?: AbortSignal\n  readonly headers?: RequestInit["headers"]\n  /** Reports every chunk a streaming response receives, including keepalive comments that yield no event. */\n  readonly onActivity?: () => void\n  /** Reports the SSE id of each streamed event just before that event is yielded. */\n  readonly onEventId?: (id: string) => void\n}\n\ninterface RequestDescriptor {\n  readonly method: string\n  readonly path: string\n  readonly query?: Record<string, unknown>\n  readonly headers?: Record<string, unknown>\n  readonly body?: unknown\n  readonly successStatus: number\n  readonly declaredStatuses: ReadonlyArray<number>\n  readonly empty: boolean\n}\n\nconst maxSseEventBytes = 16 * 1024 * 1024\n\nconst maxJsonBodyBytes = 16 * 1024 * 1024\n\n/** Default deadline for a non-SSE request, in milliseconds (#1385): a stalled or slow-dripping server otherwise hangs a signal-less request forever. 120_000 matches this package's own bound for waiting on a service promise (service-timing.ts defaultEnsureTiming.promiseTimeout). The composed signal stays live through the body read, so the deadline covers headers and body alike. */\nconst defaultRequestTimeoutMs = 120_000\n\nexport function make(options: ClientOptions) {\n  const fetch = options.fetch ?? globalThis.fetch\n\n  const requestTimeout = options.requestTimeout !== undefined && Number.isFinite(options.requestTimeout) && options.requestTimeout > 0 ? options.requestTimeout : defaultRequestTimeoutMs\n\n  // Non-SSE requests only: the SSE path keeps no total deadline, so a healthy long-lived stream is never killed. A caller signal still aborts independently of the deadline.\n  const withDeadline = (requestOptions?: RequestOptions): RequestOptions => {\n    const timeout = AbortSignal.timeout(requestTimeout)\n    return Object.assign({}, requestOptions, {\n      signal: requestOptions?.signal ? AbortSignal.any([requestOptions.signal, timeout]) : timeout,\n    })\n  }\n\n  const prepare = (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {\n    // A leading slash would replace any path prefix on baseUrl, so join relative to it.\n    const baseUrl = new URL(options.baseUrl)\n    if (!baseUrl.pathname.endsWith("/")) baseUrl.pathname += "/"\n    const url = new URL(descriptor.path.slice(1), baseUrl)\n    for (const [key, value] of Object.entries(descriptor.query ?? {})) appendQuery(url.searchParams, key, value)\n    const headers = new Headers(options.headers)\n    for (const [key, value] of Object.entries(descriptor.headers ?? {})) {\n      if (value !== undefined && value !== null) headers.set(key, String(value))\n    }\n    for (const [key, value] of new Headers(requestOptions?.headers)) headers.set(key, value)\n    if (descriptor.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json")\n    return {\n      url,\n      init: {\n        method: descriptor.method,\n        signal: requestOptions?.signal,\n        headers,\n        body: descriptor.body === undefined ? undefined : JSON.stringify(descriptor.body),\n      } satisfies RequestInit,\n    }\n  }\n\n  const execute = async (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {\n    try {\n      const prepared = prepare(descriptor, requestOptions)\n      return await fetch(prepared.url, prepared.init)\n    } catch (cause) {\n      throw new ClientError("Transport", { cause })\n    }\n  }\n\n  const responseError = async (response: Response, descriptor: RequestDescriptor): Promise<never> => {\n    if (descriptor.declaredStatuses.includes(response.status)) throw declared(await json(response) as DeclaredErrorBody)\n    try {\n      await response.body?.cancel()\n    } catch {}\n    throw new ClientError("UnexpectedStatus", { cause: { status: response.status }, detail: String(response.status) })\n  }\n\n  const request = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {\n    const response = await execute(descriptor, withDeadline(requestOptions))\n    if (response.status !== descriptor.successStatus) return responseError(response, descriptor)\n    if (descriptor.empty) {\n      try {\n        await response.body?.cancel()\n      } catch {}\n      return undefined as A\n    }\n    return await json(response) as A\n  }\n\n  const sse = <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): AsyncIterable<A> => ({\n    async *[Symbol.asyncIterator]() {\n      const response = await execute(descriptor, requestOptions)\n      if (response.status !== descriptor.successStatus) await responseError(response, descriptor)\n      if (!isContentType(response, "text/event-stream")) {\n        try {\n          await response.body?.cancel()\n        } catch {}\n        throw new ClientError("UnsupportedContentType", { detail: response.headers.get("content-type") })\n      }\n      if (response.body === null) throw new ClientError("MalformedResponse")\n      const reader = response.body.getReader()\n      const decoder = new TextDecoder()\n      let buffer = ""\n      try {\n        while (true) {\n          let next: ReadableStreamReadResult<Uint8Array>\n          try {\n            next = await reader.read()\n          } catch (cause) {\n            throw new ClientError("Transport", { cause })\n          }\n          if (!next.done) requestOptions?.onActivity?.()\n          buffer += decoder.decode(next.value, { stream: !next.done })\n          if (buffer.length > maxSseEventBytes) throw new ClientError("SseEventTooLarge")\n          const trailingCarriageReturn = !next.done && buffer.endsWith("\\r")\n          if (trailingCarriageReturn) buffer = buffer.slice(0, -1)\n          buffer = buffer.replaceAll("\\r\\n", "\\n").replaceAll("\\r", "\\n")\n          if (trailingCarriageReturn) buffer += "\\r"\n          if (next.done && buffer !== "") buffer += "\\n\\n"\n          let boundary = buffer.indexOf("\\n\\n")\n          while (boundary >= 0) {\n            const block = buffer.slice(0, boundary)\n            buffer = buffer.slice(boundary + 2)\n            const data = block.split("\\n").flatMap((line) => line.startsWith("data:") ? [line.slice(5).trimStart()] : []).join("\\n")\n            const id = block.split("\\n").flatMap((line) => line.startsWith("id:") ? [line.slice(3).trimStart()] : []).pop()\n            if (data !== "") {\n              let value: A\n              try {\n                value = JSON.parse(data) as A\n              } catch (cause) {\n                throw new ClientError("MalformedResponse", { cause })\n              }\n              if (id) requestOptions?.onEventId?.(id)\n              yield value\n            }\n            boundary = buffer.indexOf("\\n\\n")\n          }\n          if (next.done) return\n        }\n      } finally {\n        try {\n          await reader.cancel()\n        } catch {}\n        reader.releaseLock()\n      }\n    },\n  })\n\n  return { ${fields.join(", ")} }\n}\n\nfunction appendQuery(params: URLSearchParams, key: string, value: unknown): void {\n  if (value === undefined) return\n  if (value === null) {\n    params.append(key, "null")\n    return\n  }\n  if (Array.isArray(value)) {\n    for (const item of value) appendQuery(params, key, item)\n    return\n  }\n  if (typeof value === "object") {\n    for (const [child, item] of Object.entries(value)) appendQuery(params, \`\${key}[\${child}]\`, item)\n    return\n  }\n  params.append(key, String(value))\n}\n\nasync function json(response: Response): Promise<unknown> {\n  if (!isContentType(response, "application/json") && !response.headers.get("content-type")?.includes("+json")) {\n    try {\n      await response.body?.cancel()\n    } catch {}\n    throw new ClientError("UnsupportedContentType", { detail: response.headers.get("content-type") })\n  }\n  const declared = Number(response.headers.get("content-length"))\n  if (Number.isFinite(declared) && declared > maxJsonBodyBytes) {\n    try {\n      void response.body?.cancel()?.catch(() => {})\n    } catch {}\n    throw new ClientError("ResponseTooLarge")\n  }\n  let text = ""\n  try {\n    if (response.body === null) {\n      text = await response.text()\n      if (new TextEncoder().encode(text).byteLength > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")\n    } else {\n      const reader = response.body.getReader()\n      const decoder = new TextDecoder()\n      let bytes = 0\n      try {\n        while (true) {\n          const next = await reader.read()\n          if (next.done) {\n            text += decoder.decode()\n            break\n          }\n          bytes += next.value.byteLength\n          if (bytes > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")\n          text += decoder.decode(next.value, { stream: true })\n        }\n      } finally {\n        try {\n          void reader.cancel().catch(() => {})\n        } catch {}\n        reader.releaseLock()\n      }\n    }\n  } catch (cause) {\n    if (cause instanceof ClientError) throw cause\n    throw new ClientError("Transport", { cause })\n  }\n  if (text === "") throw new ClientError("MalformedResponse")\n  try {\n    return JSON.parse(text)\n  } catch (cause) {\n    throw new ClientError("MalformedResponse", { cause })\n  }\n}\n\ntype DeclaredErrorBody = { readonly _tag?: string; readonly message?: string; readonly data?: { readonly message?: string } }\n\n/** Throw declared error bodies as Errors. The body's fields stay on the error, so narrowing on \`_tag\` or \`name\` still works. */\nfunction declared(body: DeclaredErrorBody) {\n  const error = Object.assign(new Error(body.message ?? body.data?.message), body)\n  if (body._tag) error.name = body._tag\n  return error\n}\n\nfunction isContentType(response: Response, expected: string) {\n  return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === expected\n}\n`
+packages/merman/src/gantt/parser.ts :: Number(calendar[1]),
+packages/merman/src/gantt/parser.ts :: Number(calendar[2]) - 1,
+packages/merman/src/gantt/parser.ts :: Number(calendar[3]),
+packages/merman/src/gantt/parser.ts :: Number(calendar[4] ?? 0),
+packages/merman/src/gantt/parser.ts :: Number(calendar[5] ?? 0),
+packages/merman/src/gantt/parser.ts :: Number(calendar[6] ?? 0),
+packages/merman/src/gantt/parser.ts :: const numeric = Number(value)
+packages/merman/src/gantt/parser.ts :: return start + Number(duration[1]) * units[duration[2]!.toLowerCase() as keyof typeof units]
+packages/merman/src/gitgraph/parser.ts :: const order = orderValue === undefined ? undefined : Number(orderValue)
+packages/merman/src/sequence/parser.ts :: messageNumberIncrement = Number.parseInt(autonumberMatch[2] ?? "1", 10)
+packages/merman/src/sequence/parser.ts :: nextMessageNumber = Number.parseInt(autonumberMatch[1] ?? "1", 10)
+packages/merman/src/state/routing.ts :: (left, right) => Number(Boolean(plans[left]!.pathRepaired)) - Number(Boolean(plans[right]!.pathRepaired)),
+packages/plugin-browser/src/proxy.ts :: port: url.port ? Number(url.port) : url.protocol === "https:" || url.protocol === "wss:" ? 443 : 80,
+packages/plugin-github/src/actions.ts :: if (/^\d+$/.test(text)) return { id: Number(text) }
+packages/plugin-github/src/actions.ts :: return { id: Number(id), repo: `${url.hostname}/${match[1]}/${match[2]}` }
+packages/plugin-github/src/client.ts :: const declared = Number(response.headers["content-length"])
+packages/plugin-github/src/client.ts :: const reset = Number(input.headers["x-ratelimit-reset"])
+packages/plugin-github/src/client.ts :: const retry = Number(input.headers["retry-after"])
+packages/plugin-github/src/copilot.ts :: ...(comment ? { commentID: Number(comment) } : {}),
+packages/plugin-github/src/copilot.ts :: ...(location ? { path: location[1], line: Number(location[2]) } : {}),
+packages/plugin-github/src/copilot.ts :: ...(location?.[3] ? { endLine: Number(location[3]) } : {}),
+packages/plugin-github/src/copilot.ts :: ...(match[3] ? { endLine: Number(match[3]) } : {}),
+packages/plugin-github/src/copilot.ts :: const generated = generatedMatch ? (/^no/i.test(generatedMatch[1]) ? 0 : Number(generatedMatch[1])) : undefined
+packages/plugin-github/src/copilot.ts :: line: Number(match[2]),
+packages/plugin-github/src/copilot.ts :: return value === undefined ? undefined : Number(value)
+packages/plugin-github/src/repo.ts :: if (plain) return { number: Number(plain[1]) }
+packages/plugin-github/src/repo.ts :: return repo ? { repo, number: Number(short[2]) } : undefined
+packages/plugin-github/src/repo.ts :: return { repo: { host: url.hostname, owner: match[1], name: match[2] }, number: Number(match[3]) }
+packages/plugin-github/src/review.ts :: const alertNumber = Number(response.id.slice("alert:".length))
+packages/plugin-github/src/review.ts :: const page = last ? Number(new URL(last).searchParams.get("page")) : 1
+packages/schema/src/identifier.ts :: Number((value >> BigInt(48 - 8 * index)) & 0xffn)
+packages/script/src/index.ts :: const [major, minor, patch] = version.split(".").map((x: string) => Number(x) || 0)
+packages/script/src/registry.ts :: const declared = Number(res.headers.get("content-length"))
+packages/server/src/auth.ts :: const expires = Number(parts[0])
+packages/server/src/event-feed.ts :: const cursor = Number(digits)
+packages/server/src/handlers/fs.ts :: const end = match[2] === "" ? size - 1 : Number(match[2])
+packages/server/src/handlers/fs.ts :: const start = Number(match[1])
+packages/server/src/handlers/fs.ts :: const suffix = Number(match[2])
+packages/server/src/handlers/persistent-pty.ts :: const cursor = Number(url.searchParams.get("cursor") ?? "0")
+packages/server/src/handlers/pty.ts :: const cursorNumber = parsedCursor === null ? undefined : Number(parsedCursor)
+packages/session-ui/src/components/file.tsx :: const value = parseInt(node.dataset.line, 10)
+packages/session-ui/src/pierre/commented-lines.ts :: const line = parseInt(value, 10)
+packages/session-ui/src/pierre/diff-selection.ts :: .map((x) => parseInt(x, 10))
+packages/session-ui/src/pierre/diff-selection.ts :: if (parseInt(row.dataset.altLine ?? "", 10) === line) return diffLineIndex(split, row)
+packages/session-ui/src/pierre/file-find.ts :: const title = parseFloat(getComputedStyle(root).getPropertyValue("--session-title-height"))
+packages/session-ui/src/pierre/file-selection.ts :: const alt = parseInt(line.dataset.altLine ?? "", 10)
+packages/session-ui/src/pierre/file-selection.ts :: const primary = parseInt(line.dataset.line ?? "", 10)
+packages/session-ui/src/pierre/file-selection.ts :: const value = parseInt(line.dataset.line ?? "", 10)
+packages/session-ui/src/tools/tool-renderer.tsx :: additions: input.content.split("\n").length - Number(input.content.endsWith("\n")),
+packages/simulation/src/control-server.ts :: const server = new websocket.WebSocketServer({ host: url.hostname, port: Number(url.port) })
+packages/simulation/src/manifest.ts :: const port = Number(endpoint.port)
+packages/stats/app/src/component/model-compare-detail.tsx :: const day = match[3] ? Number(match[3]) : 1
+packages/stats/app/src/component/model-compare-detail.tsx :: const month = match[2] ? Number(match[2]) - 1 : 0
+packages/stats/app/src/component/model-compare-detail.tsx :: const year = Number(match[1])
+packages/stats/app/src/component/model-compare-detail.tsx :: return Number(value.toFixed(digits)).toLocaleString("en")
+packages/stats/app/src/lib/comparison-pages.ts :: const year = Number(value.match(/\d{4}/)?.[0] ?? 0)
+packages/stats/app/src/lib/format.ts :: const date = new Date(Date.UTC(end.getUTCFullYear(), month, Number(match[2])))
+packages/stats/app/src/lib/format.ts :: return Number(value.toFixed(digits)).toLocaleString("en")
+packages/stats/app/src/routes/[lab]/[model].tsx :: if (iso) return new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])))
+packages/stats/app/src/routes/[lab]/[model].tsx :: return Number(value.toFixed(2)).toString()
+packages/stats/app/src/routes/[lab]/[model].tsx :: return Number(value.toFixed(3))
+packages/stats/app/src/routes/[lab]/[model].tsx :: return Number(value.toFixed(digits)).toLocaleString("en")
+packages/stats/app/src/routes/[lab]/[model].tsx :: return new Date(Date.UTC(year, month, Number(label[2])))
+packages/stats/app/src/routes/[lab]/[model].tsx :: }).format(new Date(Date.UTC(Number(match[1]), match[2] ? Number(match[2]) - 1 : 0, 1)))
+packages/stats/app/src/routes/[lab]/index.tsx :: const day = match[3] ? Number(match[3]) : 1
+packages/stats/app/src/routes/[lab]/index.tsx :: const month = match[2] ? Number(match[2]) - 1 : 0
+packages/stats/app/src/routes/[lab]/index.tsx :: const year = Number(match[1])
+packages/stats/app/src/routes/[lab]/index.tsx :: return Number(value.toFixed(3))
+packages/stats/app/src/routes/[lab]/index.tsx :: return Number(value.toFixed(digits)).toLocaleString("en")
+packages/stats/app/src/routes/[lab]/index.tsx :: return `${monthName(match[1])} ${Number(match[2])} ${new Date().getFullYear()}`
+packages/stats/app/src/routes/compare/index.tsx :: const year = Number(value.match(/\d{4}/)?.[0] ?? 0)
+packages/stats/app/src/routes/compare/index.tsx :: return Number(value.toFixed(digits)).toLocaleString("en")
+packages/stats/app/src/routes/compare/index.tsx :: }).format(new Date(Date.UTC(Number(match[1]), match[2] ? Number(match[2]) - 1 : 0, match[3] ? Number(match[3]) : 1)))
+packages/stats/app/src/routes/index.tsx :: if (value < 0.001) return `${Number((value * 1_000_000).toFixed(value >= 0.00001 ? 0 : 1))}M`
+packages/stats/app/src/routes/index.tsx :: if (value < 1) return `${Number((value * 1_000).toFixed(value >= 0.01 ? 0 : 1))}B`
+packages/stats/app/src/routes/index.tsx :: if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`
+packages/stats/app/src/routes/stats-shell.tsx :: const declared = Number(response.headers.get("content-length"))
+packages/stats/core/src/domain/home.ts :: return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+packages/stats/core/src/domain/home.ts :: return Number(value ?? 0)
+packages/stats/core/src/domain/home.ts :: return Number(value.toFixed(digits))
+packages/stats/core/src/domain/inference.ts :: const value = Number(data[key])
+packages/stats/core/src/domain/inference.ts :: return Number(number(data, key).toFixed(2))
+packages/stats/core/src/domain/stat.ts :: return Number((((left ?? 0) * leftWeight + (right ?? 0) * rightWeight) / totalWeight).toFixed(2))
+packages/stats/core/src/domain/stat.ts :: return Number(((value ?? 0) / total).toFixed(6))
+packages/stats/core/src/honeycomb-backfill.ts :: const numeric = Number(value)
+packages/stats/core/src/honeycomb-backfill.ts :: const parsed = Number(value)
+packages/stats/core/src/honeycomb-backfill.ts :: const value = Number(cell(row, [name, ...aliases]).replace(/,/g, ""))
+packages/stats/core/src/honeycomb-backfill.ts :: const week = Number(match[2])
+packages/stats/core/src/honeycomb-backfill.ts :: const year = Number(match[1])
+packages/stats/core/src/honeycomb-backfill.ts :: return Number(number(row, name, aliases).toFixed(2))
+packages/stats/core/src/r2-sql.test.ts :: expect(rows.reduce((sum, row) => sum + Number(row.requests), 0)).toBe((count * (count + 1)) / 2)
+packages/theme/src/tui/resolve.ts :: if (!HueStep.literals.includes(Number(step) as HueStep))
+packages/tui/src/component/dialog-config.tsx :: : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
+packages/tui/src/component/dialog-config.tsx :: format: (value) => Number(value).toFixed(2),
+packages/tui/src/component/dialog-config.tsx :: format: (value) => `${Math.round(Number(value) * 100)}%`,
+packages/tui/src/component/dialog-integration.tsx :: .toSorted((a, b) => Number(a.type === "key") - Number(b.type === "key"))
+packages/tui/src/component/dialog-integration.tsx :: Number(b.metadata?.source === "mcp") - Number(a.metadata?.source === "mcp") ||
+packages/tui/src/component/dialog-model.tsx :: (a, b) => Number(favorites.has(modelPreferenceKey(b.value))) - Number(favorites.has(modelPreferenceKey(a.value))),
+packages/tui/src/component/dialog-model.tsx :: ? Number(b.providerID === "opencode-go") - Number(a.providerID === "opencode-go") ||
+packages/tui/src/component/dialog-model.tsx :: Number(b.providerID === "opencode") - Number(a.providerID === "opencode")
+packages/tui/src/component/dialog-model.tsx :: const free = Number(b.footer === "Free") - Number(a.footer === "Free")
+packages/tui/src/component/dialog-model.tsx :: const release = Number(b.releaseDate) - Number(a.releaseDate)
+packages/tui/src/component/session-tabs.tsx :: : tint(idleNumber(), tint(theme.text.base, pulseBackground(), 0.25), Number(selected()))
+packages/tui/src/component/session-tabs.tsx :: activities: layout().tabs.map((tab) => Number(statuses().get(tab.sessionID)!.complete)),
+packages/tui/src/component/session-tabs.tsx :: activity: current.activities[index] ?? Number(statuses().get(tab.sessionID)!.complete),
+packages/tui/src/component/session-tabs.tsx :: const activity = () => visuals().get(tab.sessionID)?.activity ?? Number(status().complete)
+packages/tui/src/component/session-tabs.tsx :: const selection = () => visuals().get(tab.sessionID)?.selection ?? Number(selected())
+packages/tui/src/component/session-tabs.tsx :: selection: current.selections[index] ?? Number(tab.sessionID === activeID()),
+packages/tui/src/component/session-tabs.tsx :: selections: layout().tabs.map((tab) => Number(tab.sessionID === activeID())),
+packages/tui/src/component/title-shimmer.tsx :: Number(border === true || (Array.isArray(border) && border.includes("bottom"))),
+packages/tui/src/component/title-shimmer.tsx :: Number(border === true || (Array.isArray(border) && border.includes("right"))),
+packages/tui/src/component/title-shimmer.tsx :: const left = Number(border === true || (Array.isArray(border) && border.includes("left")))
+packages/tui/src/component/title-shimmer.tsx :: const top = Number(border === true || (Array.isArray(border) && border.includes("top")))
+packages/tui/src/context/session-tabs-model.ts :: widths: visible.map((_, index) => width + Number(index < remainder)),
+packages/tui/src/editor.ts :: const port = Number(value)
+packages/tui/src/mini/footer.command.tsx :: const provider = Number(a.providerID !== "opencode") - Number(b.providerID !== "opencode")
+packages/tui/src/mini/footer.form.tsx :: const digit = Number(event.name)
+packages/tui/src/mini/stream-v2.subagent.ts :: const active = Number(b.status === "running") - Number(a.status === "running")
+packages/tui/src/prompt/attachment.ts :: return match ? Math.max(highest, Number(match[1])) : highest
+packages/tui/src/prompt/parse.ts :: const endLine = match[2] && startLine < Number(match[2]) ? Number(match[2]) : undefined
+packages/tui/src/prompt/parse.ts :: const startLine = Number(match[1])
+packages/tui/src/routes/session/rows.ts :: const ordinal = Number(match[2])
+packages/tui/src/util/diff.ts :: const count = Number(header[1])
+packages/tui/src/util/form.ts :: const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(value)
+packages/tui/src/util/form.ts :: const point = match[2].length + Number(match[4])
+packages/tui/src/util/form.ts :: if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+packages/tui/src/util/form.ts :: if (time && Number(time[1]) > 23) return false
+packages/tui/src/util/form.ts :: if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+packages/tui/src/util/form.ts :: return /^-?\d+(?:\.\d+)?$/.test(trimmed) ? Number(trimmed) : Number.NaN
+packages/tui/src/util/form.ts :: return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+packages/ui/src/components/text-reveal.tsx :: const prev = Number.parseFloat(width())
+packages/ui/src/components/thinking-heading.stories.tsx :: const w = Number.parseFloat(width())
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("blur", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("bounce", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("duration", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("maskHeight", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("maskPad", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("maskSize", Number(e.currentTarget.value))}
+packages/ui/src/components/thinking-heading.stories.tsx :: onInput={(e) => setState("travel", Number(e.currentTarget.value))}
+packages/ui/src/feedback/toast/toast.tsx :: toast.custom((id) => render({ toastId: Number(id) }), {
+packages/ui/src/theme/color.ts :: const num = parseInt(rgb, 16)
+packages/ui/src/theme/loader.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/ui/src/theme/v2/foreground.ts :: const hex = greyHex(primitives, Number(step))
+packages/util/src/http-body.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+packages/util/src/npm.ts :: .toSorted((a, b) => Number(a) - Number(b)),
+packages/util/src/npm.ts :: : Number(name.match(/^\.staging-(\d+)-/)?.[1] ?? Number.NaN)
+packages/util/src/npm.ts :: ? Number(name)
+packages/util/src/npm.ts :: const newest = Number((yield* generations(dir)).at(-1) ?? 0)
+packages/util/src/observability/logging.ts :: const size = Number((yield* fs.stat(target)).size)
+packages/util/src/path.ts :: const first = Number(colonMatch[2])
+packages/util/src/path.ts :: const first = Number(hashMatch[2])
+packages/util/src/path.ts :: const second = colonMatch[3] ? Number(colonMatch[3]) : first
+packages/util/src/path.ts :: const second = hashMatch[3] ? Number(hashMatch[3]) : first
+packages/web/src/lib/accept-language.ts :: const parsed = q ? Number.parseFloat(q) : 1
+packages/web/src/lib/share-data.ts :: const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
+services/changelog/src/index.ts :: const declared = Number(response.headers.get("content-length"))
+services/changelog/src/index.ts :: if (Date.now() - Number(cached.headers.get(FETCHED_AT)) > FRESH_SECONDS * 1000) ctx.waitUntil(refresh(cache))
+services/files/src/index.ts :: const end = bytes[1] && bytes[2] ? Math.min(Number(bytes[2]), object.size - 1) : object.size - 1
+services/files/src/index.ts :: const offset = bytes[1] ? Number(bytes[1]) : Math.max(0, object.size - Number(bytes[2]))
+services/update/src/index.ts :: const duration = typeof input === "string" && input.trim() ? Number(input) : NaN
+services/update/src/index.ts :: const requestedPage = Number.parseInt(url.searchParams.get("page") ?? "1", 10)
