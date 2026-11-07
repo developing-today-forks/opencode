@@ -37,9 +37,9 @@ import {
  * store's `google` OAuth login written by the antigravity auth method.
  */
 
-export const providerId = "antigravity"
+export const providerId = "_antigravity"
 export const providerName = "Antigravity"
-export const aliases = ["antigravity", "antigravity-direct"]
+export const aliases = ["_antigravity", "antigravity", "antigravity-direct"]
 
 const DEFAULT_PROJECT_ID = "rising-fact-p41fc"
 const ANTIGRAVITY_ENDPOINTS = [
@@ -463,6 +463,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
+  // #1823 rename: the quota id now equals the config provider id, so the
+  // disable key is pinned to the pre-rename quota id — config
+  // disabled_providers must not hide this row (module rule, kept).
+  disabledBy: ["antigravity"],
   credentialAliases: ["google"],
   isConfigured: async (ctx) => (await resolveCandidates(ctx)).length > 0,
   fetchQuota: async (ctx) => fetchWithCandidates(ctx, await resolveCandidates(ctx)),

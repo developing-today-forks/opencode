@@ -71,8 +71,8 @@ it.effect("MuseDirect composes the native Meta Responses route under its own pro
   Effect.gen(function* () {
     const direct = MuseDirect.configure(keySettings(MINTED_KEY))
     const model = direct.model("muse-spark-1.3-contributor")
-    expect(model.provider).toBe("muse-direct")
-    expect(model.route.providerMetadataKey).toBe("muse-direct")
+    expect(model.provider).toBe("_muse")
+    expect(model.route.providerMetadataKey).toBe("_muse")
     expect(model.route.endpoint.baseURL).toBe("https://api.meta.ai/v1")
     expect(model.route.endpoint.path).toBe("/responses")
     expect(MuseDirectResponses.protocol.id).toBe("muse-direct-responses")

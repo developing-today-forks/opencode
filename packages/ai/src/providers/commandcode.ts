@@ -31,7 +31,7 @@ import type { RouteDefaultsInput } from "../route/client.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { CommandCodeAuth, type CredentialSources } from "./commandcode-auth.js"
 
-export const id = ProviderID.make("commandcode")
+export const id = ProviderID.make("_commandcode")
 
 export type ProviderOptionsInput = CommandCode.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput

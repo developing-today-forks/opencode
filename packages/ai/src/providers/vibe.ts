@@ -30,7 +30,7 @@ import { HttpTransport, type Transport, type TransportPrepareInput } from "../ro
 import { mergeJsonRecords, ProviderID, type ModelID } from "../schema/index.js"
 import { VibeAuth, type CredentialSources } from "./vibe-auth.js"
 
-export const id = ProviderID.make("vibe")
+export const id = ProviderID.make("_vibe")
 
 export type ProviderOptionsInput = MistralChat.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput

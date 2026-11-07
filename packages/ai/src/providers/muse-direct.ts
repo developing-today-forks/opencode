@@ -24,7 +24,7 @@ import { Auth } from "../route/auth.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import type { OpenResponsesProviderOptionsInput } from "./open-responses-options.js"
 
-export const id = ProviderID.make("muse-direct")
+export const id = ProviderID.make("_muse")
 const baseURL = "https://api.meta.ai/v1"
 
 export type ProviderOptionsInput = OpenResponsesProviderOptionsInput
@@ -77,7 +77,7 @@ export const MODELS: ReadonlyArray<ModelPreset> = [
 const responsesRoute = Route.make({
   id: "muse-direct-responses",
   provider: id,
-  providerMetadataKey: "muse-direct",
+  providerMetadataKey: "_muse",
   protocol: MuseDirectResponses.protocol,
   endpoint: Endpoint.path("/responses", { baseURL }),
   // Meta Responses does not support WebSocket upgrades; always use HTTP/SSE.

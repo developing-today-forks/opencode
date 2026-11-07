@@ -34,11 +34,11 @@ const tools = [
 
 it.effect("Claude Code provider stays wired to the Claude Code Messages protocol", () =>
   Effect.sync(() => {
-    expect(ClaudeCode.id).toBe("claude-code")
-    expect(ClaudeCode.provider.id).toBe("claude-code")
+    expect(ClaudeCode.id).toBe("_claude")
+    expect(ClaudeCode.provider.id).toBe("_claude")
     expect(typeof ClaudeCode.model).toBe("function")
     expect(ClaudeCode.route.id).toBe(ClaudeCodeMessages.route.id)
-    expect(model.provider).toBe("claude-code")
+    expect(model.provider).toBe("_claude")
     expect(ClaudeCode.MODELS.map((preset) => preset.id)).toEqual([
       "claude-haiku-5-5",
       "claude-sonnet-5-5",

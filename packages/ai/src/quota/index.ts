@@ -51,12 +51,14 @@ const registry = new Map(quotaProviders.map((provider) => [provider.providerId, 
 
 export const getQuotaProvider = (providerId: string): QuotaProvider | undefined => registry.get(providerId)
 
-// The disabled filter keys on the provider's own quota id (its
-// `disabledBy`, by default itself): quota ids and OpenCode provider
-// ids are different namespaces (config disables `claude-code` and
-// `commandcode`, which must not hide the `claude` and `command-code`
-// quota rows), so alias matching would hide live rows — the module's
-// rule, kept.
+// The disabled filter keys on the provider's `disabledBy` (by
+// default its own quota id): since the #1823 rename the fleet quota
+// ids equal the config provider ids, so the renamed providers pin
+// `disabledBy` to their pre-rename quota ids (`claude`,
+// `command-code`, `antigravity`) — config disabled_providers must
+// not hide live quota rows, and alias matching would hide more —
+// the module's rule, kept.
+
 const disabledIdsOf = (provider: QuotaProvider): string[] => provider.disabledBy ?? [provider.providerId]
 
 export const isProviderDisabled = (ctx: QuotaContext, provider: QuotaProvider): boolean =>

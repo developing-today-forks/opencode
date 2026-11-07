@@ -43,7 +43,7 @@ import {
  * opencode-auth → "opencode", env → "environment".
  */
 
-export const providerId = "claude"
+export const providerId = "_claude"
 export const providerName = "Claude"
 export const aliases = ["anthropic", "claude", "claude-code"]
 
@@ -226,6 +226,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
+  // #1823 rename: the quota id now equals the config provider id, so the
+  // disable key is pinned to the pre-rename quota id — config
+  // disabled_providers must not hide this row (module rule, kept).
+  disabledBy: ["claude"],
   isConfigured: (ctx) => Boolean(findClaudeCredential(ctx)),
   fetchQuota: async (ctx) => {
     const credential = findClaudeCredential(ctx)

@@ -27,11 +27,11 @@ const ndjson = (...events: ReadonlyArray<Record<string, unknown>>) =>
 
 it.effect("Command Code provider stays wired to the /alpha/generate protocol", () =>
   Effect.sync(() => {
-    expect(Commandcode.id).toBe("commandcode")
-    expect(Commandcode.provider.id).toBe("commandcode")
+    expect(Commandcode.id).toBe("_commandcode")
+    expect(Commandcode.provider.id).toBe("_commandcode")
     expect(typeof Commandcode.model).toBe("function")
     expect(Commandcode.route.id).toBe(CommandCode.route.id)
-    expect(model.provider).toBe("commandcode")
+    expect(model.provider).toBe("_commandcode")
     expect(Commandcode.DEFAULT_MODEL_ID).toBe("deepseek/deepseek-v4-flash")
   }),
 )

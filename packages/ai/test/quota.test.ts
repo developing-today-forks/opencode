@@ -1266,11 +1266,11 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     const indexSource = readFileSync(new URL("../src/quota/index.ts", import.meta.url), "utf8")
     const registryBody = indexSource.match(/export const quotaProviders[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? ""
     const variableToId: Record<string, string> = {
-      antigravity: "antigravity",
-      claude: "claude",
+      antigravity: "_antigravity",
+      claude: "_claude",
       clinePass: "cline-pass",
       codex: "codex",
-      commandCode: "command-code",
+      commandCode: "_commandcode",
       deepseek: "deepseek",
       groq: "groq",
       meta: "meta",
@@ -1286,11 +1286,11 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       .filter(Boolean)
       .map((variable) => variableToId[variable])
     expect(ids).toEqual([
-      "antigravity",
-      "claude",
+      "_antigravity",
+      "_claude",
       "cline-pass",
       "codex",
-      "command-code",
+      "_commandcode",
       "deepseek",
       "groq",
       "meta",

@@ -397,7 +397,9 @@ const formatPercent = (value: number): string => String(Math.round(value * 100) 
 export const renderQuotaResults = (results: QuotaResult[]): string => {
   const lines: string[] = []
   for (const result of results) {
-    const headerParts = [`${result.providerName} (${result.providerId})`]
+    // Display only (#1823): the leading underscore is a config/source
+    // ownership marker; human surfaces strip it. JSON keeps the canonical id.
+    const headerParts = [`${result.providerName} (${result.providerId.replace(/^_/, "")})`]
     if (result.credentialLabel) headerParts.push(result.credentialLabel)
     if (result.accountLabel) headerParts.push(result.accountLabel)
     if (result.planLabel) headerParts.push(`plan: ${result.planLabel}`)
