@@ -793,6 +793,30 @@ export const turnAttempts = (db: Database.Interface["db"], since: number, sessio
     .limit(ROW_LIMIT)
     .all()
 
+/** One session's own attempts, newest first, with the serving leaf and failover of each step (#1891).
+ * This is the per-session readout behind "which leaf served my last step": route_attempt already
+ * records provider/model/variant per attempt plus `failed_over_to`; nothing else surfaces it back
+ * to the session itself. Session-local by construction — it only ever returns the named session's rows. */
+export const sessionAttempts = (db: Database.Interface["db"], sessionID: string, limit = 50) =>
+  db
+    .select({
+      routeID: RouteAttemptTable.route_id,
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      variant: RouteAttemptTable.variant,
+      assistantMessageID: RouteAttemptTable.assistant_message_id,
+      outcome: RouteAttemptTable.outcome,
+      failedOverTo: RouteAttemptTable.failed_over_to,
+      hedged: RouteAttemptTable.hedged,
+      timeStarted: RouteAttemptTable.time_started,
+      timeEnded: RouteAttemptTable.time_ended,
+    })
+    .from(RouteAttemptTable)
+    .where(eq(RouteAttemptTable.session_id, sessionID))
+    .orderBy(desc(RouteAttemptTable.time_started))
+    .limit(limit)
+    .all()
+
 /** Selections in the window, newest first: who was eligible, the weights and exclusions behind each, and who was chosen. */
 export const decisionRows = (db: Database.Interface["db"], since: number, routeID?: string) =>
   db

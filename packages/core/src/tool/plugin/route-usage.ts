@@ -13,7 +13,7 @@ export const name = "route_usage"
 
 export const description = `Read what routed work has used: totals per provider and model, per session (requests, tokens, cost, the pools and models it used), per day (with cache-read tokens, cache hit ratio and USD saved by cache hits), per continued turn (the chunks of one response joined back together), and each plan's quota windows with the share used in its last window.
 
-Use it for questions like "which sessions used the most", "did any pool use this provider", "how much of my Claude window is gone", or "what did this week cost". It also reports per-model burn rates: the typical percent of a quota window one session costs, derived from the listed sessions' window shares. Set \`hours\` for the window (default 168; up to a year). Set \`provider\` or \`model\` to narrow the totals, \`route\` to one pool, or \`session\` to one session. Every target lists each pool it belongs to: used, offered but never chosen, or configured but never reached. The history is kept indefinitely, so a longer window is always available.`
+Use it for questions like "which sessions used the most", "did any pool use this provider", "how much of my Claude window is gone", or "what did this week cost". When the session input names one session it also reports that session's per-step serving readout: which provider/model leaf actually served each step and whether the last step failed over from another leaf — use it to answer "which model served my last step" (the session's declared route ref is not what served it). It also reports per-model burn rates: the typical percent of a quota window one session costs, derived from the listed sessions' window shares. Set \`hours\` for the window (default 168; up to a year). Set \`provider\` or \`model\` to narrow the totals, \`route\` to one pool, or \`session\` to one session. Every target lists each pool it belongs to: used, offered but never chosen, or configured but never reached. The history is kept indefinitely, so a longer window is always available.`
 
 export const Input = Schema.Struct({
   hours: Schema.Finite.check(Schema.isBetween({ minimum: 0.1, maximum: 24 * 366 })).pipe(Schema.optional),
@@ -30,6 +30,8 @@ export const Output = Schema.Struct({
   sessions: Schema.Array(Schema.Unknown),
   days: Schema.Array(Schema.Unknown),
   turns: Schema.Array(Schema.Unknown),
+  serving: Schema.Array(Schema.Unknown),
+  lastServing: Schema.Unknown.pipe(Schema.optional),
   plans: Schema.Array(Schema.Unknown),
   burnRates: Schema.Array(Schema.Unknown),
   noDatabase: Schema.Boolean,
@@ -116,6 +118,8 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
           if (target) targetsByID.set(`${row.providerID}/${row.modelID}`, { ...target, sessions: row.sessions })
         }
         const targets = [...targetsByID.values()]
+        const servingRows =
+          input.session === undefined ? [] : yield* ModelRouteLog.sessionAttempts(db, input.session, 50)
         const days = yield* ModelRouteLog.dailyUsage(db, since)
         const turns = yield* ModelRouteLog.turnAttempts(db, since, input.session)
         const offers = (yield* ModelRouteLog.offerUsage(db, since, input.route)) as ModelUsage.OfferRow[]
@@ -129,7 +133,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
             totals: ModelUsage.sum(rows.filter((row) => row.providerID === plan.providerID)),
           })
         }
-        return { sessions, sessionTargets, targets, days, turns, offers, windowTotals, windowSessionTargets }
+        return { sessions, sessionTargets, targets, days, turns, offers, windowTotals, windowSessionTargets, servingRows }
       }).pipe(Effect.orDie),
     )
     const history = Option.getOrUndefined(read)
@@ -208,6 +212,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
         ? { ...report, used: null, percent: null, remaining: null }
         : report
     })
+    const serving = ModelUsage.servingSteps(history?.servingRows ?? []).slice(0, 20)
     return {
       hours,
       since: new Date(since).toISOString(),
@@ -217,6 +222,8 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
       sessions,
       days,
       turns,
+      serving,
+      lastServing: ModelUsage.lastServing(history?.servingRows ?? []),
       plans: planReports,
       burnRates,
     }
@@ -255,6 +262,17 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>) => {
     lines.push(
       `session ${session.sessionID} last ${new Date(session.last).toISOString().slice(0, 16)}: ${session.requests} requests, ${ModelUsage.metered(session)} metered tokens, ${money(session.costUsd)}, ${cache(session)}; pools ${session.pools.join(", ") || "none"}; models ${session.targets.map((item) => `${item.target} x${item.requests}`).join(", ") || "none"}${shares.length > 0 ? `; used ${shares.join(", ")}` : ""}`,
     )
+  }
+  if (report.lastServing) {
+    const last = report.lastServing
+    lines.push(
+      `serving last step: ${last.leaf}${last.variant ? `#${last.variant}` : ""} via route ${last.routeID} (outcome ${last.outcome})${last.failedOver ? `; attempted ${last.attemptedLeaf} -> failed over${last.failedOverTo ? ` to ${last.failedOverTo}` : ""}, served by ${last.leaf}` : "; no failover"}`,
+    )
+    for (const step of report.serving.slice(0, 10)) {
+      lines.push(
+        `serving step ${new Date(step.timeStarted).toISOString()}: ${step.leaf}${step.variant ? `#${step.variant}` : ""} via route ${step.routeID}, outcome ${step.outcome}${step.failedOverTo ? `, failed over to ${step.failedOverTo}` : ""}`,
+      )
+    }
   }
   for (const day of report.days.slice(-14)) {
     lines.push(
@@ -297,6 +315,8 @@ export const add = (editor: ToolEditor, source: () => Source = () => NO_SOURCE, 
             sessions: report.sessions,
             days: report.days,
             turns: report.turns,
+            serving: report.serving,
+            lastServing: report.lastServing ?? undefined,
             plans: report.plans,
             burnRates: report.burnRates,
             noDatabase: report.noDatabase,
