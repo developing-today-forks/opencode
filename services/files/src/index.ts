@@ -103,24 +103,16 @@ export default {
     const rangeHeader = request.headers.get("Range")
     // Ignore unsupported/malformed and multipart ranges; a full 200 is valid.
     const bytes = rangeHeader?.match(/^bytes=(\d*)-(\d*)$/)
-    // RFC 9110 14.2: an invalid range set — a zero-length suffix
-    // (bytes=-0) or a first position past the last (bytes=5-3) — is
-    // ignored, not rejected; only a well-formed range that starts at or
-    // beyond the object is unsatisfiable (416).
-    const first = bytes?.[1] ? Number(bytes[1]) : undefined
-    const last = bytes?.[2] ? Number(bytes[2]) : undefined
-    const invalid = (first !== undefined && last !== undefined && first > last) || (first === undefined && last === 0)
     if (
       bytes &&
       (bytes[1] || bytes[2]) &&
-      !invalid &&
       (ifRange === null ||
         ifRange === object.httpEtag ||
         (!ifRange.startsWith('"') && !ifRange.startsWith("W/") && modified <= Date.parse(ifRange)))
     ) {
-      const offset = first !== undefined ? first : Math.max(0, object.size - (last ?? 0))
-      const end = first !== undefined && last !== undefined ? Math.min(last, object.size - 1) : object.size - 1
-      if (offset >= object.size) {
+      const offset = bytes[1] ? Number(bytes[1]) : Math.max(0, object.size - Number(bytes[2]))
+      const end = bytes[1] && bytes[2] ? Math.min(Number(bytes[2]), object.size - 1) : object.size - 1
+      if (offset >= object.size || end < offset) {
         headers.set("Content-Range", `bytes */${object.size}`)
         headers.set("Content-Length", "0")
         return new Response(null, { status: 416, headers })
