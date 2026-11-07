@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import FastCheck from "fast-check"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -19,6 +20,7 @@ const assertions: Permission.AssertInput[] = []
 let captured: Form.CreateInput | undefined
 let reject = false
 let deny = false
+let denialReason: string | undefined
 const capturedInput = () => captured
 const questionInput = {
   questions: [
@@ -39,6 +41,7 @@ const permission = permissionLayer({
                 rules: [],
                 permission: input.action,
                 resources: input.resources,
+                reason: denialReason,
               }),
             )
           : Effect.void,
@@ -129,6 +132,110 @@ describe("QuestionTool", () => {
       expect(capturedInput()).toBeUndefined()
     }),
   )
+
+  it.effect("returns detached-mode guidance when a question call reaches the denied leaf", () =>
+    Effect.gen(function* () {
+      captured = undefined
+      deny = true
+      denialReason = Permission.DETACHED_QUESTION_MESSAGE
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          deny = false
+          denialReason = undefined
+        }),
+      )
+      const registry = yield* Tool.Service
+
+      expect(
+        yield* executeTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-question-detached", name: QuestionTool.name, input: questionInput },
+        }),
+      ).toEqual({
+        status: "error",
+        error: {
+          type: "permission.rejected",
+          message: Permission.DETACHED_QUESTION_MESSAGE,
+        },
+      })
+      expect(capturedInput()).toBeUndefined()
+    }),
+  )
+
+  it.effect("detached sessions lose the question tool from their toolset and interactive ones keep it", () =>
+    Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      const names = (rules: Permission.Ruleset) =>
+        toolDefinitions(registry, rules).pipe(Effect.map((tools) => tools.map((tool) => tool.name)))
+
+      expect(yield* names(Permission.effectiveRules([], {}))).toEqual(["question", "execute"])
+      expect(yield* names(Permission.effectiveRules([], { detached: true }))).toEqual(["execute"])
+      // No agent or session rule can restore it: the detached override is evaluated last.
+      expect(
+        yield* names(
+          Permission.effectiveRules([{ action: "question", resource: "*", effect: "allow" }], {
+            detached: true,
+            permissions: [{ action: "*", resource: "*", effect: "allow" }],
+          }),
+        ),
+      ).toEqual(["execute"])
+    }),
+  )
+
+  it.effect("detached tool filtering survives a permission-action override and rejects stale question calls", () =>
+    Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      yield* registry.transform((editor) =>
+        editor.update(QuestionTool.name, (tool) => {
+          tool.options = { ...tool.options, permission: "read" }
+        }),
+      )
+      const snapshot = yield* registry.snapshot(
+        [{ action: "read", resource: "*", effect: "allow" }],
+        new Set([QuestionTool.name]),
+      )
+
+      expect(snapshot.definitions.map((tool) => tool.name)).toEqual(["execute"])
+      expect(
+        yield* snapshot.execute({
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-question-disabled", name: QuestionTool.name, input: questionInput },
+        }).pipe(Effect.flip),
+      ).toMatchObject({ message: Permission.DETACHED_QUESTION_MESSAGE })
+    }),
+  )
+
+  test("effectiveRules is the plain agent+session merge unless detached", () => {
+    FastCheck.assert(
+      FastCheck.property(
+        FastCheck.array(
+          FastCheck.record({
+            action: FastCheck.constantFrom("question", "read", "*", "shell"),
+            resource: FastCheck.constantFrom("*", "src/**"),
+            effect: FastCheck.constantFrom("allow" as const, "deny" as const, "ask" as const),
+          }),
+        ),
+        FastCheck.array(
+          FastCheck.record({
+            action: FastCheck.constantFrom("question", "read", "*", "shell"),
+            resource: FastCheck.constantFrom("*", "src/**"),
+            effect: FastCheck.constantFrom("allow" as const, "deny" as const, "ask" as const),
+          }),
+        ),
+        (agent, own) => {
+          expect(Permission.effectiveRules(agent, { permissions: own })).toEqual(Permission.merge(agent, own))
+          // Invariant: whatever the other rules say, detached question is denied; other actions are unaffected.
+          const detached = Permission.effectiveRules(agent, { permissions: own, detached: true })
+          expect(Permission.evaluate("question", "*", detached).effect).toBe("deny")
+          expect(Permission.evaluate("read", "src/a.ts", detached)).toEqual(
+            Permission.evaluate("read", "src/a.ts", Permission.merge(agent, own)),
+          )
+        },
+      ),
+    )
+  })
 
   it.effect("registers question and projects user answers without a permission assertion", () =>
     Effect.gen(function* () {

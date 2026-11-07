@@ -672,6 +672,7 @@ export function make(options: ClientOptions) {
               metadata: input?.["metadata"],
               permissions: input?.["permissions"],
               subagentPolicy: input?.["subagentPolicy"],
+              detached: input?.["detached"],
             },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],

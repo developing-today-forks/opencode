@@ -92,6 +92,8 @@ type CreateBaseInput = {
   metadata?: SessionSchema.Metadata
   permissions?: Permission.Ruleset
   subagentPolicy?: SessionSchema.SubagentPolicy
+  /** Detached (non-interactive) mode; children always inherit it from their parent. */
+  detached?: true
   /** Per-call governance override from the launching tool; see ModelGovernance. */
   subagentOverride?: SessionSchema.AgentOverride
 }
@@ -436,6 +438,8 @@ const layer = Layer.effect(
               metadata: input.metadata ?? parent?.metadata,
               subagentPolicy: input.subagentPolicy,
               permissions: input.permissions ?? parent?.permissions,
+              // A detached tree never sprouts an interactive leaf: a child cannot opt out.
+              detached: input.detached ?? parent?.detached,
               model: storedModel
                 ? {
                     id: Model.ID.make(storedModel.id),
