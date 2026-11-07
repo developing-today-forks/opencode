@@ -1161,6 +1161,20 @@ describe("openrouter quota mapping (#1799)", () => {
     expect(result.usage?.windows.monthly?.valueLabel).toBe("$12.50 spent")
   })
 
+  test("a negative spend on the unlimited path is read as absent — the no-data contract (#1913)", async () => {
+    const result = await fetchWith({ data: { limit: null, limit_remaining: null, usage_monthly: -5 } })
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
+  test("a zero spend on the unlimited path still publishes (control, #1913)", async () => {
+    const result = await fetchWith({ data: { limit: null, limit_remaining: null, usage_monthly: 0 } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.monthly?.valueLabel).toBe("$0.00 spent")
+  })
+
   test("normal and over-limit controls keep their probed shapes", async () => {
     const over = await fetchWith({
       data: { limit: 100, limit_remaining: -20, usage_monthly: 120, limit_reset: "monthly" },
