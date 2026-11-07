@@ -473,6 +473,34 @@ const secretHeaders = (daemon: FakeDaemon) =>
 const scriptReadingNeon = `return await tools.neon.run_sql({ query: "select 1" })`
 
 describe("McpxTool entry points, projections, and secrets", () => {
+  it.live("mcpx_discover names the built-in comms namespace and answers for it locally", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.promise(() => tmpdir())
+      const daemon = fakeDaemon()
+      yield* withFakeDaemon(
+        daemon,
+        withSession(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            const listed = yield* registry.list()
+            expect(listed.find((tool) => tool.name === "mcpx_discover")?.description).toContain("comms")
+            expect(listed.find((tool) => tool.name === "mcpx_exec")?.description).toContain("tools.comms.msg")
+
+            const comms = yield* invoke(registry, "call-discover-comms", "mcpx_discover", { namespace: "comms" })
+            expect(comms.status).toBe("completed")
+            expect(comms.output?.output).toContain("tools.comms.msg")
+            expect(comms.output?.output).toContain("tools.comms.topics")
+            expect(comms.output?.output).toContain("tools.comms.sessions")
+            expect(daemonCalls(daemon, "/v1/types")).toHaveLength(0)
+
+            const all = yield* invoke(registry, "call-discover-all", "mcpx_discover", {})
+            expect(all.status).toBe("completed")
+            expect(all.output?.output).toContain("comms")
+          }),
+        ),
+      )
+    }),
+  )
+
   it.live("lists the entry points as native tools and keeps mcpx_observe in the Code Mode catalog", () =>
     Effect.gen(function* () {
       const tmp = yield* Effect.promise(() => tmpdir())
