@@ -478,6 +478,37 @@ it.effect("convertSchema leaves allOf/not-only roots self-describing (#1667)", (
   }),
 )
 
+it.effect("convertSchema leaves enum/items/prefixItems-only roots self-describing (#1901)", () =>
+  Effect.sync(() => {
+    // An enum root enumerates its values verbatim: forcing type OBJECT
+    // onto a non-object enum makes it unsatisfiable (no value is both an
+    // object and "a"), for Gemini and Anthropic targets alike.
+    expect(convertSchema({ enum: ["a", "b"] } as never)).toEqual({ enum: ["a", "b"] })
+    expect(convertSchema({ enum: ["a", "b"] } as never, true)).toEqual({ enum: ["a", "b"] })
+    // An object enum is already fully enumerated by the enum itself, so
+    // it likewise takes no OBJECT default — the enum is the whole schema.
+    expect(convertSchema({ enum: [{ a: 1 }] } as never)).toEqual({ enum: [{ a: 1 }] })
+    // An items-only root describes an array: items constrains arrays
+    // only, so a forced OBJECT would strand the element constraint.
+    expect(convertSchema({ items: { type: "string" } } as never)).toEqual({
+      items: { type: "STRING" },
+    })
+    expect(convertSchema({ items: { type: "string" } } as never, true)).toEqual({
+      items: { type: "STRING" },
+    })
+    // A prefixItems-only root is the same shape (the node synthesises
+    // items: {} for the prefixItems carrier, #1820); no OBJECT either.
+    expect(convertSchema({ prefixItems: [{ type: "string" }] } as never)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+    })
+    expect(convertSchema({ prefixItems: [{ type: "string" }] } as never, true)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+    })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(

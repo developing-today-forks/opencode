@@ -295,13 +295,22 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
   // allOf/not-only root (#1667): allOf composes its branches (a string
   // branch plus a forced OBJECT is unsatisfiable), and `not` negates its
   // subschema against every type, so OBJECT would narrow "not a string"
-  // to objects only.
+  // to objects only. The same holds for an enum-only root (#1901): the
+  // enum enumerates the allowed values verbatim, so a forced OBJECT makes
+  // a non-object enum unsatisfiable (an object enum is already fully
+  // enumerated, so it needs no OBJECT either). An items/prefixItems-only
+  // root (#1901) describes an array: its element keywords constrain
+  // arrays only, so a forced OBJECT strands them on a root they can
+  // never reach.
   if (
     converted.type === undefined &&
     converted.anyOf === undefined &&
     converted.oneOf === undefined &&
     converted.allOf === undefined &&
-    converted.not === undefined
+    converted.not === undefined &&
+    converted.enum === undefined &&
+    converted.items === undefined &&
+    converted.prefixItems === undefined
   )
     converted.type = "OBJECT"
   return converted
