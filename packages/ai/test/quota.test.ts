@@ -13,6 +13,7 @@ import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js
 import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
+import { provider as metaProvider } from "../src/quota/providers/meta.js"
 import { toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
 import { readFileSync } from "node:fs"
@@ -128,6 +129,73 @@ describe("mistral budget label currency (#1805)", () => {
     const result = await fetchWith({ usage_percentage: 10, initial_budget: 200 })
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.api?.valueLabel).toBe("$20.00 / $200.00")
+  })
+})
+
+describe("meta key-endpoint subs_usage windows (#1907)", () => {
+  // Drive the real provider down its key-endpoint cross-check path:
+  // the portal read fails closed (unreachable CDP base), so the key
+  // endpoint answer is the result. Contract rule 4 (types.ts) /
+  // codex #1762 disposition: a window object with no usable
+  // used_percent publishes no window.
+  const fetchWith = (subsUsage: Record<string, unknown> | undefined, active?: boolean) =>
+    metaProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: {},
+      homeDir: "/nonexistent-home",
+      cdpBase: "http://127.0.0.1:9",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ...(active === undefined ? {} : { is_subs_active: active }),
+            subs_tier_name: "fixture-tier",
+            ...(subsUsage === undefined ? {} : { subs_usage: subsUsage }),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    } as never)
+
+  test("an empty rolling window object publishes no phantom window beside a real weekly window", async () => {
+    const result = await fetchWith({ window: {}, weekly: { used_percent: 25, resets_at: 1893456000 } }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["weekly"])
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(25)
+  })
+
+  test("an empty weekly window object publishes no phantom window beside a real rolling window", async () => {
+    const result = await fetchWith({ window: { used_percent: 10, resets_at: 1893456000 }, weekly: {} }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["rolling"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+  })
+
+  test("two figure-less windows with no active subscription reach the no-data disposition, not an all-null success", async () => {
+    const result = await fetchWith({ window: {}, weekly: {} })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("no quota data")
+  })
+
+  test("two figure-less windows on an active subscription keep the post-roll empty state", async () => {
+    const result = await fetchWith({ window: {}, weekly: {} }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBeNull()
+    expect(result.usage?.windows.weekly?.usedPercent).toBeNull()
+  })
+
+  test("windows carrying figures publish as before (control)", async () => {
+    const result = await fetchWith(
+      { window: { used_percent: 10, resets_at: 1893456000 }, weekly: { used_percent: 25, resets_at: 1893456000 } },
+      true,
+    )
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(25)
   })
 })
 
