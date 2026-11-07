@@ -16,6 +16,7 @@ import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
+import { listConfiguredQuotaProviders } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -664,6 +665,26 @@ describe("claude usage transform (#1750)", () => {
     expect(legacy.windows["7d"]).toBeUndefined()
     expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
     expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
+  })
+})
+
+describe("turso disabled listing (#1923)", () => {
+  const ctxWith = (disabledProviders: Set<string>) => ({
+    credentials: [],
+    disabledProviders,
+    instances: new Map(),
+    providerConfig: {},
+  })
+
+  test("the built-in turso fetcher honours disabled_providers like every other provider", async () => {
+    await expect(listConfiguredQuotaProviders(ctxWith(new Set()))).resolves.toContain("turso")
+    await expect(listConfiguredQuotaProviders(ctxWith(new Set(["turso"])))).resolves.not.toContain("turso")
+  })
+
+  test("includeDisabled brings the disabled turso row back", async () => {
+    await expect(
+      listConfiguredQuotaProviders(ctxWith(new Set(["turso"])), { includeDisabled: true }),
+    ).resolves.toContain("turso")
   })
 })
 

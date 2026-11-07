@@ -141,8 +141,11 @@ export const listConfiguredQuotaProviders = async (
     visible.push(baseId)
   }
 
-  // The built-in turso fetcher is part of every default listing.
-  visible.push(turso.providerId)
+  // The built-in turso fetcher is part of every default listing,
+  // subject to the same disabled filter as every other provider
+  // (#1923): a `disabled_providers` entry naming turso leaves it out
+  // unless `includeDisabled` is set, so a default run never fetches it.
+  if (includeDisabled || !isProviderDisabled(ctx, turso)) visible.push(turso.providerId)
   return visible
 }
 
