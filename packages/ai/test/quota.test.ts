@@ -1586,13 +1586,11 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     expect(groups[0].bucketWeekly?.remainingFraction).toBe(0.25)
   })
 
-  test("a missing remainingFraction propagates as unknown, not as fully remaining", () => {
-    const parsed = parseBucket({ window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" } as never)
-    expect(parsed?.remainingFraction).toBeNull()
-    expect(parsed?.window.usedPercent).toBeNull()
+  test("a missing remainingFraction publishes no bucket, not an all-null-percent window (#1917)", () => {
+    expect(parseBucket({ window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" } as never)).toBeNull()
   })
 
-  test("weekly-constrained ordering requires both fractions present", () => {
+  test("a figure-less weekly bucket never reaches a matched model (#1917)", () => {
     const groups = transformSummary(
       summaryWith([
         { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
@@ -1600,8 +1598,9 @@ describe("antigravity quota bucket labelling (#1768)", () => {
       ]) as never,
     )
     const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
-    // Unknown weekly fraction never constrains: default order is 5h first.
-    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["5h", "weekly"])
+    // The figure-less weekly bucket is dropped at parse time, so it can
+    // neither publish a window nor constrain the ordering.
+    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["5h"])
   })
 
   test("a known near-exhausted weekly fraction still puts weekly first (control)", () => {
@@ -1613,6 +1612,42 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     )
     const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
     expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["weekly", "5h"])
+  })
+})
+
+describe("antigravity quota summary figure check (#1917)", () => {
+  // No figure, no window (window contract rule 4): a recognized bucket
+  // with no usable remainingFraction publishes no window on the summary
+  // path. Disposition: parseBucket returns null, matching its
+  // unrecognized-kind case (codex #1762 / meta #1907 precedent).
+  const summaryWith = (buckets: unknown[]) => ({ groups: [{ displayName: "Gemini", buckets }] })
+
+  test("a reset-only bucket parses to null", () => {
+    expect(parseBucket({ window: "5h", resetTime: "2026-12-01T00:00:00Z" } as never)).toBeNull()
+  })
+
+  test("a summary group built only from figure-less buckets carries no windows", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
+    )
+    expect(groups[0].windows).toEqual({})
+    expect(groups[0].bucket5h).toBeNull()
+  })
+
+  test("a matched model inherits no window from a figure-less group", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
+    )
+    const models = transformModels({ models: { "gemini-x": {} } } as never, groups)
+    expect(models["gemini-x"]?.windows ?? {}).toEqual({})
+  })
+
+  test("a present remainingFraction still publishes its window (control)", () => {
+    const parsed = parseBucket(
+      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
+    )
+    expect(parsed?.window.usedPercent).toBe(50)
+    expect(parsed?.window.remainingPercent).toBe(50)
   })
 })
 
