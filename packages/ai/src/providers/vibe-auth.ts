@@ -222,7 +222,8 @@ export const resolveApiKey = async (sources: CredentialSources = {}): Promise<st
 let cached: string | undefined
 let inflight: Promise<string> | undefined
 
-/** Drop the in-memory credential (re-resolve on next use). */
+/** Drop the in-memory credential (re-resolve on next use). Production
+ * caller: the Vibe route's transport, on a 401 (#1900). */
 export const invalidate = () => {
   cached = undefined
   inflight = undefined

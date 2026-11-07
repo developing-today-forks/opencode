@@ -260,3 +260,73 @@ it.effect("absent credential fails with the not-signed-in guidance, before any r
     if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("vibe --setup")
   }),
 )
+
+// #1900 oracle: the muse-direct/antigravity transport shape. A 401 means
+// the cached credential is dead (rotated/revoked): the transport
+// invalidates it, re-prepares so auth re-resolves, and retries exactly
+// once - the pre-rotation key must not be sent again after the trigger.
+it.effect("a 401 invalidates the credential, re-resolves the rotated key, and retries exactly once", () =>
+  Effect.gen(function* () {
+    const env: Record<string, string | undefined> = { MISTRAL_API_KEY: "stale-key" }
+    const rotated = Vibe.configure({
+      sources: { env, readFile: () => undefined, keyringLookup: async () => undefined },
+    }).model("mistral-vibe-cli-latest")
+    const calls: Array<{ headers: Headers }> = []
+    const seen: Array<{ method: string; url: string; headers: Headers; body: string }> = []
+    const response = yield* LLMClient.generate(LLM.request({ model: rotated, prompt: "hi" })).pipe(
+      Effect.provide(
+        dynamicResponse((input) =>
+          Effect.gen(function* () {
+            const { call, nth } = yield* observe(seen, input)
+            calls.push({ headers: call.headers })
+            if (nth === 1) {
+              // The key is rotated while the first request is in flight;
+              // Mistral rejects the stale one.
+              env.MISTRAL_API_KEY = "rotated-key"
+              return input.respond(JSON.stringify({ error: { message: "unauthorized" } }), {
+                status: 401,
+                headers: { "content-type": "application/json" },
+              })
+            }
+            return input.respond(sseEvents(chunk({ content: "recovered" }, "stop")), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          }),
+        ),
+      ),
+    )
+    expect(response.text).toBe("recovered")
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.headers.get("authorization")).toBe("Bearer " + "stale-key")
+    expect(calls[1]?.headers.get("authorization")).toBe("Bearer " + "rotated-key")
+  }),
+)
+
+it.effect("a second 401 is terminal - the retry happens exactly once", () =>
+  Effect.gen(function* () {
+    const dead = Vibe.configure({
+      sources: {
+        env: { MISTRAL_API_KEY: "dead-key" },
+        readFile: () => undefined,
+        keyringLookup: async () => undefined,
+      },
+    }).model("mistral-vibe-cli-latest")
+    let calls = 0
+    const result = yield* LLMClient.generate(LLM.request({ model: dead, prompt: "hi" })).pipe(
+      Effect.provide(
+        dynamicResponse((input) =>
+          Effect.sync(() => {
+            calls += 1
+            return input.respond(JSON.stringify({ error: { message: "unauthorized" } }), {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            })
+          }),
+        ),
+      ),
+      Effect.result,
+    )
+    expect(result._tag).toBe("Failure")
+    expect(calls).toBe(2)
+  }),
+)
