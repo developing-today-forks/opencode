@@ -124,11 +124,16 @@ export const provider: QuotaProvider = {
       const remainingRequests = headerNumber(response.headers, "x-ratelimit-remaining-requests")
       if (limitRequests !== null && limitRequests > 0 && remainingRequests !== null) {
         const resetSeconds = parseGroqResetSeconds(response.headers.get("x-ratelimit-reset-requests"))
+        // #1897 disposition (window-contract rule 5, #1821 clamp shape): a
+        // remaining count above its limit is an impossible pair — clamp the
+        // remaining to the limit so usedPercent, remainingPercent, and the
+        // label all derive from the same published figure, never split.
+        const publishedRemainingRequests = Math.min(remainingRequests, limitRequests)
         windows.requests_daily = toUsageWindow({
-          usedPercent: Math.min(100, Math.max(0, ((limitRequests - remainingRequests) / limitRequests) * 100)),
+          usedPercent: Math.min(100, Math.max(0, ((limitRequests - publishedRemainingRequests) / limitRequests) * 100)),
           windowSeconds: 86400,
           resetAt: resetSeconds !== null ? now + resetSeconds * 1000 : null,
-          valueLabel: `${remainingRequests} / ${limitRequests} requests remaining`,
+          valueLabel: `${publishedRemainingRequests} / ${limitRequests} requests remaining`,
         })
       }
 
@@ -136,11 +141,13 @@ export const provider: QuotaProvider = {
       const remainingTokens = headerNumber(response.headers, "x-ratelimit-remaining-tokens")
       if (limitTokens !== null && limitTokens > 0 && remainingTokens !== null) {
         const resetSeconds = parseGroqResetSeconds(response.headers.get("x-ratelimit-reset-tokens"))
+        // #1897: same whole-window clamp as the requests window above.
+        const publishedRemainingTokens = Math.min(remainingTokens, limitTokens)
         windows.tokens_minute = toUsageWindow({
-          usedPercent: Math.min(100, Math.max(0, ((limitTokens - remainingTokens) / limitTokens) * 100)),
+          usedPercent: Math.min(100, Math.max(0, ((limitTokens - publishedRemainingTokens) / limitTokens) * 100)),
           windowSeconds: 60,
           resetAt: resetSeconds !== null ? now + resetSeconds * 1000 : null,
-          valueLabel: `${remainingTokens} / ${limitTokens} tokens remaining`,
+          valueLabel: `${publishedRemainingTokens} / ${limitTokens} tokens remaining`,
         })
       }
 
