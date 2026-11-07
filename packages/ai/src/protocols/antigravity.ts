@@ -933,8 +933,8 @@ export const protocol = Protocol.make({
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "antigravity",
-  providerMetadataKey: "antigravity",
+  provider: "_antigravity",
+  providerMetadataKey: "_antigravity",
   protocol,
   endpoint: Endpoint.path("/v1internal:streamGenerateContent?alt=sse", { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,

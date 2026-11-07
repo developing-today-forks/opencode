@@ -24,7 +24,7 @@ it.effect("Antigravity route points at the v1internal stream endpoint", () =>
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse")
-    expect(model.provider).toBe("antigravity")
+    expect(model.provider).toBe("_antigravity")
   }),
 )
 
@@ -687,7 +687,7 @@ it.effect("Antigravity stream: wrapped SSE events become text, reasoning, tool c
     expect(call.name).toBe("get_weather")
     expect(call.input).toEqual({ city: "Oslo" })
     expect(call.id).toMatch(/^call_[0-9a-f]{32}$/)
-    expect(call.providerMetadata?.antigravity).toEqual({ thoughtSignature: "sig-1" })
+    expect(call.providerMetadata?.["_antigravity"]).toEqual({ thoughtSignature: "sig-1" })
     expect(response.usage?.inputTokens).toBe(11)
     expect(response.usage?.outputTokens).toBe(10)
     expect(response.usage?.reasoningTokens).toBe(3)
@@ -817,7 +817,7 @@ it.effect("Antigravity tool_choice naming an undeclared function fails closed be
 it.effect("Antigravity protocol exports stay wired to the provider package", () =>
   Effect.sync(() => {
     expect(AntigravityProtocol.protocol.id).toBe("antigravity")
-    expect(Antigravity.provider.id).toBe("antigravity")
+    expect(Antigravity.provider.id).toBe("_antigravity")
     expect(typeof Antigravity.model).toBe("function")
   }),
 )

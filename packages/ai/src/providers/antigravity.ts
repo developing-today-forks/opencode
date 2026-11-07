@@ -5,7 +5,7 @@ import type { RouteDefaultsInput } from "../route/client.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { AntigravityAuth } from "./antigravity-auth.js"
 
-export const id = ProviderID.make("antigravity")
+export const id = ProviderID.make("_antigravity")
 
 export type ProviderOptionsInput = Antigravity.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput

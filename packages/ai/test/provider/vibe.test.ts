@@ -18,11 +18,11 @@ const chunk = (delta: object, finishReason: string | null = null, usage?: object
 
 it.effect("Vibe provider stays wired to the Mistral Chat protocol", () =>
   Effect.sync(() => {
-    expect(Vibe.id).toBe("vibe")
-    expect(Vibe.provider.id).toBe("vibe")
+    expect(Vibe.id).toBe("_vibe")
+    expect(Vibe.provider.id).toBe("_vibe")
     expect(typeof Vibe.model).toBe("function")
     expect(Vibe.route.id).toBe(MistralChat.route.id)
-    expect(model.provider).toBe("vibe")
+    expect(model.provider).toBe("_vibe")
   }),
 )
 
