@@ -667,6 +667,45 @@ describe("claude usage transform (#1750)", () => {
   })
 })
 
+describe("claude spend exponent range (#1920)", () => {
+  const spendWith = (exponent: unknown) =>
+    toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, exponent, currency: "USD" },
+        limit: { amount_minor: 1000, exponent },
+      },
+    })
+
+  test("an over-range exponent reads the money object as absent; the percent still publishes", () => {
+    const { windows } = spendWith(999)
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("a negative exponent reads the money object as absent", () => {
+    const { windows } = spendWith(-2)
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("in-range exponents and the absent-exponent default are unchanged (controls)", () => {
+    expect(spendWith(2).windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+    expect(spendWith(0).windows["extra_usage"]?.valueLabel).toBe("$500.00 / $1000.00")
+    expect(spendWith(3).windows["extra_usage"]?.valueLabel).toBe("$0.50 / $1.00")
+    const absent = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, currency: "USD" },
+        limit: { amount_minor: 1000 },
+      },
+    })
+    expect(absent.windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+  })
+})
+
 describe("claude quota no-data contract (#1915)", () => {
   // Drive the real provider against a stubbed usage response, with the
   // env credential as the only source (homeDir names no credentials file).
