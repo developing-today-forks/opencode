@@ -301,7 +301,11 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
   // enumerated, so it needs no OBJECT either). An items/prefixItems-only
   // root (#1901) describes an array: its element keywords constrain
   // arrays only, so a forced OBJECT strands them on a root they can
-  // never reach.
+  // never reach. The same holds for a constraint-only root (#1950):
+  // minItems/maxItems constrain arrays only, minLength/maxLength/pattern
+  // constrain strings only, and minimum/maximum constrain numbers only,
+  // so a root carrying only such a keyword describes that one type —
+  // a forced OBJECT both narrows it to objects and strands the keyword.
   if (
     converted.type === undefined &&
     converted.anyOf === undefined &&
@@ -310,7 +314,14 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
     converted.not === undefined &&
     converted.enum === undefined &&
     converted.items === undefined &&
-    converted.prefixItems === undefined
+    converted.prefixItems === undefined &&
+    converted.minItems === undefined &&
+    converted.maxItems === undefined &&
+    converted.minLength === undefined &&
+    converted.maxLength === undefined &&
+    converted.pattern === undefined &&
+    converted.minimum === undefined &&
+    converted.maximum === undefined
   )
     converted.type = "OBJECT"
   return converted
