@@ -444,11 +444,18 @@ const mapUsage = (usage: typeof WireUsage.Type | undefined, metadataKey: string)
   })
 }
 
-// The bundle's normalizeStopReason: tool spellings win, then length,
-// everything else is end_turn; client tool calls also force tool-calls.
+// Map Command Code finish reasons to the standard FinishReason set.
+// Per issue #1755 triage decision:
+// - content-filter/content_filter/content_filtering -> 'content-filter'
+// - error/failed/failure -> 'error'
+// - abort/aborted/cancelled/canceled -> 'error' (raw 'abort' preserved in finishEvents)
+// - stop/end_turn/end-turn/stop_sequence/empty -> 'stop'
+// - tool spellings and length/max_tokens unchanged
+// - any other unrecognized spelling -> 'unknown'
 const mapFinishReason = (raw: string | undefined, hasToolCalls: boolean): FinishReason => {
   if (hasToolCalls) return "tool-calls"
-  switch ((raw ?? "").toLowerCase()) {
+  const normalized = (raw ?? "").toLowerCase()
+  switch (normalized) {
     case "tool_use":
     case "tool-calls":
     case "tool_calls":
@@ -456,8 +463,27 @@ const mapFinishReason = (raw: string | undefined, hasToolCalls: boolean): Finish
     case "length":
     case "max_tokens":
       return "length"
-    default:
+    case "content-filter":
+    case "content_filter":
+    case "content_filtering":
+      return "content-filter"
+    case "error":
+    case "failed":
+    case "failure":
+      return "error"
+    case "abort":
+    case "aborted":
+    case "cancelled":
+    case "canceled":
+      return "error"
+    case "stop":
+    case "end_turn":
+    case "end-turn":
+    case "stop_sequence":
+    case "empty":
       return "stop"
+    default:
+      return "unknown"
   }
 }
 
