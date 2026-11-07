@@ -122,7 +122,12 @@ export const toUsageWindow = (input: {
   const hasFiniteUsedPercent = typeof usedPercent === "number" && Number.isFinite(usedPercent)
   return {
     usedPercent,
-    remainingPercent: hasFiniteUsedPercent ? Math.max(0, 100 - usedPercent) : null,
+    // The derived percent is capped on BOTH sides (#1904): an
+    // over-100 usedPercent (turso publish-truthfully disposition,
+    // code#6227) derives 0 remaining, and a negative usedPercent
+    // derives at most 100 - never a remainingPercent above 100.
+    // usedPercent itself is published unchanged.
+    remainingPercent: hasFiniteUsedPercent ? Math.min(100, Math.max(0, 100 - usedPercent)) : null,
     windowSeconds: input.windowSeconds ?? null,
     resetAfterSeconds: calculateResetAfterSeconds(resetAt),
     resetAt,

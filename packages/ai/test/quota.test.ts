@@ -3,7 +3,7 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp } from "../src/quota/utils.js"
+import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -1457,5 +1457,27 @@ describe("readQuotaJson byte cap (#1877)", () => {
     const body = JSON.stringify({ note: "\u20AC".repeat(1_000) })
     const parsed = await readQuotaJson(new Response(body))
     expect(parsed).toEqual({ note: "\u20AC".repeat(1_000) })
+  })
+})
+
+describe("toUsageWindow remainingPercent derivation (#1904)", () => {
+  test("a negative usedPercent derives at most 100% remaining, never above it", () => {
+    expect(toUsageWindow({ usedPercent: -20 }).remainingPercent).toBe(100)
+    expect(toUsageWindow({ usedPercent: -5 }).remainingPercent).toBe(100)
+  })
+
+  test("usedPercent itself is published unchanged (provider disposition preserved)", () => {
+    expect(toUsageWindow({ usedPercent: -20 }).usedPercent).toBe(-20)
+    // Turso publish-truthfully over-100 case (code#6227): the used
+    // figure stands and the derived remaining floors at 0, as before.
+    expect(toUsageWindow({ usedPercent: 150 }).usedPercent).toBe(150)
+    expect(toUsageWindow({ usedPercent: 150 }).remainingPercent).toBe(0)
+  })
+
+  test("in-range derivations are exactly as before (controls)", () => {
+    expect(toUsageWindow({ usedPercent: 0 }).remainingPercent).toBe(100)
+    expect(toUsageWindow({ usedPercent: 50 }).remainingPercent).toBe(50)
+    expect(toUsageWindow({ usedPercent: 100 }).remainingPercent).toBe(0)
+    expect(toUsageWindow({ usedPercent: null }).remainingPercent).toBeNull()
   })
 })
