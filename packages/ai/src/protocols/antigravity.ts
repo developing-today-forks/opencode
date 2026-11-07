@@ -76,7 +76,7 @@ type Effort = (typeof EFFORTS)[number]
 //     just not part of the model id.
 // The list is the non-internal subset of the probed catalog (the
 // chat_*/tab_* completion keys are not chat models and stay unlisted).
-const WIRE_COMPLETE_MODELS = new Set([
+export const WIRE_COMPLETE_MODEL_IDS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-2.5-flash-thinking",
@@ -86,7 +86,8 @@ const WIRE_COMPLETE_MODELS = new Set([
   "gemini-3.1-flash-lite",
   "gemini-3.5-flash-lite",
   "gemini-3.8-flash-tiered",
-])
+] as const
+const WIRE_COMPLETE_MODELS = new Set<string>(WIRE_COMPLETE_MODEL_IDS)
 
 export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: string) => {
   let model = String(requestedModel ?? "").trim()

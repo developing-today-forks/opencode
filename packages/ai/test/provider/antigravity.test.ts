@@ -2,9 +2,15 @@ import { expect } from "bun:test"
 import { Effect } from "effect"
 import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
 import { Antigravity } from "../../src/providers/antigravity.js"
-import { Antigravity as AntigravityProtocol, convertSchema, resolveModelAndEffort } from "../../src/protocols/antigravity.js"
+import {
+  Antigravity as AntigravityProtocol,
+  convertSchema,
+  resolveModelAndEffort,
+  WIRE_COMPLETE_MODEL_IDS,
+} from "../../src/protocols/antigravity.js"
 import { compileRequest } from "../../src/route/client.js"
 import { Endpoint } from "../../src/route/endpoint.js"
+import { ANTIGRAVITY_MODEL_CATALOG } from "../fixtures/antigravity-model-catalog.js"
 import { it } from "../lib/effect.js"
 import { dynamicResponse, fixedResponse } from "../lib/http.js"
 import { sseEvents } from "../lib/sse.js"
@@ -145,6 +151,41 @@ it.effect("resolveModelAndEffort ports the door's suffix + effort rules", () =>
     expect(resolveModelAndEffort("gemini-2.5-flash-medium").fullName).toBe("gemini-2.5-flash")
     expect(resolveModelAndEffort("gemini-3.8-flash-tiered").fullName).toBe("gemini-3.8-flash-tiered")
     expect(resolveModelAndEffort("gemini-2.5-pro", "low").fullName).toBe("gemini-2.5-pro")
+  }),
+)
+
+it.effect("Antigravity model classification matches the dated upstream catalog", () =>
+  Effect.sync(() => {
+    const daily = ANTIGRAVITY_MODEL_CATALOG.endpoints.dailyCloudcodePa
+    const production = ANTIGRAVITY_MODEL_CATALOG.endpoints.cloudcodePa
+    expect(daily).toEqual([...daily].sort())
+    expect(production).toEqual(daily)
+
+    const classifications = [
+      ...ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds,
+      ...ANTIGRAVITY_MODEL_CATALOG.effortModelIds,
+      ...ANTIGRAVITY_MODEL_CATALOG.internalModelIds,
+    ]
+    expect([...classifications].sort()).toEqual(daily)
+    expect(new Set(classifications).size).toBe(classifications.length)
+    expect([...WIRE_COMPLETE_MODEL_IDS].sort()).toEqual([...ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds].sort())
+
+    const catalog = new Set(daily)
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds) {
+      for (const effort of ["low", "medium", "high"] as const) {
+        expect(resolveModelAndEffort(model, effort).fullName).toBe(model)
+        expect(resolveModelAndEffort(`${model}-${effort}`).fullName).toBe(model)
+      }
+    }
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.effortModelIds) {
+      const separator = model.lastIndexOf("-")
+      const base = model.slice(0, separator)
+      const effort = model.slice(separator + 1)
+      const resolved = resolveModelAndEffort(base, effort).fullName
+      expect(resolved).toBe(model)
+      expect(catalog.has(resolved)).toBe(true)
+    }
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.internalModelIds) expect(/^(chat|tab)_/.test(model)).toBe(true)
   }),
 )
 
