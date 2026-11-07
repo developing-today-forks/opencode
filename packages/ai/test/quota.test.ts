@@ -1602,6 +1602,54 @@ describe("antigravity quota bucket labelling (#1768)", () => {
   })
 })
 
+describe("antigravity quota transformModels fallback figure check (#1912)", () => {
+  // No figure, no window (window contract rule 4): the per-model
+  // fallback branch must not publish a window when quotaInfo carries
+  // no usable remainingFraction. Disposition: the model entry is
+  // omitted (codex #1762 / meta #1907 drop-the-window precedent).
+  test("a model with no quotaInfo publishes no entry", () => {
+    expect(transformModels({ models: { "gemini-x": {} } } as never, [])).toEqual({})
+  })
+
+  test("a model with an empty quotaInfo publishes no entry", () => {
+    expect(transformModels({ models: { "gemini-x": { quotaInfo: {} } } } as never, [])).toEqual({})
+  })
+
+  test("a reset-only quotaInfo publishes no entry — no label is derived from a reset alone", () => {
+    expect(
+      transformModels(
+        { models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never,
+        [],
+      ),
+    ).toEqual({})
+  })
+
+  test("a present remainingFraction still publishes its window (control)", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const models = transformModels(
+      { models: { "gemini-x": { quotaInfo: { remainingFraction: 0.5, resetTime } } } } as never,
+      [],
+    )
+    expect(models["gemini-x"]?.windows["5h"]?.usedPercent).toBe(50)
+    expect(models["gemini-x"]?.windows["5h"]?.remainingPercent).toBe(50)
+  })
+
+  test("figure-less models are omitted while figured models remain", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const models = transformModels(
+      {
+        models: {
+          "gemini-x": {},
+          "gemini-y": { quotaInfo: { remainingFraction: 0.25, resetTime } },
+        },
+      } as never,
+      [],
+    )
+    expect(Object.keys(models)).toEqual(["gemini-y"])
+    expect(models["gemini-y"]?.windows["5h"]?.usedPercent).toBe(75)
+  })
+})
+
 describe("normalizeTimestamp non-positive handling (#1857)", () => {
   test("non-positive spellings convert to null, never 1969/1970 credential expiries", () => {
     expect(normalizeTimestamp(-5000)).toBeNull()
