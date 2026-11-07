@@ -42,6 +42,34 @@ it.live("creates a child at its parent's location and lists it under the parent"
   }).pipe(Effect.scoped),
 )
 
+it.live("accepts detached mode on session creation and inherits it in children", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({
+      app: { version: "test" },
+      database: { path: ":memory:" },
+      fs: { filewatcher: false },
+    })
+    const create = (body: unknown) =>
+      Effect.promise(async () => {
+        const response = await handler(
+          new Request("http://opencode.local/api/session", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+        )
+        expect(response.status).toBe(200)
+        return Schema.decodeUnknownSync(SessionResponse)(await response.json()).data
+      })
+
+    const parent = yield* create({ detached: true })
+    const child = yield* create({ parentID: parent.id })
+
+    expect(parent.detached).toBe(true)
+    expect(child.detached).toBe(true)
+  }).pipe(Effect.scoped),
+)
+
 it.live("returns not found when creating a child of a missing session", () =>
   Effect.gen(function* () {
     const handler = yield* ServerFetch.make({

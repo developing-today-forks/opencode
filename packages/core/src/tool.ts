@@ -45,7 +45,10 @@ type Data = {
 
 export interface Interface extends State.Transformable<Editor> {
   readonly list: () => Effect.Effect<ReadonlyArray<Tool.Info & { readonly id: string }>>
-  readonly snapshot: (permissions?: Permission.Ruleset) => Effect.Effect<Snapshot>
+  readonly snapshot: (
+    permissions?: Permission.Ruleset,
+    disabledTools?: ReadonlySet<string>,
+  ) => Effect.Effect<Snapshot>
 }
 
 /** A local execution result after hooks and content normalization. */
@@ -236,13 +239,16 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => visibleTools(state.get())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions) =>
+      snapshot: Effect.fn("Tool.snapshot")((permissions, disabledTools) =>
         Effect.sync(() => {
           const data = state.get()
           const rules = permissions ?? []
           const enabled = (entries: ReadonlyMap<string, Entry>) =>
             new Map(
-              Array.from(entries).filter(([name, tool]) => !whollyDisabled(tool.options?.permission ?? name, rules)),
+              Array.from(entries).filter(
+                ([name, tool]) =>
+                  !disabledTools?.has(name) && !whollyDisabled(tool.options?.permission ?? name, rules),
+              ),
             )
           const direct = enabled(data.native)
           const codeModeTools = enabled(data.codeMode)
@@ -274,6 +280,13 @@ const layer = Layer.effect(
               ...(codeModeTool ? [definition(codeModeTool)] : []),
             ],
             execute: Effect.fnUntraced(function* (input: Parameters<Snapshot["execute"]>[0]) {
+              if (disabledTools?.has(input.call.name))
+                return yield* new Tool.Error({
+                  message:
+                    input.call.name === "question"
+                      ? Permission.DETACHED_QUESTION_MESSAGE
+                      : `Tool is disabled for this session: ${input.call.name}`,
+                })
               const context: Tool.Context = {
                 sessionID: input.sessionID,
                 agent: input.agent,

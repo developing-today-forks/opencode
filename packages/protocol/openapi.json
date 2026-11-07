@@ -1045,7 +1045,7 @@
             }
           }
         },
-        "description": "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location.",
+        "description": "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location. Detached sessions have no interactive question tool, and their child sessions inherit detached mode.",
         "summary": "Create session",
         "requestBody": {
           "content": {
@@ -1142,6 +1142,18 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "detached": {
+                    "anyOf": [
+                      {
+                        "type": "boolean",
+                        "enum": [true]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Run in detached (non-interactive) mode. The question tool is unavailable, and every child session inherits this mode."
                   }
                 },
                 "additionalProperties": false
@@ -21424,6 +21436,15 @@
           "maxTokensField": {
             "$ref": "#/components/schemas/Model.MaxTokensField"
           },
+          "supportsStore": {
+            "type": "boolean"
+          },
+          "supportsStrictMode": {
+            "type": "boolean"
+          },
+          "zaiToolStream": {
+            "type": "boolean"
+          },
           "requireFinishReason": {
             "type": "boolean"
           },
@@ -22539,6 +22560,15 @@
           "maxTokensField": {
             "$ref": "#/components/schemas/Model.MaxTokensField"
           },
+          "supportsStore": {
+            "type": "boolean"
+          },
+          "supportsStrictMode": {
+            "type": "boolean"
+          },
+          "zaiToolStream": {
+            "type": "boolean"
+          },
           "requireFinishReason": {
             "type": "boolean"
           },
@@ -23361,6 +23391,10 @@
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
+          },
+          "detached": {
+            "type": "boolean",
+            "enum": [true]
           },
           "revert": {
             "$ref": "#/components/schemas/Session.Revert"

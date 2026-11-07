@@ -210,6 +210,7 @@ export type SessionCreateInput = {
   readonly metadata?: Session.Metadata | undefined
   readonly permissions?: Permission.Ruleset | undefined
   readonly subagentPolicy?: Session.SubagentPolicy | undefined
+  readonly detached?: true | undefined
 }
 export type SessionCreateOutput = Session.Info
 export type SessionCreateOperation<E = never> = (input?: SessionCreateInput) => Effect.Effect<SessionCreateOutput, E>
@@ -453,6 +454,7 @@ export type SessionLogOutput =
             readonly metadata?: Session.Metadata | undefined
             readonly subagentPolicy?: Session.SubagentPolicy | undefined
             readonly permissions?: Permission.Ruleset | undefined
+            readonly detached?: true | undefined
             readonly version: string
           }
         }
@@ -1494,6 +1496,9 @@ export type ProviderListOutput = {
           readonly reasoningField?: Model.ReasoningField | undefined
           readonly requireReasoning?: boolean | undefined
           readonly maxTokensField?: Model.MaxTokensField | undefined
+          readonly supportsStore?: boolean | undefined
+          readonly supportsStrictMode?: boolean | undefined
+          readonly zaiToolStream?: boolean | undefined
           readonly requireFinishReason?: boolean | undefined
           readonly requireAssistantAfterTool?: boolean | undefined
           readonly supportsPromptCacheKey?: boolean | undefined
@@ -1527,6 +1532,9 @@ export type ProviderGetOutput = {
           readonly reasoningField?: Model.ReasoningField | undefined
           readonly requireReasoning?: boolean | undefined
           readonly maxTokensField?: Model.MaxTokensField | undefined
+          readonly supportsStore?: boolean | undefined
+          readonly supportsStrictMode?: boolean | undefined
+          readonly zaiToolStream?: boolean | undefined
           readonly requireFinishReason?: boolean | undefined
           readonly requireAssistantAfterTool?: boolean | undefined
           readonly supportsPromptCacheKey?: boolean | undefined

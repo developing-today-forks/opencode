@@ -154,6 +154,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 metadata: ctx.payload.metadata,
                 permissions: ctx.payload.permissions,
                 subagentPolicy: ctx.payload.subagentPolicy,
+                detached: ctx.payload.detached,
                 ...(ctx.payload.parentID === undefined
                   ? {
                       location:

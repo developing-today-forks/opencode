@@ -389,6 +389,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`tokens_cache_write\` integer DEFAULT 0 NOT NULL,
           \`revert\` text,
           \`permission\` text,
+          \`detached\` integer,
           \`agent\` text,
           \`model\` text,
           \`time_created\` integer NOT NULL,

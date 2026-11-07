@@ -141,10 +141,13 @@ const layer = Layer.effect(
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const permissions = Permission.effectiveRules(agent.info.permissions, session)
+      // Hide by effective tool name as well as permission action, so a plugin override cannot
+      // re-expose `question` by assigning it a different permission action.
+      const disabledTools = session.detached ? new Set(["question"]) : undefined
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions),
+          tools: registry.snapshot(permissions, disabledTools),
           builtins: builtins.load(),
           discovery: discovered(session.id),
           skills: skillInstructions.load(permissions),

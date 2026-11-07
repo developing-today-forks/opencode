@@ -751,6 +751,39 @@ describe("SubagentTool", () => {
     ),
   )
 
+  it.live("launches children of a detached session detached and children of an interactive one interactive", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const detached = yield* sessions.create({ location, model: parentModel, detached: true })
+          const interactive = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(detached.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(detached.location)))
+          const launch = (sessionID: Session.ID, id: string) =>
+            executeTool(registry, {
+              sessionID,
+              ...toolIdentity,
+              call: {
+                type: "tool-call",
+                id,
+                name: SubagentTool.name,
+                input: { agent: "reviewer", description: "review", prompt: "review this" },
+              },
+            }).pipe(Effect.flatMap((settled) => sessions.get(outputSessionID(settled.metadata))))
+
+          expect((yield* launch(detached.id, "call-detached")).detached).toBe(true)
+          expect((yield* launch(interactive.id, "call-interactive")).detached).toBeUndefined()
+        }),
+      ),
+    ),
+  )
+
   it.live("continues an existing child session", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

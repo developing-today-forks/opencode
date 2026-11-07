@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ef4cbe05-effd-4b8d-810e-c17a176ac90f",
-  "prevIds": ["bb94a60a-f0d3-4a7e-a33e-0212a658dc3f"],
+  "id": "bb5a557b-39ed-4b96-af60-3a6e173c77c7",
+  "prevIds": ["ef4cbe05-effd-4b8d-810e-c17a176ac90f"],
   "ddl": [
     {
       "name": "account_state",
@@ -2629,6 +2629,16 @@
       "table": "session_v2"
     },
     {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detached",
+      "entityType": "columns",
+      "table": "session_v2"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -2785,6 +2795,26 @@
       "default": null,
       "generated": null,
       "name": "last_used_at",
+      "entityType": "columns",
+      "table": "workspace"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_snapshot_at",
+      "entityType": "columns",
+      "table": "workspace"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "snapshot_retry_at",
       "entityType": "columns",
       "table": "workspace"
     },

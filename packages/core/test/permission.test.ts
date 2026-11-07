@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
+import { Cause, Deferred, Exit, Effect, Fiber, Layer } from "effect"
 import { Agent } from "@opencode/core/agent"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -110,6 +110,34 @@ describe("Permission", () => {
       yield* setRules([])
       expect(yield* service.ask(assertion())).toEqual({ id: Permission.ID.create("per_test"), effect: "ask" })
       expect(yield* service.get(Permission.ID.create("per_test"))).toBeDefined()
+    }),
+  )
+
+  it.effect("denies question in a detached session with a message naming the mode, whatever the rules say", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "question", resource: "*", effect: "allow" }])
+      const { db } = yield* Database.Service
+      const service = yield* Permission.Service
+      const question = assertion({ action: "question", resources: ["*"] })
+
+      // Interactive: today's behavior.
+      expect(yield* service.ask(question)).toMatchObject({ effect: "allow" })
+      expect(yield* service.assert(question).pipe(Effect.exit)).toSatisfy(Exit.isSuccess)
+
+      yield* db
+        .update(SessionTable)
+        .set({ detached: true })
+        .where(eq(SessionTable.id, Session.ID.make("ses_test")))
+        .run()
+        .pipe(Effect.orDie)
+      expect(yield* service.ask(question)).toMatchObject({ effect: "deny" })
+      const blocked = yield* service.assert(question).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(Permission.BlockedError)
+      expect(blocked.message).toBe(Permission.DETACHED_QUESTION_MESSAGE)
+      expect(blocked.message).toContain("disabled in this mode")
+      // Only question is affected; other actions keep their evaluated effect.
+      yield* setRules([{ action: "read", resource: "*", effect: "allow" }])
+      expect(yield* service.ask(assertion())).toMatchObject({ effect: "allow" })
     }),
   )
 

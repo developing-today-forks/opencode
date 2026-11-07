@@ -232,6 +232,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           metadata: Session.Metadata.pipe(Schema.optional),
           permissions: Permission.Ruleset.pipe(Schema.optional),
           subagentPolicy: Session.SubagentPolicy.pipe(Schema.optional),
+          detached: Schema.Literal(true).pipe(Schema.optional).annotate({
+            description:
+              "Run in detached (non-interactive) mode. The question tool is unavailable, and every child session inherits this mode.",
+          }),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),
         error: [SessionNotFoundError, InvalidRequestError],
@@ -240,7 +244,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.create",
           summary: "Create session",
           description:
-            "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location.",
+            "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location. Detached sessions have no interactive question tool, and their child sessions inherit detached mode.",
         }),
       ),
     )
