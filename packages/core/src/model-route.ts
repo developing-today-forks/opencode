@@ -925,7 +925,10 @@ const demotionConfig = (location?: string): DemotionConfig | undefined => {
  * the fallback layer (`configure()` over the compiled defaults), field by field. */
 export const demotionPolicy = (location?: string): DemotionPolicy => {
   const config = demotionConfig(location)
-  const fallback = activeSettings().quota
+  // The fallback layer is the judging Location's own settings (#1423):
+  // its model_route_settings demotion fields, over the configure() layer —
+  // never another Location's, which the unscoped read would have supplied.
+  const fallback = activeSettings(location).quota
   return {
     threshold: config?.threshold ?? fallback.demoteAfter,
     windowMs: config?.windowMs ?? fallback.windowMs,
@@ -994,7 +997,12 @@ const retainedQuotaWindowMs = () => {
 
 const recordQuota = (target: Model.Ref, now: number, credentialID?: string) => {
   const id = credentialID ? credentialKey(target, credentialID) : key(target)
-  const recent = (quotaEvents.get(id) ?? []).filter((at) => now - at <= retainedDemotionWindow())
+  // Retention is the union over BOTH demotion layers (#1151 readers and
+  // #1423 settings readers): an event either layer's widest window still
+  // judges must survive pruning by the other layer's narrower one.
+  const recent = (quotaEvents.get(id) ?? []).filter(
+    (at) => now - at <= Math.max(retainedDemotionWindow(), retainedQuotaWindowMs()),
+  )
   quotaEvents.set(id, [...recent, now].slice(-50))
 }
 
