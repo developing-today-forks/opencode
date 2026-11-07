@@ -706,6 +706,81 @@ describe("claude spend exponent range (#1920)", () => {
   })
 })
 
+describe("claude spend negative amounts (#1919)", () => {
+  test("a negative used amount reads as absent; the percent still publishes", () => {
+    const { windows } = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: -500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("a negative limit reads as absent; the used amount still labels", () => {
+    const { windows } = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: -1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(windows["extra_usage"]?.valueLabel).toBe("$5.00")
+  })
+
+  test("a negative-only spend payload publishes no extra_usage window", () => {
+    const { windows } = toClaudeUsage({
+      spend: { enabled: true, used: { amount_minor: -500, exponent: 2, currency: "USD" } },
+    })
+    expect(windows["extra_usage"]).toBeUndefined()
+  })
+
+  test("positive, zero, and percent-only controls are unchanged", () => {
+    const positive = toClaudeUsage({
+      spend: {
+        enabled: true,
+        used: { amount_minor: 500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(positive.windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+    const zero = toClaudeUsage({
+      spend: {
+        enabled: true,
+        used: { amount_minor: 0, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(zero.windows["extra_usage"]?.valueLabel).toBe("$0.00 / $10.00")
+    const percentOnly = toClaudeUsage({ spend: { enabled: true, percent: 50 } })
+    expect(percentOnly.windows["extra_usage"]?.usedPercent).toBe(50)
+  })
+
+  test("a negative-only spend payload reaches the no-data contract through fetchQuota", async () => {
+    const result = await claudeProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            spend: { enabled: true, used: { amount_minor: -500, exponent: 2, currency: "USD" } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-test-home",
+    } as never)
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+  })
+})
+
 describe("claude quota no-data contract (#1915)", () => {
   // Drive the real provider against a stubbed usage response, with the
   // env credential as the only source (homeDir names no credentials file).

@@ -129,6 +129,14 @@ const toAmount = (value: JsonValue | undefined): number | null => {
   const money = asObject(value)
   const minor = toNumber(money?.amount_minor)
   if (minor === null) return null
+  // A negative amount is a figure that cannot exist (billing glitch or
+  // refund spelled as spend): read it as absent, consistent with this
+  // module's sibling dispositions (meta parseBillingBanner, turso
+  // numNonNegative, opencode-go toMicroCents). Without this, a negative
+  // spend publishes as a negative money label, and a negative-only
+  // payload mints an extra_usage window that defeats the #1915
+  // no-data contract (#1919).
+  if (minor < 0) return null
   const exponent = toNumber(money?.exponent) ?? 2
   // Valid exponents are the ISO 4217 currency exponents: integers 0-3.
   // A wire exponent outside that range would silently rescale a real
