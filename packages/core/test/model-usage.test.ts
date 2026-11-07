@@ -415,3 +415,62 @@ describe("ModelUsage", () => {
     ).toBeNull()
   })
 })
+
+describe("ModelUsage serving readout (#1891)", () => {
+  const servingRow = (overrides: Partial<ModelUsage.ServingAttemptRow>): ModelUsage.ServingAttemptRow => ({
+    routeID: "workhorse",
+    providerID: "openai",
+    modelID: "gpt-6-luna",
+    variant: "xhigh",
+    assistantMessageID: "msg_1",
+    outcome: "success",
+    failedOverTo: null,
+    hedged: null,
+    timeStarted: 2_000,
+    timeEnded: 2_500,
+    ...overrides,
+  })
+
+  test("lastServing names the leaf that served, not the leaf first attempted, after a failover", () => {
+    // Newest-first, as sessionAttempts returns: the serving success is newest, the 429 failure older.
+    const rows = [
+      servingRow({ providerID: "vibe-direct", modelID: "mistral-small-latest", variant: "high", timeStarted: 3_000, timeEnded: 3_500 }),
+      servingRow({ outcome: "failure", failedOverTo: "vibe-direct/mistral-small-latest", timeStarted: 2_000, timeEnded: 2_400 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "vibe-direct/mistral-small-latest",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: true,
+      failedOverTo: "vibe-direct/mistral-small-latest",
+      outcome: "success",
+    })
+    expect(ModelUsage.servingSteps(rows).map((step) => step.leaf)).toEqual([
+      "vibe-direct/mistral-small-latest",
+      "openai/gpt-6-luna",
+    ])
+  })
+
+  test("lastServing reports no failover for a single-leaf turn and null for no attempts", () => {
+    expect(ModelUsage.lastServing([servingRow({})])).toMatchObject({
+      leaf: "openai/gpt-6-luna",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+      failedOverTo: null,
+    })
+    expect(ModelUsage.lastServing([])).toBeNull()
+    expect(ModelUsage.servingSteps([])).toEqual([])
+  })
+
+  test("lastServing only groups the newest turn, never an older turn's failover", () => {
+    const rows = [
+      servingRow({ assistantMessageID: "msg_2", timeStarted: 5_000, timeEnded: 5_500 }),
+      servingRow({ outcome: "failure", failedOverTo: "vibe-direct/mistral-small-latest", timeStarted: 2_000, timeEnded: 2_400 }),
+      servingRow({ providerID: "vibe-direct", modelID: "mistral-small-latest", timeStarted: 3_000, timeEnded: 3_500 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "openai/gpt-6-luna",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+    })
+  })
+})
