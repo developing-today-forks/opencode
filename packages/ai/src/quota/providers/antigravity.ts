@@ -266,11 +266,15 @@ interface ParsedBucket {
 // A bucket is published only when its window string is recognized
 // (#1768): an unrecognized string (e.g. MONTHLY) must not fabricate a
 // "5h" window that overwrites the real one — honest absence instead.
-// A missing remainingFraction likewise propagates as unknown (null),
-// never as an invented "fully remaining" 1.
+// A bucket whose remainingFraction carries no usable figure likewise
+// publishes nothing (#1917, window-contract rule 4: no figure, no
+// window) — the parseBucket-returns-null disposition, matching the
+// unrecognized-kind case; a missing fraction is never propagated as
+// an all-null-percent window and never invented as "fully remaining" 1.
 export const parseBucket = (bucket: JsonValue): ParsedBucket | null => {
   const record = asObject(bucket)
   const remainingFraction = toNumber(record?.remainingFraction)
+  if (remainingFraction === null) return null
   const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
   const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
   const resetAt = toTimestamp(record?.resetTime)
