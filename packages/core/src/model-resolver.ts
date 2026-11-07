@@ -806,12 +806,13 @@ export const layer = Layer.effect(
             const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
             const credentialProbe =
               credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            const poolProbe = ModelRoute.poolProbeDue(target, credentialID, now, locationDirectory)
             const isPoolExhausted = poolExhausted.get(index) ?? false
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
-            else if (isPoolExhausted)
+            else if (isPoolExhausted && !poolProbe)
               unavailable.set(index, `pool-quota-exhausted:${ModelRoute.poolIDOf(definition, index) ?? "pool"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, "user-skip")
@@ -821,7 +822,7 @@ export const layer = Layer.effect(
               (until <= now || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
-              !isPoolExhausted &&
+              (!isPoolExhausted || poolProbe) &&
               (limited <= now || kept) &&
               !isSkipped &&
               !isOverBudget &&
@@ -845,7 +846,11 @@ export const layer = Layer.effect(
           // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
           // route resolves nothing and the cascade looks elsewhere instead. When every
           // usable target sits in an exhausted pool there is no last resort at all.
-          const nonPool = usable.filter((index) => !poolExhausted.get(index))
+          const nonPool = usable.filter((index) => {
+            if (!poolExhausted.get(index)) return true
+            const target = definition.targets[index]
+            return ModelRoute.poolProbeDue(target, credentialByProvider.get(target.providerID), now, locationDirectory)
+          })
           const nonPoolNonFull = nonPool.filter((index) => nonFull.includes(index))
           const lastResort = nonPool.length === 0 ? [] : nonPoolNonFull.length > 0 ? nonPoolNonFull : nonPool
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []

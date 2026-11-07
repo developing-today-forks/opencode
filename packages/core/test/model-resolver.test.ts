@@ -1691,6 +1691,63 @@ describe("ModelResolver routes", () => {
   const single = { nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }] }
   const targetOf = (resolved: ModelResolver.Resolved) => String(resolved.routing?.target.providerID)
 
+  it.effect("admits a due pool probe in both the ready path and the last resort", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const targets = [a, b, c].map((item) => ModelRoute.ref({ providerID: item.providerID, model: item.id }))
+    const nodes = [
+      { selection: "ordered", weights: [1], children: [{ node: 1 }] },
+      { routeID: "sub", selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
+    ]
+    const route = routed([a, b, c], { nodes })
+    const routeWithBudget = routed([a, b, c], {
+      nodes,
+      budgets: [{}, {}, { requestsPerMinute: 2, softLimit: 1 }],
+    })
+    const now = Date.now()
+    const observedAt = now - 1_000
+    const resetAt = now - 500
+    const laterReset = now + 60_000
+    for (const target of targets) ModelRoute.failed(target, ModelRoute.policy(), observedAt, { quota: true })
+    for (const [index, target] of targets.entries()) {
+      const reset = index === 0 ? resetAt : laterReset
+      const snapshot = {
+        planID: "plan",
+        window: "hour",
+        providerID: target.providerID,
+        percent: 100,
+        remaining: 0,
+        resetAt: reset,
+        observedAt: observedAt + 1,
+        stale: false,
+      }
+      ModelRoute.observeProviderQuota(target, snapshot, observedAt + 1)
+    }
+
+    return withResolver([a, b, c], (resolver) =>
+      Effect.gen(function* () {
+        const definition = ModelRoute.definition(route)!
+        expect(ModelRoute.poolQuotaExhausted(definition, 0, Date.now())).toBe(true)
+
+        // The two not-yet-due leaves keep the pool pulled, but its due leaf can recover
+        // through the ready path instead of being hidden by that pool verdict.
+        const ready = yield* resolver.resolveModel(route)
+        expect(targetOf(ready)).toBe("pa")
+        expect(ready.routing?.probeClaim).toBeDefined()
+        const claim = ready.routing!.probeClaim!
+        expect(ModelRoute.releaseBenchProbe(targets[0]!, claim.credentialID, claim.claimedAt, claim.token)).toBe(true)
+
+        // A soft budget empties the ready set. The same due probe remains available through
+        // the last resort, while the two ordinary quota benches still keep the pool pulled.
+        ModelRoute.recordUsage(targets[0], 0)
+        ModelRoute.recordUsage(targets[0], 0)
+        expect(targetOf(yield* resolver.resolveModel(routeWithBudget))).toBe("pa")
+      }),
+    )
+  })
+
   it.effect("carries each target's declared cache format into the resolved model's compatibility", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

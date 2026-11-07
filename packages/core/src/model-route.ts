@@ -646,6 +646,20 @@ const quotaSkipBlocks = (item: Adjustment, now: number, location?: string): bool
   return deadBalance(judged, currentConstants(location).quotaGate.balanceDeadThreshold)
 }
 
+const providerQuotaBlocks = (target: Model.Ref, now: number, location?: string): boolean => {
+  const provider = providerQuota.get(target.providerID)
+  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
+    return true
+  if (
+    provider &&
+    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+  )
+    return true
+  return activeAdjustments(now).some(
+    (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
+  )
+}
+
 /** One leaf's quota-out evidence, or undefined when the leaf is not quota-out: a quota
  * bench on the leaf (or on the credential that serves it) counts per leaf, a quota gate
  * on the credential counts once per credential, and a quota gate on the provider (a
@@ -667,25 +681,12 @@ const quotaEvidence = (
     return undefined
   }
   if (quotaBench(health.get(key(target)), now)) return `bench:${key(target)}`
-  const provider = providerQuota.get(target.providerID)
   // A threshold balance hold is judged under the judging Location (#1461), but its
   // verdict is not final for the provider's other skips: a timed attempt-reported
   // `quota:` skip installed while the hold stands must still count. The fallthrough
   // is safe for the hold's own durable record because quotaSkipBlocks re-judges
   // threshold records, so an admitted threshold hold does not re-block through it.
-  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
-    return `prov:${target.providerID}`
-  if (
-    provider &&
-    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
-  )
-    return `prov:${target.providerID}`
-  if (
-    activeAdjustments(now).some(
-      (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
-    )
-  )
-    return `prov:${target.providerID}`
+  if (providerQuotaBlocks(target, now, location)) return `prov:${target.providerID}`
   return undefined
 }
 
@@ -734,7 +735,9 @@ export const poolIDOf = (definition: Definition, index: number) => poolOf(defini
  * pull-out). Evidence is deduplicated by identity — two leaves out only through one
  * shared credential or provider gate count as one signal, so a single provider's quota
  * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
- * leaf's own quota bench always counts per leaf. The verdict is derived from the
+ * leaf's own quota bench always counts per leaf. An unclaimed, due probe stops counting
+ * only when no independent quota gate or other bench still blocks that leaf (#1390);
+ * claimed and not-yet-due probes remain exhaustion evidence. The verdict is derived from the
  * leaves' live quota state, so it lifts by itself when the benches reach their stated
  * reset, when a balance hold is released by a fresh increase, or when a benched leaf
  * recovers — a recovered pool re-enters rotation with no second producer. */
@@ -751,10 +754,32 @@ export const poolQuotaExhausted = (
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
     if (!target) continue
-    const source = quotaEvidence(target, credentialOf?.(leaf), now, location)
-    if (source) evidence.add(source)
+    const credentialID = credentialOf?.(leaf)
+    const source = quotaEvidence(target, credentialID, now, location)
+    if (source && !poolProbeDue(target, credentialID, now, location)) evidence.add(source)
   }
   return evidence.size >= POOL_QUOTA_LEAVES
+}
+
+/** Whether a due half-open probe can recover a leaf past its pool's quota pull-out. A due
+ * probe does not bypass another active quota gate or a second bench on the same leaf. */
+export const poolProbeDue = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+): boolean => {
+  const until = cooldownUntil(target, now, location)
+  const targetProbe = until > now && probeDue(target, undefined, now)
+  const credentialUntil = credentialID ? credentialCooldownUntil(target, credentialID, now) : 0
+  const credentialProbe =
+    credentialID !== undefined && credentialUntil > now && probeDue(target, credentialID, now)
+  if (!targetProbe && !credentialProbe) return false
+  if (until > now && !targetProbe) return false
+  if (credentialUntil > now && !credentialProbe) return false
+  if (credentialID !== undefined && credentialQuotaBlocked(credentialID, now, location) !== undefined) return false
+  if (providerQuotaBlocks(target, now, location)) return false
+  return true
 }
 
 /** The half-open bench probe claim a routed pick spent (#1478, #1486): the token names the

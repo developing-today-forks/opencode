@@ -2703,6 +2703,72 @@ describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
     ModelRoute.resetHealth()
   })
 
+  test("a due bench probe stops counting toward pool exhaustion until claimed", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30_000
+    const laterReset = resetAt + 30_000
+    const snapshot = (target: (typeof leaves)[number], reset: number) => ({
+      planID: "plan",
+      window: "hour",
+      providerID: target.providerID,
+      percent: 100,
+      remaining: 0,
+      resetAt: reset,
+      observedAt: now + 1,
+      stale: false,
+    })
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    ModelRoute.observeProviderQuota(leaves[0], snapshot(leaves[0], resetAt), now + 1)
+    ModelRoute.observeProviderQuota(leaves[1], snapshot(leaves[1], laterReset), now + 1)
+
+    // Before either reset, both benches keep the pool pulled.
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt - 1)).toBe(true)
+    // Once the first window rolls over, its due probe no longer counts as exhaustion.
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(false)
+    // Claiming the probe makes that bench count again while its attempt is outstanding.
+    expect(ModelRoute.claimBenchProbe(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.poolProbeDue(leaves[0], undefined, resetAt)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
+  test("an independent provider quota gate keeps a due probe in the pool count", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 30_000
+    const laterReset = resetAt + 30_000
+    const snapshot = (target: (typeof leaves)[number], reset: number, observedAt: number, balance = false) => ({
+      planID: "plan",
+      window: "hour",
+      providerID: target.providerID,
+      percent: 100,
+      remaining: 0,
+      resetAt: balance ? null : reset,
+      observedAt,
+      stale: false,
+      ...(balance ? { balance: true } : {}),
+    })
+    for (const target of leaves) ModelRoute.failed(target, policy, now, { quota: true })
+    // A later window replaces the first provider reset but does not postpone the bench's
+    // already-due probe; the current known-full gate still blocks that recovery.
+    ModelRoute.observeProviderQuota(leaves[0], snapshot(leaves[0], resetAt, now + 1), now + 1)
+    ModelRoute.observeProviderQuota(leaves[0], snapshot(leaves[0], laterReset, now + 2), now + 2)
+    // A persistent balance hold is an independent gate too, even after its bench is due.
+    ModelRoute.observeProviderQuota(leaves[1], snapshot(leaves[1], resetAt, now + 1), now + 1)
+    ModelRoute.observeProviderQuota(leaves[1], snapshot(leaves[1], resetAt, now + 2, true), now + 2)
+    ModelRoute.observeProviderQuota(leaves[2], snapshot(leaves[2], laterReset, now + 1), now + 1)
+
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(leaves[1], undefined, resetAt)).toBe(true)
+    expect(ModelRoute.poolProbeDue(leaves[0], undefined, resetAt)).toBe(false)
+    expect(ModelRoute.poolProbeDue(leaves[1], undefined, resetAt)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt)).toBe(true)
+    ModelRoute.resetHealth()
+  })
+
   test("reactive quota gates on two leaves' providers exhaust the pool until the stated reset", () => {
     ModelRoute.resetHealth()
     const now = Date.now()
