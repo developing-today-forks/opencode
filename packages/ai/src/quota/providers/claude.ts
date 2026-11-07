@@ -120,7 +120,7 @@ const withMetadata = (result: QuotaResult, credential: ClaudeCredential): QuotaR
   ...(credential.expiresAt !== null
     ? { credentialExpiresAt: new Date(credential.expiresAt).toISOString() }
     : {}),
-  credentialSource: SOURCE_MAP[credential.source],
+  ...(Object.hasOwn(SOURCE_MAP, credential.source) ? { credentialSource: SOURCE_MAP[credential.source] } : {}),
 })
 
 // ---- usage payload transforms (providers/claude/transforms.js) ----

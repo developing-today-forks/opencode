@@ -12,6 +12,7 @@ import {
   toTimestamp,
   toUsageWindow,
   parseJsonValue,
+  readQuotaJson,
 } from "../utils.js"
 
 /**
@@ -201,7 +202,7 @@ export const fetchTursoQuota = async (ctx: QuotaContext): Promise<QuotaResult> =
         signal: AbortSignal.timeout(15_000),
       })
       if (!response.ok) throw new Error(`turso ${path} HTTP ${response.status}`)
-      const parsed: JsonValue = await response.json()
+      const parsed = await readQuotaJson(response)
       return parsed
     }
     const usage = await get("/usage")

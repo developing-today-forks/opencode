@@ -237,7 +237,7 @@ export const readConfigFacts = (
 
   const disabledProviders = new Set<string>()
   const instances = new Map<string, { base: string; name?: string }>()
-  const providerConfig: Record<string, JsonObject> = {}
+  const providerConfig: Record<string, JsonObject> = Object.create(null)
 
   for (const file of [...new Set(files)]) {
     let document: JsonObject | undefined
@@ -263,7 +263,8 @@ export const readConfigFacts = (
       for (const [id, definition] of Object.entries(section)) {
         if (!isJsonObject(definition)) continue
         const record = definition
-        providerConfig[id] = { ...(providerConfig[id] ?? {}), ...record }
+        const previous = Object.hasOwn(providerConfig, id) ? providerConfig[id] : undefined
+        providerConfig[id] = { ...(previous ?? {}), ...record }
         const base = typeof record.instanceOf === "string" ? record.instanceOf : undefined
         if (base) {
           instances.set(id, {

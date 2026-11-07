@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
-import { tursoWindows } from "../src/quota/providers/turso.js"
+import { fetchTursoQuota, tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
 import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
@@ -1525,6 +1525,36 @@ describe("readQuotaJson byte cap (#1877)", () => {
     const body = JSON.stringify({ note: "\u20AC".repeat(1_000) })
     const parsed = await readQuotaJson(new Response(body))
     expect(parsed).toEqual({ note: "\u20AC".repeat(1_000) })
+  })
+
+  test("Turso rejects an oversized streamed response before parsing", async () => {
+    let cancelled = false
+    let requests = 0
+    const result = await fetchTursoQuota({
+      credentials: [],
+      disabledProviders: new Set(),
+      instances: new Map(),
+      providerConfig: {},
+      env: { TURSO_API_TOKEN: "fixture-token" },
+      fetchImpl: async () => {
+        requests++
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.enqueue(new Uint8Array(QUOTA_RESPONSE_MAX_BYTES + 1))
+            },
+            cancel() {
+              cancelled = true
+            },
+          }),
+        )
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("Quota response exceeded")
+    expect(cancelled).toBe(true)
+    expect(requests).toBe(1)
   })
 })
 

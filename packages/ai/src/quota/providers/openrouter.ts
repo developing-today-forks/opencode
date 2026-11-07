@@ -140,10 +140,14 @@ export const provider: QuotaProvider = {
         const percent = limit > 0 ? (used / limit) * 100 : null
         usedPercent = percent === null ? null : Math.min(100, percent)
         valueLabel = `$${formatMoney(used)} / $${formatMoney(limit)}`
-        if (typeof data.limit_reset === "string" && Object.hasOwn(PERIOD_SECONDS, data.limit_reset)) {
-          windowKey = data.limit_reset
-          windowSeconds = PERIOD_SECONDS[data.limit_reset]
-          resetAt = resolveResetAt(data.limit_reset, nowMs)
+        const resetPeriod =
+          typeof data.limit_reset === "string" && Object.hasOwn(PERIOD_SECONDS, data.limit_reset)
+            ? { key: data.limit_reset, seconds: PERIOD_SECONDS[data.limit_reset] }
+            : undefined
+        if (resetPeriod) {
+          windowKey = resetPeriod.key
+          windowSeconds = resetPeriod.seconds
+          resetAt = resolveResetAt(resetPeriod.key, nowMs)
         } else {
           windowKey = "key_limit"
           windowSeconds = null

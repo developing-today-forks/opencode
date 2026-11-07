@@ -190,4 +190,25 @@ describe("quota config facts discovery (#1733)", () => {
       rmSync(tree.root, { recursive: true, force: true })
     }
   })
+
+  test("provider config keys stay own properties instead of inheriting defaults", () => {
+    const tree = makeTree()
+    try {
+      writeFileSync(
+        join(tree.child, "opencode.json"),
+        JSON.stringify({ provider: Object.fromEntries([["constructor", { api: "https://example.test" }]]) }),
+      )
+      const facts = readConfigFacts(
+        { config: tree.globalDir, data: tree.root, state: tree.root },
+        { cwd: tree.child, systemDirectory: tree.systemDir, env: {} },
+      )
+      expect(Object.getPrototypeOf(facts.providerConfig)).toBe(null)
+      expect(Object.hasOwn(facts.providerConfig, "constructor")).toBe(true)
+      expect(Object.getOwnPropertyDescriptor(facts.providerConfig, "constructor")?.value).toEqual({
+        api: "https://example.test",
+      })
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true })
+    }
+  })
 })

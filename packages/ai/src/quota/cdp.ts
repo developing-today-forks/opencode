@@ -1,5 +1,5 @@
 import type { JsonObject, JsonValue, QuotaContext } from "./types.js"
-import { asObject, envOf, isJsonObject, parseJsonValue } from "./utils.js"
+import { asObject, envOf, isJsonObject, parseJsonValue, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson } from "./utils.js"
 
 /**
  * Console-session reads through the laptop browser's Chrome DevTools
@@ -65,7 +65,7 @@ export const cdpBaseOf = (ctx: QuotaContext): string => {
 const httpJson = async (url: string, init?: RequestInit): Promise<JsonValue> => {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) })
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  const parsed: JsonValue = await response.json()
+  const parsed = await readQuotaJson(response)
   return parsed
 }
 
@@ -233,18 +233,50 @@ export const cdpPageFetch = async (
   }
   let client: WsClient | undefined
   try {
-    client = await connectWs(page.webSocketDebuggerUrl, ctx.cdpRequestTimeoutMs ?? CDP_REQUEST_TIMEOUT_MS)
+    const requestTimeoutMs = ctx.cdpRequestTimeoutMs ?? CDP_REQUEST_TIMEOUT_MS
+    client = await connectWs(page.webSocketDebuggerUrl, requestTimeoutMs)
     const pageUrl = await waitForPage(client, origin)
     const expression = `(async () => {
       const paths = ${JSON.stringify(paths)};
+      const maxBytes = ${QUOTA_RESPONSE_MAX_BYTES};
+      const timeoutMs = ${requestTimeoutMs};
       const out = {};
+      const readBoundedText = async (response) => {
+        const reader = response.body?.getReader();
+        if (!reader) return "";
+        const chunks = [];
+        let size = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value || value.byteLength === 0) continue;
+            if (size + value.byteLength > maxBytes) {
+              await reader.cancel().catch(() => undefined);
+              throw new Error("Quota response exceeded " + maxBytes + " bytes");
+            }
+            chunks.push(value);
+            size += value.byteLength;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return new TextDecoder().decode(bytes);
+      };
       for (const path of paths) {
         try {
           const r = await fetch(new URL(path, ${JSON.stringify(origin)}).toString(), {
             headers: { Accept: "application/json" },
             credentials: "include",
+            signal: AbortSignal.timeout(timeoutMs),
           });
-          out[path] = { status: r.status, url: r.url, text: await r.text() };
+          out[path] = { status: r.status, url: r.url, text: await readBoundedText(r) };
         } catch (e) {
           out[path] = { status: 0, url: "", text: "", error: String(e) };
         }

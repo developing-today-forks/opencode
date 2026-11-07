@@ -9,6 +9,7 @@ import type {
   QuotaUsage,
   QuotaWindow,
 } from "./types.js"
+import { readBoundedResponseText } from "@opencode/util/http-body"
 
 export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -169,23 +170,13 @@ export const buildResult = (input: {
   return result
 }
 
-/**
- * The most a quota provider answer may weigh: every quota payload is a
- * small per-account usage/balance/credits JSON document, so 1 MiB is
- * orders of magnitude above any legitimate response, and a hostile or
- * misconfigured endpoint cannot grow memory inside the deadline.
- */
+/** Maximum quota-provider JSON response size in bytes, enforced while the response stream is read. */
 export const QUOTA_RESPONSE_MAX_BYTES = 1 * 1024 * 1024
 
 export const readQuotaJson = async (response: Response): Promise<JsonValue> => {
-  const text = await response.text()
-  // The cap is denominated in bytes, so measure the UTF-8 byte length —
-  // text.length counts UTF-16 code units and under-counts multi-byte
-  // bodies by up to ~3x, letting a >cap payload pass on its alphabet
-  // rather than its size (#1877).
-  if (new TextEncoder().encode(text).length > QUOTA_RESPONSE_MAX_BYTES) {
-    throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
-  }
+  const text = await readBoundedResponseText(response, QUOTA_RESPONSE_MAX_BYTES, () =>
+    new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`),
+  )
   // JSON.parse yields exactly the JsonValue grammar; the annotation
   // records that contract at the boundary.
   const parsed: JsonValue = JSON.parse(text.replace(/^\uFEFF/, ""))
