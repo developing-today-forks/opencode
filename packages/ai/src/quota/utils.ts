@@ -177,15 +177,36 @@ export const buildResult = (input: {
  */
 export const QUOTA_RESPONSE_MAX_BYTES = 1 * 1024 * 1024
 
-export const readQuotaJson = async (response: Response): Promise<JsonValue> => {
-  const text = await response.text()
-  // The cap is denominated in bytes, so measure the UTF-8 byte length —
-  // text.length counts UTF-16 code units and under-counts multi-byte
-  // bodies by up to ~3x, letting a >cap payload pass on its alphabet
-  // rather than its size (#1877).
-  if (new TextEncoder().encode(text).length > QUOTA_RESPONSE_MAX_BYTES) {
-    throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+/** Read up to QUOTA_RESPONSE_MAX_BYTES of a response body as text. */
+const readBoundedResponseText = async (response: Response): Promise<string> => {
+  if (response.body === null) return ""
+  const reader = response.body.getReader()
+  let totalBytes = 0
+  const decoder = new TextDecoder()
+  let text = ""
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > QUOTA_RESPONSE_MAX_BYTES) {
+        throw new Error(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => {})
+    throw err
+  } finally {
+    reader.releaseLock()
   }
+
+  return text + decoder.decode()
+}
+
+export const readQuotaJson = async (response: Response): Promise<JsonValue> => {
+  const text = await readBoundedResponseText(response)
   // JSON.parse yields exactly the JsonValue grammar; the annotation
   // records that contract at the boundary.
   const parsed: JsonValue = JSON.parse(text.replace(/^\uFEFF/, ""))

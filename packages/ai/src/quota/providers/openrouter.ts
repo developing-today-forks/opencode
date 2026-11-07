@@ -27,8 +27,6 @@ export const providerName = "OpenRouter"
 export const aliases = ["openrouter"]
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-const PERIOD_SECONDS: Record<string, number> = { daily: 86400, weekly: 604800, monthly: 30 * 86400 }
-
 export const resolveResetAt = (limitReset: JsonValue | undefined, nowMs: number): number | null => {
   const now = new Date(nowMs)
   const y = now.getUTCFullYear()
@@ -130,7 +128,7 @@ export const provider: QuotaProvider = {
 
       if (limit === null) {
         windowKey = "monthly"
-        windowSeconds = PERIOD_SECONDS.monthly
+        windowSeconds = 30 * 86400
         resetAt = resolveResetAt("monthly", nowMs)
         usedPercent = null
         valueLabel = `$${formatMoney(usageMonthly)} spent`
@@ -140,9 +138,17 @@ export const provider: QuotaProvider = {
         const percent = limit > 0 ? (used / limit) * 100 : null
         usedPercent = percent === null ? null : Math.min(100, percent)
         valueLabel = `$${formatMoney(used)} / $${formatMoney(limit)}`
-        if (typeof data.limit_reset === "string" && Object.hasOwn(PERIOD_SECONDS, data.limit_reset)) {
+        if (data.limit_reset === "daily") {
           windowKey = data.limit_reset
-          windowSeconds = PERIOD_SECONDS[data.limit_reset]
+          windowSeconds = 86400
+          resetAt = resolveResetAt(data.limit_reset, nowMs)
+        } else if (data.limit_reset === "weekly") {
+          windowKey = data.limit_reset
+          windowSeconds = 604800
+          resetAt = resolveResetAt(data.limit_reset, nowMs)
+        } else if (data.limit_reset === "monthly") {
+          windowKey = data.limit_reset
+          windowSeconds = 30 * 86400
           resetAt = resolveResetAt(data.limit_reset, nowMs)
         } else {
           windowKey = "key_limit"
