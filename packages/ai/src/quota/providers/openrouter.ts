@@ -115,7 +115,13 @@ export const provider: QuotaProvider = {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
       }
       const usageMonthly = toNumber(data.usage_monthly)
-      if (limit === null && usageMonthly === null) {
+      // A negative spend is impossible wire data (#1913): read it as
+      // absent, the way sibling parsers read negative amounts
+      // (turso numNonNegative, opencode-go toMicroCents). On the
+      // unlimited path the spend is the only figure, so absent is
+      // the no-data contract — the same disposition as the
+      // zero/negative limit above (#1799, contract rule 4).
+      if (limit === null && (usageMonthly === null || usageMonthly < 0)) {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
       }
 
