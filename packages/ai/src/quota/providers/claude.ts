@@ -130,6 +130,12 @@ const toAmount = (value: JsonValue | undefined): number | null => {
   const minor = toNumber(money?.amount_minor)
   if (minor === null) return null
   const exponent = toNumber(money?.exponent) ?? 2
+  // Valid exponents are the ISO 4217 currency exponents: integers 0-3.
+  // A wire exponent outside that range would silently rescale a real
+  // amount into a false one (999 erases it to $0.00, -2 inflates it
+  // 100x), so an out-of-range exponent reads the money object as
+  // absent, consistent with this module's other boundary dispositions.
+  if (!Number.isInteger(exponent) || exponent < 0 || exponent > 3) return null
   return minor / 10 ** exponent
 }
 
