@@ -61,10 +61,11 @@
  * provider parsing resets through the shared converter, so no
  * consumer can publish a 1969/1970 resetAt or fields derived from one.
  *
- *   antigravity — fetch-only for exported purposes: its transforms
- *     parseBucket / transformSummary / transformModels are
- *     module-private. KNOWN-LOSSY: #1768 (substring-derived labels,
- *     last-wins bucket assignment, missing remainingFraction as 1).
+ *   antigravity — parseBucket / transformSummary / transformModels
+ *     (all exported pure transforms). Conforming (unrecognized
+ *     window strings skipped, same-label collisions keep-first,
+ *     missing remainingFraction propagates as null, #1768; pinned
+ *     by its dedicated describe in quota.test.ts, per rule 7).
  *   claude — toClaudeUsage (exported pure transform);
  *     findClaudeCredential (credential lookup, not a window parser).
  *     KNOWN-LOSSY: #1781 (unconditional addWindow overwrites
@@ -95,9 +96,10 @@
      A zero or negative limit drops only that window (rule 4),
      pinned by the matrix (#1849).
  *   mistral — parseMistralBudget (exported; wraps the module-private
- *     parseBudget). KNOWN-LOSSY: #1785 (usedPercent clamped while
- *     usedAmount is derived from the raw percentage, so a window's
- *     fields can disagree — rule 5).
+ *     parseBudget). Conforming (usedPercent clamped and usedAmount
+ *     derived from the clamped percent, so a window's fields agree
+ *     — rule 5, #1785; pinned by the mistral console budget mapping
+ *     describe in quota.test.ts).
  *   opencode-go — parseOpenCodeGoUsage, parseConsoleGoUsage,
  *     parseConsoleBillingBalance (all exported). KNOWN-LOSSY:
  *     #1725 (unpinned remainder; a window is dropped when resetAt
