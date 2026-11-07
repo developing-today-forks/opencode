@@ -377,6 +377,15 @@ export const transformModels = (
     } else {
       const quotaInfo = asObject(modelData?.quotaInfo)
       const remainingFraction = toNumber(quotaInfo?.remainingFraction)
+      // No figure, no window (window contract rule 4, #1912): a
+      // fallback quotaInfo with no usable remainingFraction carries
+      // no quota figure, so the model publishes no window at all —
+      // the entry is omitted, not published as an all-null window
+      // with a label fabricated from its reset time (or the 5h
+      // default). Same disposition as codex #1762 and meta #1907.
+      // Omitting the entry also keeps an all-figureless models
+      // payload from reading as a successful quota read.
+      if (remainingFraction === null) continue
       const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
       const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
       const resetAt = toTimestamp(quotaInfo?.resetTime)
