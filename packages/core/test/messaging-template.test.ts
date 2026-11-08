@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Cause, Effect } from "effect"
 import { MessagingTemplate } from "@opencode/core/messaging/template"
+import { ConfigMessaging } from "@opencode/schema/config/messaging"
 
 const failure = async (template: string, vars: Record<string, string>) => {
   const exit = await Effect.runPromiseExit(
@@ -97,5 +98,45 @@ describe("MessagingTemplate.parseTime bare epochs", () => {
   test("ISO and relative forms still parse", () => {
     expect(MessagingTemplate.parseTime("2026-01-01T00:00:00Z", now)).toBe(1767225600000)
     expect(MessagingTemplate.parseTime("2h", now)).toBe(now - 2 * 3_600_000)
+  })
+})
+
+describe("MessagingTemplate.constant own-property lookups (#793)", () => {
+  const config = new ConfigMessaging.Info({ vars: { custom: "configured" } })
+
+  test("prototype names resolve to undefined, not inherited values", () => {
+    expect(MessagingTemplate.constant("constructor", config)).toBeUndefined()
+    expect(MessagingTemplate.constant("__proto__", config)).toBeUndefined()
+    expect(MessagingTemplate.constant("toString", config)).toBeUndefined()
+    expect(MessagingTemplate.constant("hasOwnProperty", config)).toBeUndefined()
+    expect(MessagingTemplate.constant("constructor")).toBeUndefined()
+    expect(MessagingTemplate.constant("__proto__")).toBeUndefined()
+  })
+
+  test("configured vars and built-in constants still resolve, config first", () => {
+    expect(MessagingTemplate.constant("custom", config)).toBe("configured")
+    expect(MessagingTemplate.constant("separator", config)).toBe("/")
+    expect(MessagingTemplate.constant("separator", new ConfigMessaging.Info({ vars: { separator: ":" } }))).toBe(":")
+    expect(MessagingTemplate.constant("unknown", config)).toBeUndefined()
+  })
+
+  test("rendering a prototype name with vars configured reports an unknown variable, not a TypeError", async () => {
+    // The resolver mirrors MessagingVars.resolve: constant() is the configured/built-in lookup.
+    const exit = await Effect.runPromiseExit(
+      MessagingTemplate.render(
+        "{constructor}",
+        (name) => {
+          const value = MessagingTemplate.constant(name, config)
+          return Effect.succeed(value === undefined ? undefined : { value, template: true })
+        },
+        { strict: true },
+      ),
+    )
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag !== "Failure") return
+    const error = Cause.squash(exit.cause)
+    expect(error).toBeInstanceOf(MessagingTemplate.TemplateError)
+    expect(error instanceof Error ? error.message : String(error)).toContain("Unknown variable")
+    expect(error instanceof Error ? error.message : String(error)).toContain("{constructor}")
   })
 })

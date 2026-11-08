@@ -1,8 +1,8 @@
 export * as ServiceRegistration from "./service-registration"
 
 import { Service, type Info } from "@opencode/client/effect/service"
-import path from "node:path"
-import { Effect, FileSystem, Schedule, Schema } from "effect"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Effect, Schedule, Schema } from "effect"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
 import { OPENCODE_VERSION } from "../version"
@@ -18,9 +18,7 @@ export const register = Effect.fnUntraced(function* (options: {
   readonly file: string
   readonly shutdown: Effect.Effect<void>
 }) {
-  const fs = yield* FileSystem.FileSystem
-  const temp = options.file + "." + options.id + ".tmp"
-  yield* fs.makeDirectory(path.dirname(options.file), { recursive: true })
+  const fs = yield* FSUtil.Service
   const info = {
     id: options.id,
     version: OPENCODE_VERSION,
@@ -36,7 +34,7 @@ export const register = Effect.fnUntraced(function* (options: {
     found.url === info.url &&
     found.pid === info.pid &&
     found.password === info.password
-  yield* fs.writeFileString(temp, encoded, { mode: 0o600 }).pipe(Effect.andThen(fs.rename(temp, options.file)))
+  yield* fs.writeAtomic(options.file, encoded, { modePolicy: "owner-capped" })
   yield* current.pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("managed service registration check failed; shutting down", {

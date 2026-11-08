@@ -52,6 +52,7 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
     metadata: row.metadata ?? undefined,
     subagentPolicy: row.subagent_policy ?? undefined,
     permissions: row.permission ?? undefined,
+    detached: row.detached ? true : undefined,
     revert: row.revert ? decodeRevert(row.revert) : undefined,
     outcome: row.idle_outcome ?? undefined,
     time: {

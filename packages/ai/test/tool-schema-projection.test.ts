@@ -216,6 +216,31 @@ describe("tool schema projections", () => {
     })
   })
 
+  test("moonshot keeps prefix constraints when prefixItems and items are both present (#1574)", () => {
+    expect(
+      ToolSchemaProjection.moonshot({
+        type: "object",
+        properties: {
+          pair: { type: "array", prefixItems: [{ type: "string" }], items: { type: "integer" } },
+          triple: {
+            type: "array",
+            prefixItems: [{ type: "string" }, { type: "boolean" }],
+            items: { type: "integer" },
+          },
+        },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        pair: { type: "array", items: { anyOf: [{ type: "string" }, { type: "integer" }] } },
+        triple: {
+          type: "array",
+          items: { anyOf: [{ type: "string" }, { type: "boolean" }, { type: "integer" }] },
+        },
+      },
+    })
+  })
+
   test("moonshot derives a type for untyped enums", () => {
     expect(
       ToolSchemaProjection.moonshot({
@@ -245,6 +270,32 @@ describe("tool schema projections", () => {
         mixed: { enum: ["a", 1] },
       },
       $defs: { Mode: { type: "string", enum: ["fast"] } },
+    })
+  })
+
+  test("moonshot passes structured enum/default/const values through verbatim (#1952)", () => {
+    expect(
+      ToolSchemaProjection.moonshot({
+        type: "object",
+        properties: {
+          enumItems: { enum: [{ items: ["a", "b"] }] },
+          enumRef: { enum: [{ $ref: "#/x", extra: 1 }] },
+          enumPrefix: { enum: [{ prefixItems: [{ type: "string" }], note: "keep" }] },
+          defaulted: { type: "object", default: { items: [1, 2, 3] } },
+          fixed: { const: { items: ["x"] } },
+          nested: { type: "array", items: { enum: [{ items: ["y"] }] } },
+        },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        enumItems: { type: "object", enum: [{ items: ["a", "b"] }] },
+        enumRef: { type: "object", enum: [{ $ref: "#/x", extra: 1 }] },
+        enumPrefix: { type: "object", enum: [{ prefixItems: [{ type: "string" }], note: "keep" }] },
+        defaulted: { type: "object", default: { items: [1, 2, 3] } },
+        fixed: { const: { items: ["x"] } },
+        nested: { type: "array", items: { type: "object", enum: [{ items: ["y"] }] } },
+      },
     })
   })
 

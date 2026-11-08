@@ -20,11 +20,16 @@ export const handler = Effect.fn("cli.web-ui.handler")(function* (options?: {
       const request = yield* HttpServerRequest.HttpServerRequest
       const url = new URL(request.url, "http://localhost")
       // Serve the web shell before API authentication so a signed-out browser gets the app's sign-in screen.
+      // The /v1 namespace is the facade API surface (the OpenAI-shaped doors), owned by the API
+      // router like /api: it must pass through, or the shell answers its GETs with the SPA and
+      // its POSTs with 405 (#1627).
       if (
         url.pathname === "/api" ||
         url.pathname.startsWith("/api/") ||
         url.pathname.startsWith("/auth/") ||
-        url.pathname === "/openapi.json"
+        url.pathname === "/openapi.json" ||
+        url.pathname === "/v1" ||
+        url.pathname.startsWith("/v1/")
       )
         return yield* api.pipe(
           Effect.catchIf(isRouteNotFound, () => Effect.succeed(HttpServerResponse.empty({ status: 404 }))),

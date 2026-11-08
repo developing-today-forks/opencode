@@ -8,7 +8,7 @@ import { Effect, FileSystem, Layer, PlatformError, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
-import { Updater } from "../src/services/updater"
+import { releaseMaxResponseBytes, Updater } from "../src/services/updater"
 import { testEffect } from "../../core/test/lib/effect"
 
 const it = testEffect(NodeServices.layer)
@@ -24,6 +24,7 @@ function fixture(
   releasePackage = name,
   formula?: string,
   executableOverride?: (root: string, home: string) => Effect.Effect<string, PlatformError.PlatformError, FileSystem.FileSystem>,
+  releaseResponse?: () => Response,
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
@@ -53,6 +54,7 @@ function fixture(
               const url = input instanceof Request ? input.url : input.toString()
               requests.push(url)
               if (new URL(url).hostname === "formulae.brew.sh") return Response.json({ versions: { stable: "2.0.21" } })
+              if (releaseResponse) return releaseResponse()
               return Response.json({ version: "2.3.4", metadata: { package: releasePackage } })
             },
             { preconnect: fetch.preconnect },
@@ -324,6 +326,67 @@ it.live("Homebrew Core installs check and upgrade the Core formula", () =>
     ])
   }),
 )
+it.live("latest rejects a declared oversized release body before reading it (#1031)", () =>
+  Effect.gen(function* () {
+    let bodyRead = false
+    const test = yield* fixture(
+      () => ({}),
+      "@opencode/cli",
+      false,
+      "@opencode/cli",
+      undefined,
+      undefined,
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("small body"))
+            },
+            pull(controller) {
+              bodyRead = true
+              controller.close()
+            },
+          }),
+          { headers: { "content-length": String(releaseMaxResponseBytes + 1) } },
+        ),
+    )
+    const error = yield* test.updater.latest().pipe(Effect.flip)
+    expect(error).toBeInstanceOf(Updater.UpgradeError)
+    expect((error as InstanceType<typeof Updater.UpgradeError>).title).toContain("Could not read the OpenCode update information")
+    expect(bodyRead).toBe(false)
+  }),
+)
+
+it.live("latest rejects a streamed oversized release body in flight (#1031)", () =>
+  Effect.gen(function* () {
+    const chunkBytes = releaseMaxResponseBytes / 2
+    const totalChunks = 8
+    let pulled = 0
+    const test = yield* fixture(
+      () => ({}),
+      "@opencode/cli",
+      false,
+      "@opencode/cli",
+      undefined,
+      undefined,
+      () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (pulled === totalChunks) return controller.close()
+              pulled++
+              controller.enqueue(new Uint8Array(chunkBytes))
+            },
+          }),
+        ),
+    )
+    const error = yield* test.updater.latest().pipe(Effect.flip)
+    expect(error).toBeInstanceOf(Updater.UpgradeError)
+    expect((error as InstanceType<typeof Updater.UpgradeError>).title).toContain("Could not read the OpenCode update information")
+    expect(pulled).toBeLessThan(totalChunks)
+  }),
+)
+
 ;["opencode-v2", "opencode-beta"].forEach((formula) => {
   it.live(`Homebrew tap installs of ${formula} use the published tap formula`, () =>
     Effect.gen(function* () {

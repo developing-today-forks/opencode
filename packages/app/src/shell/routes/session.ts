@@ -14,17 +14,22 @@ export function requireServerKey(segment: string | undefined) {
   return ServerConnection.Key.make(key)
 }
 
-type SessionParent = { id: string; parentID?: string }
+type SessionParent = { id: string; parentID?: string; fork?: { sessionID: string } }
 
 export async function rootSession<T extends SessionParent>(session: T, get: (sessionID: string) => Promise<T>) {
   const seen = new Set([session.id])
   let current = session
 
-  while (current.parentID) {
-    if (seen.has(current.parentID)) throw new Error(`Session parent cycle: ${current.parentID}`)
-    seen.add(current.parentID)
-    current = await get(current.parentID)
-  }
+  // Follow the fork link where a session has no parent, as core
+  // SessionAffinity.resolveRoot does, so a fork resolves to the source
+  // tree's root instead of stopping at the fork.
+  while (true) {
+    const parentID = current.parentID ?? current.fork?.sessionID
 
-  return current
+    if (!parentID) return current
+
+    if (seen.has(parentID)) throw new Error(`Session parent cycle: ${parentID}`)
+    seen.add(parentID)
+    current = await get(parentID)
+  }
 }

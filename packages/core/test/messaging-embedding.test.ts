@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { createHash } from "node:crypto"
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { createServer } from "node:http"
 import path from "node:path"
 import { Context, Effect, Exit, Layer, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
@@ -84,6 +85,35 @@ describe("MessagingEmbedding.resolve", () => {
     }),
   )
 
+  it.effect("carries configured sha256 and size for custom models", () =>
+    Effect.sync(() => {
+      const local = MessagingEmbedding.resolve(
+        { url: "https://example.com/x/model.gguf", sha256: "abc123", size: 123_456 },
+        {},
+      ).local
+      expect(local?.tier).toBe("custom")
+      expect(local?.sha256).toBe("abc123")
+      expect(local?.size).toBe(123_456)
+    }),
+  )
+
+  it.effect("does not carry configured integrity metadata to a different override url", () =>
+    Effect.sync(() => {
+      const config = { url: "https://example.com/a/model.gguf", sha256: "abc123", size: 123_456 }
+      const different = MessagingEmbedding.resolve(config, {
+        OPENCODE_EMBEDDING: "https://example.com/b/other.gguf",
+      }).local
+      expect(different?.url).toBe("https://example.com/b/other.gguf")
+      expect(different?.sha256).toBeUndefined()
+      expect(different?.size).toBeUndefined()
+      const same = MessagingEmbedding.resolve(config, {
+        OPENCODE_EMBEDDING: "https://example.com/a/model.gguf",
+      }).local
+      expect(same?.sha256).toBe("abc123")
+      expect(same?.size).toBe(123_456)
+    }),
+  )
+
   it.effect("applies environment overrides", () =>
     Effect.sync(() => {
       expect(MessagingEmbedding.resolve("default", { OPENCODE_DISABLE_EMBEDDING: "1" }).local).toBeUndefined()
@@ -127,6 +157,32 @@ function rangeServer(body: Uint8Array, options: { ranges: boolean }) {
   return { server, seen, url: `http://127.0.0.1:${server.port}/model.gguf` }
 }
 
+// Serves a tiny body under a declared content-length of `total`: download() must reject the
+// declared length from the headers alone, so no multi-GiB body ever crosses the wire.
+function declaredServer(total: number) {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-length": String(total) })
+    response.end(new Uint8Array(10))
+  })
+  return new Promise<{ server: typeof server; url: string }>((resolvePromise) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address()
+      const port = typeof address === "object" && address ? address.port : 0
+      resolvePromise({ server, url: `http://127.0.0.1:${port}/model.gguf` })
+    })
+  })
+}
+
+const declared = (total: number) =>
+  Effect.acquireRelease(
+    Effect.promise(() => declaredServer(total)),
+    (fixture) =>
+      Effect.sync(() => {
+        fixture.server.closeAllConnections()
+        fixture.server.close()
+      }),
+  )
+
 const served = (body: Uint8Array, options: { ranges: boolean }) =>
   Effect.acquireRelease(
     Effect.sync(() => rangeServer(body, options)),
@@ -134,6 +190,38 @@ const served = (body: Uint8Array, options: { ranges: boolean }) =>
   )
 
 const payload = Uint8Array.from({ length: 200_000 }, (_, index) => (index * 31) % 251)
+
+const oversized = Uint8Array.from({ length: 500_000 }, (_, index) => (index * 31) % 251)
+
+// Serves `body` as a stream of small chunks with no content-length, like a chunked response.
+function chunkedServer(body: Uint8Array, chunk: number) {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch() {
+      let offset = 0
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset >= body.byteLength) {
+            controller.close()
+            return
+          }
+          const next = body.slice(offset, offset + chunk)
+          offset += next.byteLength
+          controller.enqueue(next)
+        },
+      })
+      return new Response(stream)
+    },
+  })
+  return { server, url: `http://127.0.0.1:${server.port}/model.gguf` }
+}
+
+const chunked = (body: Uint8Array, chunk: number) =>
+  Effect.acquireRelease(
+    Effect.sync(() => chunkedServer(body, chunk)),
+    (fixture) => Effect.promise(() => fixture.server.stop(true)),
+  )
 
 describe("MessagingEmbedding.download", () => {
   it.live("resumes a partial file with a Range request", () =>
@@ -198,6 +286,176 @@ describe("MessagingEmbedding.download", () => {
       expect((yield* Effect.promise(() => stat(dest))).size).toBe(payload.byteLength)
     }),
   )
+
+  it.live("fails fast when the declared length exceeds the known size", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* served(oversized, { ranges: false })
+      const dest = path.join(dir, "model.gguf")
+      const updates: Array<number> = []
+      const exit = yield* Effect.exit(
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          sha256: sha(payload),
+          size: payload.byteLength,
+          onProgress: (received) => updates.push(received),
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      // The pre-check fires before the body is read: no progress past the known size was ever reported.
+      expect(Math.max(0, ...updates)).toBeLessThanOrEqual(payload.byteLength)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("aborts a chunked body in flight once it passes the known size", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* chunked(oversized, 10_000)
+      const dest = path.join(dir, "model.gguf")
+      const updates: Array<number> = []
+      const exit = yield* Effect.exit(
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          size: payload.byteLength,
+          onProgress: (received) => updates.push(received),
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      // In-flight bound: progress never passes the known size, so the download stopped
+      // before the whole 500,000-byte body was consumed.
+      expect(Math.max(0, ...updates)).toBeLessThanOrEqual(payload.byteLength)
+      expect(Math.max(0, ...updates)).toBeLessThan(oversized.byteLength)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("checks the expected size even when the digest matches", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* served(payload, { ranges: false })
+      const dest = path.join(dir, "model.gguf")
+      const exit = yield* Effect.exit(
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          sha256: sha(payload),
+          size: payload.byteLength + 1,
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("size mismatch")
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("fails fast at the production default cap on a declared length (no sha256, no size, no limit seam)", () =>
+    Effect.gen(function* () {
+      // The cap is a named constant sized above the largest built-in tier.
+      expect(MessagingEmbedding.MAX_UNKNOWN_SIZE_DOWNLOAD_BYTES).toBe(17_179_869_184)
+      expect(MessagingEmbedding.MAX_UNKNOWN_SIZE_DOWNLOAD_BYTES).toBeGreaterThan(
+        Math.max(...MessagingEmbedding.tiers.map((tier) => tier.size)),
+      )
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* declared(MessagingEmbedding.MAX_UNKNOWN_SIZE_DOWNLOAD_BYTES + 1)
+      const dest = path.join(dir, "model.gguf")
+      const exit = yield* Effect.exit(MessagingEmbedding.download({ url: fixture.url, dest }))
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("fails fast when the declared length exceeds the cap for the custom shape (no sha256, no size)", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* served(oversized, { ranges: false })
+      const dest = path.join(dir, "model.gguf")
+      const updates: Array<number> = []
+      const exit = yield* Effect.exit(
+        // The custom-URL call shape after resolve(): neither sha256 nor size is set. The limit seam
+        // stands in for the 16 GiB production cap so the test body stays small.
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          limit: payload.byteLength,
+          onProgress: (received) => updates.push(received),
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      expect(Math.max(0, ...updates)).toBeLessThanOrEqual(payload.byteLength)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("aborts a chunked body in flight once it passes the cap for the custom shape (no sha256, no size)", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* chunked(oversized, 10_000)
+      const dest = path.join(dir, "model.gguf")
+      const updates: Array<number> = []
+      const exit = yield* Effect.exit(
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          limit: payload.byteLength,
+          onProgress: (received) => updates.push(received),
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      expect(Math.max(0, ...updates)).toBeLessThanOrEqual(payload.byteLength)
+      expect(Math.max(0, ...updates)).toBeLessThan(oversized.byteLength)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
+
+  it.live("accepts an under-cap chunked body whole for the custom shape (no sha256, no size)", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* chunked(payload, 10_000)
+      const dest = path.join(dir, "model.gguf")
+      // No limit seam either: the production 16 GiB cap applies and a small body is accepted at
+      // its own length — no exact-size requirement is invented for the unknown-size shape.
+      yield* MessagingEmbedding.download({ url: fixture.url, dest })
+      expect(new Uint8Array(yield* Effect.promise(() => readFile(dest)))).toEqual(payload)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+    }),
+  )
+
+  it.live("bounds the llama.cpp asset shape (sha256 plus recorded size) in flight", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped()).path
+      const fixture = yield* chunked(oversized, 10_000)
+      const dest = path.join(dir, "llama.tar.gz")
+      const updates: Array<number> = []
+      const exit = yield* Effect.exit(
+        MessagingEmbedding.download({
+          url: fixture.url,
+          dest,
+          // The installServer call shape after LLAMA_ASSETS gained exact sizes.
+          sha256: sha(payload),
+          size: payload.byteLength,
+          onProgress: (received) => updates.push(received),
+        }),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(String(exit)).toContain("larger than expected")
+      expect(Math.max(0, ...updates)).toBeLessThanOrEqual(payload.byteLength)
+      expect(yield* Effect.promise(() => Bun.file(`${dest}.part`).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(dest).exists())).toBe(false)
+    }),
+  )
 })
 
 const EmbeddingRequest = Schema.Struct({
@@ -220,6 +478,18 @@ function fakeOpenAI() {
     },
   })
   return { server, requests, url: `http://127.0.0.1:${server.port}/v1/` }
+}
+
+function fakeEndpoint(respond: () => Response) {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      await request.text()
+      return respond()
+    },
+  })
+  return { server, url: `http://127.0.0.1:${server.port}/v1/` }
 }
 
 const service = Effect.fn("test.service")(function* () {
@@ -312,6 +582,88 @@ describe("MessagingEmbedding.Service", () => {
       expect(fake.requests.map((request) => request.body.input[0])).toEqual(["q: hello", "hello"])
       expect(fake.requests[0]?.body.dimensions).toBe(3)
       expect(fake.requests[0]?.authorization).toBeNull()
+    }),
+  )
+
+  it.live("surfaces a small remote error body in the failure", () =>
+    Effect.gen(function* () {
+      const fake = yield* Effect.acquireRelease(
+        Effect.sync(() => fakeEndpoint(() => new Response("remote exploded: bad key", { status: 400 }))),
+        (fixture) => Effect.promise(() => fixture.server.stop(true)),
+      )
+      const embedding = yield* service()
+      yield* embedding.configure({ tier: "off", remote: { url: fake.url, model: "m" } })
+      const error = yield* Effect.flip(embedding.embed(["hello"], "query"))
+      expect(error).toBeInstanceOf(MessagingEmbedding.UnavailableError)
+      expect(error.message).toContain("HTTP 400")
+      expect(error.message).toContain("remote exploded: bad key")
+    }),
+  )
+
+  it.live("degrades an oversized declared error body to the status-only error", () =>
+    Effect.gen(function* () {
+      const oversized = "e".repeat(MessagingEmbedding.embeddingErrorMaxResponseBytes + 4096)
+      const fake = yield* Effect.acquireRelease(
+        Effect.sync(() => fakeEndpoint(() => new Response(oversized, { status: 400 }))),
+        (fixture) => Effect.promise(() => fixture.server.stop(true)),
+      )
+      const embedding = yield* service()
+      yield* embedding.configure({ tier: "off", remote: { url: fake.url, model: "m" } })
+      const error = yield* Effect.flip(embedding.embed(["hello"], "query"))
+      expect(error).toBeInstanceOf(MessagingEmbedding.UnavailableError)
+      expect(error.message).toContain("HTTP 400")
+      // The whole body must not be buffered just to show 500 chars: no run of body text survives.
+      expect(error.message).not.toContain("e".repeat(500))
+    }),
+  )
+
+  it.live("degrades an oversized streamed error body to the status-only error", () =>
+    Effect.gen(function* () {
+      const total = MessagingEmbedding.embeddingErrorMaxResponseBytes + 16384
+      const fake = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          fakeEndpoint(() => {
+            let sent = 0
+            const stream = new ReadableStream<Uint8Array>({
+              pull(controller) {
+                if (sent >= total) {
+                  controller.close()
+                  return
+                }
+                const chunk = new Uint8Array(1024).fill(101)
+                sent += chunk.byteLength
+                controller.enqueue(chunk)
+              },
+            })
+            return new Response(stream, { status: 400, headers: { "content-type": "text/plain" } })
+          }),
+        ),
+        (fixture) => Effect.promise(() => fixture.server.stop(true)),
+      )
+      const embedding = yield* service()
+      yield* embedding.configure({ tier: "off", remote: { url: fake.url, model: "m" } })
+      const error = yield* Effect.flip(embedding.embed(["hello"], "query"))
+      expect(error).toBeInstanceOf(MessagingEmbedding.UnavailableError)
+      expect(error.message).toContain("HTTP 400")
+      expect(error.message).not.toContain("e".repeat(500))
+    }),
+  )
+
+  it.live("fails cleanly on an oversized success body", () =>
+    Effect.gen(function* () {
+      // A syntactically valid embeddings payload larger than the success cap (~18 MiB of JSON floats).
+      const huge = `{"data":[{"index":0,"embedding":[${"0,".repeat(9_000_000)}0]}]}`
+      const fake = yield* Effect.acquireRelease(
+        Effect.sync(
+          () => fakeEndpoint(() => new Response(huge, { headers: { "content-type": "application/json" } })),
+        ),
+        (fixture) => Effect.promise(() => fixture.server.stop(true)),
+      )
+      const embedding = yield* service()
+      yield* embedding.configure({ tier: "off", remote: { url: fake.url, model: "m" } })
+      const error = yield* Effect.flip(embedding.embed(["hello"], "query"))
+      expect(error).toBeInstanceOf(MessagingEmbedding.UnavailableError)
+      expect(error.message).toContain(`embeddings response exceeded ${MessagingEmbedding.embeddingMaxResponseBytes} bytes`)
     }),
   )
 })

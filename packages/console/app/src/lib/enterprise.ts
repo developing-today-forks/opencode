@@ -5,6 +5,7 @@ import { localeFromRequest } from "~/lib/language"
 import { createLead } from "~/lib/salesforce"
 import { inferenceSpendOptions } from "~/lib/inference-spend"
 import { lookupConsoleAccount, type ConsoleAccount } from "~/lib/console-account"
+import { emailOctopusSubscribe } from "~/lib/emailoctopus"
 
 interface EnterpriseFormData {
   name: string
@@ -19,6 +20,39 @@ interface EnterpriseFormData {
 
 const EMAIL_OCTOPUS_LIST_ID = "1b381e5e-39bd-11f1-ba4a-cdd4791f0c43"
 
+// The failure log line needs only the status and a short excerpt of the error
+// body; cap the read so a misbehaving upstream cannot buffer unboundedly.
+export const ERROR_BODY_MAX_BYTES = 8192
+
+/** Read an error response body through a bounded reader, keeping at most ERROR_BODY_MAX_BYTES. */
+export async function readErrorBodyExcerpt(res: Response): Promise<string> {
+  if (!res.body) return ""
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (size < ERROR_BODY_MAX_BYTES) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const take = value.subarray(0, ERROR_BODY_MAX_BYTES - size)
+      chunks.push(take)
+      size += take.byteLength
+    }
+    if (size >= ERROR_BODY_MAX_BYTES) await reader.cancel().catch(() => undefined)
+  } catch {
+    // An unreadable error body still leaves the status-based log line useful.
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
+}
+
 function splitFullName(fullName: string) {
   const parts = fullName
     .trim()
@@ -29,7 +63,7 @@ function splitFullName(fullName: string) {
   return { firstName: parts[0], lastName: parts.slice(1).join(" ") }
 }
 
-function subscribe(email: string, fullName: string) {
+export function subscribe(email: string, fullName: string) {
   const name = splitFullName(fullName)
   const fields: Record<string, string> = {}
   if (name.firstName) fields.FirstName = name.firstName
@@ -38,17 +72,10 @@ function subscribe(email: string, fullName: string) {
   const payload: { email_address: string; fields?: Record<string, string> } = { email_address: email }
   if (Object.keys(fields).length) payload.fields = fields
 
-  return fetch(`https://api.emailoctopus.com/lists/${EMAIL_OCTOPUS_LIST_ID}/contacts`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${Resource.EMAILOCTOPUS_API_KEY.value}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  }).then(
+  return emailOctopusSubscribe(EMAIL_OCTOPUS_LIST_ID, payload).then(
     async (res) => {
       if (!res.ok) {
-        console.error("EmailOctopus subscribe failed:", res.status, res.statusText, await res.text())
+        console.error("EmailOctopus subscribe failed:", res.status, res.statusText, await readErrorBodyExcerpt(res))
         return false
       }
       return true

@@ -2,6 +2,8 @@ import { Resource } from "sst/resource"
 
 const listId = "8b9bb82c-9d5f-11f0-975f-0df6fd1e4945"
 
+export const EMAILOCTOPUS_TIMEOUT_MS = 5000
+
 export async function POST(event: { request: Request }) {
   const contentType = event.request.headers.get("content-type") ?? ""
   if (!contentType.includes("multipart/form-data") && !contentType.includes("application/x-www-form-urlencoded")) {
@@ -23,6 +25,7 @@ export async function POST(event: { request: Request }) {
     body: JSON.stringify({
       email_address: emailAddress.trim(),
     }),
+    signal: AbortSignal.timeout(EMAILOCTOPUS_TIMEOUT_MS),
   })
   if (!response.ok) return Response.json({ error: "Failed to subscribe" }, { status: 502 })
   return Response.json({ success: true })

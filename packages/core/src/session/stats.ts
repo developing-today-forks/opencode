@@ -76,6 +76,17 @@ type ToolAggregate = {
 
 const decodeUsage = Schema.decodeUnknownOption(SessionEvent.UsageRecorded.data)
 const Window = 31 * 24 * 60 * 60 * 1_000
+// Maximum accepted span for one stats request: 120 windows of 31 days
+// (~10 years). The range is scanned once per window in three sequential
+// passes, so an unbounded caller-supplied span (an ancient `from` or a
+// far-future `to`) would run tens of thousands to millions of sequential
+// database scans inside a single request. Wider spans are rejected with
+// InvalidRangeError instead; every plausible stats range is far narrower.
+const MaxSpan = 120 * Window
+/** The span cap in whole days (3720), for callers that must state the
+ * limit in user-facing units: the CLI's --days bound and the server
+ * handler's too-wide message both use it (issue #1000). */
+export const MaxSpanDays = MaxSpan / (24 * 60 * 60 * 1_000)
 
 export class InvalidRangeError extends Schema.TaggedError<InvalidRangeError>()("SessionStats.InvalidRangeError", {
   from: Schema.Finite,
@@ -86,6 +97,8 @@ export const get = Effect.fn("SessionStats.get")(function* (input: Input = {}) {
   const db = (yield* Database.Service).db
   const to = input.to ?? Date.now()
   if (input.from !== undefined && input.from >= to) return yield* new InvalidRangeError({ from: input.from, to })
+  if (input.from !== undefined && to - input.from > MaxSpan)
+    return yield* new InvalidRangeError({ from: input.from, to })
   const project = input.projectID === undefined ? sql`` : sql`AND session.project_id = ${input.projectID}`
   const from =
     input.from ??
@@ -103,6 +116,9 @@ export const get = Effect.fn("SessionStats.get")(function* (input: Input = {}) {
       )
       .pipe(Effect.orDie))?.time ??
     to
+  // Also bound the resolved range: with no explicit `from`, an extreme
+  // `to` against the earliest stored message is the same unbounded span.
+  if (to - from > MaxSpan) return yield* new InvalidRangeError({ from, to })
   const ranges = windows(from, to)
   const toolMode = input.tools ?? "summary"
   const sessions = new Set<string>()

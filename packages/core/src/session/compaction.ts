@@ -3,6 +3,7 @@ export * as SessionCompaction from "./compaction.js"
 import {
   AIError,
   type ContentPart,
+  SystemPart,
   InvalidProviderOutputError,
   InvalidRequestError,
   isContextOverflowFailure,
@@ -38,6 +39,7 @@ import { SessionRunnerModel } from "./runner/model.js"
 import { SessionRunnerRetry } from "./runner/retry.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import { contentFilterError, toSessionError } from "./to-session-error.js"
+import { SessionSystemPrompt } from "./system-prompt.js"
 import { SessionUsage } from "./usage.js"
 
 export type Settings = {
@@ -230,6 +232,19 @@ export const layer = Layer.effect(
         trigger.reason === "overflow" ? Math.min(cap, Math.floor(estimateContext(context) * SHRINK_STEPS[0])) : cap
 
       const selected = model === context.model ? trigger : { ...trigger, context: { ...context, model } }
+      // A compaction that resolves its own model spends that pick's probe claim (#1486), but
+      // compaction never settles health — success or failure here is not target evidence the
+      // way a runner attempt is — so the claim is handed back on every exit instead of
+      // settling. Attempted requests release rather than settle for the same reason: ending
+      // or renewing a bench from a summary request would change routing behavior beyond
+      // this fix. The release is token-guarded, so it no-ops when there is no claim.
+      const releaseFreshClaim = Effect.sync(() => {
+        const claim = model !== context.model ? model.routing?.probeClaim : undefined
+        if (!claim || !model.routing) return
+        ModelRoute.releaseBenchProbe(model.routing.target, undefined, claim.claimedAt, claim.token)
+        if (claim.credentialID)
+          ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+      })
       const compaction = native
         ? compactNatively(selected, budget, settings.keep)
         : summarize(selected, budget, settings.keep)
@@ -238,6 +253,7 @@ export const layer = Layer.effect(
           onSuccess: (result) => publish(selected, result),
           onFailure: (failure) => publish(selected, failure),
         }),
+        Effect.ensuring(releaseFreshClaim),
       )
     })
 
@@ -546,11 +562,13 @@ export const layer = Layer.effect(
           providerID: context.model.ref.providerID,
           modelID: context.model.ref.id,
           variant: context.model.ref.variant,
+          credentialID: context.model.servingCredentialID ?? context.model.routing?.credentialID,
           sessionID: context.session.id,
           assistantMessageID: `compaction-${label}`,
           startedAt: Date.now(),
         },
-        (snapshot: RateLimitSnapshot) => ModelRoute.observeRateLimit(context.model.ref, snapshot),
+        (snapshot: RateLimitSnapshot) =>
+          ModelRoute.observeRateLimit(context.model.ref, snapshot, Date.now(), context.model.routing?.credentialID),
       )
 
     const stream = (
@@ -926,6 +944,64 @@ export const recentUserMessages = (
 export const estimateContext = (context: SessionContext.Loaded) => {
   const prompt = estimatePrompt(context)
   return prompt.measured + prompt.estimated
+}
+
+/**
+ * The next request's size for a session whose model is not resolved yet — the caller is
+ * route resolution itself, which needs the size to skip over-ceiling targets (#891).
+ * Mirrors `estimatePrompt`'s accounting (the latest measured response anchors the size;
+ * everything since it, plus — with no anchor — the system prompt and tool definitions,
+ * is estimated from text), with two differences forced by the pre-resolution position:
+ * the anchor is accepted from any provider, because a routed session's previous turn was
+ * served by one of the route's leaves and a context size is a property of the history,
+ * not of the leaf that counted it (compaction's stricter check guards native-checkpoint
+ * replay, a different concern); and conversion uses the route's own ref and advertised
+ * capabilities, the only model shape known before a leaf is chosen. Returns undefined
+ * when there is no history to size, so an unknown size never filters.
+ */
+export const estimateHistoryRequest = (input: {
+  readonly agent: SessionContext.Loaded["agent"]
+  readonly model: { readonly ref: SessionContext.Loaded["model"]["ref"]; readonly capabilities: Model.Info["capabilities"] }
+  readonly tools: SessionContext.Loaded["tools"]
+  readonly initial: string
+  readonly messages: ReadonlyArray<SessionMessage.Info>
+}): number | undefined => {
+  if (input.messages.length === 0) return undefined
+  const anchorIndex = input.messages.findLastIndex(
+    (message) =>
+      message.type === "assistant" &&
+      !message.error &&
+      message.tokens !== undefined &&
+      message.tokens.input + message.tokens.cache.read + message.tokens.cache.write > 0,
+  )
+  const anchor = input.messages[anchorIndex]
+  const sent = SessionModelRequest.boundImages(
+    SessionModelRequest.unsupportedParts(
+      toLLMMessages(input.messages.slice(Math.max(0, anchorIndex)), input.model.ref),
+      input.model.capabilities,
+    ),
+  )
+  const unmeasured = sent.filter((message) => message.role !== "assistant" || message.id !== anchor?.id)
+  if (anchor?.type !== "assistant" || !anchor.tokens) {
+    const system = [
+      input.agent.info.system
+        ? input.agent.info.system
+        : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
+      input.initial,
+    ]
+      .filter((part) => part.length > 0)
+      .map((text) => SystemPart.make(text))
+    return estimateRequest({ system, tools: input.tools.definitions, messages: unmeasured })
+  }
+  const tokens = anchor.tokens
+  return (
+    tokens.input +
+    tokens.cache.read +
+    tokens.cache.write +
+    tokens.output +
+    tokens.reasoning +
+    unmeasured.reduce((sum, message) => sum + estimateMessage(message), 0)
+  )
 }
 
 /** The prompt size: `measured` is what the provider reported at the latest response, `estimated` is the text since. */

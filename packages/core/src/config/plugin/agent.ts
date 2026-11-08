@@ -1,35 +1,21 @@
 export * as ConfigAgentPlugin from "./agent.js"
 
 import { define } from "@opencode/plugin/effect/plugin"
-import { Document, Info, type Entry } from "@opencode/schema/config"
-import { ConfigAgent } from "@opencode/schema/config/agent"
+import { Document, type Entry } from "@opencode/schema/config"
 import path from "path"
-import { Effect, Option, PubSub, Schema, Stream } from "effect"
+import { Effect, PubSub, Stream } from "effect"
 import { Agent } from "../../agent.js"
 import { Config, reloadsSections } from "../../config.js"
-import { ConfigMarkdown } from "../markdown.js"
+import { ConfigAgentDocuments } from "../agent-documents.js"
 import { FSUtil } from "@opencode/util/fs-util"
-import { ConfigAgentV1 } from "../../v1/config/agent.js"
-import { ConfigMigrateV1 } from "../../v1/config/migrate.js"
 import { Global } from "@opencode/util/global"
 import { Permission } from "../../permission.js"
 import type { FileAccess } from "../../file-access.js"
 import type { ReadTool } from "../../tool/plugin/read.js"
 import type { EditTool } from "../../tool/plugin/edit.js"
-import { AbsolutePath } from "../../schema.js"
 
-const legacySources = [
-  { pattern: "{agent,agents}/**/*.md", primary: false },
-  { pattern: "{mode,modes}/*.md", primary: true },
-] as const
-// Keep in sync with the legacySources patterns and the name-strip regex in decode.
-const sourceDirectories = ["agent", "agents", "mode", "modes"] as const
-const decodeAgent = Schema.decodeUnknownOption(ConfigAgent.Info)
-const decodeLegacyAgent = Schema.decodeUnknownOption(ConfigAgentV1.Info)
-const decodeConfig = Schema.decodeUnknownOption(Info)
 type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof ReadTool.name | typeof EditTool.name
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
-const agentKeys = new Set(["variant", ...Object.keys(ConfigAgent.Info.fields)])
 
 export const Plugin = define({
   id: "opencode.config.agent",
@@ -37,17 +23,7 @@ export const Plugin = define({
     const config = yield* Config.Service
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
-    const loadEntry = Effect.fnUntraced(function* (entry: Entry) {
-      if (entry.type === "document") return [entry]
-      if (entry.type !== "directory") return []
-      const files = yield* discover(fs, entry.path)
-      return yield* Effect.forEach(files, (file) =>
-        fs.readFileStringSafe(file.filepath).pipe(
-          Effect.map((content) => (content ? decode(file, content) : undefined)),
-          Effect.orElseSucceed(() => undefined),
-        ),
-      ).pipe(Effect.map((documents) => documents.filter((document): document is Document => document !== undefined)))
-    })
+    const loadEntry = (entry: Entry) => ConfigAgentDocuments.expandEntry(fs, entry)
     const load = Effect.fn("ConfigAgentPlugin.load")(function* () {
       return yield* Effect.forEach(yield* config.entries(), loadEntry).pipe(Effect.map((documents) => documents.flat()))
     })
@@ -69,7 +45,7 @@ export const Plugin = define({
       Effect.forkScoped({ startImmediately: true }),
     )
     yield* ctx.event.subscribe().pipe(
-      Stream.filter((event) => reloadsSections(event, ["agents", "permissions"])),
+      Stream.filter((event) => reloadsSections(event, ["agents", "permissions", "default_agent"])),
       Stream.runForEach(notify),
       Effect.forkScoped({ startImmediately: true }),
     )
@@ -140,7 +116,7 @@ function isAgentSource(entries: Entry[], file: string) {
   return entries.some(
     (entry) =>
       entry.type === "directory" &&
-      sourceDirectories.some((name) => FSUtil.contains(path.join(entry.path, name), file)),
+      ConfigAgentDocuments.sourceDirectories.some((name) => FSUtil.contains(path.join(entry.path, name), file)),
   )
 }
 
@@ -167,52 +143,3 @@ function expandHome(resource: string, home: string) {
   return resource
 }
 
-function discover(fs: FSUtil.Interface, directory: string) {
-  return Effect.forEach(legacySources, (source) =>
-    fs
-      .scan(source.pattern, { cwd: directory, absolute: true, dot: true, symlink: true })
-      .pipe(
-        Effect.map((files) => files.toSorted().map((filepath) => ({ directory, filepath, primary: source.primary }))),
-      ),
-  ).pipe(
-    Effect.map((files) => files.flat()),
-    Effect.orElseSucceed(() => []),
-  )
-}
-
-function decode(file: { directory: string; filepath: string; primary: boolean }, content: string) {
-  const markdown = ConfigMarkdown.parseOption(content)
-  if (!markdown) return
-  const name = path
-    .relative(file.directory, file.filepath)
-    .replaceAll("\\", "/")
-    .replace(/^(agent|agents|mode|modes)\//, "")
-    .replace(/\.md$/, "")
-  const body = markdown.content.trim()
-  const legacy = Object.keys(markdown.data).some((key) => !agentKeys.has(key))
-  // Join legacy model + variant without sending native request/permissions through migration.
-  // Embedded and structured native selections, and a variant without a model, stay unchanged.
-  const data =
-    typeof markdown.data.model === "string" &&
-    !markdown.data.model.includes("#") &&
-    typeof markdown.data.variant === "string" &&
-    /^[^#]+$/.test(markdown.data.variant)
-      ? { ...markdown.data, model: `${markdown.data.model}#${markdown.data.variant}` }
-      : markdown.data
-  const agent = legacy
-    ? Option.getOrUndefined(
-        Option.map(
-          decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all" }),
-          ConfigMigrateV1.migrateAgent,
-        ),
-      )
-    : Option.getOrUndefined(decodeAgent({ ...data, system: body }, { errors: "all" }))
-  if (!agent) return
-  const info = Option.getOrUndefined(
-    decodeConfig({
-      agents: { [name]: file.primary ? { ...agent, mode: "primary" } : agent },
-    }),
-  )
-  if (!info) return
-  return new Document({ type: "document", path: AbsolutePath.make(file.filepath), info })
-}

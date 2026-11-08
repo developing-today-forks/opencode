@@ -1,9 +1,10 @@
 import { EOL } from "node:os"
 import path from "node:path"
-import { readFile, stat, writeFile } from "node:fs/promises"
+import { stat } from "node:fs/promises"
 import { Effect, Option } from "effect"
 import { applyEdits, modify } from "jsonc-parser"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 
@@ -32,7 +33,7 @@ export default Runtime.handler(
 
     const global = yield* Global.Service
     const configPath = yield* Effect.promise(() => resolveConfigPath(input.global ? global.config : process.cwd()))
-    yield* Effect.promise(() => write(configPath, input.name, server))
+    yield* writeMcpConfig(configPath, input.name, server)
     process.stdout.write(`MCP server "${input.name}" added to ${configPath}` + EOL)
   }),
 )
@@ -56,13 +57,13 @@ export async function resolveConfigPath(directory: string) {
   return candidates[0]
 }
 
-async function write(configPath: string, name: string, server: unknown) {
-  const text = await readFile(configPath, "utf8").catch((error) => {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return "{}"
-    throw error
-  })
+export const writeMcpConfig = Effect.fnUntraced(function* (configPath: string, name: string, server: unknown) {
+  const fs = yield* FSUtil.Service
+  const text = yield* fs.readFileString(configPath).pipe(
+    Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed("{}")),
+  )
   const edits = modify(text, ["mcp", "servers", name], server, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
   })
-  await writeFile(configPath, applyEdits(text, edits))
-}
+  yield* fs.writeAtomic(configPath, applyEdits(text, edits), { modePolicy: "owner-capped" })
+})

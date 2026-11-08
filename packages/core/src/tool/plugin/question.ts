@@ -15,6 +15,12 @@ export const description = `Use this tool when you need to ask the user question
 3. Get decisions on implementation choices as you work
 4. Offer choices to the user about what direction to take.
 
+Detached and subsession warning:
+- Only call this tool when a user is actually watching this session. In detached, background, or subsession contexts there may be no user watching, and the question can sit unseen indefinitely.
+- Your parent session is NOT notified that you asked. If a parent is waiting on you in the foreground, it blocks until an external actor answers — a question call can stall both you and your parent silently.
+- Sessions launched in detached mode may have this tool disabled entirely; its absence from your tool list is deliberate, not an error.
+- In any detached context, prefer the alternative: record the question in your output or working notes, state the default you chose and why, and keep working.
+
 Usage notes:
 - A "Type your own answer" option is added automatically; don't include a separate option for free form answers
 - Set \`multiple: true\` to allow selecting more than one option
@@ -69,7 +75,16 @@ export const Plugin = {
                 source: { type: "tool", messageID: context.messageID, id: context.id },
               })
               .pipe(
-                Effect.mapError((error) => new ToolFailure({ message: "Permission denied: question", error })),
+                Effect.mapError(
+                  (error) =>
+                    new ToolFailure({
+                      message:
+                        error._tag === "Permission.BlockedError" && error.reason
+                          ? error.reason
+                          : "Permission denied: question",
+                      error,
+                    }),
+                ),
                 Effect.andThen(
                   forms
                     .ask({

@@ -7,6 +7,7 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { ProviderPlugins } from "@opencode/core/plugin/provider"
+import { MAX_EXPIRES_IN_SECONDS } from "@opencode/core/plugin/provider/expires"
 import { PoePlugin } from "@opencode/core/plugin/provider/poe"
 import { Provider } from "@opencode/core/provider"
 import { expect } from "bun:test"
@@ -93,7 +94,15 @@ it.effect("registers Poe browser OAuth alongside generic key and environment met
   }),
 )
 
-for (const expiry of [3600, null, undefined]) {
+for (const [expiry, stored] of [
+  [3600, 3600],
+  [null, null],
+  [undefined, undefined],
+  // A millisecond-scale lifetime (~83 days) and an absurd one are clamped to the shared
+  // 30-day bound (#892), not stored verbatim and not failed.
+  [7_200_000, MAX_EXPIRES_IN_SECONDS],
+  [8_640_000_000_000, MAX_EXPIRES_IN_SECONDS],
+] as const) {
   it.live(`exchanges a PKCE code for a native Poe credential (expiry: ${expiry})`, () =>
     Effect.gen(function* () {
       const test = yield* fixture
@@ -148,10 +157,10 @@ for (const expiry of [3600, null, undefined]) {
       if (saved?.type !== "oauth") throw new Error("Expected OAuth credential")
       expect(saved.access).toBe("poe-key")
       expect(saved.refresh).toBe("")
-      if (expiry == null) expect(saved.expires).toBe(8_640_000_000_000_000)
-      if (expiry != null) {
-        expect(saved.expires).toBeGreaterThanOrEqual(now + expiry * 1000)
-        expect(saved.expires).toBeLessThanOrEqual(Date.now() + expiry * 1000)
+      if (stored == null) expect(saved.expires).toBe(8_640_000_000_000_000)
+      if (stored != null) {
+        expect(saved.expires).toBeGreaterThanOrEqual(now + stored * 1000)
+        expect(saved.expires).toBeLessThanOrEqual(Date.now() + stored * 1000)
       }
       test.replies.push(
         new Response(
@@ -243,11 +252,6 @@ for (const response of [
     '{"api_key":"poe-key","api_key_expires_in":1.5}',
     '{"api_key":"poe-key","api_key_expires_in":1e309}',
   ].map((body) => ({ status: 200, body, message: "Invalid Poe token response" })),
-  {
-    status: 200,
-    body: '{"api_key":"poe-key","api_key_expires_in":8640000000000}',
-    message: "Invalid Poe API key expiry",
-  },
 ]) {
   it.live(`preserves the active connection after a failed token exchange (${response.status}: ${response.body})`, () =>
     Effect.gen(function* () {
@@ -266,6 +270,35 @@ for (const response of [
     }),
   )
 }
+
+it.live("fails the login when the token response exceeds the OAuth body cap (#1029)", () =>
+  Effect.gen(function* () {
+    const test = yield* fixture
+    const login = yield* test.connect
+    test.replies.push(new Response("x".repeat(70_000)))
+    const page = yield* Effect.promise(() => fetch(login.callback, { headers: { Connection: "close" } }))
+    expect(page.status).toBe(400)
+    expect(yield* Effect.promise(() => page.text())).toContain("Poe token response exceeded")
+    expect(yield* test.status(login.attempt.attemptID)).toMatchObject({
+      status: "failed",
+      message: expect.stringContaining("Poe token response exceeded"),
+    })
+  }),
+)
+
+it.live("reports only the status when a token error body exceeds the OAuth body cap (#1029)", () =>
+  Effect.gen(function* () {
+    const test = yield* fixture
+    const login = yield* test.connect
+    test.replies.push(new Response("x".repeat(70_000), { status: 400 }))
+    const page = yield* Effect.promise(() => fetch(login.callback, { headers: { Connection: "close" } }))
+    expect(page.status).toBe(400)
+    expect(yield* test.status(login.attempt.attemptID)).toMatchObject({
+      status: "failed",
+      message: "Poe token exchange failed (400)",
+    })
+  }),
+)
 
 for (const cancel of [false, true]) {
   it.live(`waits for the token exchange and consumes the callback once (cancel: ${cancel})`, () =>

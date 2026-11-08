@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { AIError, ProviderInternalError, QuotaExceededError, RateLimitError, TransportError } from "@opencode/ai"
+import {
+  AIError,
+  AuthenticationError,
+  ProviderInternalError,
+  QuotaExceededError,
+  RateLimitError,
+  TransportError,
+  UnknownProviderError,
+} from "@opencode/ai"
 import { ModelRoute } from "@opencode/core/model-route"
 import { SessionStep } from "@opencode/core/session/runner/step"
 
@@ -10,6 +18,7 @@ describe("SessionStep.failureHint", () => {
     expect(SessionStep.failureHint(error(new RateLimitError({ message: "slow down", retryAfterMs: 7_000 })))).toEqual({
       retryAfterMs: 7_000,
       quota: false,
+      auth: false,
       network: false,
     })
     expect(
@@ -17,10 +26,33 @@ describe("SessionStep.failureHint", () => {
     ).toMatchObject({ retryAfterMs: 9_000, quota: false, network: false })
   })
 
+  test("flags authentication refusals for the long first bench", () => {
+    expect(SessionStep.failureHint(error(new AuthenticationError({ message: "bad key" })))).toMatchObject({
+      auth: true,
+      quota: false,
+    })
+    const http = (status: number) => ({ url: "https://api.example.com/v1", status, headers: {} })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "forbidden", http: http(403) }))),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "unauthorized", http: http(401) }))),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(
+        error(new ProviderInternalError({ message: "Your organization has disabled Claude subscription access" })),
+      ),
+    ).toMatchObject({ auth: true })
+    expect(
+      SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", http: http(500) }))),
+    ).toMatchObject({ auth: false })
+  })
+
   test("flags an exhausted quota, which carries no retry-after", () => {
     expect(SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))).toEqual({
       retryAfterMs: undefined,
       quota: true,
+      auth: false,
       network: false,
     })
   })
@@ -28,10 +60,10 @@ describe("SessionStep.failureHint", () => {
   test("an ordinary provider failure may carry a retry-after and is never a quota", () => {
     expect(
       SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", retryAfterMs: 3_000 }))),
-    ).toEqual({ retryAfterMs: 3_000, quota: false, network: false })
+    ).toEqual({ retryAfterMs: 3_000, quota: false, auth: false, network: false })
     expect(
       SessionStep.failureHint(error(new TransportError({ message: "reset", transport: "http", operation: "read" }))),
-    ).toEqual({ retryAfterMs: undefined, quota: false, network: true })
+    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: true })
     expect(
       SessionStep.failureHint(
         error(
@@ -43,7 +75,61 @@ describe("SessionStep.failureHint", () => {
           }),
         ),
       ),
-    ).toEqual({ retryAfterMs: undefined, quota: false, network: false })
+    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: false })
+  })
+
+  test("a provider-stated wait on a transport timeout still yields a retry-after (#1551)", () => {
+    expect(
+      SessionStep.failureHint(
+        error(
+          new TransportError({
+            message: "provider asked us to wait in 5 seconds",
+            transport: "http",
+            operation: "request",
+            code: "Timeout",
+          }),
+        ),
+      ),
+    ).toMatchObject({ retryAfterMs: 5_000, network: true })
+  })
+})
+
+describe("SessionStep.quotaFailureClassification", () => {
+  test("a QuotaExceeded tag is balance exhaustion", () => {
+    expect(
+      SessionStep.quotaFailureClassification(error(new QuotaExceededError({ message: "out of quota" }))),
+    ).toBe("balance-exhaustion")
+  })
+
+  test("explicitly credit/balance-specific text is balance exhaustion", () => {
+    expect(
+      SessionStep.quotaFailureClassification(error(new UnknownProviderError({ message: "insufficient credits" }))),
+    ).toBe("balance-exhaustion")
+    expect(
+      SessionStep.quotaFailureClassification(
+        error(new UnknownProviderError({ message: "Your credit balance is too low" })),
+      ),
+    ).toBe("balance-exhaustion")
+  })
+
+  test("generic limit text is only a rate limit, never balance exhaustion (#1380)", () => {
+    expect(
+      SessionStep.quotaFailureClassification(
+        error(new RateLimitError({ message: "You have reached your rate limit" })),
+      ),
+    ).toBe("rate-limit")
+    expect(
+      SessionStep.quotaFailureClassification(error(new UnknownProviderError({ message: "usage limit exceeded" }))),
+    ).toBe("rate-limit")
+    expect(
+      SessionStep.quotaFailureClassification(error(new UnknownProviderError({ message: "quota exhausted" }))),
+    ).toBe("rate-limit")
+  })
+
+  test("an ordinary failure does not enter the quota-failure path", () => {
+    expect(
+      SessionStep.quotaFailureClassification(error(new ProviderInternalError({ message: "overloaded" }))),
+    ).toBeUndefined()
   })
 })
 

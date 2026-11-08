@@ -5,6 +5,8 @@ import { App } from "../../app.js"
 import { Credential } from "../../credential.js"
 import { Integration } from "../../integration.js"
 import { Provider } from "../../provider.js"
+import { readBoundedResponseText } from "../../tool/http-body.js"
+import { deviceLifetimeSeconds, expiresInSeconds } from "./expires.js"
 
 const clientID = "b1a00492-073a-47ea-816f-4c329264a828"
 const issuer = "https://auth.x.ai/oauth2"
@@ -14,6 +16,20 @@ const pollingSafetyMargin = 3000
 const browserMethodID = Integration.MethodID.make("browser")
 const deviceMethodID = Integration.MethodID.make("device")
 const providerID = Provider.ID.make("xai")
+
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
+const readOAuthText = (response: Response) =>
+  Effect.tryPromise({
+    try: () => readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+    catch: (cause) => cause,
+  })
 
 const Token = Schema.Struct({
   access_token: Schema.String,
@@ -58,7 +74,7 @@ const device = (app: App.Info) =>
         Effect.flatMap((value) =>
           Clock.currentTimeMillis.pipe(
             Effect.map((created) => {
-              const lifetime = positiveSeconds(value.expires_in, 0)
+              const lifetime = deviceLifetimeSeconds(value.expires_in, 0)
               return {
                 mode: "auto" as const,
                 url: value.verification_uri_complete ?? value.verification_uri,
@@ -122,10 +138,27 @@ function refresh(methodID: Integration.MethodID, value: Credential.OAuth, app: A
   ).pipe(Effect.flatMap((tokens) => credential(methodID, tokens, value.refresh, value.metadata)))
 }
 
+/** Initial poll interval for the device flow, in milliseconds. The
+ * server-supplied `interval` was only floored (#941): positiveSeconds
+ * validates positivity only, so a large or unit-confused value made the
+ * first sleep overshoot the device deadline — checked only between sleeps
+ * — by up to the whole interval. The result is clamped to [1s, 60s], the
+ * Copilot bound from #915; slow_down growth (+5s) composes from the
+ * clamped value. */
+export const deviceIntervalMs = (value: unknown): number =>
+  Math.min(Math.max(positiveSeconds(value, 5) * 1000, 1000), 60_000)
+
+/** The poll deadline for a device attempt, in epoch milliseconds (#900). The
+ * server-supplied lifetime is clamped to {@link MAX_DEVICE_LIFETIME_SECONDS}
+ * so a millisecond-confused value cannot poll the token endpoint for days; an
+ * absent or non-positive value takes the 300-second fallback. */
+export const deviceDeadline = (started: number, value: unknown) =>
+  started + deviceLifetimeSeconds(value, 300) * 1000
+
 function poll(device: typeof Device.Type, app: App.Info): Effect.Effect<Token, unknown> {
   return Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis
-    const expires = started + positiveSeconds(device.expires_in, 300) * 1000
+    const expires = deviceDeadline(started, device.expires_in)
     const loop = (interval: number): Effect.Effect<Token, unknown> =>
       Effect.gen(function* () {
         if ((yield* Clock.currentTimeMillis) >= expires) {
@@ -141,9 +174,15 @@ function poll(device: typeof Device.Type, app: App.Info): Effect.Effect<Token, u
           }).toString(),
         })
         if (response.ok) return yield* decode(response, Token)
-        const error = yield* Effect.promise(() => response.text()).pipe(
+        const error = yield* readOAuthText(response).pipe(
           Effect.map((body) => Option.getOrUndefined(decodeDeviceError(body))),
-          Effect.orElseSucceed(() => undefined),
+          // An over-cap error body must surface the size-limit error itself,
+          // not be swallowed into the generic exchange failure below.
+          Effect.catch((cause) =>
+            cause instanceof Error && cause.message.includes("OAuth response exceeded")
+              ? Effect.fail(cause)
+              : Effect.succeed(undefined),
+          ),
         )
         if (error?.error === "authorization_pending") {
           return yield* Effect.sleep(interval + pollingSafetyMargin).pipe(Effect.andThen(loop(interval)))
@@ -163,7 +202,7 @@ function poll(device: typeof Device.Type, app: App.Info): Effect.Effect<Token, u
           new Error(`xAI device token exchange failed (${response.status})${detail ? `: ${detail}` : ""}`),
         )
       })
-    return yield* loop(Math.max(positiveSeconds(device.interval, 5) * 1000, 1000))
+    return yield* loop(deviceIntervalMs(device.interval))
   })
 }
 
@@ -171,7 +210,7 @@ function request<S extends Schema.Decoder<unknown>>(url: string, init: RequestIn
   return send(url, init).pipe(
     Effect.flatMap((response) => {
       if (response.ok) return decode(response, schema)
-      return Effect.promise(() => response.text()).pipe(
+      return readOAuthText(response).pipe(
         Effect.flatMap((detail) =>
           Effect.fail(new Error(`xAI request failed (${response.status})${detail ? `: ${detail}` : ""}`)),
         ),
@@ -188,7 +227,10 @@ function send(url: string, init: RequestInit) {
 }
 
 function decode<S extends Schema.Decoder<unknown>>(response: Response, schema: S) {
-  return Effect.promise(() => response.json()).pipe(Effect.map(Schema.decodeUnknownSync(schema)))
+  return readOAuthText(response).pipe(
+    Effect.map((text) => JSON.parse(text)),
+    Effect.map(Schema.decodeUnknownSync(schema)),
+  )
 }
 
 function credential(
@@ -212,7 +254,7 @@ function credential(
 }
 
 function tokenExpiration(tokens: Token) {
-  if (tokens.expires_in) return Date.now() + positiveSeconds(tokens.expires_in, 3600) * 1000
+  if (tokens.expires_in) return Date.now() + expiresInSeconds(tokens.expires_in, 3600) * 1000
   const payload = tokens.access_token.split(".")[1]
   if (!payload) return Date.now() + 3600 * 1000
   const claims = Schema.decodeUnknownOption(

@@ -39,6 +39,8 @@ import { errorMessage } from "../util/error"
 import {
   formInitialValues,
   formLabel,
+  formNumberText,
+  formNumberValue,
   formRows,
   formSelected,
   formToggleMultiselect,
@@ -1100,7 +1102,12 @@ function textAnswer(
   dialog: ReturnType<typeof useDialog>,
   title: string,
   field: Extract<FormAnswerField, { type: "string" | "number" | "integer" }>,
-  initial = field.default === undefined ? undefined : String(field.default),
+  initial =
+    field.default === undefined
+      ? undefined
+      : typeof field.default === "number"
+        ? formNumberText(field.default)
+        : String(field.default),
 ): Promise<FormValue | undefined | typeof CANCELLED> {
   return new Promise<FormValue | undefined | typeof CANCELLED>((resolve) => {
     dialog.replace(
@@ -1114,7 +1121,12 @@ function textAnswer(
             value={initial}
             onConfirm={(input) => {
               const text = input.trim()
-              const value = text === "" && !field.required ? undefined : field.type === "string" ? text : Number(text)
+              const value =
+                text === "" && !field.required
+                  ? undefined
+                  : field.type === "string"
+                    ? text
+                    : formNumberValue(text)
               const invalid = formValidateValue(field, value)
               if (invalid) {
                 setError(invalid)

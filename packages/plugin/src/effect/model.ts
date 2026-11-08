@@ -6,6 +6,7 @@ import type { Transform } from "./registration.js"
 
 export interface ModelEditor {
   /** Candidates from available providers, including models disabled by earlier transforms. */
+  ids(providerID: string): readonly string[]
   list(providerID?: string): readonly Types.DeepMutable<Model.Info>[]
   get(providerID: string, modelID: string): Types.DeepMutable<Model.Info> | undefined
   /** Edits raw model overrides; cannot create an unavailable provider. */

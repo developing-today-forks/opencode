@@ -1,7 +1,7 @@
 import { confirm, log, multiselect, password, select, text, type Option } from "@clack/prompts"
 import { Effect, Schema } from "effect"
 import { Form } from "@opencode/schema/form"
-import { formValidateValue } from "@opencode/tui/util/form"
+import { formNumberText, formNumberValue, formValidateValue } from "@opencode/tui/util/form"
 import type { FormAnswer, FormField, FormFields } from "@opencode/client"
 import { openUrl, prompt, requireInteractive } from "../../../ui/prompt"
 
@@ -140,13 +140,18 @@ const answerField = Effect.fn("cli.auth.form.field")(function* (field: FormField
     text({
       message,
       placeholder: field.type === "string" ? field.placeholder : undefined,
-      initialValue: field.default === undefined ? undefined : String(field.default),
+      initialValue:
+        field.default === undefined
+          ? undefined
+          : typeof field.default === "number"
+            ? formNumberText(field.default)
+            : String(field.default),
       validate: (input) => validateText(field, input),
     }),
   )
   if (!value && !field.required) return undefined
   if (field.type === "string") return value
-  return Number(value)
+  return formNumberValue(value)
 })
 
 function active(field: FormField, answer: FormAnswer) {
@@ -163,11 +168,12 @@ function required(value: string | undefined) {
   return value ? undefined : "Required"
 }
 
-function validateText(field: Exclude<FormField, { type: "boolean" | "external" | "multiselect" }>, value?: string) {
+export function validateText(field: Exclude<FormField, { type: "boolean" | "external" | "multiselect" }>, value?: string) {
   if (!value) return field.required ? "Required" : undefined
   if (field.type === "number" || field.type === "integer") {
-    const number = Number(value)
-    if (!Number.isFinite(number)) return "Expected a number"
+    if (!value.trim()) return field.required ? "Required" : undefined
+    const number = formNumberValue(value)
+    if (number === undefined || !Number.isFinite(number)) return "Expected a number"
     if (field.type === "integer" && !Number.isInteger(number)) return "Expected an integer"
     if (typeof field.minimum === "number" && number < field.minimum) return `Must be at least ${field.minimum}`
     if (typeof field.maximum === "number" && number > field.maximum) return `Must be at most ${field.maximum}`
@@ -195,6 +201,26 @@ function validateText(field: Exclude<FormField, { type: "boolean" | "external" |
   return undefined
 }
 
+const MONTH_NUMBERS: Readonly<Record<string, number>> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+}
+
+/** Calendar components of a non-ISO date whose parts are named or ordered unambiguously
+ * (#798): "Feb 30 2026", "30 Feb 2026", "2026/02/30". Ambiguous numeric forms (02/03/2026)
+ * and shapes without named components keep the lenient bare-parse behaviour. */
+function namedDateParts(text: string): readonly [number, number, number] | undefined {
+  const ymd = /(\d{4})[/.](\d{1,2})[/.](\d{1,2})(?!\d)/.exec(text)
+  if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+  const monthFirst =
+    /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)/i.exec(text)
+  if (monthFirst)
+    return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+  const dayFirst =
+    /(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})(?!\d)/i.exec(text)
+  if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+  return undefined
+}
+
 function validDateTime(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return false
@@ -202,16 +228,16 @@ function validDateTime(value: string) {
   // ISO date part must round-trip through a real calendar date (matching core isDateTime).
   // Values without an ISO date part keep the existing lenient behaviour.
   const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
-  if (!iso) return true
-  const year = Number(iso[1])
-  const month = Number(iso[2])
-  const day = Number(iso[3])
-  const probe = new Date(0)
-  probe.setUTCFullYear(year, month - 1, day)
-  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
-    return false
-  // V8 rolls hour 24 into the next day instead of failing, so an ISO time part must not
-  // carry hour > 23 (RFC 3339 time-hour is 00-23).
+  const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(value)
+  if (parts) {
+    const [year, month, day] = parts
+    const probe = new Date(0)
+    probe.setUTCFullYear(year, month - 1, day)
+    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
+      return false
+  }
+  // V8 rolls hour 24 into the next day instead of returning NaN (minutes/seconds 60+ are
+  // Invalid), so a time part must not carry hour > 23 (RFC 3339 time-hour is 00-23).
   const time = /[T ](\d{2}):\d{2}/i.exec(value)
   if (time && Number(time[1]) > 23) return false
   return true

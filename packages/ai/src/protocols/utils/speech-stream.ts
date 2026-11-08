@@ -54,7 +54,7 @@ const CONTAINER_MEDIA_TYPES: Readonly<Record<string, string>> = {
 }
 
 export const container = (format: string, sampleRate?: number) => ({
-  mediaType: CONTAINER_MEDIA_TYPES[format],
+  mediaType: Object.hasOwn(CONTAINER_MEDIA_TYPES, format) ? CONTAINER_MEDIA_TYPES[format] : undefined,
   info: { format, sampleRate },
 })
 
@@ -68,7 +68,7 @@ const PCM_MEDIA_TYPES = {
 export type PcmEncoding = keyof typeof PCM_MEDIA_TYPES
 
 export const pcm = (encoding: PcmEncoding, sampleRate: number | undefined, mediaType?: string) => ({
-  mediaType: mediaType ?? PCM_MEDIA_TYPES[encoding],
+  mediaType: mediaType ?? (Object.hasOwn(PCM_MEDIA_TYPES, encoding) ? PCM_MEDIA_TYPES[encoding] : undefined),
   info: { format: "pcm", encoding, sampleRate, channels: 1 },
 })
 

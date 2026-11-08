@@ -35,6 +35,7 @@
     "@clack/core": "1.0.0-alpha.1",
     "@clack/prompts": "1.0.0-alpha.1",
     "@effect/platform-node": "catalog:",
+    "@opencode/ai": "workspace:*",
     "@opencode/client": "workspace:*",
     "@opencode/plugin": "workspace:*",
     "@opencode-ai/pty": "0.2.0",

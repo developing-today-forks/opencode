@@ -1,5 +1,6 @@
 export * as ModelRouteOverrides from "./model-route-overrides.js"
 
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { Global } from "@opencode/util/global"
@@ -185,14 +186,104 @@ export const current = (): readonly Override[] => {
   return list
 }
 
-/** Replaces the stored overrides, dropping any that have already expired. */
+const transientRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
+const renameRetryDelays = [10, 25, 50, 100]
+const renameWait = new Int32Array(new SharedArrayBuffer(4))
+
+function isTransientRenameError(error: unknown) {
+  if (typeof error !== "object" || error === null) return false
+  if (!("code" in error)) return false
+  return typeof error.code === "string" && transientRenameCodes.has(error.code)
+}
+
+// Sync writers follow the atomic-replace contract in design #1345.
+function renameSyncWithRetry(source: string, destination: string) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(source, destination)
+      return
+    } catch (error) {
+      const delay = renameRetryDelays[attempt]
+      if (delay === undefined || !isTransientRenameError(error)) throw error
+      Atomics.wait(renameWait, 0, 0, delay)
+    }
+  }
+}
+
+/** Replaces the stored overrides, dropping any that have already expired. The write is atomic —
+ * a temporary file in the same directory, then a rename over the old one — so a crash or a
+ * concurrent reader (OpenChamber reads this same file) never observes a partially written store
+ * whose truncated JSON `current()` would silently treat as no overrides (#924). */
 export const save = (overrides: readonly Override[], now = Date.now()) => {
-  const file = filePath()
+  const requested = path.resolve(filePath())
+  fs.mkdirSync(path.dirname(requested), { recursive: true })
+  const file = resolveAtomicTarget(requested)
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const live = overrides.filter((item) => item.until === undefined || item.until > now)
-  fs.writeFileSync(file, JSON.stringify({ version: 1, overrides: live }, null, 2))
+  const temporary = path.join(path.dirname(file), `.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`)
+  const mode = fileMode(file)
+  let created = false
+  try {
+    const descriptor = fs.openSync(temporary, "wx", 0o600)
+    created = true
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify({ version: 1, overrides: live }, null, 2))
+    } finally {
+      fs.closeSync(descriptor)
+    }
+    fs.chmodSync(temporary, mode)
+    renameSyncWithRetry(temporary, file)
+    created = false
+  } catch (error) {
+    if (created) {
+      try {
+        fs.rmSync(temporary, { force: true })
+      } catch {}
+    }
+    throw error
+  }
   cache = undefined
   return live
+}
+
+function resolveAtomicTarget(file: string, remaining = 8): string {
+  try {
+    return fs.realpathSync(file)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+  }
+
+  let parent: string
+  try {
+    parent = fs.realpathSync(path.dirname(file))
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+    parent = path.dirname(file)
+  }
+
+  const target = path.join(parent, path.basename(file))
+  let link: string
+  try {
+    link = fs.readlinkSync(target)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EINVAL") return target
+    throw error
+  }
+  if (remaining === 0) throw new Error(`Too many levels of symbolic links: ${file}`)
+  return resolveAtomicTarget(path.resolve(parent, link), remaining - 1)
+}
+
+function fileMode(file: string) {
+  // These stores use the contract's preserve policy: keep an existing mode, or use 0o600 for a new file.
+  try {
+    return fs.statSync(file).mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600
+    throw error
+  }
 }
 
 /** Adds one override, replacing any with the same id. */

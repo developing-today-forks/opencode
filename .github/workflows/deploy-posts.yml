@@ -1,13 +1,6 @@
 name: deploy-posts
 
 on:
-  push:
-    branches:
-      - production
-    paths:
-      - packages/posts/**
-      - bun.lock
-      - .github/workflows/deploy-posts.yml
   workflow_dispatch:
 
 concurrency:

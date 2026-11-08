@@ -1544,12 +1544,30 @@ describe("HttpApiCodegen.generate", () => {
     )
   })
 
-  test("rejects custom validation checks without portable metadata", () => {
+  test("requires an authoritative API for nonportable success checks", () => {
+    const Positive = Schema.Number.check(Schema.makeFilter((value) => (value > 0 ? undefined : "positive")))
+    const contract = compileContract(api(HttpApiEndpoint.get("get", "/session", { success: Positive })))
+
+    expect(() => emitEffect(contract)).toThrow("Effect schema requires authoritative import: session.get")
+    expect(() => emitEffectImported(contract, { module: "@example/api", api: "Api" })).not.toThrow()
+    expect(emitPromise(contract).files.find((file) => file.path === "types.ts")?.content).toContain(
+      "export type SessionGetOutput = number",
+    )
+  })
+
+  test("rejects nonportable validation checks in transport inputs", () => {
     const Positive = Schema.Number.check(Schema.makeFilter((value) => (value > 0 ? undefined : "positive")))
 
-    expect(() => compile(api(HttpApiEndpoint.get("get", "/session", { success: Positive })))).toThrow(
-      "Unportable schema: session.get.success",
-    )
+    expect(() =>
+      compile(
+        api(
+          HttpApiEndpoint.get("get", "/session", {
+            query: { value: Positive },
+            success: Schema.String,
+          }),
+        ),
+      ),
+    ).toThrow("Unportable schema: session.get.query")
   })
 
   test("emits schema classes with native arbitrary constraints structurally", () => {
@@ -1570,10 +1588,10 @@ describe("HttpApiCodegen.generate", () => {
     const Aborted = Schema.Number.check(Schema.isFinite().abort())
 
     expect(() => compile(api(HttpApiEndpoint.get("spoofed", "/session", { success: Spoofed })))).toThrow(
-      "Unportable schema: session.spoofed.success",
+      "Effect schema requires authoritative import: session.spoofed",
     )
     expect(() => compile(api(HttpApiEndpoint.get("aborted", "/session", { success: Aborted })))).toThrow(
-      "Unportable schema: session.aborted.success",
+      "Effect schema requires authoritative import: session.aborted",
     )
   })
 
@@ -1608,7 +1626,7 @@ describe("HttpApiCodegen.generate", () => {
       "Unportable schema: session.generated.success",
     )
     expect(() => compile(api(HttpApiEndpoint.get("annotated", "/session", { success: Annotated })))).toThrow(
-      "Unportable schema: session.annotated.success",
+      "Effect schema requires authoritative import: session.annotated",
     )
   })
 

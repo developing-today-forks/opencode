@@ -29,15 +29,24 @@ const types: Record<string, string> = {
 
 /** Serves `oc://extensions/<id>/<path>` from an enabled installed archive, with byte ranges for media. */
 export function extensionAsset(db: Database, request: Request, url: URL) {
-  const [id, ...rest] = url.pathname.slice(1).split("/").map(decodeURIComponent)
-  const path = rest.join("/")
-
   const headers = new Headers({
     "Access-Control-Allow-Origin": "*",
     "Cache-Control": "no-store",
     "Accept-Ranges": "bytes",
-    "Content-Type": types[path.split(".").at(-1)?.toLowerCase() ?? ""] ?? "application/octet-stream",
   })
+  let segments: string[]
+
+  try {
+    segments = url.pathname.slice(1).split("/").map(decodeURIComponent)
+  } catch {
+    headers.set("Content-Type", "application/octet-stream")
+
+    return new Response(null, { status: 404, headers })
+  }
+
+  const [id, ...rest] = segments
+  const path = rest.join("/")
+  headers.set("Content-Type", types[path.split(".").at(-1)?.toLowerCase() ?? ""] ?? "application/octet-stream")
 
   const where = and(eq(extensionFile.extension_id, id ?? ""), eq(extensionFile.path, path), eq(extension.enabled, true))
 

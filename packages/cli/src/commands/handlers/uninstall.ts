@@ -1,6 +1,7 @@
 import { confirm, intro, log, outro, spinner } from "@clack/prompts"
 import { Service } from "@opencode/client/effect/service"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, FileSystem, Schedule } from "effect"
 import path from "node:path"
 import { Commands } from "../commands"
@@ -91,7 +92,7 @@ export default Runtime.handler(
     )
     yield* Effect.forEach(shell, (file) =>
       fs.readFileString(file).pipe(
-        Effect.flatMap((content) => fs.writeFileString(file, cleanShellConfig(content))),
+        Effect.flatMap((content) => writeShellConfig(file, cleanShellConfig(content))),
         Effect.catch((error) => Effect.sync(() => errors.push(`Shell config ${file}: ${errorMessage(error)}`))),
       ),
     )
@@ -151,7 +152,12 @@ const shellConfigs = Effect.fnUntraced(function* (home: string) {
   )
 })
 
-function cleanShellConfig(content: string) {
+export const writeShellConfig = Effect.fnUntraced(function* (file: string, content: string) {
+  const fs = yield* FSUtil.Service
+  yield* fs.writeAtomic(file, content, { modePolicy: "preserve", preserveOwnership: true })
+})
+
+export function cleanShellConfig(content: string) {
   const lines = content.split("\n")
   const entry = (line: string) =>
     /^(?:export PATH=|fish_add_path\s)/.test(line.trim()) && line.includes(".opencode/bin")

@@ -17,6 +17,12 @@ import { verifyArtifact } from "./verify-artifact"
 import { NativeArch } from "../../../script/native-arch"
 
 const NODE_VERSION = "26.4.0"
+/** Deadline for each Node download leg (archive and SHASUMS256.txt). The archive is ~59 MiB:
+ * 10 minutes sustains ~100 KiB/s, the slowest link worth waiting on, while a stalled or
+ * slow-dripping nodejs.org fails with a TimeoutError instead of hanging the build until the
+ * CI job timeout kills it (#1276). The signal stays attached during the body reads, so it
+ * bounds headers and body alike. */
+const NODE_DOWNLOAD_TIMEOUT_MS = 600_000
 const dir = path.resolve(import.meta.dirname, "..")
 const outdir = path.resolve(
   dir,
@@ -204,7 +210,10 @@ async function resolveTargetNode(target: NodeTarget, host?: string) {
   const filename = `${archiveName}.${extension}`
   const archive = path.join(cache, filename)
   const base = `https://nodejs.org/dist/v${NODE_VERSION}`
-  const [response, sums] = await Promise.all([fetch(`${base}/${filename}`), fetch(`${base}/SHASUMS256.txt`)])
+  const [response, sums] = await Promise.all([
+    fetch(`${base}/${filename}`, { signal: AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS) }),
+    fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(NODE_DOWNLOAD_TIMEOUT_MS) }),
+  ])
   if (!response.ok) throw new Error(`Failed to download Node ${NODE_VERSION}: ${response.status}`)
   if (!sums.ok) throw new Error(`Failed to download Node ${NODE_VERSION} checksums: ${sums.status}`)
   const data = new Uint8Array(await response.arrayBuffer())

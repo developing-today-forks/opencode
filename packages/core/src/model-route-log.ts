@@ -1,11 +1,12 @@
 export * as ModelRouteLog from "./model-route-log.js"
 
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm" 
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { snapshot as takeSnapshot, type Snapshot } from "./model-route-limits.js"
+import { ModelRouteLimits } from "./model-route-limits.js"
+import { DEFAULT_MAX_AGE_MS } from "./quota-snapshot.js"
 import { Database } from "./database/database.js"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable, RouteNoteTable } from "./model-route-log/sql.js"
 
@@ -16,7 +17,13 @@ export type Note = typeof RouteNoteTable.$inferInsert
 
 export type Event =
   | { readonly kind: "decision"; readonly row: Decision }
-  | { readonly kind: "attempt"; readonly row: Attempt }
+  | {
+      readonly kind: "attempt"
+      readonly row: Attempt
+      /** The assistant message of the attempt this request continues. The writer resolves it to that attempt's row id
+       * when it persists the row, because the id only exists after the root was inserted. */
+      readonly continuationOfMessageID?: string
+    }
   | { readonly kind: "health"; readonly row: Health }
   | { readonly kind: "note"; readonly row: Note }
 
@@ -49,6 +56,11 @@ export interface RequestObservation {
   readonly providerID: string
   readonly modelID: string
   readonly variant?: string
+  /** The credential that served this request, when the call site knows it authoritatively (the
+   * serving credential captured at resolution, never a pre-load snapshot of the active one).
+   * Omitted when an env connection served or the site cannot know: the attempt is then recorded
+   * unattributed and its usage feeds no credential's quota snapshot (#1106). */
+  readonly credentialID?: string
   readonly sessionID?: string
   readonly assistantMessageID?: string
   readonly startedAt: number
@@ -115,6 +127,7 @@ export const observer = (
           provider_id: request.providerID,
           model_id: request.modelID,
           variant: request.variant,
+          credential_id: request.credentialID,
           outcome,
           ...fields,
           // A failed request's own details win; a successful one keeps what its response said.
@@ -210,7 +223,7 @@ const reasonOf = (failure: unknown) => {
  * stored as not retryable instead of being guessed from the presence of a tag. */
 const observerRetryable = (failure: unknown) => (failure instanceof AIError ? isRetryable(failure) : false)
 
-/** Whether failed requests keep their provider error body: `experimental.model_route_log`, read live. */
+/** Whether failed requests keep their provider error body: `experimental.routes.log`, read live. */
 let captureErrorBodies: () => boolean = () => false
 
 export const onCaptureErrorBodies = (read: () => boolean) => {
@@ -272,13 +285,35 @@ export const failureFields = (reason: unknown, options?: { readonly captureBody?
 const persist = (db: Database.Interface["db"], events: readonly Event[]) =>
   Effect.gen(function* () {
     const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
-    const attempts = events.flatMap((event) => (event.kind === "attempt" ? [event.row] : []))
+    const attempts = events.flatMap((event) => (event.kind === "attempt" ? [event] : []))
     const health = events.flatMap((event) => (event.kind === "health" ? [event.row] : []))
     if (decisions.length) yield* db.insert(RouteDecisionTable).values(decisions).run()
-    if (attempts.length) yield* db.insert(RouteAttemptTable).values(attempts).run()
+    // One statement per attempt: a continuation resolves its root from the row inserted just before it.
+    for (const attempt of attempts) yield* persistAttempt(db, attempt)
     if (health.length) yield* db.insert(RouteHealthTable).values(health).run()
     const notes = events.flatMap((event) => (event.kind === "note" ? [event.row] : []))
     if (notes.length) yield* db.insert(RouteNoteTable).values(notes).run()
+  })
+
+/** Inserts one attempt and, for a continuation, points `continuation_of` at the attempt that started the response.
+ * The root is read back by its assistant message, so the link survives the root having been persisted in an earlier
+ * batch and stays correct across a restart. Retries and hedge losers share that message, so the newest standalone row
+ * is the attempt that actually answered — the one whose response hit the output token limit. */
+const persistAttempt = (db: Database.Interface["db"], event: Extract<Event, { kind: "attempt" }>) =>
+  Effect.gen(function* () {
+    const inserted = yield* db
+      .insert(RouteAttemptTable)
+      .values(event.row)
+      .returning({ id: RouteAttemptTable.id })
+      .get()
+    if (event.continuationOfMessageID === undefined) return
+    yield* db
+      .update(RouteAttemptTable)
+      .set({
+        continuation_of: sql`(select root.id from route_attempt root where root.session_id = ${event.row.session_id} and root.assistant_message_id = ${event.continuationOfMessageID} and root.continuation_index = 0 order by root.id desc limit 1)`,
+      })
+      .where(eq(RouteAttemptTable.id, inserted.id))
+      .run()
   })
 
 /** Receives the still-active adjustments stored by earlier runs. Set by the routing module, which
@@ -296,7 +331,7 @@ export const onRestoreUsage = (next: typeof restoreUsage) => {
   restoreUsage = next
 }
 
-type CooldownRow = { providerID: string; modelID: string; until: number }
+type CooldownRow = { providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }
 let restoreCooldowns: ((rows: readonly CooldownRow[]) => void) | undefined
 
 export const onRestoreCooldowns = (next: typeof restoreCooldowns) => {
@@ -307,6 +342,12 @@ let restoreLimits: ((rows: readonly CooldownRow[]) => void) | undefined
 
 export const onRestoreLimits = (next: typeof restoreLimits) => {
   restoreLimits = next
+}
+
+type DemotionRow = { id: number; time: number; providerID: string; modelID: string; credentialID?: string }
+let restoreDemotion: ((rows: readonly DemotionRow[]) => void) | undefined
+export const onRestoreDemotion = (next: typeof restoreDemotion) => {
+  restoreDemotion = next
 }
 
 /** Cooldowns still in force, rebuilt from the health history so a restart does not send traffic
@@ -331,10 +372,22 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       .all()
       .pipe(Effect.orElseSucceed(() => []))
     const latest = new Map<string, CooldownRow>()
-    const windows = new Map<string, CooldownRow & { snapshot?: Snapshot }>()
+    const windows = new Map<string, CooldownRow & { snapshot?: ModelRouteLimits.Snapshot }>()
     for (const row of rows) {
-      const id = `${row.provider_id}/${row.model_id}`
-      const entry = { providerID: row.provider_id, modelID: row.model_id, until: row.until ?? 0 }
+      // A credential-scoped health row carries its credential in `credential_id`: it restores
+      // onto that credential only, never onto the whole target (#870). Rows written before the
+      // column existed name it in the reason ("... credential:<id>"), so those still fall back
+      // to the reason regex. A `provider:<id>` reason is a different dimension (provider quota)
+      // and never a credential.
+      const credentialID = row.credential_id ?? /credential:(\S+)/.exec(row.reason ?? "")?.[1]
+      const id = credentialID ? `${row.provider_id}/${row.model_id}#${credentialID}` : `${row.provider_id}/${row.model_id}`
+      const entry = {
+        providerID: row.provider_id,
+        modelID: row.model_id,
+        until: row.until ?? 0,
+        ...(row.reason ? { reason: row.reason } : {}),
+        ...(credentialID ? { credentialID } : {}),
+      }
       if (row.kind === "rate-limit-window") windows.set(id, entry)
       else if (row.kind === "cooldown-end") latest.delete(id)
       else if (row.until !== null) latest.set(id, entry)
@@ -346,6 +399,7 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
         modelID: RouteAttemptTable.model_id,
         quota: RouteAttemptTable.quota,
         time: RouteAttemptTable.time_ended,
+        credentialID: RouteAttemptTable.credential_id,
       })
       .from(RouteAttemptTable)
       .where(
@@ -358,12 +412,17 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       .all()
       .pipe(Effect.orElseSucceed(() => []))
     for (const row of snapshots) {
-      const id = `${row.providerID}/${row.modelID}`
-      const stored = (row.quota ?? {}) as Partial<Snapshot>
+      // Key snapshots exactly like the health rows above (#1116): a snapshot stored on a
+      // credential's attempt belongs to that credential's window, never the whole target.
+      // Rows written before the credential_id column existed carry none and stay target-wide.
+      const id = row.credentialID
+        ? `${row.providerID}/${row.modelID}#${row.credentialID}`
+        : `${row.providerID}/${row.modelID}`
+      const stored = (row.quota ?? {}) as Partial<ModelRouteLimits.Snapshot>
       const parsed =
         typeof stored !== "object" || stored === null
           ? undefined
-          : takeSnapshot(
+          : ModelRouteLimits.snapshot(
               {
                 limit: stored.limit,
                 remaining: stored.remaining,
@@ -375,7 +434,24 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
       const current = windows.get(id)
       if (!parsed) continue
       if (current) windows.set(id, { ...current, snapshot: parsed })
-      else windows.set(id, { providerID: row.providerID, modelID: row.modelID, until: 0, snapshot: parsed })
+      else
+        windows.set(id, {
+          providerID: row.providerID,
+          modelID: row.modelID,
+          until: 0,
+          snapshot: parsed,
+          ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+        })
+    }
+    // Older persisted quota benches may predate the cap. Restore them no later than the
+    // corresponding fresh, exhausted provider window; unrelated or stale windows do not apply.
+    for (const [id, row] of latest) {
+      const snapshot = windows.get(id)?.snapshot
+      const resetAt =
+        row.reason?.includes("quota") && snapshot
+          ? ModelRouteLimits.exhaustedWindowResetAt(snapshot, now, DEFAULT_MAX_AGE_MS)
+          : undefined
+      if (resetAt !== undefined && resetAt < row.until) latest.set(id, { ...row, until: resetAt })
     }
     restoreCooldowns?.([...latest.values()].filter((row) => row.until > now))
     restoreLimits?.(
@@ -415,6 +491,53 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
     )
   })
 
+/** The widest demotion window either config surface admits: both
+ * `experimental.model_route_demotion.window_ms` and `routes.settings.demotion.windowMs`
+ * cap at 7,776,000,000 ms (90 days) in the schema, so the demotion restore below reads
+ * that far back. Seeding retains the whole horizon (a judging Location may only
+ * register after the restore), while judging (`demoted`) applies the actually
+ * configured window over what is retained, so a shorter window never counts
+ * the older rows. */
+export const MAX_DEMOTION_WINDOW_MS = 7_776_000_000
+
+/** Quota-error attempts inside the widest demotion window, so demotion counts survive
+ * a restart (#1151). A quota error is the attempt whose `error_tag` is `QuotaExceeded`:
+ * that is the same failure class `ModelRoute.failed` counts live (its `hint.quota`),
+ * and `failureFields` records it on the attempt row for session and facade traffic
+ * alike, so both traffic classes rehydrate the one shared demotion count. Each row
+ * keeps its ledger id: restored attempts are deduplicated by that identity, never by
+ * timestamp (distinct attempts can share a millisecond). */
+export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
+  Effect.gen(function* () {
+    const rows = yield* db
+      .select({
+        id: RouteAttemptTable.id,
+        time: RouteAttemptTable.time_ended,
+        providerID: RouteAttemptTable.provider_id,
+        modelID: RouteAttemptTable.model_id,
+        credentialID: RouteAttemptTable.credential_id,
+      })
+      .from(RouteAttemptTable)
+      .where(
+        and(
+          gte(RouteAttemptTable.time_ended, Date.now() - MAX_DEMOTION_WINDOW_MS),
+          eq(RouteAttemptTable.error_tag, "QuotaExceeded"),
+        ),
+      )
+      .orderBy(asc(RouteAttemptTable.time_ended))
+      .all()
+      .pipe(Effect.orElseSucceed(() => []))
+    restoreDemotion?.(
+      rows.map((row) => ({
+        id: row.id,
+        time: row.time,
+        providerID: row.providerID,
+        modelID: row.modelID,
+        ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+      })),
+    )
+  })
+
 /** Hands still-active stored notes to the routing module. Runs when the node starts. */
 export const restoreNotes = (db: Database.Interface["db"]) =>
   Effect.gen(function* () {
@@ -442,6 +565,7 @@ const layer = Layer.effectDiscard(
     yield* restoreNotes(db)
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db)
+    yield* restoreDemotionFrom(db)
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
@@ -465,6 +589,8 @@ export interface TargetStats {
   readonly modelID: string
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections, counted separately and never part of `failures` (#1084). */
+  readonly policyRejections: number
   readonly timeouts: number
   readonly avgFirstTokenMs: number | null
   readonly avgResponseMs: number | null
@@ -478,7 +604,10 @@ export const targetStats = (db: Database.Interface["db"], since: number, routeID
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      // Content-policy rejections are refusals of a request, not target failures: they are
+      // counted separately (policyRejections) and never enter failure/health rates (#1084).
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
       timeouts: sql<number>`sum(case when ${RouteAttemptTable.outcome} = 'timeout' then 1 else 0 end)`,
       avgFirstTokenMs: sql<number | null>`avg(${RouteAttemptTable.first_token_ms})`,
       avgResponseMs: sql<number | null>`avg(${RouteAttemptTable.response_ms})`,
@@ -532,6 +661,8 @@ export interface HourlyStat {
   readonly hour: number
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections in the hour, kept out of `failures` (#1084). */
+  readonly policyRejections: number
 }
 
 /** Failure counts by hour of day, so a target that only fails at certain times can be told apart
@@ -543,7 +674,8 @@ export const hourlyStats = (db: Database.Interface["db"], since: number) =>
       modelID: RouteAttemptTable.model_id,
       hour: sql<number>`cast(strftime('%H', ${RouteAttemptTable.time_started} / 1000, 'unixepoch') as integer)`,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
     })
     .from(RouteAttemptTable)
     .where(gte(RouteAttemptTable.time_started, since))
@@ -627,12 +759,71 @@ export const attemptRows = (db: Database.Interface["db"], since: number, routeID
     .limit(ROW_LIMIT)
     .all()
 
+/** Attempt rows in the window with their continuation link, so a response split by output-token-limit
+ * continuations can be rolled up as one turn. Newest first; `ModelUsage.turns` does the arithmetic. */
+export const turnAttempts = (db: Database.Interface["db"], since: number, sessionID?: string) =>
+  db
+    .select({
+      id: RouteAttemptTable.id,
+      continuationOf: RouteAttemptTable.continuation_of,
+      continuationIndex: RouteAttemptTable.continuation_index,
+      assistantMessageID: RouteAttemptTable.assistant_message_id,
+      sessionID: RouteAttemptTable.session_id,
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      timeStarted: RouteAttemptTable.time_started,
+      timeEnded: RouteAttemptTable.time_ended,
+      outcome: RouteAttemptTable.outcome,
+      input: RouteAttemptTable.tokens_input,
+      output: RouteAttemptTable.tokens_output,
+      reasoning: RouteAttemptTable.tokens_reasoning,
+      cacheRead: RouteAttemptTable.tokens_cache_read,
+      cacheWrite: RouteAttemptTable.tokens_cache_write,
+      costUsd: RouteAttemptTable.cost_usd,
+      cacheSavedUsd: RouteAttemptTable.cache_savings_usd,
+    })
+    .from(RouteAttemptTable)
+    .where(
+      and(
+        gte(RouteAttemptTable.time_started, since),
+        sessionID === undefined ? undefined : eq(RouteAttemptTable.session_id, sessionID),
+      ),
+    )
+    .orderBy(desc(RouteAttemptTable.time_started))
+    .limit(ROW_LIMIT)
+    .all()
+
+/** One session's own attempts, newest first, with the serving leaf and failover of each step (#1891).
+ * This is the per-session readout behind "which leaf served my last step": route_attempt already
+ * records provider/model/variant per attempt plus `failed_over_to`; nothing else surfaces it back
+ * to the session itself. Session-local by construction — it only ever returns the named session's rows. */
+export const sessionAttempts = (db: Database.Interface["db"], sessionID: string, limit = 50) =>
+  db
+    .select({
+      routeID: RouteAttemptTable.route_id,
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      variant: RouteAttemptTable.variant,
+      assistantMessageID: RouteAttemptTable.assistant_message_id,
+      outcome: RouteAttemptTable.outcome,
+      failedOverTo: RouteAttemptTable.failed_over_to,
+      hedged: RouteAttemptTable.hedged,
+      timeStarted: RouteAttemptTable.time_started,
+      timeEnded: RouteAttemptTable.time_ended,
+    })
+    .from(RouteAttemptTable)
+    .where(eq(RouteAttemptTable.session_id, sessionID))
+    .orderBy(desc(RouteAttemptTable.time_started))
+    .limit(limit)
+    .all()
+
 /** Selections in the window, newest first: who was eligible, the weights and exclusions behind each, and who was chosen. */
 export const decisionRows = (db: Database.Interface["db"], since: number, routeID?: string) =>
   db
     .select({
       routeID: RouteDecisionTable.route_id,
       sessionID: RouteDecisionTable.session_id,
+      selection: RouteDecisionTable.selection,
       candidates: RouteDecisionTable.candidates,
       chosen: RouteDecisionTable.chosen,
       reason: RouteDecisionTable.reason,
@@ -647,13 +838,14 @@ export const decisionRows = (db: Database.Interface["db"], since: number, routeI
 /** The usage columns every rollup below shares: request and failure counts, tokens by kind, and cost. */
 const usageColumns = {
   requests: count(),
-  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end), 0)`,
+  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
   input: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
   output: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
   reasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,
   cacheRead: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_read}), 0)`,
   cacheWrite: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_write}), 0)`,
   costUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cost_usd}), 0)`,
+  cacheSavedUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cache_savings_usd}), 0)`,
 }
 
 /** Totals per session that made a request since `since`, most recently active first. */
@@ -702,12 +894,16 @@ export const sessionTargetUsage = (db: Database.Interface["db"], since: number, 
         )
         .all()
 
-/** Totals per provider and model since `since`, with how many sessions used each. */
+/** Totals per provider, model and serving credential since `since`, with how many sessions used
+ * each. `credentialID` is null for unattributed attempts (env-served, or recorded before the
+ * column existed): consumers summing per-credential usage must exclude those rows, never assign
+ * them to a credential (#1106). */
 export const targetUsage = (db: Database.Interface["db"], since: number) =>
   db
     .select({
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
+      credentialID: RouteAttemptTable.credential_id,
       sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
       first: sql<number>`min(${RouteAttemptTable.time_started})`,
       last: sql<number>`max(${RouteAttemptTable.time_ended})`,
@@ -715,10 +911,26 @@ export const targetUsage = (db: Database.Interface["db"], since: number) =>
     })
     .from(RouteAttemptTable)
     .where(gte(RouteAttemptTable.time_started, since))
-    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id, RouteAttemptTable.credential_id)
     .all()
 
 const DAY = sql`strftime('%Y-%m-%d', ${RouteAttemptTable.time_started} / 1000, 'unixepoch')`
+
+/** Distinct sessions per provider and model since `since`. targetUsage rows split by serving
+ * credential, so their per-group distinct counts cannot be summed back into this figure: a
+ * session served by two credentials of one target (credential fallback, or across the
+ * credential_id migration) sits in two groups but is one session (#1106). */
+export const targetSessions = (db: Database.Interface["db"], since: number) =>
+  db
+    .select({
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
+    })
+    .from(RouteAttemptTable)
+    .where(gte(RouteAttemptTable.time_started, since))
+    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .all()
 
 /** Totals per UTC day, provider and model since `since`, oldest day first. */
 export const dailyUsage = (db: Database.Interface["db"], since: number) =>

@@ -12,12 +12,33 @@ import { Agent } from "../../agent.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
+import { readBoundedResponseText } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 
 const clientID = "Ov23li8tweQw6odWQebz"
 const apiVersion = "2026-08-01"
 const userApiVersion = "2025-04-01"
 const pollingSafetyMargin = 3000
+/** Poll interval for the device flow, in milliseconds. The server-supplied
+ * `interval` was only floored (#915): a large or unit-confused value (600
+ * for a 600-second wait in milliseconds, say) made the first sleep outlast
+ * the integration layer's 10-minute attempt lifetime, silently guaranteeing
+ * a login timeout. Non-positive and non-finite values take the 5-second
+ * fallback and the result is clamped to [1s, 60s] — the sibling flows'
+ * deviceIntervalMs shape (opencode.ts, #880) plus a ceiling low enough to
+ * poll many times within the attempt lifetime; the poll loop adds
+ * pollingSafetyMargin on top of every wait. */
+export const deviceIntervalMs = (interval: number): number => {
+  const seconds = Number.isFinite(interval) && interval > 0 ? interval : 5
+  return Math.min(Math.max(seconds, 1), 60) * 1000
+}
+/** The wait after a `slow_down` response. RFC 8628 says the client must
+ * slow down, so the next wait never drops below the current wait + 5s —
+ * the sibling flows' behaviour — even when the response repeats a smaller
+ * positive `interval`; a larger server interval is honoured through
+ * deviceIntervalMs, ceiling and all. */
+export const slowDownWaitMs = (wait: number, interval?: number): number =>
+  Math.max(wait + 5000, interval === undefined ? 0 : deviceIntervalMs(interval))
 const methodID = Integration.MethodID.make("device")
 
 const Device = Schema.Struct({
@@ -84,7 +105,7 @@ const oauth = (app: App.Info) =>
           headers: headers(app),
           body: JSON.stringify({ client_id: clientID, scope: "read:user" }),
         }).pipe(Effect.map(Schema.decodeUnknownSync(Device)))
-        const interval = Math.max(device.interval, 1) * 1000
+        const interval = deviceIntervalMs(device.interval)
 
         const poll = (wait: number): Effect.Effect<Credential.OAuth, unknown> =>
           request(urls.token, {
@@ -140,7 +161,7 @@ const oauth = (app: App.Info) =>
               if (token.error === "authorization_pending")
                 return Effect.sleep(wait + pollingSafetyMargin).pipe(Effect.andThen(poll(wait)))
               if (token.error === "slow_down") {
-                const next = token.interval && token.interval > 0 ? token.interval * 1000 : wait + 5000
+                const next = slowDownWaitMs(wait, token.interval)
                 return Effect.sleep(next + pollingSafetyMargin).pipe(Effect.andThen(poll(next)))
               }
               return Effect.fail(new Error(`Device authorization failed${token.error ? `: ${token.error}` : ""}`))
@@ -425,6 +446,14 @@ export function copilotEndpointDiscoveryNeeded(metadata?: Readonly<Record<string
   return true
 }
 
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
 // The same /copilot_internal/user lookup authorize() performs, reused at load
 // time for credentials (such as v1 migrations) that never stored endpoints.api.
 export function discoverCopilotApiEndpoint(input: { token: string; app: App.Info; fetch?: Fetch }) {
@@ -441,7 +470,9 @@ export function discoverCopilotApiEndpoint(input: { token: string; app: App.Info
         },
       })
       if (!response.ok) throw new Error(`Copilot user lookup failed: ${response.status}`)
-      return response.json()
+      return JSON.parse(
+        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+      )
     },
     catch: (cause) => cause,
   }).pipe(
@@ -463,7 +494,9 @@ function request(url: string, init: RequestInit) {
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return response.json()
+      return JSON.parse(
+        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+      )
     },
     catch: (cause) => cause,
   })
@@ -479,6 +512,13 @@ const UtilityCompletion = Schema.Struct({
   choices: Schema.Array(Schema.Struct({ message: Schema.Struct({ content: Schema.NullOr(Schema.String) }) })),
 })
 const decodeUtilityCompletion = Schema.decodeUnknownEffect(Schema.fromJsonString(UtilityCompletion))
+/** Size cap for the utility-title response body. A title completion is a
+ * small JSON struct (a few hundred bytes in practice); 64 KiB is generous
+ * headroom for its wrapping while staying far below webfetch's 5 MB cap.
+ * Without a cap, `response.text()` buffers the whole body — bounded only
+ * by the 20 s timeout — so a misbehaving configured endpoint could OOM the
+ * process on this automatic background call (#960). */
+export const utilityTitleMaxResponseBytes = 64 * 1024
 
 // This issues its own /chat/completions call instead of steering core's title request.
 // The `session.title` hook exposes `model` read-only, so pointing core at another model
@@ -522,7 +562,11 @@ export function utilityTitle(
         }),
       })
       if (!response.ok) throw new Error(`Utility title request failed: ${response.status}`)
-      return response.text()
+      return readBoundedResponseText(
+        response,
+        utilityTitleMaxResponseBytes,
+        () => new Error("Utility title response exceeded " + utilityTitleMaxResponseBytes + " bytes"),
+      )
     },
     catch: (cause) => cause,
   }).pipe(

@@ -20,6 +20,9 @@ on:
 env:
   LOOKBACK_HOURS: 4
 
+permissions:
+  contents: read
+
 jobs:
   update-docs:
     timeout-minutes: 30

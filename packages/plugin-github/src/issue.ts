@@ -678,8 +678,8 @@ export function tools(deps: Deps): Tool.Info[] {
 
         const found = yield* commentNode(api, input.id, resolved.repo.host)
         const node = found.node
-        const edit = EDIT_MUTATIONS[node.__typename]
-        const remove = DELETE_MUTATIONS[node.__typename]
+        const edit = Object.hasOwn(EDIT_MUTATIONS, node.__typename) ? EDIT_MUTATIONS[node.__typename] : undefined
+        const remove = Object.hasOwn(DELETE_MUTATIONS, node.__typename) ? DELETE_MUTATIONS[node.__typename] : undefined
         if (!edit || !remove)
           return yield* new GitHubClient.Error({
             kind: "validation",

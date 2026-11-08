@@ -110,6 +110,7 @@ export function normalizeProviderList(
       },
       limit: model.limit,
       status: model.status,
+      hidden: model.hidden,
       options: model.settings ?? {},
       headers: model.headers ?? {},
       release_date: new Date(model.time.released).toISOString().slice(0, 10),

@@ -70,6 +70,19 @@ describe("Form", () => {
     }),
   )
 
+  it.effect("rejects calendar-invalid non-ISO date-times while keeping valid ones (#798)", () =>
+    Effect.sync(() => {
+      const fields = [{ key: "at", type: "string", format: "date-time" }] satisfies ReadonlyArray<Form.Field>
+
+      for (const value of ["Feb 30 2026", "Feb 30, 2026", "30 Feb 2026", "2026/02/30", "Feb 30 2026 24:00"]) {
+        expect(Form.validateAnswer(fields, { at: value })).toBe("Expected date-time for form field: at")
+      }
+      for (const value of ["Jan 5 2026", "January 5, 2026", "5 Jan 2026", "Feb 29 2024"]) {
+        expect(Form.validateAnswer(fields, { at: value })).toBeUndefined()
+      }
+    }),
+  )
+
   it.effect("pins date format behaviour alongside date-time", () =>
     Effect.sync(() => {
       const fields = [{ key: "day", type: "string", format: "date" }] satisfies ReadonlyArray<Form.Field>
@@ -509,6 +522,24 @@ describe("Form", () => {
           { key: "b", type: "string", when: [{ key: "age", op: "eq", value: 15.5 }] },
         ]),
       ).toBeUndefined()
+    }),
+  )
+
+  it.effect("rejects non-finite when values on a number target (#853)", () =>
+    Effect.sync(() => {
+      const gated = (value: number, op: "eq" | "neq" = "eq") =>
+        Form.validateFields([
+          { key: "age", type: "number" },
+          { key: "b", type: "string", when: [{ key: "age", op, value }] },
+        ])
+      // No valid answer is non-finite, so eq can never match and neq always matches.
+      for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(gated(value)).toBe("Form field condition value must be a finite number: b -> age")
+        expect(gated(value, "neq")).toBe("Form field condition value must be a finite number: b -> age")
+      }
+      // A finite control still creates.
+      expect(gated(5)).toBeUndefined()
+      expect(gated(5, "neq")).toBeUndefined()
     }),
   )
 

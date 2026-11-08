@@ -8,6 +8,7 @@ import { parseSessionTargetModel, resolveSessionTarget, type SessionTargetPrepar
 import { Env } from "./env"
 
 export type MiniCommandInput = {
+  log?: (message: string) => void
   server: {
     endpoint: Endpoint
     reconnect?: (signal: AbortSignal) => Promise<Endpoint>
@@ -34,7 +35,14 @@ export async function runMini(input: MiniCommandInput) {
   try {
     validate(input)
     await usingInteractiveStdin(async (terminal) => {
-      const initialInput = mergeInput(process.stdin.isTTY ? undefined : await readStdin(), input.prompt)
+      const initialInput = mergeInput(
+        process.stdin.isTTY
+          ? undefined
+          : await readStdin(() =>
+              input.log?.("Reading stdin until EOF; redirect from /dev/null when no piped input is intended"),
+            ),
+        input.prompt,
+      )
       const frontendTask = import("@opencode/tui/mini")
       const directory = localDirectory()
       const connection = createMiniConnection(input.server)

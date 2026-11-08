@@ -371,7 +371,10 @@ export function presetList(config?: ConfigMessaging.Info): ReadonlyArray<Preset>
 
 /** Constant value with config overrides applied; custom variables are resolved by the caller. */
 export function constant(name: string, config?: ConfigMessaging.Info) {
-  return config?.vars?.[name] ?? constants[name]?.value
+  // Own-property lookups only (#793): plain indexing reads through the prototype chain, so
+  // "constructor" / "__proto__" resolve to inherited non-string values when any vars exist.
+  const configured = config?.vars && Object.hasOwn(config.vars, name) ? config.vars[name] : undefined
+  return configured ?? (Object.hasOwn(constants, name) ? constants[name]?.value : undefined)
 }
 
 export interface Classification {

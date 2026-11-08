@@ -21,6 +21,7 @@ import * as OpenAICompatible from "../../src/providers/openai-compatible.js"
 import * as XAI from "../../src/providers/xai.js"
 import * as OpenAIChat from "../../src/protocols/openai-chat.js"
 import { ProviderShared } from "../../src/protocols/shared.js"
+import type { LanguageModelCompatibility } from "../../src/schema/options.js"
 import { Auth, LLMClient } from "../../src/route.js"
 import { compileRequest } from "../../src/route/client.js"
 import { it } from "../lib/effect.js"
@@ -2247,6 +2248,151 @@ describe("OpenAI Chat route", () => {
 
       expect(error).toBeInstanceOf(AIError)
       expect(error).toMatchObject({ reason: { _tag: "InvalidRequest" }, message: "Bad request" })
+    }),
+  )
+
+  it.effect("does not detect model families in the shared protocol; explicit compatibility entries carry door defaults", () =>
+    Effect.gen(function* () {
+      const gateways = ["cline-pass", "opendesign", "opencode-go"] as const
+      const tool = ToolDefinition.make({ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } })
+      const prepare = (
+        provider: string,
+        baseURL: string,
+        id: string,
+        compatibility?: LanguageModelCompatibility.Input,
+      ) =>
+        compileRequest(
+          LLM.request({
+            model: OpenAIChat.route
+              .with({ provider, endpoint: { baseURL }, auth: Auth.bearer("test") })
+              .model({ id, compatibility }),
+            prompt: "Use a tool.",
+            generation: { maxTokens: 20 },
+            tools: [tool],
+          }),
+        )
+      const viaGateway = (id: string, compatibility?: LanguageModelCompatibility.Input) =>
+        Effect.all(gateways.map((gateway) => prepare(gateway, "https://gateway.test/v1", id, compatibility)))
+      const fields = (body: object) => {
+        const record = body as Record<string, unknown>
+        const tools = record.tools as Array<{ function?: Record<string, unknown> }> | undefined
+        return {
+          maxTokens: "max_tokens" in record,
+          maxCompletionTokens: "max_completion_tokens" in record,
+          store: "store" in record,
+          toolStream: "tool_stream" in record,
+          strict: tools?.[0]?.function !== undefined && "strict" in tools[0].function,
+        }
+      }
+      const familyIDs = [
+        "glm-5.3",
+        "zai/glm-5.3",
+        "GLM-5.3",
+        "glm-4.5",
+        "kimi-k2.6",
+        "moonshotai/kimi-k2.6",
+        "moonshot-v1-8k",
+        "gemini-2.5-flash",
+        "google/gemini-3.8-flash",
+        "deepseek-chat",
+        "deepseek/deepseek-chat",
+        "deepseek-v3.2",
+      ]
+
+      // Pinning test (#1824): with no explicit compatibility, a family-shaped
+      // model id gets the upstream-default wire fields on an official
+      // provider AND behind the gateway doors alike — the shared protocol
+      // no longer keys any behavior off the model-id family.
+      for (const id of familyIDs) {
+        const official = yield* prepare("openai", "https://api.openai.com/v1", id)
+        expect(official.body).toMatchObject({ max_completion_tokens: 20, store: false })
+        expect(official.body).not.toHaveProperty("tool_stream")
+        expect(official.body.tools?.[0]?.function).toHaveProperty("strict", false)
+        for (const prepared of yield* viaGateway(id)) expect(fields(prepared.body)).toEqual(fields(official.body))
+      }
+
+      // The gateway doors' family defaults now arrive as explicit per-model
+      // compatibility entries from the catalog/config layer (#1824); with
+      // those entries the wire fields match what family detection produced.
+      // GLM entry: max_tokens, no store, strict sent, tool_stream on.
+      for (const prepared of yield* viaGateway("glm-5.3", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20, tool_stream: true })
+        expect(prepared.body).not.toHaveProperty("store")
+        expect(prepared.body.tools?.[0]?.function).toHaveProperty("strict", false)
+      }
+      // GLM 4.5 entry: tool streaming excluded.
+      for (const prepared of yield* viaGateway("glm-4.5", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("tool_stream")
+        expect(prepared.body).not.toHaveProperty("store")
+      }
+      // Kimi entry: max_tokens, no store, no strict field on tools.
+      for (const prepared of yield* viaGateway("kimi-k2.6", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        supportsStrictMode: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
+        expect(prepared.body.tools?.[0]?.function).not.toHaveProperty("strict")
+      }
+      // Gemini entry: no store; the token field and strict stay at defaults.
+      for (const prepared of yield* viaGateway("gemini-2.5-flash", { supportsStore: false })) {
+        expect(prepared.body).toMatchObject({ max_completion_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
+        expect(prepared.body.tools?.[0]?.function).toHaveProperty("strict", false)
+      }
+      // DeepSeek entry: max_tokens, no store.
+      for (const prepared of yield* viaGateway("deepseek-chat", {
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+      })) {
+        expect(prepared.body).toMatchObject({ max_tokens: 20 })
+        expect(prepared.body).not.toHaveProperty("store")
+      }
+    }),
+  )
+
+  it.effect("preserves Gemini thought signatures on parallel tool calls behind a gateway", () =>
+    Effect.gen(function* () {
+      // The gateway route keys provider metadata by its provider id, so a
+      // tool call captured through opencode-go carries its signature under
+      // that key; lowering must replay it opaquely, without rewriting.
+      const gatewayModel = OpenAIChat.route
+        .with({ provider: "opencode-go", endpoint: { baseURL: "https://gateway.test/v1" }, auth: Auth.bearer("test") })
+        .model({ id: "google/gemini-2.5-flash" })
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model: gatewayModel,
+          messages: [
+            Message.user("Weather in Paris and Tokyo?"),
+            Message.assistant([
+              ToolCallPart.make({
+                id: "call_1",
+                name: "lookup",
+                input: { city: "Paris" },
+                providerMetadata: { "opencode-go": { extraContent: { google: { thought_signature: "sig_1" } } } },
+              }),
+              ToolCallPart.make({ id: "call_2", name: "lookup", input: { city: "Tokyo" } }),
+            ]),
+            Message.tool({ id: "call_1", name: "lookup", result: "Sunny" }),
+            Message.tool({ id: "call_2", name: "lookup", result: "Rainy" }),
+          ],
+        }),
+      )
+
+      const assistant = prepared.body.messages[1]
+      expect(assistant?.role === "assistant" ? assistant.tool_calls?.[0]?.extra_content : undefined).toEqual({
+        google: { thought_signature: "sig_1" },
+      })
     }),
   )
 

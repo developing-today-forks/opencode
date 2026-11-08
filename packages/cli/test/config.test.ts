@@ -1,9 +1,11 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { Flock } from "@opencode/util/flock"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Effect, FileSystem, Option, Schema } from "effect"
 import { expect, test } from "bun:test"
 import { parse } from "jsonc-parser"
+import fs from "node:fs/promises"
 import path from "path"
 import { Config } from "../src/config"
 import { tmpdir } from "./fixture/tmpdir"
@@ -13,6 +15,7 @@ function run<A, E>(directory: string, effect: Effect.Effect<A, E, Config.Service
     effect.pipe(
       Effect.provide(Config.layer),
       Effect.provide(Global.layerWith({ config: directory, state: directory })),
+      Effect.provide(FSUtil.layer),
       Effect.provide(NodeFileSystem.layer),
     ),
   )
@@ -358,6 +361,51 @@ test("migrates copy_on_select in an existing cli.json", async () => {
   }
 })
 
+test("migration of a symlinked cli.json updates the target and preserves the symlink", async () => {
+  await using directory = await tmpdir()
+  const configDir = path.join(directory.path, "config")
+  const target = path.join(directory.path, "dotfiles", "cli.json")
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await fs.writeFile(target, JSON.stringify({ terminal: { copy_on_select: true } }))
+  await fs.mkdir(configDir, { recursive: true })
+  const file = path.join(configDir, "cli.json")
+  await fs.symlink(target, file)
+
+  const config = await run(
+    configDir,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      return yield* service.get()
+    }),
+  )
+
+  expect(config.terminal).toEqual({ copy: "select" })
+  expect((await fs.lstat(file)).isSymbolicLink()).toBe(true)
+  const text = await fs.readFile(target, "utf8")
+  expect(text).not.toContain("copy_on_select")
+  expect(parse(text).terminal).toEqual({ copy: "select" })
+})
+
+test("migration keeps a read-only cli.json read-only", async () => {
+  await using directory = await tmpdir()
+  const file = path.join(directory.path, "cli.json")
+  await Bun.write(file, JSON.stringify({ terminal: { copy_on_select: false } }))
+  await fs.chmod(file, 0o400)
+
+  const config = await run(
+    directory.path,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      return yield* service.get()
+    }),
+  )
+
+  expect(config.terminal).toEqual({ copy: "manual" })
+  const text = await Bun.file(file).text()
+  expect(text).not.toContain("copy_on_select")
+  if (process.platform !== "win32") expect((await fs.stat(file)).mode & 0o777).toBe(0o400)
+})
+
 test("uses migrated keybinds when persistence fails", async () => {
   await using directory = await tmpdir()
   const file = path.join(directory.path, "cli.json")
@@ -378,6 +426,7 @@ test("uses migrated keybinds when persistence fails", async () => {
     }).pipe(
       Effect.provide(Config.layer),
       Effect.provide(Global.layerWith({ config: directory.path, state: directory.path })),
+      Effect.provide(FSUtil.layer),
       Effect.provideService(FileSystem.FileSystem, fs),
     ),
   )
@@ -474,6 +523,7 @@ test("config reads remain interruptible while waiting for the file lock", async 
       Config.Service.pipe(
         Effect.provide(Config.layer),
         Effect.provide(Global.layerWith({ config: directory.path, state: directory.path })),
+        Effect.provide(FSUtil.layer),
         Effect.provide(NodeFileSystem.layer),
       ),
     )

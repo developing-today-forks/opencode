@@ -29,6 +29,11 @@ export type Definition = {
  * config agent plugin applies them: later documents override earlier fields.
  * Agents defined only by plugins carry no definition here and are treated as
  * unrestricted by the definition layer; session policy still governs them.
+ *
+ * Callers feed this directory-expanded entries (ConfigAgentDocuments, via
+ * GovernanceConfig and the SubagentDepth callers), so an agent defined only
+ * in a Markdown file under a config directory is visible here with the same
+ * fields the config agent plugin applies to the agent editor (#1107).
  */
 export function agentDefinitions(entries: readonly Entry[]): Map<string, Definition> {
   const definitions = new Map<string, Definition>()
@@ -175,18 +180,28 @@ export type Catalog = ReadonlyMap<string, ReadonlyMap<string, CatalogModel>>
  * The target SET mirrors the runtime too (#530): a target whose `until` has
  * passed is dropped, a target naming a `*` pattern expands to every matching
  * catalog model via the shared `ModelRouteExpansion.matchingModels` the
- * plugin runs, and catalog models that are disabled are dropped. Per leaf,
+ * plugin runs, a provider-route target expands over its configured concrete
+ * members, a door-set target (provider `*`, #637) expands over every catalog
+ * door via the shared `matchingProviders` minus its exclusions, and catalog
+ * models that are disabled are dropped. Per leaf,
  * the effective variant is filtered the way the plugin expansion filters it
- * before the resolver runs: a fixed (selection/inherited) variant the leaf
- * does not offer drops the leaf; a requested variant runs at its remap only
- * when the leaf offers the remapped variant, else at the requested variant
- * when the leaf offers it, else bare; a `defaultVariant` applies only when
- * the leaf offers it. Expansion needs the catalog: when none is supplied
+ * before the resolver runs: a pinned or requested variant runs at the
+ * target's remap of it when the leaf offers the remapped variant, else at
+ * the variant itself when the leaf offers it, else the leaf is dropped
+ * (#869); a `defaultVariant` applies only when the leaf offers it. Expansion needs the catalog: when none is supplied
  * (or the provider is absent from it), a pattern target is judged as its
  * literal ref and a concrete target is judged as named, exactly as
  * governance behaved before it had a catalog. A concrete target the catalog
  * does not hold is still judged as named (fail-closed: an allowed list can
  * reject it), where the plugin would drop it. */
+/** A variants-remap lookup with own-property semantics: a requested variant
+ * named after an Object.prototype member (e.g. "constructor") is unremapped
+ * unless the target's variants record defines it itself (#831). */
+const ownVariant = (
+  variants: Readonly<Record<string, string>> | undefined,
+  requested: string,
+): string | undefined => (variants && Object.hasOwn(variants, requested) ? variants[requested] : undefined)
+
 function routeTargets(
   entries: readonly Entry[],
   routeID: string,
@@ -196,8 +211,13 @@ function routeTargets(
 ): Model.Ref[] {
   if (seen.has(routeID)) return []
   seen.add(routeID)
-  const routes = Config.latest(entries, "experimental")?.model_routes
-  const route = routes?.[routeID]
+  const configuredRoutes = Config.latest(entries, "experimental")?.routes
+  const routes = configuredRoutes?.models
+  const providerRoutes = configuredRoutes?.providers
+  // Own-property lookup: a route named after an Object.prototype member
+  // (e.g. "constructor") must read as an unknown route, not the inherited
+  // member (#831).
+  const route = routes && Object.hasOwn(routes, routeID) ? routes[routeID] : undefined
   if (route === undefined) return []
   const requested = requestedVariant === "default" ? undefined : requestedVariant
   return route.targets.flatMap((target) => {
@@ -216,7 +236,7 @@ function routeTargets(
         ? object?.defaultVariant === undefined
           ? undefined
           : Model.VariantID.make(object.defaultVariant)
-        : Model.VariantID.make(object?.variants?.[requested] ?? requested))
+        : Model.VariantID.make(ownVariant(object?.variants, requested) ?? requested))
     const literal = {
       id: Model.ID.make(selection.model),
       providerID: Provider.ID.make(selection.providerID),
@@ -225,26 +245,36 @@ function routeTargets(
     const models = catalog?.get(selection.providerID)
     // The variant a known catalog leaf actually runs, or undefined when the
     // leaf is dropped (disabled, or its fixed variant is not offered).
-    const leaf = (id: string, model: CatalogModel): Model.Ref[] => {
+    const leaf = (
+      providerID: string,
+      id: string,
+      model: CatalogModel,
+      doorModels?: ReadonlyMap<string, CatalogModel>,
+    ): Model.Ref[] => {
       if (!model.enabled) return []
       const offers = (variant: string) => model.variants.some((item) => item.id === variant)
-      if (selectionVariant !== undefined)
-        return offers(selectionVariant) ? [{ ...literal, id: Model.ID.make(id), variant: selectionVariant }] : []
-      if (requested !== undefined) {
-        const remapped = object?.variants?.[requested]
+      // Runtime producibility (#985): a variant also runs when the door's catalog
+      // exposes it as a suffixed model id (`${id}-${variant}`), as proxy catalogs
+      // enumerate effort levels that way and carry no variant list for them.
+      const producible = (variant: string) => offers(variant) || (doorModels?.has(`${id}-${variant}`) ?? false)
+      // A pinned or route-requested variant resolves through the target's remap
+      // table exactly as the plugin expansion resolves it (#869): the remapped
+      // variant when the leaf offers it, else the variant itself when offered,
+      // else the leaf is pruned — governance must not judge a variant that never
+      // runs, nor keep a leaf the plugin drops. The remap read itself is
+      // own-property only (#831's ownVariant).
+      const wanted = selectionVariant ?? requested
+      if (wanted !== undefined) {
+        const remapped = ownVariant(object?.variants, wanted)
         const variant =
-          remapped !== undefined && offers(remapped)
+          remapped !== undefined && producible(remapped)
             ? Model.VariantID.make(remapped)
-            : offers(requested)
-              ? requested
+            : producible(wanted)
+              ? wanted
               : undefined
-        return [
-          {
-            id: Model.ID.make(id),
-            providerID: Provider.ID.make(selection.providerID),
-            ...(variant === undefined ? {} : { variant }),
-          },
-        ]
+        return variant === undefined
+          ? []
+          : [{ id: Model.ID.make(id), providerID: Provider.ID.make(providerID), variant }]
       }
       const variant =
         object?.defaultVariant !== undefined && offers(object.defaultVariant)
@@ -253,17 +283,57 @@ function routeTargets(
       return [
         {
           id: Model.ID.make(id),
-          providerID: Provider.ID.make(selection.providerID),
+          providerID: Provider.ID.make(providerID),
           ...(variant === undefined ? {} : { variant }),
         },
       ]
     }
+    // Provider routes share the target's provider namespace with concrete providers:
+    // a catalog provider always wins, just as it does during runtime expansion.
+    if (catalog !== undefined && !catalog.has(selection.providerID)) {
+      const providerRoute =
+        providerRoutes && Object.hasOwn(providerRoutes, selection.providerID)
+          ? providerRoutes[selection.providerID]
+          : undefined
+      if (providerRoute !== undefined) {
+        // The runtime drops a provider route whose id names a configured model
+        // route (configuredProviderRoutes in model-routes.ts): the declaration is
+        // ignored, so the target is dropped with it instead of being expanded
+        // over members runtime would never reach.
+        if (routes && Object.hasOwn(routes, selection.providerID)) return []
+        return providerRoute.providers.flatMap((providerID) => {
+          const memberModels = catalog.get(providerID)
+          if (memberModels === undefined) return []
+          if (!selection.model.includes("*")) {
+            const known = memberModels.get(selection.model)
+            return known === undefined ? [] : leaf(providerID, selection.model, known, memberModels)
+          }
+          return ModelRouteExpansion.matchingModels(selection.model, memberModels).flatMap(([id, model]) =>
+            leaf(providerID, id, model, memberModels),
+          )
+        })
+      }
+    }
+    // A door-set target (`*/model`, #637) is judged over every catalog door
+    // except its exclusions, via the same shared helper the plugin expands
+    // with; without a catalog it is judged literally, as patterns are.
+    if (selection.providerID === "*") {
+      if (catalog === undefined) return [literal]
+      return ModelRouteExpansion.matchingProviders(catalog, object?.exclude ?? [], "opencode-route").flatMap(
+        ([providerID, doorModels]) =>
+          ModelRouteExpansion.matchingModels(selection.model, doorModels).flatMap(([id, model]) =>
+            leaf(providerID, id, model, doorModels),
+          ),
+      )
+    }
     if (!selection.model.includes("*")) {
       const known = models?.get(selection.model)
-      return known === undefined ? [literal] : leaf(selection.model, known)
+      return known === undefined ? [literal] : leaf(selection.providerID, selection.model, known, models)
     }
     if (models === undefined) return [literal]
-    return ModelRouteExpansion.matchingModels(selection.model, models).flatMap(([id, model]) => leaf(id, model))
+    return ModelRouteExpansion.matchingModels(selection.model, models).flatMap(([id, model]) =>
+      leaf(selection.providerID, id, model, models),
+    )
   })
 }
 
@@ -276,6 +346,22 @@ export type Input = {
   model?: Model.Ref
   /** The per-call override from the launching tool, when one was supplied. */
   override?: SessionSchema.AgentOverride
+}
+
+/**
+ * The model governance judges for `input`, in precedence order: the explicit
+ * choice, the per-call override's model, the session policy's per-agent
+ * override, the child agent's configured default, then the parent's model.
+ * Session creation stores this model on a model-less child so the model that
+ * is checked is the model that runs (#507): the runner otherwise resolves a
+ * model-less session against the global default, which governance never saw.
+ */
+export function checkedModel(entries: readonly Entry[], input: Input): Model.Ref | undefined {
+  const definitions = agentDefinitions(entries)
+  const policyOverride =
+    input.agent === undefined ? undefined : input.parent.subagentPolicy?.agentOverrides?.[input.agent]
+  const definition = input.agent === undefined ? undefined : definitions.get(input.agent)
+  return input.model ?? input.override?.model ?? policyOverride?.model ?? definition?.model ?? input.parent.model
 }
 
 /**
@@ -302,15 +388,20 @@ export const assertAllowed = Effect.fn("ModelGovernance.assertAllowed")(function
   const chain: SessionSchema.Info[] = [input.parent]
   const seen = new Set([input.parent.id])
   let current = input.parent
-  while (current.parentID) {
-    if (seen.has(current.parentID))
-      return yield* new DeniedError({ message: `Session parent cycle: ${current.parentID}` })
-    seen.add(current.parentID)
-    const parentID = current.parentID
+  // A fork is projected top-level (no parentID) but is a child of its source
+  // for governance (spec §6.2): follow the fork link when there is no parent
+  // link, so a fork cannot escape the policies above its source (#505).
+  let governanceParentID = current.parentID ?? current.fork?.sessionID
+  while (governanceParentID) {
+    if (seen.has(governanceParentID))
+      return yield* new DeniedError({ message: `Session parent cycle: ${governanceParentID}` })
+    seen.add(governanceParentID)
+    const parentID = governanceParentID
     current = yield* sessions
       .get(parentID)
       .pipe(Effect.mapError(() => new DeniedError({ message: `Parent session not found: ${parentID}` })))
     chain.push(current)
+    governanceParentID = current.parentID ?? current.fork?.sessionID
   }
 
   // Layer 1: ancestor session policies, hard at every level.
@@ -364,12 +455,7 @@ export const assertAllowed = Effect.fn("ModelGovernance.assertAllowed")(function
     excluded = unionExcluded(excluded, overridden.excluded, layer)
   }
 
-  const model =
-    input.model ??
-    input.override?.model ??
-    policyOverride?.model ??
-    definition?.model ??
-    input.parent.model
+  const model = checkedModel(entries, input)
   if (model === undefined) return
 
   const targets =

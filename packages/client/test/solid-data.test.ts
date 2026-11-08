@@ -99,6 +99,54 @@ test("counts every subagent page in a root session's cost", async () => {
   }
 })
 
+test("registers fork descendants in the source family and includes their cost", async () => {
+  const sessions: Record<string, SessionInfo> = {
+    ses_root: { ...session(0), id: "ses_root", cost: 0.5 },
+    ses_child: { ...session(0), id: "ses_child", parentID: "ses_root", cost: 1 },
+    ses_fork: {
+      ...session(0),
+      id: "ses_fork",
+      fork: { sessionID: "ses_child", boundary: { type: "through", messageID: "msg_boundary" } },
+      cost: 2,
+    },
+    ses_grandchild: { ...session(0), id: "ses_grandchild", parentID: "ses_fork", cost: 3 },
+  }
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      const sessionID = url.pathname.match(/^\/api\/session\/(.+)$/)?.[1]
+      if (sessionID) return Response.json({ data: sessions[sessionID] })
+
+      const parentID = url.searchParams.get("parentID")
+      return Response.json({
+        data: Object.values(sessions).filter((item) => item.parentID === parentID),
+        cursor: {},
+      })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+
+  try {
+    await setup.data.session.sync("ses_root", { children: true })
+    await setup.data.session.sync("ses_fork", { children: true })
+
+    expect(setup.data.session.root("ses_grandchild")).toBe("ses_root")
+    expect(setup.data.session.family("ses_root").toSorted()).toEqual([
+      "ses_child",
+      "ses_fork",
+      "ses_grandchild",
+      "ses_root",
+    ])
+    expect(setup.data.session.cost("ses_root")).toBe(6.5)
+  } finally {
+    setup.dispose()
+  }
+})
+
 test("discovers nested subagents at any depth, publishing each listing as it resolves", async () => {
   const parents: Record<string, string> = {
     ses_a: "ses_root",
@@ -319,6 +367,291 @@ test("fills a subagent from discovery while its own read is in flight, and keeps
   }
 })
 
+test("syncing a nested subagent by ID also loads its ancestors (#631)", async () => {
+  const info = (id: string, parentID?: string): SessionInfo => ({ ...session(0), id, parentID })
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      if (url.pathname === "/api/session/ses_root") return Response.json({ data: info("ses_root") })
+      if (url.pathname === "/api/session/ses_child")
+        return Response.json({ data: info("ses_child", "ses_root") })
+      if (url.pathname === "/api/session/ses_grandchild")
+        return Response.json({ data: info("ses_grandchild", "ses_child") })
+      if (url.pathname === "/api/session/ses_great_grandchild")
+        return Response.json({ data: info("ses_great_grandchild", "ses_grandchild") })
+      if (url.pathname === "/api/session/ses_grandchild_missing")
+        return Response.json({ data: info("ses_grandchild_missing", "ses_child") })
+      // The session list (and every children listing) only ever surfaces the root,
+      // matching a subagent chain that has not been loaded into the list cache yet.
+      return Response.json({ data: [info("ses_root")], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+
+  try {
+    // A plain sync leaves the chain unloaded: callers that walk ancestors themselves
+    // (the TUI's family discovery, with its own retry backoff) keep their semantics.
+    await setup.data.session.sync("ses_great_grandchild")
+    expect(setup.data.session.get("ses_grandchild")).toBeUndefined()
+    expect(setup.data.session.get("ses_child")).toBeUndefined()
+
+    await setup.data.session.sync("ses_great_grandchild", { children: true })
+    expect(setup.data.session.get("ses_grandchild")?.parentID).toBe("ses_child")
+    expect(setup.data.session.get("ses_child")?.parentID).toBe("ses_root")
+    expect(setup.data.session.get("ses_root")?.id).toBe("ses_root")
+    expect(setup.data.session.root("ses_great_grandchild")).toBe("ses_root")
+    expect(setup.data.session.family("ses_great_grandchild").toSorted()).toEqual([
+      "ses_child",
+      "ses_grandchild",
+      "ses_great_grandchild",
+      "ses_root",
+    ])
+  } finally {
+    setup.dispose()
+  }
+})
+
+test("retries the ancestor walk on the next sync after a parent read failed", async () => {
+  const failures = { root: 1 }
+  const rootGets: string[] = []
+  const info = (id: string, parentID?: string): SessionInfo => ({ ...session(0), id, parentID })
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      if (url.pathname === "/api/session/ses_grandchild")
+        return Response.json({ data: info("ses_grandchild", "ses_child") })
+      if (url.pathname === "/api/session/ses_child") return Response.json({ data: info("ses_child", "ses_root") })
+      if (url.pathname === "/api/session/ses_root") {
+        rootGets.push("get")
+        if (failures.root > 0) {
+          failures.root--
+          return new Response(null, { status: 500 })
+        }
+        return Response.json({ data: info("ses_root") })
+      }
+      // No children anywhere: the family is just the ancestor chain.
+      return Response.json({ data: [], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+
+  try {
+    await setup.data.session.sync("ses_grandchild", { children: true })
+    expect(setup.data.session.get("ses_root")).toBeUndefined()
+    // The root resolves by parent link but its info is still missing, so the
+    // family groups tentatively without it.
+    expect(setup.data.session.root("ses_grandchild")).toBe("ses_root")
+    expect(setup.data.session.family("ses_grandchild").toSorted()).toEqual(["ses_child", "ses_grandchild"])
+
+    await setup.data.session.sync("ses_grandchild", { children: true })
+    expect(rootGets).toHaveLength(2)
+    expect(setup.data.session.get("ses_root")?.id).toBe("ses_root")
+    expect(setup.data.session.root("ses_grandchild")).toBe("ses_root")
+    expect(setup.data.session.family("ses_grandchild").toSorted()).toEqual([
+      "ses_child",
+      "ses_grandchild",
+      "ses_root",
+    ])
+  } finally {
+    setup.dispose()
+  }
+})
+
+test("family sync does not overwrite an ancestor updated during the walk (#1038)", async () => {
+  const walk = Promise.withResolvers<void>()
+  const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
+  let parentReads = 0
+  const info = (id: string, parentID?: string, title?: string): SessionInfo => ({ ...session(0), id, parentID, title })
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      if (url.pathname === "/api/session/ses_child") return Response.json({ data: info("ses_child", "ses_parent") })
+      if (url.pathname === "/api/session/ses_grandparent") return Response.json({ data: info("ses_grandparent") })
+      if (url.pathname === "/api/session/ses_parent") {
+        parentReads++
+        // The read the walk makes is held open; a read the rename refresh makes
+        // returns the same snapshot and the event applies the new title after.
+        if (parentReads === 1) await walk.promise
+        return Response.json({ data: info("ses_parent", "ses_grandparent", "Walk snapshot title") })
+      }
+      return Response.json({ data: [], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({
+      api: () => api,
+      directory: "/project",
+      event: {
+        on: () => () => {},
+        listen(handler) {
+          listeners.add(handler)
+          return () => listeners.delete(handler)
+        },
+      },
+    }),
+    dispose,
+  }))
+
+  try {
+    const initial = setup.data.session.sync("ses_child", { children: true })
+    await wait(() => parentReads === 1)
+    const event: OpenCodeEvent = {
+      id: "evt_renamed",
+      created: 1,
+      type: "session.renamed",
+      durable: { aggregateID: "ses_parent", seq: 1, version: 1 },
+      data: { sessionID: "ses_parent", title: "Generated title" },
+    }
+    listeners.forEach((listener) => listener({ name: event.type, details: event }))
+    // The rename refresh loads ses_parent and applies the live title while the
+    // family walk is still holding its older snapshot of that ancestor.
+    await wait(() => setup.data.session.get("ses_parent")?.title === "Generated title")
+    walk.resolve()
+    await initial
+
+    expect(setup.data.session.get("ses_parent")?.title).toBe("Generated title")
+    expect(setup.data.session.get("ses_grandparent")?.id).toBe("ses_grandparent")
+  } finally {
+    walk.resolve()
+    setup.dispose()
+  }
+})
+
+test("family sync does not overwrite its target updated during the walk (#1051)", async () => {
+  const walk = Promise.withResolvers<void>()
+  let parentReads = 0
+  let childGets = 0
+  const info = (id: string, parentID: string | undefined, directory: string): SessionInfo => ({
+    ...session(0),
+    id,
+    parentID,
+    location: { directory },
+  })
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      if (url.pathname === "/api/session/ses_child") {
+        childGets++
+        // The family sync's first read sees the old location; every later read
+        // (the concurrent plain sync) sees the moved one.
+        return Response.json({ data: info("ses_child", "ses_parent", childGets === 1 ? "/old" : "/new") })
+      }
+      if (url.pathname === "/api/session/ses_parent") {
+        parentReads++
+        await walk.promise
+        return Response.json({ data: info("ses_parent", undefined, "/project") })
+      }
+      return Response.json({ data: [], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+
+  try {
+    const family = setup.data.session.sync("ses_child", { children: true })
+    await wait(() => parentReads === 1)
+    // A concurrent plain sync (a different sync key than the family sync)
+    // re-reads the moved target and publishes it while the walk is held.
+    await setup.data.session.sync("ses_child")
+    expect(setup.data.session.get("ses_child")?.location.directory).toBe("/new")
+    walk.resolve()
+    await family
+
+    // The family sync's older first-read snapshot must not revert the target,
+    // and the ancestor the walk read is still published.
+    expect(setup.data.session.get("ses_child")?.location.directory).toBe("/new")
+    expect(setup.data.session.get("ses_parent")?.id).toBe("ses_parent")
+  } finally {
+    walk.resolve()
+    setup.dispose()
+  }
+})
+
+test("family sync retries its target when the covering plain sync fails (#1053)", async () => {
+  const walk = Promise.withResolvers<void>()
+  const cover = Promise.withResolvers<void>()
+  let parentReads = 0
+  let childGets = 0
+  const info = (id: string, parentID: string | undefined, directory: string): SessionInfo => ({
+    ...session(0),
+    id,
+    parentID,
+    location: { directory },
+  })
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const url = new URL((input instanceof Request ? input : new Request(input, init)).url)
+      if (url.pathname === "/api/session/ses_child") {
+        childGets++
+        // The first read publishes the pre-walk snapshot; the family sync's read
+        // holds the newer one; the covering plain sync's read is held, then fails.
+        if (childGets === 1) return Response.json({ data: info("ses_child", "ses_parent", "/old") })
+        if (childGets === 2) return Response.json({ data: info("ses_child", "ses_parent", "/mid") })
+        if (childGets === 3) {
+          await cover.promise
+          return new Response(null, { status: 500 })
+        }
+        return Response.json({ data: info("ses_child", "ses_parent", "/mid") })
+      }
+      if (url.pathname === "/api/session/ses_parent") {
+        parentReads++
+        await walk.promise
+        return Response.json({ data: info("ses_parent", undefined, "/project") })
+      }
+      return Response.json({ data: [], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+
+  try {
+    await setup.data.session.sync("ses_child")
+    expect(setup.data.session.get("ses_child")?.location.directory).toBe("/old")
+    setup.data.session.invalidate("ses_child")
+
+    const family = setup.data.session.sync("ses_child", { children: true })
+    await wait(() => parentReads === 1)
+    // A concurrent plain sync (a different sync key than the family sync) starts
+    // its covering read while the walk is held, and is still in flight when the
+    // family sync publishes, so the family sync drops its /mid snapshot.
+    const covering = setup.data.session.sync("ses_child")
+    await wait(() => childGets === 3)
+    walk.resolve()
+    await family
+    expect(setup.data.session.get("ses_child")?.location.directory).toBe("/old")
+
+    // The covering read fails and publishes nothing.
+    cover.resolve()
+    await expect(covering).rejects.toThrow()
+
+    // The family key was not kept, so the next family sync re-reads the target
+    // instead of no-oping on the completed family key, and the target recovers
+    // to the snapshot the failed covering read never replaced.
+    await setup.data.session.sync("ses_child", { children: true })
+    expect(childGets).toBeGreaterThan(3)
+    expect(setup.data.session.get("ses_child")?.location.directory).toBe("/mid")
+  } finally {
+    walk.resolve()
+    cover.resolve()
+    setup.dispose()
+  }
+})
+
 test("lists a branch again on the next sync after its listing failed", async () => {
   const failures = { left: 1 }
   const info = (id: string, parentID?: string): SessionInfo => ({ ...session(0), id, parentID })
@@ -378,8 +711,11 @@ test("lists each session once when parent links form a cycle", async () => {
   try {
     await setup.data.session.sync("ses_x", { children: true })
     expect(setup.data.session.get("ses_y")?.parentID).toBe("ses_x")
+    // The ancestor read for ses_y (#631) is a by-ID get, not a listing: each
+    // session is still listed exactly once, and the cycle still terminates.
     expect(requests.toSorted()).toEqual([
       "/api/session/ses_x?",
+      "/api/session/ses_y?",
       "/api/session?limit=200&order=desc&parentID=ses_x",
       "/api/session?limit=200&order=desc&parentID=ses_y",
     ])
@@ -1288,7 +1624,11 @@ test.each(["success", "failure", "cancel", "cancel-retry", "cancel-page", "join-
           return Response.json({ data: [messages[2], messages[1]], cursor: { next: "oldest" } })
         }
         if (cursor === "oldest") return Response.json({ data: [messages[0]], cursor: { next: "empty" } })
-        expect(init?.signal).toBe(requests.length === 4 ? controller.signal : undefined)
+        // #1385: every request now carries a signal - the caller's composed with the
+        // default deadline via AbortSignal.any - never the caller's signal itself or
+        // undefined. The cancel modes below prove the caller's signal still drives
+        // this gated request: aborting it settles the load.
+        expect(init?.signal).toBeInstanceOf(AbortSignal)
         await release.promise
         if (mode === "failure") return Response.json({ message: "offline" }, { status: 503 })
         return Response.json({ data: [], cursor: {} })

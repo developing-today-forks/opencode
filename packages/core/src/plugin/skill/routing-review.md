@@ -42,11 +42,13 @@ model `opencode-route/<id>`. A category's model can be a pool, and a pool can li
 another pool as a target.
 
 - `selection`: `ordered` (default; the first ready target takes the traffic, and the
-  rest are failover, ranked by effective weight), `round-robin` (new sessions rotate
-  in proportion to weight), or `weighted` (each new session draws a target in
-  proportion to its weight). In every mode a session stays on its target while it
-  works; failover moves it.
-- `weights`: relative ratios per target, default 1.
+  rest are failover, ranked by effective weight), `round-robin` (weights are priority
+  tiers: new sessions rotate evenly inside the top tier, and the next tier is tried
+  only once every target above it has failed), or `weighted` (each new session draws
+  a target in proportion to its weight). In every mode a session stays on its target
+  while it works; failover moves it.
+- `weights`: per target, default 1 — ratios in `weighted` pools, priority tiers in
+  `round-robin` pools, failover rank in `ordered` pools.
 - `health`: `firstTokenTimeoutMs` (default 10000), `maxResponseTimeMs`,
   `minOutputTokensPerSecond`, `sampleWindow` (5), `slowThreshold` (3), `cooldownMs`
   (60000), `quotaCooldownMs` (900000). A target that fails goes on cooldown.
@@ -60,7 +62,8 @@ another pool as a target.
   the ones before it.
 
 A target is left out of a selection for one reason, which `route_stats` reports as
-`excluded`: `cooldown`, `provider-limit`, `user-skip`, `soft-budget`, or
+`excluded`: `cooldown`, `provider-limit`, `user-skip`, `soft-budget`,
+`over-limit` (the request does not fit the target's ceiling), or
 `already-tried` (it already failed in this request).
 
 ### How effective weight is formed
@@ -176,10 +179,17 @@ attempts in 7 days and no category uses it. Retire only after the user confirms.
 ### 3.4 Underused members
 
 Only in `weighted` and `round-robin` pools, compare `takeRate` with `expectedShare`
-over at least 30 draws:
+over at least 30 draws. `expectedShare` follows the pool's own mode: in a `weighted`
+pool it is the member's proportional share of the weights; in a `round-robin` pool
+weights are priority tiers, so the top tier present in a draw splits the expectation
+evenly and every lower tier expects 0 — a lower-tier member that wins nothing is
+serving as failover, exactly as configured, not underused.
 
 - Underused: `takeRate` below half of `expectedShare`, and exclusions on fewer than
-  20% of its offers. Raise its weight by 1.5 to 2 times, or add a time-bound schedule.
+  20% of its offers. In a `weighted` pool, raise its weight by 1.5 to 2 times, or add
+  a time-bound schedule. In a `round-robin` pool only a member of the active tier can
+  be underused this way; the fix is a tier change — raise its weight into (or above)
+  the top tier — not a proportional bump, which leaves it in its tier.
 - Mostly excluded: a health or budget problem, not a weight problem. Read its errors,
   cooldown and budget.
 

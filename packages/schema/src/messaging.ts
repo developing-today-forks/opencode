@@ -47,8 +47,8 @@ export type Order = typeof Order.Type
 export interface Writer extends Schema.Schema.Type<typeof Writer> {}
 export const Writer = Schema.Struct({
   session: Schema.String.annotate({ description: "Session ID or user" }),
-  children: Schema.Boolean.pipe(optional).annotate({ description: "Also allow its descendants" }),
-  ancestors: Schema.Boolean.pipe(optional).annotate({ description: "Also allow its ancestors" }),
+  children: Schema.Boolean.annotate({ description: "Also allow its descendants" }).pipe(optional),
+  ancestors: Schema.Boolean.annotate({ description: "Also allow its ancestors" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Writer" })
 
 export interface Participant extends Schema.Schema.Type<typeof Participant> {}
@@ -57,8 +57,8 @@ export const Participant = Schema.Struct({
   title: Schema.String.pipe(optional),
   reads: NonNegativeInt,
   writes: NonNegativeInt,
-  first: Schema.Number.pipe(optional).annotate({ description: "First read or write, epoch milliseconds" }),
-  last: Schema.Number.pipe(optional).annotate({ description: "Latest read or write, epoch milliseconds" }),
+  first: Schema.Number.annotate({ description: "First read or write, epoch milliseconds" }).pipe(optional),
+  last: Schema.Number.annotate({ description: "Latest read or write, epoch milliseconds" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Participant" })
 
 export interface Window extends Schema.Schema.Type<typeof Window> {}
@@ -74,7 +74,7 @@ export const Topic = Schema.Struct({
   exists: Schema.Boolean.annotate({ description: "Standard topics are listed before first use with exists: false" }),
   kind: Schema.String.annotate({ description: "Standard kind (private, readonly, family, dm, ...) or custom" }),
   preset: Schema.String.pipe(optional),
-  owner: Schema.String.pipe(optional).annotate({ description: "Session the standard topic belongs to" }),
+  owner: Schema.String.annotate({ description: "Session the standard topic belongs to" }).pipe(optional),
   creator: Schema.String.pipe(optional),
   description: Schema.String.pipe(optional),
   mode: WriteMode,
@@ -82,12 +82,12 @@ export const Topic = Schema.Struct({
   policy: Schema.String.annotate({ description: "Effective write rule in words" }),
   messages: NonNegativeInt.annotate({ description: "Latest sequence number" }),
   created: Schema.Number.pipe(optional),
-  last: Schema.Number.pipe(optional).annotate({ description: "Time of the latest message" }),
+  last: Schema.Number.annotate({ description: "Time of the latest message" }).pipe(optional),
   unread: NonNegativeInt.pipe(optional),
   subscribed: Delivery.pipe(optional),
   writersWindow: Window.pipe(optional),
-  readersWindow: Window.pipe(optional).annotate({ description: "Sessions that read but never wrote" }),
-  allowedWindow: Window.pipe(optional).annotate({ description: "Sessions allowed by limited-writer rules" }),
+  readersWindow: Window.annotate({ description: "Sessions that read but never wrote" }).pipe(optional),
+  allowedWindow: Window.annotate({ description: "Sessions allowed by limited-writer rules" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Topic" })
 
 export interface Op extends Schema.Schema.Type<typeof Op> {}
@@ -114,7 +114,7 @@ export const Message = Schema.Struct({
   reply: PositiveInt.pipe(optional),
   hidden: Schema.Boolean.pipe(optional),
   score: Schema.Number.pipe(optional),
-  ops: Schema.Array(Op).pipe(optional).annotate({ description: "Delete and restore operations applied to it" }),
+  ops: Schema.Array(Op).annotate({ description: "Delete and restore operations applied to it" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Message" })
 
 export interface Delivered extends Schema.Schema.Type<typeof Delivered> {}
@@ -125,9 +125,9 @@ export const Delivered = Schema.Struct({
 
 export interface SendInput extends Schema.Schema.Type<typeof SendInput> {}
 export const SendInput = Schema.Struct({
-  as: Schema.String.pipe(optional).annotate({ description: "Writer session ID; defaults to user" }),
+  as: Schema.String.annotate({ description: "Writer session ID; defaults to user" }).pipe(optional),
   topic: Schema.String.pipe(optional),
-  to: Schema.String.pipe(optional).annotate({ description: "Session to message directly" }),
+  to: Schema.String.annotate({ description: "Session to message directly" }).pipe(optional),
   text: Schema.String,
   type: Schema.String.pipe(optional),
   meta: Schema.Record(Schema.String, Schema.Json).pipe(optional),
@@ -150,44 +150,44 @@ export const UserInput = Schema.Struct({
   as: Schema.String,
   text: Schema.String,
   title: Schema.String.pipe(optional),
-  root: Schema.Literals(["hidden", "visible", "wake"]).pipe(optional).annotate({
+  root: Schema.Literals(["hidden", "visible", "wake"]).annotate({
     description: "Whether the root session sees the message: hidden (user only), visible, or wake (visible and run)",
-  }),
+  }).pipe(optional),
 }).annotate({ identifier: "Messaging.UserInput" })
 
 export interface Query extends Schema.Schema.Type<typeof Query> {}
 export const Query = Schema.Struct({
-  as: Schema.String.pipe(optional).annotate({ description: "Viewer session ID; defaults to user" }),
-  topics: Schema.Array(Schema.String).pipe(optional).annotate({ description: "Topics to read; omit to search all" }),
+  as: Schema.String.annotate({ description: "Viewer session ID; defaults to user" }).pipe(optional),
+  topics: Schema.Array(Schema.String).annotate({ description: "Topics to read; omit to search all" }).pipe(optional),
   query: Schema.String.pipe(optional),
   match: MatchMode.pipe(optional),
-  from: Schema.Array(Schema.String).pipe(optional).annotate({ description: "Writer session-set expressions" }),
+  from: Schema.Array(Schema.String).annotate({ description: "Writer session-set expressions" }).pipe(optional),
   types: Schema.Array(Schema.String).pipe(optional),
   kinds: Schema.Array(Schema.String).pipe(optional),
-  since: Schema.String.pipe(optional).annotate({ description: "ISO time, relative age such as 2h or 3d, or a bare epoch (10 digits = seconds, 13 digits = milliseconds)" }),
+  since: Schema.String.annotate({ description: "ISO time, relative age such as 2h or 3d, or a bare epoch (10 digits = seconds, 13 digits = milliseconds)" }).pipe(optional),
   until: Schema.String.pipe(optional),
-  after: NonNegativeInt.pipe(optional).annotate({ description: "Only sequence numbers greater than this" }),
-  before: PositiveInt.pipe(optional).annotate({ description: "Only sequence numbers less than this" }),
+  after: NonNegativeInt.annotate({ description: "Only sequence numbers greater than this" }).pipe(optional),
+  before: PositiveInt.annotate({ description: "Only sequence numbers less than this" }).pipe(optional),
   hidden: HiddenMode.pipe(optional),
-  hiddenBy: Schema.Array(Schema.String).pipe(optional).annotate({
+  hiddenBy: Schema.Array(Schema.String).annotate({
     description: "Re-include only hidden messages hidden by these sessions (session-set expressions)",
-  }),
-  hiddenFrom: Schema.Array(Schema.String).pipe(optional).annotate({
+  }).pipe(optional),
+  hiddenFrom: Schema.Array(Schema.String).annotate({
     description: "Re-include only hidden messages written by these sessions (session-set expressions)",
-  }),
-  hiddenSince: Schema.String.pipe(optional).annotate({ description: "Re-include only messages hidden since then" }),
-  hiddenUntil: Schema.String.pipe(optional).annotate({ description: "Re-include only messages hidden until then" }),
+  }).pipe(optional),
+  hiddenSince: Schema.String.annotate({ description: "Re-include only messages hidden since then" }).pipe(optional),
+  hiddenUntil: Schema.String.annotate({ description: "Re-include only messages hidden until then" }).pipe(optional),
   unread: Schema.Boolean.pipe(optional),
-  inbox: Schema.Boolean.pipe(optional).annotate({
+  inbox: Schema.Boolean.annotate({
     description: "Only messages addressed to the person: those written to sessions' user topics",
-  }),
+  }).pipe(optional),
   limit: PositiveInt.pipe(optional),
   order: Order.pipe(optional),
-  markRead: Schema.Boolean.pipe(optional).annotate({
+  markRead: Schema.Boolean.annotate({
     description:
       "Advance the viewer's read position; defaults to true for a session's plain reads, false for searches and filtered reads",
-  }),
-  wait: NonNegativeInt.pipe(optional).annotate({ description: "Seconds to wait for a first unread message" }),
+  }).pipe(optional),
+  wait: NonNegativeInt.annotate({ description: "Seconds to wait for a first unread message" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Query" })
 
 export interface QueryResult extends Schema.Schema.Type<typeof QueryResult> {}
@@ -211,11 +211,11 @@ export const VisibilityInput = Schema.Struct({
   topic: Schema.String,
   action: Schema.Literals(["hide", "restore"]),
   seqs: Schema.Array(PositiveInt)
-    .pipe(optional)
-    .annotate({ description: "Messages to change; omit to set the default" }),
-  for: Schema.Array(Schema.String).pipe(optional).annotate({
+    .annotate({ description: "Messages to change; omit to set the default" })
+    .pipe(optional),
+  for: Schema.Array(Schema.String).annotate({
     description: "Viewers: session-set expressions or * for everyone; defaults to the actor",
-  }),
+  }).pipe(optional),
   reason: Schema.String.pipe(optional),
 }).annotate({ identifier: "Messaging.VisibilityInput" })
 
@@ -249,23 +249,23 @@ export interface TopicInput extends Schema.Schema.Type<typeof TopicInput> {}
 export const TopicInput = Schema.Struct({
   as: Schema.String.pipe(optional),
   topic: Schema.String,
-  expand: NonNegativeInt.pipe(optional).annotate({ description: "Show the first and latest N writers and readers" }),
+  expand: NonNegativeInt.annotate({ description: "Show the first and latest N writers and readers" }).pipe(optional),
 }).annotate({ identifier: "Messaging.TopicInput" })
 
 export interface TopicsInput extends Schema.Schema.Type<typeof TopicsInput> {}
 export const TopicsInput = Schema.Struct({
   as: Schema.String.pipe(optional),
   topics: Schema.Array(Schema.String).pipe(optional),
-  sessions: Schema.Array(Schema.String).pipe(optional).annotate({ description: "Topics these sessions read or wrote" }),
+  sessions: Schema.Array(Schema.String).annotate({ description: "Topics these sessions read or wrote" }).pipe(optional),
   role: Schema.Literals(["any", "reader", "writer", "subscriber"]).pipe(optional),
   kinds: Schema.Array(Schema.String).pipe(optional),
   search: Schema.String.pipe(optional),
-  standard: Schema.Boolean.pipe(optional).annotate({ description: "Include the actor's standard topics" }),
+  standard: Schema.Boolean.annotate({ description: "Include the actor's standard topics" }).pipe(optional),
   sort: Schema.Literals(["created", "last"]).pipe(optional),
   order: Order.pipe(optional),
   limit: PositiveInt.pipe(optional),
   offset: NonNegativeInt.pipe(optional),
-  expand: NonNegativeInt.pipe(optional).annotate({ description: "Show the first and latest N writers and readers" }),
+  expand: NonNegativeInt.annotate({ description: "Show the first and latest N writers and readers" }).pipe(optional),
 }).annotate({ identifier: "Messaging.TopicsInput" })
 
 export interface TopicList extends Schema.Schema.Type<typeof TopicList> {}
@@ -316,7 +316,7 @@ export const SessionNode = Schema.Struct({
   directory: Schema.String,
   status: Schema.Literals(["running", "idle"]),
   project: Schema.String.pipe(optional),
-  original: Schema.String.pipe(optional).annotate({ description: "Directory at creation, when moved since" }),
+  original: Schema.String.annotate({ description: "Directory at creation, when moved since" }).pipe(optional),
   created: Schema.Number.pipe(optional),
   updated: Schema.Number.pipe(optional),
   outcome: Schema.String.pipe(optional),
@@ -325,7 +325,7 @@ export const SessionNode = Schema.Struct({
   messages: NonNegativeInt.pipe(optional),
   cost: Schema.Number.pipe(optional),
   tokens: NonNegativeInt.pipe(optional),
-  topics: NonNegativeInt.pipe(optional).annotate({ description: "Topics it read or wrote" }),
+  topics: NonNegativeInt.annotate({ description: "Topics it read or wrote" }).pipe(optional),
   childWindow: ChildWindow.pipe(optional),
 }).annotate({ identifier: "Messaging.SessionNode" })
 
@@ -334,7 +334,7 @@ export const ChainInput = Schema.Struct({
   session: Schema.String,
   depth: Schema.Literals(["self", "parent", "all"]).pipe(optional),
   detail: Schema.Literals(["brief", "full"]).pipe(optional),
-  expand: NonNegativeInt.pipe(optional).annotate({ description: "Show the first and latest N children of each" }),
+  expand: NonNegativeInt.annotate({ description: "Show the first and latest N children of each" }).pipe(optional),
 }).annotate({ identifier: "Messaging.ChainInput" })
 
 export interface Chain extends Schema.Schema.Type<typeof Chain> {}
@@ -347,9 +347,9 @@ export const Chain = Schema.Struct({
 export interface SessionsInput extends Schema.Schema.Type<typeof SessionsInput> {}
 export const SessionsInput = Schema.Struct({
   as: Schema.String.pipe(optional),
-  ids: Schema.Array(Schema.String).pipe(optional).annotate({ description: "Session-set expressions" }),
-  parent: Schema.String.pipe(optional).annotate({ description: "Parent session ID, or none for root sessions" }),
-  ancestor: Schema.String.pipe(optional).annotate({ description: "Only descendants of this session" }),
+  ids: Schema.Array(Schema.String).annotate({ description: "Session-set expressions" }).pipe(optional),
+  parent: Schema.String.annotate({ description: "Parent session ID, or none for root sessions" }).pipe(optional),
+  ancestor: Schema.String.annotate({ description: "Only descendants of this session" }).pipe(optional),
   project: Schema.String.pipe(optional),
   directory: Schema.String.pipe(optional),
   agent: Schema.String.pipe(optional),
@@ -362,7 +362,7 @@ export const SessionsInput = Schema.Struct({
   limit: PositiveInt.pipe(optional),
   offset: NonNegativeInt.pipe(optional),
   detail: Schema.Literals(["brief", "full"]).pipe(optional),
-  expand: NonNegativeInt.pipe(optional).annotate({ description: "Show the first and latest N children of each" }),
+  expand: NonNegativeInt.annotate({ description: "Show the first and latest N children of each" }).pipe(optional),
 }).annotate({ identifier: "Messaging.SessionsInput" })
 
 export interface SessionList extends Schema.Schema.Type<typeof SessionList> {}
@@ -381,15 +381,15 @@ export const LogInput = Schema.Struct({
   include: Schema.Array(LogPart).pipe(optional),
   query: Schema.String.pipe(optional),
   match: MatchMode.pipe(optional),
-  context: NonNegativeInt.pipe(optional).annotate({ description: "Entries of context around grep matches" }),
-  scope: Schema.Literals(["all", "context"]).pipe(optional).annotate({
+  context: NonNegativeInt.annotate({ description: "Entries of context around grep matches" }).pipe(optional),
+  scope: Schema.Literals(["all", "context"]).annotate({
     description: "all: the full transcript. context: only what the model currently sees (after the last compaction)",
-  }),
+  }).pipe(optional),
   since: Schema.String.pipe(optional),
   until: Schema.String.pipe(optional),
   limit: PositiveInt.pipe(optional),
   offset: NonNegativeInt.pipe(optional),
-  chars: PositiveInt.pipe(optional).annotate({ description: "Maximum characters per entry" }),
+  chars: PositiveInt.annotate({ description: "Maximum characters per entry" }).pipe(optional),
 }).annotate({ identifier: "Messaging.LogInput" })
 
 export interface LogEntry extends Schema.Schema.Type<typeof LogEntry> {}
@@ -401,7 +401,7 @@ export const LogEntry = Schema.Struct({
   time: Schema.Number,
   text: Schema.String,
   tool: Schema.String.pipe(optional),
-  match: Schema.Boolean.pipe(optional).annotate({ description: "False for context entries around a match" }),
+  match: Schema.Boolean.annotate({ description: "False for context entries around a match" }).pipe(optional),
   score: Schema.Number.pipe(optional),
 }).annotate({ identifier: "Messaging.LogEntry" })
 
@@ -421,7 +421,7 @@ export const Var = Schema.Struct({
   description: Schema.String,
   template: Schema.String.pipe(optional),
   value: Schema.String.pipe(optional),
-  scope: Schema.String.pipe(optional).annotate({ description: "Where a custom variable is set" }),
+  scope: Schema.String.annotate({ description: "Where a custom variable is set" }).pipe(optional),
 }).annotate({ identifier: "Messaging.Var" })
 
 export interface Preset extends Schema.Schema.Type<typeof Preset> {}
@@ -437,7 +437,7 @@ export interface VarsInput extends Schema.Schema.Type<typeof VarsInput> {}
 export const VarsInput = Schema.Struct({
   as: Schema.String.pipe(optional),
   values: Schema.Boolean.pipe(optional),
-  render: Schema.String.pipe(optional).annotate({ description: "Template to render" }),
+  render: Schema.String.annotate({ description: "Template to render" }).pipe(optional),
 }).annotate({ identifier: "Messaging.VarsInput" })
 
 export interface Vars extends Schema.Schema.Type<typeof Vars> {}
@@ -450,11 +450,11 @@ export const Vars = Schema.Struct({
 export interface SetVarInput extends Schema.Schema.Type<typeof SetVarInput> {}
 export const SetVarInput = Schema.Struct({
   as: Schema.String.pipe(optional),
-  scope: Schema.String.pipe(optional).annotate({
+  scope: Schema.String.annotate({
     description: "Session ID (inherited by its descendants), self, or global; defaults to self",
-  }),
+  }).pipe(optional),
   name: Schema.String,
-  value: Schema.String.pipe(optional).annotate({ description: "Omit to remove the variable" }),
+  value: Schema.String.annotate({ description: "Omit to remove the variable" }).pipe(optional),
 }).annotate({ identifier: "Messaging.SetVarInput" })
 
 export const ModelTier = Schema.Literals(["tiny", "default", "step-up", "top"]).annotate({
@@ -476,8 +476,8 @@ export const ModelStatus = Schema.Struct({
   model: Schema.String.pipe(optional),
   dimensions: PositiveInt.pipe(optional),
   path: Schema.String.pipe(optional),
-  source: Schema.String.pipe(optional).annotate({ description: "Download URL, local path, or remote endpoint" }),
-  server: Schema.String.pipe(optional).annotate({ description: "llama-server executable" }),
+  source: Schema.String.annotate({ description: "Download URL, local path, or remote endpoint" }).pipe(optional),
+  server: Schema.String.annotate({ description: "llama-server executable" }).pipe(optional),
   endpoint: Schema.String.pipe(optional),
   remote: Schema.Boolean.pipe(optional),
   progress: Schema.Array(ModelProgress).pipe(optional),
@@ -497,10 +497,10 @@ export const ModelStatus = Schema.Struct({
 
 export interface ModelInput extends Schema.Schema.Type<typeof ModelInput> {}
 export const ModelInput = Schema.Struct({
-  tier: Schema.String.pipe(optional).annotate({ description: "tiny, default, step-up, top, or off" }),
-  url: Schema.String.pipe(optional).annotate({ description: "GGUF download URL overriding the tier" }),
-  path: Schema.String.pipe(optional).annotate({ description: "Existing local GGUF file overriding the tier" }),
-  start: Schema.Boolean.pipe(optional).annotate({ description: "Start downloading and serving now" }),
+  tier: Schema.String.annotate({ description: "tiny, default, step-up, top, or off" }).pipe(optional),
+  url: Schema.String.annotate({ description: "GGUF download URL overriding the tier" }).pipe(optional),
+  path: Schema.String.annotate({ description: "Existing local GGUF file overriding the tier" }).pipe(optional),
+  start: Schema.Boolean.annotate({ description: "Start downloading and serving now" }).pipe(optional),
 }).annotate({ identifier: "Messaging.ModelInput" })
 
 const Created = ephemeral({
@@ -513,7 +513,7 @@ const Created = ephemeral({
     writer: Schema.String,
     time: Schema.Number,
     preview: Schema.String,
-    inbox: Schema.Boolean.pipe(optional).annotate({ description: "Addressed to the person: written to a user topic" }),
+    inbox: Schema.Boolean.annotate({ description: "Addressed to the person: written to a user topic" }).pipe(optional),
   },
 })
 

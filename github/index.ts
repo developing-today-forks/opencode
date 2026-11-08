@@ -10,6 +10,51 @@ import { createOpencodeClient } from "@opencode-ai/sdk"
 import { spawn } from "node:child_process"
 import { setTimeout as sleep } from "node:timers/promises"
 
+/** Outbound-call bounds for the action's own fetches (#1436): every fetch
+ * carries a deadline and every response body is read through a byte cap,
+ * so a stalled endpoint hangs the run only up to the deadline and a
+ * commenter-supplied attachment cannot buffer unbounded in the runner. */
+const TOKEN_EXCHANGE_TIMEOUT_MS = 30_000
+const TOKEN_RESPONSE_MAX_BYTES = 64_000
+const ATTACHMENT_TIMEOUT_MS = 60_000
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+const REVOKE_TIMEOUT_MS = 10_000
+
+/** Refuse-semantics bounded byte read: a declared content-length above
+ * the cap fails before the body streams; an undeclared body is bounded
+ * in flight and the read is cancelled at the cap. Never buffers the
+ * whole body and checks afterwards. */
+const readBoundedBytes = async (response: Response, maximumBytes: number): Promise<Uint8Array> => {
+  const declared = response.headers.get("content-length")
+  const parsed = declared ? Number.parseInt(declared, 10) : undefined
+  if (parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0 && parsed > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error(`Response body declares ${parsed} bytes, above the ${maximumBytes}-byte cap`)
+  }
+  if (!response.body) throw new Error("Response has no readable body")
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value || value.byteLength === 0) continue
+    if (size + value.byteLength > maximumBytes) {
+      await reader.cancel().catch(() => undefined)
+      throw new Error(`Response body exceeds the ${maximumBytes}-byte cap`)
+    }
+    chunks.push(value)
+    size += value.byteLength
+  }
+  const body = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return body
+}
+
 type GitHubAuthor = {
   login: string
   name?: string
@@ -376,6 +421,7 @@ async function getAccessToken() {
   if (isMock()) {
     response = await fetch("https://api.opencode.ai/exchange_github_app_token_with_pat", {
       method: "POST",
+      signal: AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),
       headers: {
         Authorization: `Bearer ${useEnvMock().mockToken}`,
       },
@@ -385,6 +431,7 @@ async function getAccessToken() {
     const oidcToken = await core.getIDToken("opencode-github-action")
     response = await fetch("https://api.opencode.ai/exchange_github_app_token", {
       method: "POST",
+      signal: AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),
       headers: {
         Authorization: `Bearer ${oidcToken}`,
       },
@@ -392,11 +439,18 @@ async function getAccessToken() {
   }
 
   if (!response.ok) {
-    const responseJson = (await response.json()) as { error?: string }
-    throw new Error(`App token exchange failed: ${response.status} ${response.statusText} - ${responseJson.error}`)
+    const errorDetail = await readBoundedBytes(response, TOKEN_RESPONSE_MAX_BYTES).then(
+      (bytes) => (JSON.parse(new TextDecoder().decode(bytes)) as { error?: string }).error,
+      () => undefined,
+    )
+    throw new Error(
+      `App token exchange failed: ${response.status} ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ""}`,
+    )
   }
 
-  const responseJson = (await response.json()) as { token: string }
+  const responseJson = JSON.parse(new TextDecoder().decode(await readBoundedBytes(response, TOKEN_RESPONSE_MAX_BYTES))) as {
+    token: string
+  }
   return responseJson.token
 }
 
@@ -463,6 +517,7 @@ async function getUserPrompt() {
 
     // Download image
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS),
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/vnd.github.v3+json",
@@ -473,16 +528,23 @@ async function getUserPrompt() {
       continue
     }
 
-    // Replace img tag with file path, ie. @image.png
+    const contentType = res.headers.get("content-type")
+    const attachment = await readBoundedBytes(res, ATTACHMENT_MAX_BYTES).then(
+      (bytes) => Buffer.from(bytes).toString("base64"),
+      (error) => {
+        console.error(`Skipping oversized attachment: ${url} (${error})`)
+        return undefined
+      },
+    )
+    if (attachment === undefined) continue
+    // Replace img tag with file path, ie. @image.png, only once the bounded download succeeded.
     const replacement = `@${filename}`
     prompt = prompt.slice(0, start + offset) + replacement + prompt.slice(start + offset + tag.length)
     offset += replacement.length - tag.length
-
-    const contentType = res.headers.get("content-type")
     imgData.push({
       filename,
       mime: contentType?.startsWith("image/") ? contentType : "text/plain",
-      content: Buffer.from(await res.arrayBuffer()).toString("base64"),
+      content: attachment,
       start,
       end: start + replacement.length,
       replacement,
@@ -1062,6 +1124,7 @@ async function revokeAppToken() {
 
   await fetch("https://api.github.com/installation/token", {
     method: "DELETE",
+    signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: "application/vnd.github+json",

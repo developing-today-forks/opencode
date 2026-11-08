@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "3b8437ee-1a59-400d-9a69-ad74f9d1e8f5",
-  "prevIds": ["c9735d25-ef18-4dc1-ae6d-00504c68d035"],
+  "id": "bb5a557b-39ed-4b96-af60-3a6e173c77c7",
+  "prevIds": ["ef4cbe05-effd-4b8d-810e-c17a176ac90f"],
   "ddl": [
     {
       "name": "account_state",
@@ -74,6 +74,10 @@
     },
     {
       "name": "route_note",
+      "entityType": "tables"
+    },
+    {
+      "name": "openai_facade_response",
       "entityType": "tables"
     },
     {
@@ -1186,6 +1190,16 @@
     },
     {
       "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "credential_id",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
@@ -1385,6 +1399,36 @@
       "table": "route_attempt"
     },
     {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cache_savings_usd",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "continuation_of",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "continuation_index",
+      "entityType": "columns",
+      "table": "route_attempt"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -1575,6 +1619,16 @@
       "table": "route_health"
     },
     {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "credential_id",
+      "entityType": "columns",
+      "table": "route_health"
+    },
+    {
       "type": "integer",
       "notNull": false,
       "autoincrement": true,
@@ -1623,6 +1677,106 @@
       "name": "expires",
       "entityType": "columns",
       "table": "route_note"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_expires",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "previous_response_id",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "depth",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "model",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "resolved_model",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "request_items",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "response_items",
+      "entityType": "columns",
+      "table": "openai_facade_response"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "usage",
+      "entityType": "columns",
+      "table": "openai_facade_response"
     },
     {
       "type": "text",
@@ -2475,6 +2629,16 @@
       "table": "session_v2"
     },
     {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detached",
+      "entityType": "columns",
+      "table": "session_v2"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -2631,6 +2795,26 @@
       "default": null,
       "generated": null,
       "name": "last_used_at",
+      "entityType": "columns",
+      "table": "workspace"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_snapshot_at",
+      "entityType": "columns",
+      "table": "workspace"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "snapshot_retry_at",
       "entityType": "columns",
       "table": "workspace"
     },
@@ -2984,6 +3168,13 @@
       "nameExplicit": false,
       "name": "route_note_pk",
       "table": "route_note",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "openai_facade_response_pk",
+      "table": "openai_facade_response",
       "entityType": "pks"
     },
     {
@@ -3392,6 +3583,20 @@
     {
       "columns": [
         {
+          "value": "continuation_of",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "route_attempt_continuation_idx",
+      "entityType": "indexes",
+      "table": "route_attempt"
+    },
+    {
+      "columns": [
+        {
           "value": "route_id",
           "isExpression": false
         },
@@ -3460,6 +3665,34 @@
       "name": "route_note_time_idx",
       "entityType": "indexes",
       "table": "route_note"
+    },
+    {
+      "columns": [
+        {
+          "value": "time_expires",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "openai_facade_response_expires_idx",
+      "entityType": "indexes",
+      "table": "openai_facade_response"
+    },
+    {
+      "columns": [
+        {
+          "value": "previous_response_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "openai_facade_response_previous_idx",
+      "entityType": "indexes",
+      "table": "openai_facade_response"
     },
     {
       "columns": [

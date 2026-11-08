@@ -224,6 +224,125 @@ describe("Watcher lifecycle", () => {
   })
 })
 
+describe("Watcher degraded signal (#797)", () => {
+  const captured = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.catchCause((cause) => Effect.succeed(cause)))
+
+  it.live("classifies subscribe failures by cause class", () =>
+    Effect.gen(function* () {
+      const timeout = yield* captured(Effect.timeout(Effect.never, "1 millis"))
+      expect(Watcher.classifySubscribeFailure(timeout)).toBe("timeout")
+      const enospc = yield* captured(
+        Effect.fail(new Error("ENOSPC: System limit for number of file watchers reached")),
+      )
+      expect(Watcher.classifySubscribeFailure(enospc)).toBe("inotify-limit")
+      const generic = yield* captured(Effect.fail(new Error("boom")))
+      expect(Watcher.classifySubscribeFailure(generic)).toBe("error")
+    }),
+  )
+
+  it.live("publishes filesystem.watcher-degraded on the bus when a directory watch cannot be established", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const seen = yield* Deferred.make<{ directory: string; cause: string }>()
+      yield* bus
+        .subscribe(FileSystem.Event.Degraded)
+        .pipe(
+          Stream.runForEach((event) => Deferred.succeed(seen, event.data)),
+          Effect.forkScoped({ startImmediately: true }),
+        )
+      // Give the bus subscription a real tick to register before the watch fails.
+      yield* Effect.sleep("50 millis")
+      const watcher = yield* Watcher.Service
+      const stream = yield* watcher.subscribe({ path: "/unavailable", type: "directory" })
+      yield* Stream.runDrain(stream)
+      const data = yield* Deferred.await(seen).pipe(Effect.timeout("2 seconds"))
+      // watcher.subscribe resolves the path first (path.resolve), which on
+      // Windows anchors a rooted path to the current drive (D:\unavailable).
+      expect(data).toEqual({ directory: path.resolve("/unavailable"), cause: "timeout" })
+    }).pipe(
+      withNative({
+        subscribe: (input) =>
+          Effect.sync(() => {
+            input.degraded?.("timeout")
+            return undefined
+          }),
+      }),
+    ),
+  )
+
+  it.live("reports degraded when neither Parcel nor the node fallback can watch a directory", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const native = yield* Watcher.Native
+          // A path under a regular file fails immediately in both backends (ENOTDIR).
+          const file = path.join(tmp.path, "a-file")
+          yield* Effect.promise(() => fs.writeFile(file, "x"))
+          const causes: Watcher.DegradedCause[] = []
+          const subscription = yield* native.subscribe({
+            type: "directory",
+            target: path.join(file, "child"),
+            ignore: [],
+            publish: () => {},
+            degraded: (cause) => causes.push(cause),
+          })
+          expect(subscription).toBeUndefined()
+          expect(causes).toHaveLength(1)
+        }).pipe(Effect.provide(Watcher.nativeLayer)),
+      ),
+    ),
+  )
+})
+
+describe("Watcher node fallback (#968)", () => {
+  it.live("delivers create, update, and delete events and suppresses ignored segments", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const updates: Watcher.Update[] = []
+          const subscription = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              Watcher.subscribeDirectoryWithNode(tmp.path, ["node_modules", ".git", "**/{node_modules,.git}/**"], (update) =>
+                updates.push(update),
+              ),
+            ),
+            (subscription) => Effect.promise(() => subscription?.unsubscribe() ?? Promise.resolve()),
+          )
+          expect(subscription?.backend).toBe("node")
+          const waitFor = (match: (update: Watcher.Update) => boolean) =>
+            Effect.sync(() => updates.some(match)).pipe(
+              Effect.filterOrFail(Boolean),
+              Effect.retry(Schedule.spaced("10 millis")),
+              Effect.timeout("2 seconds"),
+              Effect.andThen(Effect.sync(() => expect(updates.some(match)).toBe(true))),
+            )
+          const file = path.join(tmp.path, "watched.txt")
+          yield* Effect.promise(() => fs.writeFile(file, "one"))
+          yield* waitFor((update) => update.path === file && update.type === "create")
+          yield* Effect.promise(() => fs.appendFile(file, " two"))
+          yield* waitFor((update) => update.path === file && update.type === "update")
+          // Ignored segments publish nothing: the sentinel create is delivered
+          // only after the ignored writes below would have been, so its
+          // arrival orders the negative assertions after them.
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "node_modules", "pkg"), { recursive: true })
+            await fs.mkdir(path.join(tmp.path, ".git"), { recursive: true })
+            await fs.writeFile(path.join(tmp.path, "node_modules", "pkg", "x.js"), "x")
+            await fs.writeFile(path.join(tmp.path, ".git", "HEAD"), "ref")
+          })
+          const sentinel = path.join(tmp.path, "sentinel.txt")
+          yield* Effect.promise(() => fs.writeFile(sentinel, "s"))
+          yield* waitFor((update) => update.path === sentinel && update.type === "create")
+          expect(updates.some((update) => update.path.split(path.sep).includes("node_modules"))).toBe(false)
+          expect(updates.some((update) => update.path.split(path.sep).includes(".git"))).toBe(false)
+          yield* Effect.promise(() => fs.rm(file))
+          yield* waitFor((update) => update.path === file && update.type === "delete")
+        }),
+      ),
+    ),
+  )
+})
+
 function provide(
   directory: string,
   vcs?: Location.Interface["vcs"],

@@ -25,6 +25,7 @@ import {
   formDisplayValue,
   formInitialValues,
   formLabel,
+  formNumberValue,
   formRows,
   formSelected,
   formSetMultiselectCustom,
@@ -402,7 +403,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
     }
 
     if (isTextual && (current.type === "number" || current.type === "integer")) {
-      const value = Number(text)
+      const value = formNumberValue(text)
       const invalid = formValidateValue(current, value)
       if (invalid) {
         setStore("error", invalid)

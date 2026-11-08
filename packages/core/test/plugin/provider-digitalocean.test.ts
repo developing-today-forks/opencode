@@ -9,7 +9,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { Provider } from "@opencode/core/provider"
 import { ProviderPlugins } from "@opencode/core/plugin/provider"
-import { DigitalOceanPlugin } from "@opencode/core/plugin/provider/digitalocean"
+import { DigitalOceanPlugin, expiresInSeconds } from "@opencode/core/plugin/provider/digitalocean"
 import { drain } from "../lib/clock"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
@@ -206,6 +206,25 @@ describe("DigitalOceanPlugin", () => {
     }),
   )
 
+  test("parses expires_in only as a plain unsigned decimal integer (#771)", () => {
+    expect(expiresInSeconds("3600")).toBe(3600)
+    expect(expiresInSeconds("0")).toBe(0)
+    expect(expiresInSeconds(undefined)).toBe(0)
+    // Malformed spellings yield NaN, so the caller applies the 30-day fallback
+    // instead of reinterpreting them (parseInt("1e3") was a 1-second lifetime).
+    for (const spelling of ["1e3", "0x10", "3600junk", "3600.9"])
+      expect(expiresInSeconds(spelling)).toBe(Number.NaN)
+  })
+
+  test("clamps oversized expires_in to the shared 30-day bound (#899)", () => {
+    // A millisecond-scale lifetime (7200000) stored verbatim would fabricate
+    // an ~83-day expiry; it clamps to MAX_EXPIRES_IN_SECONDS (30 days).
+    expect(expiresInSeconds("7200000")).toBe(30 * 24 * 60 * 60)
+    expect(expiresInSeconds("2592000")).toBe(2592000)
+    expect(expiresInSeconds("2592001")).toBe(2592000)
+    expect(expiresInSeconds("3600")).toBe(3600)
+  })
+
   it.live("completes browser OAuth independently of router discovery and releases the listener", () =>
     Effect.gen(function* () {
       const fixture = yield* discovery
@@ -248,6 +267,64 @@ describe("DigitalOceanPlugin", () => {
       yield* integrations.oauth.cancel({ integrationID, attemptID: next.attemptID })
       const retry = yield* integrations.oauth.connect({ integrationID, methodID })
       yield* integrations.oauth.cancel({ integrationID, attemptID: retry.attemptID })
+    }),
+  )
+
+  it.live("applies the 30-day fallback when expires_in is not a plain decimal (#771)", () =>
+    Effect.gen(function* () {
+      const fixture = yield* discovery
+      fixture.remote.status = 503
+      yield* fixture.install
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const attempt = yield* integrations.oauth.connect({ integrationID, methodID })
+      const url = new URL(attempt.url)
+      yield* Effect.promise(() =>
+        fetch("http://localhost:1456/auth/callback", { headers: { Connection: "close" } }).then((res) => res.text()),
+      )
+      const now = Date.now()
+      const response = yield* Effect.promise(() =>
+        fetch("http://localhost:1456/auth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify({ access_token: "do-token", expires_in: "1e3", state: url.searchParams.get("state") }),
+        }),
+      )
+      expect(response.status).toBe(200)
+      expect(yield* status(attempt)).toMatchObject({ status: "complete" })
+      const saved = (yield* credentials.list(integrationID))[0]?.value
+      if (saved?.type !== "oauth") throw new Error("Expected OAuth credential")
+      const thirtyDays = 30 * 24 * 60 * 60 * 1000
+      expect(saved.expires).toBeGreaterThanOrEqual(now + thirtyDays)
+      expect(saved.expires).toBeLessThanOrEqual(Date.now() + thirtyDays)
+    }),
+  )
+
+  it.live("rejects an over-cap token POST body and releases the listener (#1954)", () =>
+    Effect.gen(function* () {
+      const fixture = yield* discovery
+      fixture.remote.status = 503
+      yield* fixture.install
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const attempt = yield* integrations.oauth.connect({ integrationID, methodID })
+      const url = new URL(attempt.url)
+      const response = yield* Effect.promise(() =>
+        fetch("http://localhost:1456/auth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Connection: "close" },
+          body: JSON.stringify({
+            access_token: "x".repeat(100_000),
+            expires_in: "3600",
+            state: url.searchParams.get("state"),
+          }),
+        }),
+      )
+      expect(response.status).toBe(413)
+      expect(yield* status(attempt)).toMatchObject({ status: "failed", message: "OAuth callback body too large" })
+      expect(yield* credentials.list(integrationID)).toEqual([])
+      const next = yield* integrations.oauth.connect({ integrationID, methodID })
+      yield* integrations.oauth.cancel({ integrationID, attemptID: next.attemptID })
     }),
   )
 

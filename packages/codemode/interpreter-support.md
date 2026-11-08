@@ -619,6 +619,26 @@ Nothing is exposed unless a host provides it; extension calls are not tool calls
 - [ ] Host classes. Stateful host objects are expressed as closures; a declared method table would be the next
       step if `new X()` in a program is ever needed.
 
+## Program-source libraries and standard library
+
+Named, versioned libraries via `CodeMode.make({ libraries })`: each `source` is JavaScript in the supported
+subset, evaluated before the program, with its result bound to one frozen global. No import syntax is involved.
+
+- [x] Each library is parsed and evaluated separately, so program diagnostics keep the program's own line/column.
+      A library name that is not a valid identifier, or that shadows a built-in, extension, or another library,
+      throws at `make`.
+- [x] Each library namespace is frozen (`Object.isFrozen(std)` holds) and its global binding is read-only, so a
+      program that never touches `std` behaves exactly as today.
+- [x] `std@1.0.0` pure helpers: `std.version`, `std.chunk`, `std.uniqBy`, `std.keyBy`, `std.pick`, and `std.omit`.
+- [x] `std.bind(target, defaults)` wraps a tool callable or a whole namespace object: defaults merge under explicit
+      arguments and explicit wins. The wrapper calls the same callable, so the recorded, displayed, and hooked tool
+      call is the original tool.
+- [x] Async helpers (phase 2): `std.sleep` wraps the one host sleep primitive (core's sleep extension, provided
+      under an internal global name, capped per call, not a tool call); `std.mapLimit` runs bounded concurrency
+      with input-order results and starts no new items after the first rejection; `std.retry` retries rejections
+      only, delays via `std.sleep`, deterministic with no jitter by default; `std.withTimeout` rejects after the
+      deadline without cancelling the underlying work — an admitted tool call may still complete host-side.
+
 ## Errors and diagnostics
 
 - [x] `Error`, `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, and `URIError`, callable with

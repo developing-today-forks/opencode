@@ -1,4 +1,5 @@
 name: test
+# CI tier policy: .github/ci-policy.md (fast tier, full main tier; no PR triggers, #1401).
 # RUNNER-SWITCH (2026-10-18): runners in this workflow were switched from Blacksmith to
 # GitHub-hosted at Drew's direction. To switch back, grep the repo for RUNNER-SWITCH and
 # swap each commented Blacksmith line back in for the active line under it. To choose per
@@ -6,15 +7,15 @@ name: test
 # or gate individual steps with if: on the runner.
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
+  # Nightly backstop: the full main tier (build + e2e included) re-runs even
+  # if no merge lands, so nothing the affected filter skipped can vanish.
+  schedule:
+    - cron: "0 3 * * *"
 
 concurrency:
   # Keep every run on main so cancelled checks do not pollute the default branch
-  # commit history. PRs and other branches still share a group and cancel stale runs.
+  # commit history. Non-main refs still share a group and cancel stale runs.
   group: ${{ case(github.ref == 'refs/heads/main', format('{0}-{1}', github.workflow, github.run_id), format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref)) }}
   cancel-in-progress: true
 
@@ -28,22 +29,23 @@ env:
 jobs:
   affected:
     timeout-minutes: 15
-    name: affected packages
+    name: basic affected packages
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04
     outputs:
-      # Suppress e2e only on pushes to the default branch. Keying this on
-      # head_ref instead would also suppress e2e for any pull request whose
-      # source branch is named main (on pull_request events ref_name is
-      # '<number>/merge', so head_ref was the only term that could fire).
-      e2e: ${{ steps.packages.outputs.app == 'true' && (github.event_name == 'pull_request' || github.ref_name != 'main') }}
+      # e2e is a main-tier suite (ci-policy.md): it runs on pushes to main,
+      # the nightly schedule and manual dispatches. No workflow triggers on
+      # pull_request (policy #1401, gate #1406), so this output is simply
+      # the affected-app signal; the aggregator job below treats a skipped
+      # e2e-suite as the expected result whenever this output is false.
+      e2e: ${{ steps.packages.outputs.app }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Pull requests diff against the merge's first parent; pushes diff against the previous main head.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          # Pushes diff against the previous main head, so checkout keeps full history.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -53,10 +55,10 @@ jobs:
       - name: Find affected packages
         id: packages
         env:
-          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+          TURBO_SCM_BASE: ${{ github.event.before }}
           TURBO_SCM_HEAD: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
             echo "app=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -66,7 +68,7 @@ jobs:
 
   unit:
     timeout-minutes: 20
-    name: unit (${{ matrix.settings.name }})
+    name: basic unit (${{ matrix.settings.name }})
     strategy:
       fail-fast: false
       matrix:
@@ -86,8 +88,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Pull requests diff against the merge's first parent; pushes diff against the previous main head.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          # Pushes diff against the previous main head, so checkout keeps full history.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -142,6 +144,22 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run lint:effect-simplifications
 
+      - name: Check Effect patterns
+        # The pattern scan itself (no-star-import, no-json-parse-cast,
+        # no-effect-die-string, no-import-alias) was never wired into CI —
+        # only its rule tests ran — so violations accumulated unchecked
+        # (#1496).
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-patterns
+
+      - name: Test gate harness
+        # script/ is not a workspace, so turbo test never picks up
+        # script/gate-harness.test.ts, and the root bunfig test root
+        # deliberately blocks running tests from the repo root (#1611).
+        # Run the file explicitly from its own directory instead.
+        working-directory: script
+        run: bun test gate-harness.test.ts
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root
@@ -157,6 +175,15 @@ jobs:
         working-directory: script
         run: bun test turbo-json.test.ts
 
+      - name: Test main-broken reconcile run links
+        # Same script/ wiring as the mcpx-cleanup step above: script/ is
+        # not a workspace, so the test file is run explicitly. The staged
+        # three-watcher fixture pins #1314: a race-loser that is itself a
+        # former survivor must forward run links inherited via its
+        # reconcile comments, not just the link in its body.
+        working-directory: script
+        run: bun test main-broken-reconcile.test.ts
+
       - name: Test doc env var guard
         # Same script/ wiring as the mcpx-cleanup step above: script/ is
         # not a workspace, so the test file is run explicitly (#116).
@@ -164,10 +191,80 @@ jobs:
         run: bun test check-doc-env-vars.test.ts
 
       - name: Check documented env vars have readers
-        # Every OPENCODE_* variable cli.mdx documents must be read
-        # somewhere outside the docs, or the row is a silent no-op (#116).
+        # Every OPENCODE_* variable the English docs pages document must be read
+        # somewhere outside the docs or carry a reasoned allowlist entry,
+        # or the row is a silent no-op (#116, #931).
         if: runner.os == 'Linux'
         run: bun run check:doc-env-vars
+
+      - name: Test prototype-chain read guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#865).
+        working-directory: script
+        run: bun test check-proto-reads.test.ts
+
+      - name: Check prototype-chain reads are dispositioned
+        # Every P-A/P-C sweep hit in every package-owned src tree
+        # (packages/*/src incl. console/stats subtrees, services/*/src)
+        # must be guarded by ownValue/ownOr or listed with a disposition
+        # in the allowlist, or
+        # the prototype-chain class regrows one bare read at a time (#865).
+        if: runner.os == 'Linux'
+        run: bun run check:proto-reads
+
+      - name: Test bounded-http guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1129).
+        working-directory: script
+        run: bun test check-bounded-http.test.ts
+
+      - name: Check bounded-http calls are dispositioned
+        # Every fetch / direct response-read sweep hit in packages/*/src
+        # must carry a signal or a bounded reader, or be listed with a
+        # disposition in the allowlist, or the unbounded outbound class
+        # regrows one call at a time (#1129, design #1127).
+        if: runner.os == 'Linux'
+        run: bun run check:bounded-http
+
+      - name: Test numeric-boundaries guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#995).
+        working-directory: script
+        run: bun test check-numeric-boundaries.test.ts
+
+      - name: Check numeric-boundary conversions are dispositioned
+        # Every bare Number(/parseInt(/parseFloat( sweep hit in
+        # packages/core/src, packages/ai/src and packages/cli/src must be
+        # converted through the #993 primitives or listed with a
+        # disposition in the allowlist, or the bare-conversion class
+        # regrows one call at a time (#995, design #992).
+        if: runner.os == 'Linux'
+        run: bun run check:numeric-boundaries
+
+      - name: Test workflow policy guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1406).
+        working-directory: script
+        run: bun test check-workflows.test.ts
+
+      - name: Check workflow policies are followed
+        # No workflow may trigger on pull_request/pull_request_target,
+        # every workflow must declare workflow_dispatch, and every
+        # non-reusable job must declare timeout-minutes, or the
+        # workflow policies stay convention only (#1406).
+        if: runner.os == 'Linux'
+        run: bun run check:workflows
+
+      - name: Test gate wiring meta-check
+        # script/ is not a workspace; run the fixtures from its directory.
+        working-directory: script
+        run: bun test check-gates.test.ts
+
+      - name: Check gate registry and wiring
+        # Every promised gate must be registered, invoked by its owning
+        # workflow, and reachable for at least one declared trigger (#1527).
+        if: runner.os == 'Linux'
+        run: bun run check:gates
 
       - name: Configure git identity
         run: |
@@ -178,14 +275,18 @@ jobs:
         timeout-minutes: 20
         run: |
           # The runners have four vCPUs, and each Bun test process performs its own concurrent work.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            GITHUB_ACTIONS=false bun turbo test --concurrency=3
+          # A turbo/bun segfault (exit 139, SIGSEGV) truncates the suite and would read as an ordinary
+          # test failure (#90), so both variants go through script/run-unit-tests.sh: it retries a crash
+          # once and annotates a recurrence distinctly with the turbo and bun versions. Ordinary test
+          # failures still pass straight through, unrepeated.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            GITHUB_ACTIONS=false bash script/run-unit-tests.sh bun turbo test --concurrency=3
             exit 0
           fi
-          GITHUB_ACTIONS=false bun turbo test --affected --concurrency=3
+          GITHUB_ACTIONS=false bash script/run-unit-tests.sh bun turbo test --affected --concurrency=3
         env:
           OPENCODE_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
-          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+          TURBO_SCM_BASE: ${{ github.event.before }}
           TURBO_SCM_HEAD: ${{ github.sha }}
 
       - name: Verify published codemode package
@@ -197,18 +298,23 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 15
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
             bun turbo verify:package --filter=@opencode/sdk
             exit 0
           fi
           bun turbo verify:package --affected --filter=@opencode/sdk
         env:
-          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+          TURBO_SCM_BASE: ${{ github.event.before }}
           TURBO_SCM_HEAD: ${{ github.sha }}
 
       - name: Check generated client
         if: runner.os == 'Linux'
         working-directory: packages/client
+        run: bun run check:generated
+
+      - name: Check generated protocol
+        if: runner.os == 'Linux'
+        working-directory: packages/protocol
         run: bun run check:generated
 
       - name: Check generated documentation
@@ -217,6 +323,9 @@ jobs:
         run: bun run check:generated
 
   build:
+    # Main tier only (ci-policy.md): build runs on push to main, the
+    # nightly schedule and manual dispatch -- the only events this
+    # workflow triggers on (no pull_request trigger, #1401).
     timeout-minutes: 20
     name: build (${{ matrix.settings.name }})
     strategy:
@@ -238,8 +347,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Pull requests diff against the merge's first parent; pushes diff against the previous main head.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          # Pushes diff against the previous main head, so checkout keeps full history.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -260,13 +369,13 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 10
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
             bun turbo build --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
             exit 0
           fi
           bun turbo build --affected --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
         env:
-          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+          TURBO_SCM_BASE: ${{ github.event.before }}
           TURBO_SCM_HEAD: ${{ github.sha }}
 
       - name: Setup Node build runtime
@@ -397,7 +506,7 @@ jobs:
             packages/app/component-tests/test-results
             packages/app/component-tests/playwright-report
 
-  # Branch rules require one e2e check per OS. These keep those names and pass only when every
+  # One e2e check per OS under stable names. These pass only when every
   # leg above passed, or when no leg was needed; a failing leg on either OS fails both checks.
   e2e:
     timeout-minutes: 20
@@ -419,3 +528,33 @@ jobs:
         run: |
           echo "affected packages: $AFFECTED, browser test legs: $SUITES (expected $EXPECTED)"
           test "$AFFECTED" = success && test "$SUITES" = "$EXPECTED"
+
+  # Dispatch a ci-fix agent when any terminal job of this workflow fails.
+  # needs the terminal jobs only: affected and e2e-suite are internal
+  # stages whose results the e2e aggregator job above re-asserts, so every
+  # failure in this workflow surfaces in at least one of these needs.
+  ci-fix:
+    needs: [unit, build, e2e]
+    if: failure()
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      issues: read
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      # This wrapper loads pm-dispatch-task from .pm-central, which in turn
+      # loads its sibling actions there. A remote action download can fail in
+      # `_staging` before the continue-on-error step is reached.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - uses: ./.pm-central/.github/actions/pm-dispatch-ci-fix
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}

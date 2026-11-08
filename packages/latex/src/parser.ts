@@ -15,6 +15,13 @@ import {
 } from "./limits"
 import { delimiterTable, largeOperators, namedOperators, spacingCommands, symbolTable } from "./symbols"
 
+/** Own-property read for the command dispatch tables (and caller-supplied macro maps):
+ * command names come from the document, and Object.prototype members are alphabetic —
+ * a bare `in` check or bracket read would dispatch \constructor, \toString and friends
+ * to inherited functions instead of the unknown-command path (#937). */
+const own = <T>(table: Readonly<Record<string, T>>, key: string): T | undefined =>
+  Object.hasOwn(table, key) ? table[key] : undefined
+
 const matrixEnvironments: MatrixEnvironment[] = [
   "matrix",
   "pmatrix",
@@ -98,7 +105,7 @@ function expandMacros(
     for (const match of result.matchAll(commands)) {
       const command = match[0]
       const index = match.index
-      const replacement = macros[command] ?? macros[command.slice(1)]
+      const replacement = own(macros, command) ?? own(macros, command.slice(1))
       if (replacement === undefined) continue
       if (typeof replacement !== "string") {
         throw new TypeError(`Macro ${command} must expand to a string`)
@@ -239,13 +246,15 @@ class Parser {
       this.position = start
       this.fail("Unexpected \\right")
     }
-    if (command in accents) {
-      return { type: "accent", accent: accents[command], body: this.parseArgument() }
+    const accent = own(accents, command)
+    if (accent !== undefined) {
+      return { type: "accent", accent, body: this.parseArgument() }
     }
-    if (command in variants) {
+    const variant = own(variants, command)
+    if (variant !== undefined) {
       return {
         type: "variant",
-        variant: variants[command],
+        variant,
         body: command === "textrm" ? { type: "text", value: this.readTextGroup() } : this.parseArgument(),
       }
     }
@@ -311,13 +320,15 @@ class Parser {
     if (/^(?:big|Big|bigg|Bigg)[lrm]?$/.test(command)) {
       return { type: "symbol", value: this.readDelimiter() }
     }
-    if (command in spacingCommands) return { type: "space", width: spacingCommands[command] }
-    if (command in symbolTable) {
-      const symbol = symbolTable[command]
+    const spacing = own(spacingCommands, command)
+    if (spacing !== undefined) return { type: "space", width: spacing }
+    const symbol = own(symbolTable, command)
+    if (symbol !== undefined) {
       return { type: "symbol", value: symbol.value, ...(symbol.role ? { role: symbol.role } : {}) }
     }
-    if (command in largeOperators) {
-      return { type: "operator", value: largeOperators[command], limits: !command.includes("int") }
+    const largeOperator = own(largeOperators, command)
+    if (largeOperator !== undefined) {
+      return { type: "operator", value: largeOperator, limits: !command.includes("int") }
     }
     if (namedOperators.has(command)) {
       return {
@@ -327,7 +338,7 @@ class Parser {
       }
     }
     if (command === "backslash") return { type: "symbol", value: "\\" }
-    const delimiter = delimiterTable[`\\${command}`] ?? delimiterTable[command]
+    const delimiter = own(delimiterTable, `\\${command}`) ?? own(delimiterTable, command)
     if (delimiter !== undefined) return { type: "symbol", value: delimiter }
     if (command === "{" || command === "}") return { type: "symbol", value: command }
     if (command === "%" || command === "#" || command === "$" || command === "&" || command === "_") {
@@ -447,13 +458,13 @@ class Parser {
     const start = this.position
     if (this.peek() === "\\") {
       const command = this.readCommand()
-      const delimiter = delimiterTable[`\\${command}`] ?? delimiterTable[command]
+      const delimiter = own(delimiterTable, `\\${command}`) ?? own(delimiterTable, command)
       if (delimiter !== undefined) return delimiter
       if (this.strict) this.fail(`Unsupported delimiter \\${command}`, start)
       return `\\${command}`
     }
     const token = this.source[this.position++]
-    return delimiterTable[token] ?? token
+    return own(delimiterTable, token) ?? token
   }
 
   private readCommand(): string {
@@ -514,7 +525,8 @@ class Parser {
         if ("{}%#$&_ ".includes(command)) return command
         if (command === "textbackslash") return "\\"
         if (command === "!") return ""
-        if (command in spacingCommands) return " ".repeat(Math.max(1, spacingCommands[command]))
+        const spacing = own(spacingCommands, command)
+        if (spacing !== undefined) return " ".repeat(Math.max(1, spacing))
         return match
       })
       .replace(/~/g, " ")
@@ -594,5 +606,5 @@ function negateSymbol(value: string): string {
     "∣": "∤",
     "∥": "∦",
   }
-  return negated[value] ?? `${value}̸`
+  return (Object.hasOwn(negated, value) ? negated[value] : undefined) ?? `${value}̸`
 }

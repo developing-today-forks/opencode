@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic upstream sync and validation helper for developing-today/opencode.
+# Deterministic upstream sync and validation helper for developing-today-forks/opencode.
 # Tracks upstream/dev (the OpenCode v2 branch) into devtoday/main.
 set -euo pipefail
 

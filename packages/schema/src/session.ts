@@ -64,6 +64,12 @@ export const Info = Schema.Struct({
   subagentPolicy: SubagentPolicy.pipe(optional),
   /** Evaluated after the agent's rules; the last matching rule wins. */
   permissions: Permission.Ruleset.pipe(optional),
+  /**
+   * Detached (non-interactive) mode: nobody is attached to answer forms, so the `question` tool is
+   * unavailable to this session and, by inheritance, to every session in its subtree. Absent means
+   * interactive. Not clearable once set.
+   */
+  detached: Schema.Literal(true).pipe(optional),
   revert: Revert.pipe(optional),
 }).annotate({ identifier: "Session.Info" })
 

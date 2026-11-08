@@ -1,5 +1,13 @@
 import { expect } from "bun:test"
-import { LanguageModel, LLMClient } from "@opencode/ai"
+import {
+  AIError,
+  AuthenticationError,
+  LanguageModel,
+  LLMClient,
+  ProviderInternalError,
+  QuotaExceededError,
+  RateLimitError,
+} from "@opencode/ai"
 import { RequestExecutor } from "@opencode/ai/route"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
@@ -10,7 +18,7 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { ID, Info, Model, Ref } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
 import { Npm } from "@opencode/util/npm"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import { testEffect } from "./lib/effect"
 
@@ -77,6 +85,106 @@ it.effect("loads dynamic AI SDK models", () =>
 
     expect(result).toBe("OK")
   }),
+)
+
+// ---------------------------------------------------------- quota classification (#1441)
+
+const quotaHint = "Subscription quota exhausted; resets at 2026-11-03T04:00:00Z"
+
+testEffect(Layer.empty).effect("isQuotaFailure follows the routing classification: quota and rate-limit tags only", () =>
+  Effect.sync(() => {
+    expect(Generate.isQuotaFailure(new AIError({ reason: new QuotaExceededError({ message: quotaHint }) }))).toBe(true)
+    expect(Generate.isQuotaFailure(new AIError({ reason: new RateLimitError({ message: "slow down" }) }))).toBe(true)
+    expect(Generate.isQuotaFailure(new AIError({ reason: new ProviderInternalError({ message: "boom" }) }))).toBe(false)
+    expect(Generate.isQuotaFailure(new AIError({ reason: new AuthenticationError({ message: "bad key" }) }))).toBe(false)
+  }),
+)
+
+const failingIt = (error: AIError) =>
+  testEffect(
+    Generate.layer.pipe(
+      Layer.provide(Layer.merge(resolver, TestLLM.testLayer({ fallback: TestLLM.failAfter(error) }))),
+    ),
+  )
+
+failingIt(new AIError({ reason: new QuotaExceededError({ message: quotaHint }) })).effect(
+  "a quota-exceeded provider failure surfaces as Generate.QuotaError with the reset hint preserved",
+  () =>
+    Effect.gen(function* () {
+      const generate = yield* Generate.Service
+      const error = yield* generate
+        .complete({
+          model: Ref.make({ providerID: selected.providerID, id: selected.id }),
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Generate.QuotaError")
+      expect(error.message).toBe(quotaHint)
+      expect(error.message).toContain("resets at 2026-11-03T04:00:00Z")
+    }),
+)
+
+failingIt(new AIError({ reason: new RateLimitError({ message: "rate limited; resets at 2026-11-03T04:00:00Z" }) })).effect(
+  "a rate-limit provider failure surfaces as Generate.QuotaError",
+  () =>
+    Effect.gen(function* () {
+      const generate = yield* Generate.Service
+      const error = yield* generate
+        .complete({
+          model: Ref.make({ providerID: selected.providerID, id: selected.id }),
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Generate.QuotaError")
+      expect(error.message).toContain("rate limited")
+    }),
+)
+
+failingIt(new AIError({ reason: new ProviderInternalError({ message: "upstream exploded" }) })).effect(
+  "a non-quota provider failure still surfaces as Generate.UnavailableError",
+  () =>
+    Effect.gen(function* () {
+      const generate = yield* Generate.Service
+      const error = yield* generate
+        .complete({
+          model: Ref.make({ providerID: selected.providerID, id: selected.id }),
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Generate.UnavailableError")
+      expect(error.message).toBe("upstream exploded")
+    }),
+)
+
+failingIt(new AIError({ reason: new AuthenticationError({ message: "bad key" }) })).effect(
+  "an auth provider failure keeps the existing UnavailableError mapping, not the quota class",
+  () =>
+    Effect.gen(function* () {
+      const generate = yield* Generate.Service
+      const error = yield* generate
+        .complete({
+          model: Ref.make({ providerID: selected.providerID, id: selected.id }),
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Generate.UnavailableError")
+    }),
+)
+
+failingIt(new AIError({ reason: new QuotaExceededError({ message: quotaHint }) })).effect(
+  "a quota failure on the stream path surfaces as Generate.QuotaError",
+  () =>
+    Effect.gen(function* () {
+      const generate = yield* Generate.Service
+      const error = yield* generate
+        .stream({
+          model: Ref.make({ providerID: selected.providerID, id: selected.id }),
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .pipe(Stream.runCollect, Effect.flip)
+      expect(error._tag).toBe("Generate.QuotaError")
+      expect(error.message).toBe(quotaHint)
+    }),
 )
 
 resolverIt.effect("resolves dynamic models with their catalog metadata", () =>

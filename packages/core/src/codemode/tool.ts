@@ -1,6 +1,6 @@
 export * as CodeModeTool from "./tool.js"
 
-import { CodeMode, Namespace, Tool, toolError } from "@opencode/codemode"
+import { CodeMode, Namespace, Std, Tool, toolError } from "@opencode/codemode"
 import type {
   Content,
   Context,
@@ -14,6 +14,7 @@ import { Effect, Ref, Schema, Semaphore } from "effect"
 import { definition, normalizedName } from "../tool/runtime.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeWeb } from "./web.js"
+import { CodeModeSleep } from "./sleep.js"
 
 const ExecuteFile = Schema.Struct({
   data: Schema.String,
@@ -236,7 +237,7 @@ function runtime(
     })
   }
   const tools = renderTools(root)
-  return CodeMode.make<typeof tools>({ tools, extensions: [CodeModeWeb.extension], hooks })
+  return CodeMode.make<typeof tools>({ tools, extensions: [CodeModeWeb.extension, CodeModeSleep.extension], libraries: [Std.library], hooks })
 }
 
 function getNode<T>(root: Node<T>, path: string) {

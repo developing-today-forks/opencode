@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
 
 const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-luna" })
 
@@ -224,6 +225,22 @@ describe("ModelRoute correlation and adjustments", () => {
     expect(ModelRoute.networkSuspect(40_000)).toBe(false)
   })
 
+  test("network-suspect undo also forgives the escalation count", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(model("openai", "a"), policy, 1_000, { network: true })
+    ModelRoute.failed(model("azure", "a"), policy, 2_000, { network: true })
+    ModelRoute.failed(model("anthropic", "a"), policy, 3_000, { network: true })
+    expect(ModelRoute.networkSuspect(3_000)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 3_000)).toBe(false)
+
+    // After the outage is forgiven, a later single genuine failure benches at the
+    // first-offence (1x) length, not doubled by the undone failure (#1034).
+    ModelRoute.failed(model("openai", "a"), policy, 40_000)
+    expect(ModelRoute.cooldownUntil(model("openai", "a"), 40_000)).toBe(100_000)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 99_999)).toBe(true)
+    expect(ModelRoute.coolingDown(model("openai", "a"), 100_000)).toBe(false)
+  })
+
   test("does not classify provider quota failures as a network outage", () => {
     ModelRoute.resetHealth()
     ModelRoute.failed(model("openai", "a"), policy, 1_000, { quota: true })
@@ -275,6 +292,617 @@ describe("ModelRoute failure hints", () => {
     ModelRoute.resetHealth()
     ModelRoute.failed(t, policy, 1_000)
     expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 60_000)
+  })
+
+  test("repeated failures double the bench, and the count survives the bench expiring", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 60_000)
+    ModelRoute.failed(t, policy, 61_000)
+    expect(ModelRoute.cooldownUntil(t, 61_000)).toBe(61_000 + 120_000)
+    ModelRoute.failed(t, policy, 181_000)
+    expect(ModelRoute.cooldownUntil(t, 181_000)).toBe(181_000 + 240_000)
+    // Expiry (recover) does not forgive the history: the next failure keeps escalating.
+    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(0)
+    ModelRoute.failed(t, policy, 421_000)
+    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(421_000 + 480_000)
+  })
+
+  test("a success resets the escalation back to the base bench", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    ModelRoute.failed(t, policy, 61_000)
+    expect(ModelRoute.cooldownUntil(t, 61_000)).toBe(61_000 + 120_000)
+    ModelRoute.completed(t, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, 181_000)
+    ModelRoute.failed(t, policy, 182_000)
+    expect(ModelRoute.cooldownUntil(t, 182_000)).toBe(182_000 + 60_000)
+  })
+
+  test("an auth failure takes the long bench first, then escalates from it", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000, { auth: true })
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 900_000)
+    ModelRoute.failed(t, policy, 901_000, { auth: true })
+    expect(ModelRoute.cooldownUntil(t, 901_000)).toBe(901_000 + 1_800_000)
+  })
+
+  test("a stated retry-after is never multiplied, even after repeated failures", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.failed(t, policy, 1_000)
+    ModelRoute.failed(t, policy, 61_000)
+    ModelRoute.failed(t, policy, 181_000, { retryAfterMs: 5_000 })
+    expect(ModelRoute.cooldownUntil(t, 181_000)).toBe(181_000 + 5_000)
+  })
+
+  test("the escalated bench is capped at a day", () => {
+    ModelRoute.resetHealth()
+    for (let index = 0; index < 30; index++) ModelRoute.failed(t, policy, 1_000)
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 86_400_000)
+  })
+})
+
+describe("ModelRoute quota bench reset", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "reset-provider", model: "quota" })
+  const day = 86_400_000
+
+  const exhaustLadder = (now: number, credentialID?: string) => {
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(target, policy, now + index, { quota: true }, credentialID)
+  }
+
+  test("caps a credential bench at its exhausted window reset, not an unrelated window", () => {
+    const now = 100_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { short: "100", long: "1000" },
+        remaining: { short: "0", long: "100" },
+        reset: { short: "5h", long: "24h" },
+      },
+      now,
+      "cred-a",
+    )
+
+    exhaustLadder(now, "cred-a")
+
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt - 1)).toBe(resetAt)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+
+    ModelRoute.completed(target, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, resetAt, "cred-a")
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-a")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-a", resetAt + 1)).toBe(resetAt + 1 + 900_000)
+  })
+
+  test("uses a fresh known-full plan reset but never the reactive fallback as an actual reset", () => {
+    const now = 200_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-plan",
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, "cred-plan", undefined, now)
+    exhaustLadder(now + 1, "cred-plan")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-plan", now + 8)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "reset-provider",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    exhaustLadder(now)
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now)
+    exhaustLadder(now, "cred-fallback")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-fallback", now + 7)).toBe(now + 7 + day)
+  })
+
+  test("reconciling the gate against live plans clears state derived from an ended plan (#1340)", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 3_600_000
+    const ended = {
+      planID: "ended-plan",
+      window: "five-hours",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-ended", ended, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // While the plan still feeds the gate, reconciliation keeps its state.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toEqual({ until: resetAt })
+
+    // The plan ends: it derives no replacement snapshot, so its retained gate state clears
+    // and the next route selection no longer blocks the credential on the stale snapshot.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-ended", now)).toBeUndefined()
+
+    // Reactive attempt evidence is not plan capacity: an attempt-derived gate survives
+    // reconciliation even when no plan is live.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(target, "cred-reactive", resetAt, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-reactive", now)).toEqual({ until: resetAt })
+
+    // The provider scope follows the same rule, including its plan-derived skip adjustment.
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(target, ended, now)
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(true)
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(false)
+  })
+
+  test("reconciling the gate clears a balance baseline only when its grant's plan ended (#1340)", () => {
+    const now = 450_000_000
+    const balance = {
+      planID: "ended-balance-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt: null,
+      observedAt: now,
+      stale: false,
+      balance: true,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-balance", balance, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // The durable baseline record is what re-arms the hold after a restart; while the
+    // grant's plan is live, reconciliation leaves both state and record alone.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["ended-balance-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toEqual({ until: null })
+    // Once the grant's plan has ended, the baseline goes with the in-memory state:
+    // otherwise the restored hold would immediately re-block the credential.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set())
+    expect(ModelRoute.credentialQuotaBlocked("cred-balance", now)).toBeUndefined()
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-balance")).toBe(false)
+  })
+
+  test("a reclassified window replaces a balance hold with its normal timed gate (#1380)", () => {
+    const now = 500_000_000
+    const resetAt = now + 5 * 3_600_000
+    const balance = {
+      planID: "credits-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt: null,
+      observedAt: now,
+      stale: false,
+      balance: true,
+    }
+    // The same plan + window after a windowHours reclassification: derive() no longer
+    // reports it as a balance, so the snapshot is a resetting usage window.
+    const windowed = {
+      planID: "credits-plan",
+      window: "credits",
+      providerID: "reset-provider",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now + 1,
+      stale: false,
+    }
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-reclass", balance, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-reclass", now)).toEqual({ until: null })
+    expect(
+      ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-reclass"),
+    ).toBe(true)
+
+    ModelRoute.observeCredentialQuota(target, "cred-reclass", windowed, now + 1)
+    // The stale increase-only hold is gone: the credential is gated only until the
+    // window's stated reset, and the durable baseline record is cleared.
+    expect(ModelRoute.credentialQuotaBlocked("cred-reclass", now + 1)).toEqual({ until: resetAt })
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some((item) => item.id === "quota-credential:cred-reclass"),
+    ).toBe(false)
+
+    // A non-balance snapshot from a DIFFERENT grant is not evidence about the hold.
+    ModelRoute.resetHealth()
+    ModelRoute.observeCredentialQuota(target, "cred-other", balance, now)
+    ModelRoute.observeCredentialQuota(
+      target,
+      "cred-other",
+      { ...windowed, planID: "other-plan", window: "five-hours" },
+      now + 1,
+    )
+    expect(ModelRoute.credentialQuotaBlocked("cred-other", now + 1)).toEqual({ until: null })
+
+    // The provider scope follows the same rule: its balance skip is replaced by the
+    // window's timed skip, with no balance baseline left on the record.
+    ModelRoute.resetHealth()
+    ModelRoute.observeProviderQuota(target, balance, now)
+    expect(
+      ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:reset-provider")?.balanceBaseline,
+    ).toBe(0)
+    ModelRoute.observeProviderQuota(target, windowed, now + 1)
+    const skip = ModelRoute.activeAdjustments(now + 1).find((item) => item.id === "quota:reset-provider")
+    expect(skip?.balanceBaseline).toBeUndefined()
+    expect(skip?.until).toBe(resetAt)
+  })
+
+  test("reconciling clears restored balance baselines whose grant plan ended (#1380)", () => {
+    const now = 550_000_000
+    ModelRoute.resetHealth()
+    // A baseline record restored after a restart, with no in-memory gate state: it blocks
+    // its credential until a fed snapshot releases it -- or until reconciliation clears it.
+    ModelRoute.addAdjustment({
+      id: "quota-credential:cred-restored",
+      match: "credential:cred-restored",
+      action: "skip",
+      balanceBaseline: 0,
+      balanceGrant: "dead-plan\ncredits",
+      credentialID: "cred-restored",
+      providerID: "reset-provider",
+      note: "credential balance exhausted; held until a fresh balance increase (durable baseline record -- not a selection skip)",
+    })
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toEqual({ until: null })
+    // While the grant's plan still feeds the gate, the hold is still-applicable and stays.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["dead-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toEqual({ until: null })
+    // The grant's plan is gone and no balance grant remains: the stale baseline clears.
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.credentialQuotaBlocked("cred-restored", now)).toBeUndefined()
+    expect(
+      ModelRoute.activeAdjustments(now).some((item) => item.id === "quota-credential:cred-restored"),
+    ).toBe(false)
+
+    // The provider scope's restored balance skip follows the same rule.
+    ModelRoute.addAdjustment({
+      id: "quota:reset-provider",
+      match: "reset-provider/",
+      action: "skip",
+      balanceBaseline: 0,
+      balanceGrant: "dead-plan\ncredits",
+      note: "quota exhausted (proactive snapshot); held until the stated reset",
+    })
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["dead-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(true)
+    ModelRoute.reconcileQuotaGate("reset-provider", new Set(["live-plan"]))
+    expect(ModelRoute.activeAdjustments(now).some((item) => item.id === "quota:reset-provider")).toBe(false)
+  })
+
+  test("leaves the ladder unchanged for missing, invalid, elapsed or stale provider resets", () => {
+    const now = 300_000_000
+    const snapshots = [
+      { at: now, remaining: { requests: "0" } },
+      { at: now, remaining: { requests: "0" }, reset: { requests: "not-a-reset" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "5h" } },
+      { at: now - 2 * 3_600_000, remaining: { requests: "0" }, reset: { requests: "1h" } },
+    ]
+
+    for (const snapshot of snapshots) {
+      ModelRoute.resetHealth()
+      ModelRoute.observeRateLimit(target, snapshot, now, "cred-a")
+      exhaustLadder(now, "cred-a")
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now + 7)).toBe(now + 7 + day)
+    }
+  })
+
+  test("does not cap auth or ordinary benches, and retry-after still wins unless the quota window is sooner", () => {
+    const now = 400_000_000
+    const resetAt = now + 5 * 60_000
+    const spent = {
+      at: now,
+      limit: { requests: "100" },
+      remaining: { requests: "0" },
+      reset: { requests: "5m" },
+    }
+    ModelRoute.observeRateLimit(target, spent, now, "cred-auth")
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-auth", now)).toBe(now + 900_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-ordinary")
+    ModelRoute.failed(target, policy, now, undefined, "cred-ordinary")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-ordinary", now)).toBe(now + 60_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 120_000 }, "cred-retry")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry", now)).toBe(now + 120_000)
+    ModelRoute.resetHealth()
+    ModelRoute.observeRateLimit(target, spent, now, "cred-retry-long")
+    ModelRoute.failed(target, policy, now, { quota: true, retryAfterMs: 10 * 60_000 }, "cred-retry-long")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-retry-long", now)).toBe(resetAt)
+  })
+
+  test("a quota bench can expire while an independent provider gate remains active", () => {
+    const now = 500_000_000
+    const resetAt = now + 5 * 60_000
+    ModelRoute.observeRateLimit(
+      target,
+      {
+        at: now,
+        limit: { requests: "100" },
+        remaining: { requests: "0" },
+        reset: { requests: "5m" },
+      },
+      now,
+    )
+    ModelRoute.observeQuotaFailure(target, undefined, now + day, now)
+    exhaustLadder(now)
+
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(resetAt)
+    expect(ModelRoute.skipped(target, resetAt + 1)).toBe(true)
+  })
+})
+
+describe("ModelRoute quota bench probe (#1123)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "probe-provider", model: "quota" })
+  const day = 86_400_000
+  const sample = { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }
+
+  const exhaustLadder = (now: number, credentialID?: string) => {
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(target, policy, now + index, { quota: true }, credentialID)
+  }
+
+  const knownFull = (resetAt: number, observedAt: number) => ({
+    planID: "plan",
+    window: "five-hours",
+    providerID: "probe-provider",
+    percent: 100,
+    remaining: 0,
+    resetAt,
+    observedAt,
+    stale: false,
+  })
+
+  test("a reset learned after the bench arms exactly one probe at rollover; probe success unbenched and clears the ladder", () => {
+    const now = 600_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    // The bench is planted before any reset is known: the generic ladder runs to the 24h cap.
+    exhaustLadder(now, "cred-probe")
+    const benchUntil = now + 7 + day
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", now + 7)).toBe(benchUntil)
+
+    // The quota feed then learns the credential's actual window reset, hours before the bench ends.
+    ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+
+    // Route stats surface the active bench with its reason, expiry and known reset.
+    expect(ModelRoute.activeBenches(now + 11)).toEqual([
+      {
+        providerID: "probe-provider",
+        modelID: "quota",
+        credentialID: "cred-probe",
+        until: benchUntil,
+        reason: "quota",
+        consecutiveFailures: 8,
+        quotaResetAt: resetAt,
+        probeDue: false,
+        probeClaimed: false,
+      },
+    ])
+
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt - 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt)).toBe(true)
+    // Exactly one probe: the first claim wins, later claims are refused while it is outstanding,
+    // and ordinary candidacy stays excluded the whole time.
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt)).toBe(false)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt)).toBe(benchUntil)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+
+    // Probe success fully unbenched the credential (the bench had ~19h left) and clears the ladder:
+    // the next quota failure benches at the base again instead of escalating.
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-probe")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBe(0)
+    expect(ModelRoute.activeBenches(resetAt + 1)).toEqual([])
+    ModelRoute.failed(target, policy, resetAt + 2, { quota: true }, "cred-probe")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 2)).toBe(resetAt + 2 + 900_000)
+  })
+
+  test("a failed probe re-benches on the escalated ladder, capped at the next known reset", () => {
+    const now = 700_000_000
+    const resetAt = now + 5 * 3_600_000
+    const nextResetAt = resetAt + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now, "cred-probe-fail")
+    ModelRoute.observeCredentialQuota(target, "cred-probe-fail", knownFull(resetAt, now + 10), now + 10)
+    // The next window's reset becomes known before the probe runs.
+    ModelRoute.observeCredentialQuota(target, "cred-probe-fail", knownFull(nextResetAt, resetAt), resetAt)
+    expect(ModelRoute.claimBenchProbe(target, "cred-probe-fail", resetAt)).toBe(true)
+
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-probe-fail")
+    // Ninth consecutive failure: the ladder alone would cap at 24h; the next known reset bounds it.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe-fail", resetAt + 1)).toBe(nextResetAt)
+    expect(ModelRoute.probeDue(target, "cred-probe-fail", resetAt + 1)).toBe(false)
+    // The re-bench ends AT the next reset, so candidacy returns there without needing a probe.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe-fail", nextResetAt)).toBe(0)
+    // Sibling credentials were never benched or probed.
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-other", resetAt + 1)).toBe(0)
+    expect(ModelRoute.probeDue(target, "cred-other", nextResetAt)).toBe(false)
+  })
+
+  test("a target-level quota bench probes at a provider window reset learned after the bench", () => {
+    const now = 800_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    expect(ModelRoute.cooldownUntil(target, now + 7)).toBe(now + 7 + day)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.probeDue(target, undefined, resetAt - 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(false)
+    ModelRoute.completed(target, policy, sample, resetAt + 1)
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
+  })
+
+  test("a released probe claim leaves the bench in force and the probe due again (#1478)", () => {
+    const now = 850_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    // A release naming a different claim is not this claim's owner: the claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    // The owner's release hands the probe back: bench and expiry unchanged, probe due again.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.cooldownUntil(target, resetAt)).toBe(now + 7 + day)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + 1)).toBe(true)
+  })
+
+  test("a stale token release cannot clear a same-millisecond re-claim (#1486)", () => {
+    const now = 950_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    const first = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    // A newer pick re-claims within the same millisecond: the timestamp alone collides.
+    const second = ModelRoute.nextProbeClaimToken()
+    expect(second).not.toBe(first)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    // The first pick's redundant release names the same millisecond but a stale token:
+    // the newer claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+  })
+
+  test("failed settles both probe scopes of one pick, even when the serving credential differs (#1486)", () => {
+    const now = 960_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+    const benchOf = (at: number, credentialID?: string) =>
+      ModelRoute.activeBenches(at).find(
+        (bench) => bench.modelID === "quota" && bench.credentialID === credentialID,
+      )
+
+    // Without the pick's claim, a serving-credential failure leaves both probe scopes stranded.
+    setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving")
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(true)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(true)
+
+    // With it, the same failure renews the target scope and the probe credential scope too,
+    // while the serving credential keeps its own health accounting.
+    const token = setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(false)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt + 1)).toBe(false)
+  })
+
+  test("completed ends a probe credential that differs from the serving one (#1486)", () => {
+    const now = 970_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+
+    // Without the pick's claim, success on the serving credential leaves the probe
+    // credential's bench (and its outstanding claim) in force.
+    setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(
+      ModelRoute.activeBenches(resetAt + 1).find((bench) => bench.credentialID === "cred-probe")?.probeClaimed,
+    ).toBe(true)
+
+    // With it, the same success ends the target scope and the probe credential scope too.
+    const token = setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBe(0)
+  })
+
+  test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
+    const now = 900_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
+    ModelRoute.observeCredentialQuota(target, "cred-auth", knownFull(resetAt, now + 1), now + 1)
+    expect(ModelRoute.probeDue(target, "cred-auth", resetAt)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, "cred-auth", resetAt)).toBe(false)
+
+    ModelRoute.resetHealth()
+    exhaustLadder(now, "cred-fallback")
+    ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now + 10)
+    expect(ModelRoute.activeBenches(now + 11)[0]?.quotaResetAt).toBeUndefined()
+    expect(ModelRoute.probeDue(target, "cred-fallback", now + day)).toBe(false)
   })
 })
 
@@ -681,6 +1309,27 @@ describe("ModelRoute scheduled weights", () => {
     ])
     expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
   })
+
+  test('a definition with date constraints survives the settings round trip', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const window = {
+      timezone: 'UTC',
+      dates: ['2026-12-25'],
+      excludeDates: ['2026-12-24'],
+      excludeWindows: ['holidays'],
+      excludedWindows: [{ dates: [today], timezone: 'UTC' }],
+    }
+    const built = definition([1, 1], [{ window, match: { targets: ['p/b'] }, factor: 10 }], [a, b])
+    const info = {
+      providerID: ModelRoute.PROVIDER_ID,
+      id: 'r',
+      settings: { [ModelRoute.SETTING]: built },
+    } as unknown as Parameters<typeof ModelRoute.definition>[0]
+    const decoded = ModelRoute.definition(info)
+    expect(decoded?.nodes[0].schedules).toEqual([{ window, match: { targets: ['p/b'] }, factor: 10 }])
+    // The resolved holiday exclusion is active today, so the rule stays out of force.
+    expect(ModelRoute.orderTargets(decoded!, ready(2), undefined, false)).toEqual([0, 1])
+  })
 })
 
 describe("ModelRoute window gates", () => {
@@ -798,5 +1447,1560 @@ describe("ModelRoute window gates", () => {
       ],
     } as unknown as ModelRoute.Definition
     expect(ModelRoute.orderTargets(route, ready, undefined, false)).toEqual([1])
+  })
+})
+
+describe("ModelRoute per-target context limits", () => {
+  const limited = (targetLimits: ({ context?: number } | undefined)[], routeCap?: number) =>
+    ({
+      id: "r",
+      targets: targetLimits.map((_, index) => ModelRoute.ref({ providerID: "p", model: `m${index}` })),
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      ...(routeCap !== undefined ? { limit: { context: routeCap } } : {}),
+      ...(targetLimits.some((item) => item !== undefined)
+        ? { targetLimits: targetLimits.map((item) => item ?? {}) }
+        : {}),
+      nodes: [
+        {
+          selection: "ordered" as const,
+          weights: targetLimits.map(() => 1),
+          children: targetLimits.map((_, index) => ({ leaf: index })),
+        },
+      ],
+    }) as unknown as ModelRoute.Definition
+
+  test("contextCeiling is the smaller of the route cap and the leaf ceiling", () => {
+    expect(ModelRoute.contextCeiling(limited([]), 0)).toBeUndefined()
+    expect(ModelRoute.contextCeiling(limited([undefined], 100_000), 0)).toBe(100_000)
+    expect(ModelRoute.contextCeiling(limited([{ context: 200_000 }]), 0)).toBe(200_000)
+    expect(ModelRoute.contextCeiling(limited([{ context: 200_000 }], 100_000), 0)).toBe(100_000)
+    expect(ModelRoute.contextCeiling(limited([{ context: 100_000 }], 200_000), 0)).toBe(100_000)
+  })
+
+  test("overLimit skips a request that fits neither ceiling, and never filters an unknown size", () => {
+    const both = limited([{ context: 200_000 }], 100_000)
+    expect(ModelRoute.overLimit(both, 0, undefined)).toBe(false)
+    expect(ModelRoute.overLimit(both, 0, 100_000)).toBe(false)
+    expect(ModelRoute.overLimit(both, 0, 100_001)).toBe(true)
+    // The route cap binds even though the leaf ceiling is larger.
+    expect(ModelRoute.overLimit(limited([{ context: 200_000 }], 100_000), 0, 150_000)).toBe(true)
+    // The leaf ceiling binds even though the route cap is larger.
+    expect(ModelRoute.overLimit(limited([{ context: 200_000 }], 300_000), 0, 250_000)).toBe(true)
+    expect(ModelRoute.overLimit(limited([{ context: 200_000 }], 300_000), 0, 150_000)).toBe(false)
+    // A leaf with no ceiling always fits, with or without a route cap elsewhere.
+    expect(ModelRoute.overLimit(limited([undefined], 100_000), 0, 90_000)).toBe(false)
+    expect(ModelRoute.overLimit(limited([undefined]), 0, 10_000_000)).toBe(false)
+  })
+
+  test("a definition with limits survives the settings round trip", () => {
+    const built = limited([{ context: 100_000 }, {}], 200_000)
+    const info = {
+      providerID: ModelRoute.PROVIDER_ID,
+      id: "r",
+      settings: { [ModelRoute.SETTING]: built },
+    } as unknown as Parameters<typeof ModelRoute.definition>[0]
+    const decoded = ModelRoute.definition(info)
+    expect(decoded?.limit).toEqual({ context: 200_000 })
+    expect(decoded?.targetLimits).toEqual([{ context: 100_000 }, {}])
+  })
+})
+
+describe("ModelRoute round-robin tiers (#1122)", () => {
+  const policy = ModelRoute.policy()
+  const leaf = (model: string) => ModelRoute.ref({ providerID: "tiers-p", model })
+  const flat = (id: string, weights: number[], targets: ModelRoute.Target[]) =>
+    ({
+      id,
+      targets,
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights, children: targets.map((_, index) => ({ leaf: index })) },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const head = (route: ModelRoute.Definition, ready: ReadonlySet<number>, session: string) =>
+    ModelRoute.nextTarget(route, ready, new Set(), session, true)
+
+  test("a single tier rotates evenly across sessions, as plain round-robin always did", () => {
+    const route = flat("tier-single", [1, 1, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("the lower tier is never drawn while any top-tier member is ready", () => {
+    const route = flat("tier-two", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    const heads = ["s1", "s2", "s3", "s4"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    // The session-less walk order is the tier order too: both weight-2 leaves before the weight-1.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    const walked = ModelRoute.orderTargets(route, all, "sx", true)
+    expect([...walked.slice(0, 2)].sort()).toEqual([0, 1])
+    expect(walked[2]).toBe(2)
+  })
+
+  test("the next tier engages once every member above it has failed or left", () => {
+    const route = flat("tier-fall", [2, 2, 1], [leaf("a"), leaf("b"), leaf("c")])
+    // Top tier unavailable: the weight-1 leaf serves.
+    expect(head(route, new Set([2]), "down")).toBe(2)
+    // Top tier tried within this dispatch: the walk falls through instead of retrying it.
+    expect(ModelRoute.nextTarget(route, new Set([0, 1, 2]), new Set([0, 1]), "walk", true)).toBe(2)
+  })
+
+  test("a session stuck to a lower tier returns to the top tier when it recovers", () => {
+    const route = flat("tier-sticky", [2, 1], [leaf("a"), leaf("b")])
+    expect(head(route, new Set([1]), "s1")).toBe(1)
+    // The top tier is back: the sticky pick in the lower tier no longer binds the session.
+    expect(head(route, new Set([0, 1]), "s1")).toBe(0)
+    expect(ModelRoute.sessionTarget("tier-sticky#0", "s1")).toBe(0)
+  })
+
+  test("rotation persists across dispatches inside the tier, wrapping instead of falling through", () => {
+    const route = flat("tier-cycle", [2, 2, 2, 1], [leaf("a"), leaf("b"), leaf("c"), leaf("d")])
+    const all = new Set([0, 1, 2, 3])
+    const heads = ["s1", "s2", "s3", "s4", "s5", "s6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 1, 2, 0, 1, 2])
+  })
+
+  test("an unset weight lands in the same tier as weight 1", () => {
+    // Only the first target lists a weight; the other two default to 1.
+    const route = flat("tier-default", [2], [leaf("a"), leaf("b"), leaf("c")])
+    const all = new Set([0, 1, 2])
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1, 2])
+    // The lone weight-2 target is the whole top tier, so every session starts there.
+    expect(head(route, all, "s1")).toBe(0)
+    expect(head(route, all, "s2")).toBe(0)
+    // With it gone, the two default-weight targets rotate evenly between themselves.
+    const rest = new Set([1, 2])
+    const heads = ["t1", "t2", "t3", "t4"].map((session) => head(route, rest, session))
+    expect(heads).toEqual([1, 2, 1, 2])
+  })
+
+  test("a quota-demoted leaf sorts below every live tier, whatever its weight, and still serves last", () => {
+    const heavy = leaf("heavy")
+    const route = flat("tier-demoted", [100, 2, 1], [heavy, leaf("mid"), leaf("low")])
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(heavy, policy, at, { quota: true })
+    expect(ModelRoute.demoted(heavy)).toBe(true)
+    const all = new Set([0, 1, 2])
+    // Weight order among the live tiers (2 before 1); the demoted 100 goes last — the old 0.01
+    // factor would have tied it with the weight-1 leaf in configured order, [1, 0, 2].
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 2, 0])
+    // Draws stay in the live tiers while any of them can serve...
+    expect(head(route, all, "d1")).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(2)
+    // ...and the demoted leaf is the last resort, not a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set([1, 2]), "d3", true)).toBe(0)
+  })
+
+  test("a nested route reference is a tier member with its group weight", () => {
+    const targets = [leaf("a"), leaf("b"), leaf("c")]
+    const build = (weights: number[]) =>
+      ({
+        id: "tier-nested",
+        targets,
+        targetVariants: [],
+        health: policy,
+        nodes: [
+          { selection: "round-robin" as const, weights, children: [{ node: 1 }, { leaf: 2 }] },
+          { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+        ],
+      }) as unknown as ModelRoute.Definition
+    const all = new Set([0, 1, 2])
+
+    // Group at weight 2 over the weight-1 leaf: sessions rotate inside the group, leaf 2 waits.
+    const grouped = build([2, 1])
+    const heads = ["g1", "g2", "g3", "g4"].map((session) => head(grouped, all, session))
+    expect(heads).toEqual([0, 1, 0, 1])
+    expect(ModelRoute.orderTargets(grouped, all, undefined, false)).toEqual([0, 1, 2])
+    expect(head(grouped, new Set([2]), "only")).toBe(2)
+
+    // Leaf at weight 2 over the weight-1 group: the leaf is the top tier now.
+    ModelRoute.resetSelection()
+    const leafFirst = build([1, 2])
+    expect(head(leafFirst, all, "top")).toBe(2)
+    expect(ModelRoute.orderTargets(leafFirst, all, undefined, false)).toEqual([2, 0, 1])
+  })
+
+  test("float-noise tier weights share one tier: an averaged group rotates with its equal leaf (#1421)", () => {
+    const targets = [leaf("a"), leaf("b"), leaf("c"), leaf("d")]
+    const route = {
+      id: "tier-float",
+      targets,
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        {
+          selection: "round-robin" as const,
+          weights: [1, 1],
+          schedules: [{ factor: 0.1 }],
+          children: [{ node: 1 }, { leaf: 3 }],
+        },
+        {
+          routeID: "inner",
+          selection: "round-robin" as const,
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    } as unknown as ModelRoute.Definition
+    const all = new Set([0, 1, 2, 3])
+    ModelRoute.resetSelection()
+    // The group averages (0.1 + 0.1 + 0.1) / 3 = 0.10000000000000002 while the
+    // direct leaf sits at exactly 0.1: computation noise must not split the tier.
+    const heads = ["f1", "f2", "f3", "f4", "f5", "f6"].map((session) => head(route, all, session))
+    expect(heads).toEqual([0, 3, 1, 3, 2, 3])
+  })
+
+  test("a group whose every door is demoted drops below the live tiers as one demoted member", () => {    const a = leaf("ga")
+    const b = leaf("gb")
+    const route = {
+      id: "tier-group-demoted",
+      targets: [a, b, leaf("gc")],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "round-robin" as const, weights: [2, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "inner", selection: "round-robin" as const, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    } as unknown as ModelRoute.Definition
+    const now = Date.now()
+    for (const target of [a, b])
+      for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    const all = new Set([0, 1, 2])
+    // The weight-2 group is demoted as a unit: the weight-1 leaf leads, the group serves after.
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([2, 0, 1])
+    expect(head(route, all, "gd")).toBe(2)
+  })
+})
+
+describe("ModelRoute provider route groups", () => {
+  const policy = ModelRoute.policy()
+  const alt = ModelRoute.ref({ providerID: "route-alt", model: "m" })
+  const main = ModelRoute.ref({ providerID: "route-main", model: "m" })
+  const build = (selection: "ordered" | "round-robin" | "weighted", weights: number[] = [1, 1]) =>
+    ({
+      id: "outer-route",
+      targets: [alt, main],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        { routeID: "plan", providerRoute: "plan", selection, weights, children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    }) as unknown as ModelRoute.Definition
+  const all = new Set([0, 1])
+  const demote = (target: ModelRoute.Target) => {
+    const now = Date.now()
+    for (const at of [now, now + 1_000, now + 2_000]) ModelRoute.failed(target, policy, at, { quota: true })
+    expect(ModelRoute.demoted(target)).toBe(true)
+  }
+
+  test("ordered: the first ready member serves, and an unavailable member falls through", () => {
+    const route = build("ordered")
+    expect(ModelRoute.nextTarget(route, all, new Set(), "s1", true)).toBe(0)
+    // The resolver expresses a benched member by leaving it out of the ready set.
+    expect(ModelRoute.nextTarget(route, new Set([1]), new Set(), "s2", true)).toBe(1)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([0, 1])
+  })
+
+  test("ordered: a quota-demoted member drops behind the live member and still serves last", () => {
+    demote(alt)
+    const route = build("ordered")
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+    expect(ModelRoute.nextTarget(route, all, new Set(), "d1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "d2", true)).toBe(0)
+  })
+
+  test("round-robin: a quota-demoted member sorts below the live tier inside the group", () => {
+    demote(alt)
+    const route = build("round-robin", [2, 1])
+    // Alt outweighs main 2:1, but demotion holds it below the live tier: main serves,
+    // and the demoted member remains the last resort rather than a refusal.
+    expect(ModelRoute.nextTarget(route, all, new Set(), "r1", true)).toBe(1)
+    expect(ModelRoute.nextTarget(route, all, new Set([1]), "r2", true)).toBe(0)
+    expect(ModelRoute.orderTargets(route, all, undefined, false)).toEqual([1, 0])
+  })
+
+  test("the decision records show the provider route resolution: the group under its own id, the member it chose", () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    try {
+      expect(ModelRoute.nextTarget(build("ordered"), all, new Set(), "dec-session", true)).toBe(0)
+    } finally {
+      ModelRouteLog.setSink(undefined)
+    }
+    const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
+    const inner = decisions.find((row) => row.route_id === "plan")
+    expect(inner?.candidates).toEqual(["route-alt/m", "route-main/m"])
+    expect(inner?.chosen).toBe("route-alt/m")
+    const outer = decisions.find((row) => row.route_id === "outer-route")
+    expect(outer?.candidates).toEqual(["plan/m"])
+    expect(outer?.chosen).toBe("plan/m")
+  })
+})
+
+describe("ModelRoute machinery constants (experimental.model_route_settings)", () => {
+  const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-sol" })
+  const policy = ModelRoute.policy({ cooldownMs: 60_000 })
+
+  afterEach(() => {
+    ModelRoute.onSettingsConfig(() => undefined)
+    ModelRoute.configureConstants(ModelRoute.DEFAULT_CONSTANTS)
+    ModelRoute.configure({
+      escalation: { enabled: true, afterGiveUps: 2 },
+      quota: { demoteAfter: 3, windowMs: 4 * 3_600_000 },
+    })
+  })
+
+  test("the resolved defaults are exactly the machinery's named constants", () => {
+    expect(ModelRoute.currentConstants()).toEqual({
+      bench: {
+        maxCooldownMs: 86_400_000,
+        multiplier: 2,
+        retryAfterMinMs: 1_000,
+        cooldownCapMs: 3_600_000,
+        quotaCooldownCapMs: 86_400_000,
+      },
+      demotion: { factor: 0.01 },
+      quotaGate: {
+        maxMs: 30 * 86_400_000,
+        fallbackMs: 30 * 60_000,
+        feedTtlMs: 60_000,
+        balanceDeadThreshold: 0.1,
+      },
+      escalation: { outcomeWindow: 5 },
+      network: { windowMs: 30_000, providers: 3, providerModels: 2 },
+      continuity: { hedgeRequests: 2 },
+      overrides: { preferredFactor: 3 },
+    })
+    expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+  })
+
+  test("the bench ladder doubles toward the 24h cap by default, and stops at a configured cap", () => {
+    const now = 1_000_000
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 120_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.configureConstants({ bench: { maxCooldownMs: 5_000 } })
+    ModelRoute.failed(target, policy, now)
+    // A bench that would run a full minute stops at the configured cap.
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+  })
+
+  test("a fractional bench multiplier keeps growing past the old exponent limit until it reaches the cap", () => {
+    const now = 3_000_000
+    const quick = ModelRoute.policy({ cooldownMs: 60_000 })
+    ModelRoute.configureConstants({ bench: { multiplier: 1.1 } })
+
+    Array.from({ length: 32 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBeGreaterThan(now + 60_000 * 1.1 ** 30)
+
+    Array.from({ length: 50 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 86_400_000)
+
+    ModelRoute.resetHealth()
+    ModelRoute.configureConstants({ bench: { multiplier: 1 } })
+    Array.from({ length: 40 }, () => ModelRoute.failed(target, quick, now))
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+  })
+
+  test("the bench multiplier and the caps on the health bases are configurable", () => {
+    const quick = ModelRoute.policy({ cooldownMs: 1_000 })
+    const now = 2_000_000
+    ModelRoute.configureConstants({ bench: { multiplier: 3 } })
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    ModelRoute.failed(target, quick, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 9_000)
+
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(3_600_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(86_400_000)
+    ModelRoute.configureConstants({ bench: { cooldownCapMs: 120_000, quotaCooldownCapMs: 7_200_000 } })
+    expect(ModelRoute.policy({ cooldownMs: 999_999_999 }).cooldownMs).toBe(120_000)
+    expect(ModelRoute.policy({ quotaCooldownMs: 999_999_999 }).quotaCooldownMs).toBe(7_200_000)
+  })
+
+  test("demotion threshold and factor are configurable", () => {
+    const now = Date.now()
+    ModelRoute.configureConstants({ demotion: { factor: 0.5 } })
+    ModelRoute.configure({ quota: { demoteAfter: 2 } })
+    ModelRoute.failed(target, policy, now, { quota: true })
+    expect(ModelRoute.demoted(target, now + 1)).toBe(false)
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+
+  test("the quota gate believes a stated reset up to the cap and falls back when none is stated", () => {
+    const now = 100_000_000
+    ModelRoute.observeQuotaFailure(target, "settings-cred-a", now + 90 * 86_400_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now)?.until).toBe(now + 30 * 86_400_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now)?.until).toBe(now + 30 * 60_000)
+  })
+
+  test("the quota gate fallback and cap are configurable", () => {
+    const now = 100_000_000
+    ModelRoute.configureConstants({ quotaGate: { fallbackMs: 10_000, maxMs: 60_000 } })
+    ModelRoute.observeQuotaFailure(target, "settings-cred-c", undefined, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-c", now)?.until).toBe(now + 10_000)
+    ModelRoute.observeQuotaFailure(target, "settings-cred-d", now + 3_600_000, now)
+    expect(ModelRoute.credentialQuotaBlocked("settings-cred-d", now)?.until).toBe(now + 60_000)
+  })
+
+  test("the quota feed interval follows the gate constants", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_061_000)).toBe(true)
+    ModelRoute.resetQuotaFeed()
+    ModelRoute.configureConstants({ quotaGate: { feedTtlMs: 10_000 } })
+    expect(ModelRoute.shouldFeedQuota(2_000_000)).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(2_005_000)).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
+  })
+
+  test("quota feeds are throttled per provider and location", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-b")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-a")).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-b", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-b")).toBe(false)
+    ModelRoute.resetQuotaFeed()
+  })
+
+  test("the escalation outcome window is configurable", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })
+    // Default window (5): two give-ups still count after two successes.
+    ModelRoute.failed(target, policy, 1_000)
+    ModelRoute.failed(target, policy, 2_000)
+    ModelRoute.completed(target, policy, ok, 3_000)
+    ModelRoute.completed(target, policy, ok, 4_000)
+    expect(ModelRoute.escalates(target)).toBe(true)
+    // Window of 3: the successes push the older give-up out of the window.
+    ModelRoute.configureConstants({ escalation: { outcomeWindow: 3 } })
+    ModelRoute.failed(other, policy, 1_000)
+    ModelRoute.failed(other, policy, 2_000)
+    ModelRoute.completed(other, policy, ok, 3_000)
+    ModelRoute.completed(other, policy, ok, 4_000)
+    expect(ModelRoute.escalates(other)).toBe(false)
+  })
+
+  test("a valid pair at a small configured window escalates exactly at the effective threshold (#1163)", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const off = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 2, outcomeWindow: 2 } }),
+      "/loc/small-window",
+    )
+    try {
+      ModelRoute.resetHealth()
+      // One give-up in the window of 2: below the threshold of 2.
+      ModelRoute.failed(target, policy, 1_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A success pushes the give-up out of the small window: give-up, success, give-up
+      // leaves only one give-up in the last 2 outcomes, so still no escalation. (Under the
+      // default window of 5 the count would be 2 and this would already escalate.)
+      ModelRoute.completed(target, policy, ok, 2_000, undefined, "/loc/small-window")
+      ModelRoute.failed(target, policy, 3_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A second consecutive give-up fills the window at the threshold exactly
+      // (afterGiveUps == outcomeWindow): escalation fires, so the equality pair is not inert.
+      ModelRoute.failed(target, policy, 4_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(true)
+    } finally {
+      off()
+    }
+  })
+
+  test("settings readers are scoped per Location, in either activation order", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, factor: 0.5 }, bench: { maxCooldownMs: 5_000 }, escalation: { afterGiveUps: 4 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 9, factor: 0.9 }, bench: { maxCooldownMs: 9_000 }, escalation: { afterGiveUps: 7 } }),
+      "/loc/b",
+    )
+    try {
+      // B activated last: before #1423 its reader would have governed A too.
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(7)
+      expect(ModelRoute.currentConstants("/loc/a").bench.maxCooldownMs).toBe(5_000)
+      expect(ModelRoute.currentConstants("/loc/b").bench.maxCooldownMs).toBe(9_000)
+      expect(ModelRoute.currentConstants("/loc/a").demotion.factor).toBe(0.5)
+      // An unscoped read with two Locations registered cannot know which it serves:
+      // it must fall back to the defaults rather than leak either Location's config.
+      expect(ModelRoute.currentSettings().escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("a Location with no settings block gets defaults without disturbing others", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ escalation: { afterGiveUps: 4 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("behavior consumers judge with their own Location's settings, not the unscoped fallback (#1423)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    ModelRoute.failed(target, policy, now + 1)
+    ModelRoute.failed(target, policy, now + 2, { quota: true })
+    ModelRoute.failed(target, policy, now + 3, { quota: true })
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: false, afterGiveUps: 2 }, demotion: { after: 2, factor: 0.5 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: true, afterGiveUps: 2 }, demotion: { after: 9, factor: 0.9 } }),
+      "/loc/b",
+    )
+    try {
+      // Escalation: A switched it off, B left it on — each Location's step sees its own.
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.escalates(target, undefined, "/loc/b")).toBe(true)
+      // Quota demotion: two quota errors demote under A's threshold of 2, not B's 9.
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/b")).toBe(false)
+      // Weights: the traced demotion layer uses the judging Location's factor.
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/a" }).demotion).toBe(50)
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/b" }).demotion).toBe(100)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("health recording keeps the judging Location's outcome window and bench ladder (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3 } }), "/loc/b")
+    try {
+      // Six give-ups recorded for A: A's window (10) keeps all six, so A's
+      // afterGiveUps (6) can actually trigger; the default window (5) would
+      // have truncated the history before the threshold could accumulate.
+      ModelRoute.resetHealth()
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 1_000_000 + index, undefined, undefined, "/loc/a")
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+      // Bench ladder: B's multiplier (3) doubles — triples — the second bench.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 180_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-gate recording and evaluation use the owning Location's gate (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 120_000 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // A rate-limit exhaustion with no stated reset installs the fallback gate of
+      // the Location whose attempt reported it — one minute for A, not the
+      // compiled 30-minute default the unscoped read used once B registered.
+      ModelRoute.observeQuotaFailure(target, "settings-cred-a", undefined, now, "rate-limit", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now, "/loc/a")).toEqual({ until: now + 60_000 })
+      ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now, "/loc/b")).toEqual({ until: now + 120_000 })
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("threshold-derived balance holds are judged under the judging Location's threshold (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      // Armed under A's threshold (1): a balance of 0.5 is dead for A, alive for B (0.05).
+      ModelRoute.observeCredentialQuota(target, "loc-hold-cred", balance, now, "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/b")).toBeUndefined()
+      // The durable record carries the hold's threshold origin, not just its baseline.
+      expect(
+        ModelRoute.activeAdjustments(now).find((item) => item.id === "quota-credential:loc-hold-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("threshold")
+
+      // B feeding the same grant a lower balance corrects the retained snapshot:
+      // 0.03 is dead under B's threshold too, so B is now blocked as well.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/a")).toEqual({ until: null })
+
+      // A fresh increase over the benched balance still releases the hold for everyone.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 2, observedAt: now + 2 },
+        now + 2,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/a")).toBeUndefined()
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/b")).toBeUndefined()
+
+      // Attempt-reported exhaustion holds keep their unconditional force: installed
+      // from a balance of 5, they block even the Location whose threshold admits 5.
+      ModelRoute.resetHealth()
+      ModelRoute.observeCredentialQuota(target, "attempt-cred", { ...balance, remaining: 5, observedAt: now }, now, "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(target, "attempt-cred", undefined, now + 1, "balance-exhaustion", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(
+        ModelRoute.activeAdjustments(now + 1).find((item) => item.id === "quota-credential:attempt-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("attempt")
+
+      // A threshold hold restored from its durable record (no in-memory state) is
+      // judged by its benched balance under the judging Location's threshold.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:restored-cred",
+          match: "credential:restored-cred",
+          action: "skip",
+          balanceBaseline: 0.5,
+          balanceGrant: "credits-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          credentialID: "restored-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/b")).toBeUndefined()
+
+      // Expiration is known-full regardless of the numeric threshold, including after
+      // restoring the durable credential hold without a fresh quota feed.
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:expired-cred",
+          match: "credential:expired-cred",
+          action: "skip",
+          balanceBaseline: 5,
+          balanceGrant: "expired-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          balanceHoldExpired: true,
+          credentialID: "expired-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("expired-cred", now, "/loc/b")).toEqual({ until: null })
+
+      // A tuning result computed under A's policy must not leak to B.
+      ModelRoute.setAdjustments([
+        {
+          id: "auto-quota:location-scoped",
+          match: `${target.providerID}/${target.id}`,
+          action: "skip",
+          location: "/loc/a",
+        },
+      ])
+      expect(ModelRoute.skipped(target, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(target, now, { location: "/loc/b" })).toBe(false)
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("a restored threshold hold is judged by its latest judged balance, not its benched baseline (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeCredentialQuota(target, "judged-cred", balance, now, "/loc/a")
+      ModelRoute.observeCredentialQuota(
+        target,
+        "judged-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      const durable = ModelRoute.activeAdjustments(now + 1).find(
+        (item) => item.id === "quota-credential:judged-cred",
+      )
+      expect(durable?.balanceBaseline).toBe(0.5)
+      expect(durable?.balanceHoldBalance).toBe(0.03)
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/a")).toEqual({ until: null })
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("restored threshold holds keep tolerance, unknown-snapshot evidence, reactive timed gates, and timed provider skips (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    const offC = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.1 } }), "/loc/c")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      // Tolerance: a restored balance a rounding hair above the threshold
+      // (0.4 - 0.3 = 0.10000000000000003 against 0.1) is still dead, as the live
+      // gate judges it -- on both the credential and provider durable paths.
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:tol-cred",
+          match: "credential:tol-cred",
+          action: "skip",
+          balanceBaseline: 0.10000000000000003,
+          balanceHoldBalance: 0.10000000000000003,
+          balanceGrant: "credits-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          credentialID: "tol-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("tol-cred", now, "/loc/c")).toEqual({ until: null })
+      const leafTol = ModelRoute.ref({ providerID: "prov-tol", model: "m" })
+      ModelRoute.setAdjustments([
+        {
+          id: "quota:prov-tol",
+          match: "prov-tol/",
+          action: "skip",
+          balanceBaseline: 0.10000000000000003,
+          balanceHoldBalance: 0.10000000000000003,
+          balanceHoldOrigin: "threshold",
+        },
+      ])
+      expect(ModelRoute.skipped(leafTol, now, { location: "/loc/c" })).toBe(true)
+
+      // Unknown first snapshot after a restart: the restored hold's preserved
+      // judged balance still governs -- A (threshold 1) stays blocked, B (0.05)
+      // still admits -- instead of the unknown reading admitting everyone.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      ModelRoute.observeCredentialQuota(target, "unknown-cred", balance, now, "/loc/a")
+      const durableUnknown = ModelRoute.activeAdjustments(now).find(
+        (item) => item.id === "quota-credential:unknown-cred",
+      )
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durableUnknown ? [durableUnknown] : [])
+      ModelRoute.observeCredentialQuota(
+        target,
+        "unknown-cred",
+        { ...balance, percent: null, remaining: null, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("unknown-cred", now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("unknown-cred", now + 1, "/loc/b")).toBeUndefined()
+
+      // Reactive rate limit: B admits the held balance, but a plain rate limit
+      // reported under B gates the credential until its stated reset anyway;
+      // after the reset, B admits again while A stays balance-blocked.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      ModelRoute.observeCredentialQuota(target, "timed-cred", balance, now, "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(target, "timed-cred", now + 60_000, now + 1, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 1, "/loc/b")).toEqual({ until: now + 60_000 })
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 60_001, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 60_001, "/loc/a")).toEqual({ until: null })
+
+      // Timed provider skips: two providers whose threshold holds B admits each
+      // gain a timed attempt-reported skip; the exclusion lands on each
+      // provider's own records \u2014 there is no pool verdict to count them together.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      const leaf1 = ModelRoute.ref({ providerID: "prov-t1", model: "m" })
+      const leaf2 = ModelRoute.ref({ providerID: "prov-t2", model: "m" })
+      ModelRoute.observeProviderQuota(leaf1, { ...balance, providerID: "prov-t1" }, now, "/loc/a")
+      ModelRoute.observeProviderQuota(leaf2, { ...balance, providerID: "prov-t2" }, now, "/loc/a")
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leaf2, now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(leaf1, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
+      ModelRoute.observeQuotaFailure(leaf2, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
+      expect(ModelRoute.skipped(leaf1, now + 1, { location: "/loc/b" })).toBe(true)
+      // The timed exclusion is carried by each provider's own skip record
+      // (skipped above); the in-memory gate still shows only the threshold
+      // hold, which blocks A and admits B.
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now + 1, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.providerQuotaBlocked(leaf2, now + 1, "/loc/a")).toEqual({ until: null })
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+      offC()
+    }
+  })
+
+  test("threshold-derived provider holds are judged under the requesting Location in skipped (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const leafA = ModelRoute.ref({ providerID: "prov-hold", model: "m1" })
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "prov-hold",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeProviderQuota(leafA, balance, now, "/loc/a")
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      // The provider's own gate carries the same per-Location judgement: the
+      // hold blocks its leaf under A and admits it under B. There is no
+      // pool-level fact to consult \u2014 a pool cannot run out (Drew, 2026-11-07).
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/b")).toBeUndefined()
+      const durable = ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:prov-hold")
+      expect(durable?.balanceHoldOrigin).toBe("threshold")
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      // After a restart the durable record alone carries the judgement through
+      // skipped(); no in-memory provider gate exists until the next fed snapshot.
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/a")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/b")).toBeUndefined()
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ network: { providers: 2 }, continuity: { hedgeRequests: 5 } }),
+      "/loc/b",
+    )
+    try {
+      // Network forgiveness: two unrelated transport failures meet A's configured
+      // providers threshold (2), so the first target's bench is cleared — the
+      // default threshold (3) the unscoped read used would have kept it benched.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 1, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 2, "/loc/a")).toBe(0)
+      // Origin hedging: B allows five away responses before the session settles,
+      // so the origin is still offered after three — the default (2) would not.
+      const origin = ModelRoute.ref({ providerID: "p", model: "a" })
+      const away = ModelRoute.ref({ providerID: "p", model: "b" })
+      ModelRoute.moved("r", "s-net", origin)
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      expect(ModelRoute.hedgeHome("r", "s-net", "/loc/b")).toBe("p/a")
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("shared outcome history keeps each Location's window: retention is the union, evaluation is scoped (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 2_000_000 + index, undefined, undefined, "/loc/a")
+      // One success recorded through B (default window 5) must not erase the
+      // history A (window 10) still judges by.
+      ModelRoute.completed(target, policy, ok, 2_000_100, undefined, "/loc/b")
+      expect(ModelRoute.giveUps(target, undefined, "/loc/a")).toBe(6)
+      expect(ModelRoute.giveUps(target, undefined, "/loc/b")).toBe(4)
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-event and network histories retain the union of Location windows (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, windowMs: 60_000 }, network: { providers: 3, windowMs: 60_000 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { windowMs: 1_000 }, network: { windowMs: 1_000 } }),
+      "/loc/b",
+    )
+    try {
+      // Quota events: B's narrow window (1s) recording the second event must not
+      // prune the first event A (60s window, threshold 2) still counts.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, { quota: true }, undefined, "/loc/a")
+      ModelRoute.failed(target, policy, now + 2_000, { quota: true }, undefined, "/loc/b")
+      expect(ModelRoute.demoted(target, now + 2_000, undefined, "/loc/a")).toBe(true)
+      // Network history: failures through B must not prune A's longer window, so
+      // the third unrelated failure still triggers A's outage forgiveness.
+      ModelRoute.resetHealth()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const third = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 2_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(third, policy, now + 3_000, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 3_001, "/loc/a")).toBe(0)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("network forgiveness clears only the failures inside the judging Location's window (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 1_000, providers: 2 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const old = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const fresh1 = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const fresh2 = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(old, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(old, now + 1, "/loc/a")).toBeGreaterThan(now)
+      // Ten seconds later B detects its own outage from two fresh failures; its
+      // forgiveness must not reach back and clear A's older, unrelated bench,
+      // even though the shared history retains that entry for A's window.
+      ModelRoute.failed(fresh1, policy, now + 10_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(fresh2, policy, now + 10_500, { network: true }, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(fresh1, now + 10_501, "/loc/b")).toBe(0)
+      expect(ModelRoute.cooldownUntil(old, now + 10_501, "/loc/a")).toBeGreaterThan(now + 10_501)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("config feeds both layers at once, and behavior follows", () => {
+    ModelRoute.onSettingsConfig(() => ({
+      demotion: { after: 2, factor: 0.5 },
+      bench: { maxCooldownMs: 5_000 },
+      escalation: { afterGiveUps: 4 },
+    }))
+    expect(ModelRoute.currentSettings()).toEqual({
+      escalation: { enabled: true, afterGiveUps: 4 },
+      quota: { demoteAfter: 2, windowMs: 4 * 3_600_000 },
+    })
+    expect(ModelRoute.currentConstants().bench.maxCooldownMs).toBe(5_000)
+    expect(ModelRoute.currentConstants().demotion.factor).toBe(0.5)
+
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
+    ModelRoute.failed(target, policy, now, { quota: true })
+    ModelRoute.failed(target, policy, now + 1, { quota: true })
+    expect(ModelRoute.demoted(target, now + 2)).toBe(true)
+    expect(ModelRoute.weightOf(target, 2, now + 2)).toBe(1)
+  })
+})
+
+describe("ModelRoute demotion policy (experimental.model_route_demotion, #1151)", () => {
+  const target = ModelRoute.ref({ providerID: "openai", model: "gpt-6-demotion" })
+  const policy = ModelRoute.policy({ cooldownMs: 60_000 })
+  const quota = { quota: true }
+  let offs: Array<() => void> = []
+
+  afterEach(() => {
+    offs.forEach((off) => off())
+    offs = []
+    ModelRoute.onSettingsConfig(() => undefined)
+    ModelRoute.configure({
+      escalation: { enabled: true, afterGiveUps: 2 },
+      quota: { demoteAfter: 3, windowMs: 4 * 3_600_000 },
+    })
+  })
+
+  test("unconfigured, the policy is exactly today's defaults", () => {
+    expect(ModelRoute.DEFAULT_DEMOTION_POLICY).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    expect(ModelRoute.demotionPolicy()).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    expect(ModelRoute.demotionPolicy("/unconfigured-location")).toEqual({ threshold: 3, windowMs: 14_400_000 })
+    // And the behaviour matches: two quota failures do not demote, the third does,
+    // and a failure older than the 4h window no longer counts.
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    expect(ModelRoute.demoted(target, now + 2)).toBe(false)
+    ModelRoute.failed(target, policy, now + 2, quota)
+    expect(ModelRoute.demoted(target, now + 3)).toBe(true)
+    expect(ModelRoute.demoted(target, now + 14_400_000 + 10)).toBe(false)
+  })
+
+  test("a configured threshold of 1 demotes after a single quota failure inside the window", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1, windowMs: 60_000 }), "/proj-a"))
+    expect(ModelRoute.demotionPolicy("/proj-a")).toEqual({ threshold: 1, windowMs: 60_000 })
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-a")).toBe(true)
+    // The same failure is outside the configured window an hour later.
+    expect(ModelRoute.demoted(target, now + 3_600_000, undefined, "/proj-a")).toBe(false)
+    // A Location with no registration keeps the defaults: one failure is not enough.
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("failures outside the configured window do not count toward the threshold", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 2, windowMs: 1_000 }), "/proj-b"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 2_000, quota)
+    expect(ModelRoute.demoted(target, now + 2_000, undefined, "/proj-b")).toBe(false)
+    ModelRoute.failed(target, policy, now + 2_500, quota)
+    expect(ModelRoute.demoted(target, now + 2_500, undefined, "/proj-b")).toBe(true)
+  })
+
+  test("two Locations with divergent thresholds each judge by their own policy", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/proj-strict"))
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 3 }), "/proj-lenient"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-strict")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 1, undefined, "/proj-lenient")).toBe(false)
+    // An unscoped read with several Locations registered cannot know which it serves,
+    // so it falls back to the defaults rather than borrowing another Location's policy.
+    expect(ModelRoute.demoted(target, now + 1)).toBe(false)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    ModelRoute.failed(target, policy, now + 2, quota)
+    expect(ModelRoute.demoted(target, now + 3, undefined, "/proj-lenient")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 3)).toBe(true)
+  })
+
+  test("an unscoped read follows the single registered Location (session and façade traffic alike)", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/only-proj"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    expect(ModelRoute.demoted(target, now + 1)).toBe(true)
+  })
+
+  test("a wider configured window retains quota events the default window would prune", () => {
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 2, windowMs: 6 * 3_600_000 }), "/proj-wide"))
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 5 * 3_600_000, quota)
+    // Both failures are inside the configured 6h window, so the target demotes there —
+    // under the default 4h window the first failure would not count.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-wide")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("a Location registering later with a wider window still counts earlier quota events (#1699)", () => {
+    const now = Date.now()
+    // Two quota failures land while no wide-window Location is registered.
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    // A third failure five hours later is the pruning moment: under the old
+    // record-time retention (the registered readers' union, 4h by default)
+    // recording it discarded the first two events for good.
+    ModelRoute.failed(target, policy, now + 5 * 3_600_000, quota)
+    // Only now does the wider-window Location activate — no restart, so no
+    // ledger re-seed can recover anything the live path pruned.
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 3, windowMs: 10 * 3_600_000 }), "/proj-late"))
+    // All three failures are inside its 10h window, so it demotes.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-late")).toBe(true)
+    // A narrower Location still judges only its own window over the retained
+    // events: just the latest failure is inside the default 4h window, so
+    // the wider retention does not demote for it.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("removing a Location's registration restores the defaults for it", () => {
+    const off = ModelRoute.onDemotionConfig(() => ({ threshold: 1 }), "/proj-gone")
+    off()
+    expect(ModelRoute.demotionPolicy("/proj-gone")).toEqual({ threshold: 3, windowMs: 14_400_000 })
+  })
+})
+
+describe("ModelRoute provider-route groups with no ready members", () => {
+  const sibling = ModelRoute.ref({ providerID: "opendesign", model: "gpt-6-luna" })
+  const groupNode = {
+    routeID: "plan",
+    providerRoute: "plan",
+    selection: "ordered" as const,
+    weights: [] as number[],
+    children: [] as never[],
+  }
+  const capture = () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    return {
+      stop: () => ModelRouteLog.setSink(undefined),
+      decisions: () => events.flatMap((event) => (event.kind === "decision" ? [event.row] : [])),
+    }
+  }
+
+  test("a leafless provider-route group appears in the parent decision's excluded list with a reason", () => {
+    const definition = {
+      id: "luna-plan",
+      targets: [sibling],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [2.5, 1], children: [{ node: 1 }, { leaf: 0 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set([0]), new Set(), undefined, false)).toBe(0)
+    } finally {
+      cap.stop()
+    }
+    const parent = cap.decisions().find((row) => row.route_id === "luna-plan")
+    expect(parent?.chosen).toBe("opendesign/gpt-6-luna")
+    expect((parent?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
+  })
+
+  test("a route whose only seat is a leafless group records the exclusion on its no-candidates decision", () => {
+    const definition = {
+      id: "terra-plan",
+      targets: [],
+      targetVariants: [],
+      health: ModelRoute.policy(),
+      nodes: [{ selection: "round-robin" as const, weights: [1], children: [{ node: 1 }] }, groupNode],
+    } as unknown as ModelRoute.Definition
+    const cap = capture()
+    try {
+      expect(ModelRoute.nextTarget(definition, new Set(), new Set(), undefined, false)).toBeUndefined()
+    } finally {
+      cap.stop()
+    }
+    const row = cap.decisions().find((item) => item.route_id === "terra-plan")
+    expect(row?.reason).toBe("no-candidates")
+    expect((row?.detail as { excluded?: unknown } | undefined)?.excluded).toContainEqual({
+      candidate: "plan",
+      reason: "no-ready-members",
+    })
+  })
+})
+describe("ModelRoute per-leg quota state (pool verdict abolished)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 5_000, quotaCooldownMs: 60_000 })
+  const leaves = [0, 1, 2].map((index) => ModelRoute.ref({ providerID: `pool-p${index}`, model: `m${index}` }))
+  const outside = ModelRoute.ref({ providerID: "pool-outside", model: "solo" })
+
+  test("quota benches on two leaves of one group never exclude a third, individually-clear leaf", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    ModelRoute.failed(leaves[0], policy, now, { quota: true })
+    ModelRoute.failed(leaves[1], policy, now, { quota: true })
+    // Each benched leaf is out on its own bench...
+    expect(ModelRoute.cooldownUntil(leaves[0], now)).toBeGreaterThan(now)
+    expect(ModelRoute.cooldownUntil(leaves[1], now)).toBeGreaterThan(now)
+    // ...and the third leaf of the same group carries no exclusion of any kind:
+    // no bench and no provider gate. A pool cannot run out (Drew, 2026-11-07) \u2014
+    // only its leaves' own models, credentials, and providers can.
+    expect(ModelRoute.cooldownUntil(leaves[2], now)).toBe(0)
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], now)).toBeUndefined()
+    expect(ModelRoute.cooldownUntil(outside, now)).toBe(0)
+    // Expiry re-admits each benched leaf on its own clock.
+    expect(ModelRoute.cooldownUntil(leaves[0], now + 60_001)).toBe(0)
+    expect(ModelRoute.cooldownUntil(leaves[1], now + 60_001)).toBe(0)
+  })
+
+  test("a provider's own quota state blocks every leaf it serves and no other provider's leaf", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([])
+    const now = Date.now()
+    const resetAt = now + 3_600_000
+    // Two leaves share one provider; a third leaf sits on its own provider in
+    // the same route group. Quota state is the provider's, so it covers
+    // exactly the leaves that provider serves.
+    const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
+    // Attempt-reported exhaustion from ONE model family lands model-scoped
+    // (#1976): only the answering leaf is skipped — a sibling family on the
+    // same provider keeps serving until its own answer corroborates.
+    ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
+    expect(ModelRoute.skipped(shared[0], now)).toBe(true)
+    expect(ModelRoute.skipped(shared[1], now)).toBe(false)
+    expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
+    // The second family answering quota corroborates the hold to provider
+    // scope: now the provider's own skip record blocks every leaf it serves.
+    ModelRoute.observeQuotaFailure(shared[1], undefined, resetAt, now)
+    expect(ModelRoute.skipped(shared[1], now)).toBe(true)
+    expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(shared[0], now)).toBeUndefined()
+    // A fed known-full snapshot gates the provider in memory, for both leaves.
+    ModelRoute.observeProviderQuota(
+      shared[0],
+      { planID: "plan", window: "weekly", providerID: "pool-shared", percent: 100, remaining: 0, resetAt, observedAt: now, stale: false },
+      now,
+    )
+    expect(ModelRoute.providerQuotaBlocked(shared[0], now)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(shared[1], now)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], now)).toBeUndefined()
+    // The gate lifts on the provider's own reset clock.
+    expect(ModelRoute.providerQuotaBlocked(shared[0], resetAt + 1)).toBeUndefined()
+    expect(ModelRoute.skipped(shared[0], resetAt + 1)).not.toBe(true)
+  })
+
+  test("a shared credential's gate blocks through the credential scope only, never a provider scope", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 3_600_000
+    ModelRoute.observeQuotaFailure(leaves[0], "cred-pool", resetAt, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-pool", now)).toEqual({ until: resetAt })
+    // The credential gate says nothing about any provider gate: a leaf keeps
+    // whatever its own provider state says (here, nothing).
+    expect(ModelRoute.providerQuotaBlocked(leaves[0], now)).toBeUndefined()
+    expect(ModelRoute.credentialQuotaBlocked("cred-pool", resetAt + 1)).toBeUndefined()
+  })
+
+  test("a due probe does not outrank the leaf's own independent provider gate (#1390, #1473)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 5 * 3_600_000
+    const longPolicy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const knownFull = (at: number, observedAt: number) => ({
+      planID: "plan",
+      window: "five-hours",
+      providerID: "pool-p0",
+      percent: 100,
+      remaining: 0,
+      resetAt: at,
+      observedAt,
+      stale: false,
+    })
+    // Bench the leaf on the escalated ladder, which runs far past the window
+    // reset the provider feed then teaches it: a half-open probe comes due.
+    for (let index = 0; index < 8; index++) ModelRoute.failed(leaves[0], longPolicy, now + index, { quota: true })
+    ModelRoute.observeProviderQuota(leaves[0], knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    // A fresher independent gate on the same provider still blocks the leaf
+    // itself: gates beat probes, judged per leaf, never via a pool verdict.
+    ModelRoute.observeProviderQuota(leaves[0], knownFull(resetAt + 60_000, resetAt), resetAt)
+    expect(ModelRoute.providerQuotaBlocked(leaves[0], resetAt + 10)).toEqual({ until: resetAt + 60_000 })
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], resetAt + 10)).toBeUndefined()
+  })
+})
+
+describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (#1974, #1976)", () => {
+  const hour = 3_600_000
+
+  const gatheredReading = (opts: {
+    providerID: string
+    modelID: string
+    percent: number
+    at: number
+    resetAt?: number | null
+    widePercent?: number
+  }) => [
+    {
+      providerID: opts.providerID,
+      measuredAt: opts.at,
+      windows:
+        opts.widePercent === undefined
+          ? []
+          : [{ name: "weekly", usedPercent: opts.widePercent, resetAt: opts.resetAt ?? null, measuredAt: opts.at }],
+      models: {
+        [opts.modelID]: [
+          { name: "weekly", usedPercent: opts.percent, resetAt: opts.resetAt ?? null, measuredAt: opts.at },
+        ],
+      },
+    },
+  ]
+
+  test("a credential-less quota answer skips only the answering target (#1976)", () => {
+    const now = 700_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    // The Claude family's wall: one credential-less quota answer.
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // The answering target is skipped, under its own model-scoped record...
+    expect(ModelRoute.skipped(claude, now + 1)).toBe(true)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some(
+        (item) => item.id === "quota-model:antigravity-direct:claude-sonnet-5-5",
+      ),
+    ).toBe(true)
+    // ...and the sibling family is untouched: no provider-wide record, no skip.
+    expect(ModelRoute.skipped(gemini, now + 1)).toBe(false)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+  })
+
+  test("a second family's quota answer corroborates the skip to provider scope (#1976)", () => {
+    const now = 710_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // A second, distinct target of the same provider answers quota while the first
+    // family's hold still stands: two sources, the pool-verdict standard.
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt, now + 1)
+    expect(
+      ModelRoute.activeAdjustments(now + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(true)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, now + 2)).toBe(true)
+    // Corroboration is judged against live holds: once the first family's stated hold
+    // has lapsed, a lone new answer scopes to its own target again.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt + 7_200_000, resetAt + 1)
+    expect(
+      ModelRoute.activeAdjustments(resetAt + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+    expect(ModelRoute.skipped(gemini, resetAt + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, resetAt + 2)).toBe(false)
+  })
+
+  test("a gathered reading with headroom lifts the skip, long before the stated reset (#1974)", () => {
+    const now = 720_000_000
+    // The OpenDesign shape: the error's stated reset is days out, far past the real
+    // window roll — and the window did roll, which the gatherer's fresh reading shows.
+    const statedReset = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, statedReset, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 4,
+        at: judgedAt,
+        resetAt: now + 7 * 86_400_000,
+      }),
+      judgedAt,
+    )
+    // The source's reset (a fresh window, days past the stated one) governs: the skip
+    // comes off on the reading's word, with no attempt spent to learn it.
+    expect(released).toEqual(["quota-model:opendesign:claude-haiku-5.5"])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(false)
+  })
+
+  test("a gathered reading that still shows the window full lifts nothing (#1974)", () => {
+    const now = 730_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 100,
+        at: judgedAt,
+        resetAt: now + 86_400_000,
+      }),
+      judgedAt,
+    )
+    expect(released).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    // A stale reading is no evidence either way: the skip stands, unjudged.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 4, at: judgedAt }),
+        judgedAt + 2 * hour,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 2 * hour)).toBe(true)
+  })
+
+  test("a provider the snapshot does not carry keeps its skip — no reading, no judgement (#1974)", () => {
+    const now = 740_000_000
+    const leaf = ModelRoute.ref({ providerID: "unmeasured", model: "m" })
+    const other = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    // Headroom readings exist — for another provider, and for this provider's other
+    // model. Neither is a reading of this leaf's window.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "unmeasured", modelID: "some-other-model", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    expect(ModelRoute.skipped(other, judgedAt + 1)).toBe(false)
+  })
+
+  test("a corroborated provider-wide skip lifts only on provider-wide headroom (#1974)", () => {
+    const now = 750_000_000
+    // Two families answered quota, so the standing skip is provider-wide. One family's
+    // headroom reading cannot lift it while that record stands — the leaf stays
+    // skipped until the provider's own windows read headroom too.
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, now + 3 * 86_400_000, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, now + 3 * 86_400_000, now + 1)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    // Gemini's window reads 4% used, but the provider-wide window still reads full:
+    // nothing lifts, and the leaf stays skipped under the provider record.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 100,
+        }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(gemini, judgedAt + 1)).toBe(true)
+    // The provider-wide windows read headroom as well: the corroborated record comes
+    // off, and the sibling family's own record — no reading for it here — stands.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 40,
+        }),
+        judgedAt,
+      ),
+    ).toEqual(["quota:antigravity-direct"])
+    expect(ModelRoute.skipped(gemini, judgedAt + 2)).toBe(false)
+    expect(ModelRoute.skipped(claude, judgedAt + 2)).toBe(true)
+  })
+
+  test("a fresher not-full snapshot releases a model-scoped reactive skip (#1974, #1976)", () => {
+    const now = 760_000_000
+    const resetAt = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, resetAt, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    ModelRoute.observeProviderQuota(
+      leaf,
+      {
+        planID: "plan",
+        window: "weekly",
+        providerID: "opendesign",
+        percent: 4,
+        remaining: 144_000,
+        resetAt: now + 7 * 86_400_000,
+        observedAt: now + 60_000,
+        stale: false,
+      },
+      now + 60_000,
+    )
+    expect(ModelRoute.skipped(leaf, now + 60_001)).toBe(false)
+  })
+
+  test("two families out promotes the hold to provider scope; one family stays model-scoped (#1976)", () => {
+    const now = 770_000_000
+    const resetAt = now + 3_600_000
+    const a = ModelRoute.ref({ providerID: "prov-a", model: "m-a" })
+    const b = ModelRoute.ref({ providerID: "prov-a", model: "m-b" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(a, undefined, resetAt, now)
+    // One family out: only the answering target is skipped; its sibling keeps serving.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(false)
+    ModelRoute.observeQuotaFailure(b, undefined, resetAt, now)
+    // Corroborated by a second distinct target: the hold is provider-wide now.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(true)
   })
 })

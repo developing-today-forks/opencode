@@ -11,6 +11,27 @@ const totals = (overrides: Partial<ModelUsage.Totals> = {}): ModelUsage.Totals =
   cacheRead: 0,
   cacheWrite: 0,
   costUsd: 0.01,
+  cacheSavedUsd: 0,
+  ...overrides,
+})
+
+const attemptRow = (overrides: Partial<ModelUsage.TurnAttemptRow>): ModelUsage.TurnAttemptRow => ({
+  id: 1,
+  continuationOf: null,
+  continuationIndex: 0,
+  assistantMessageID: "msg_root",
+  sessionID: "ses_turn",
+  providerID: "openai",
+  modelID: "gpt-6-luna",
+  timeStarted: 1_000,
+  timeEnded: 2_000,
+  outcome: "success",
+  input: 100,
+  output: 50,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  costUsd: 0.01,
   ...overrides,
 })
 
@@ -23,6 +44,29 @@ describe("ModelUsage", () => {
     expect(ModelUsage.usedOf("messages", row)).toBe(1)
     expect(ModelUsage.usedOf("usd", row)).toBe(0.01)
     expect(ModelUsage.usedOf("percent", row)).toBeNull()
+  })
+
+  test("cache hit ratio is cache reads over all prompt tokens, null only when there were no prompt tokens", () => {
+    expect(ModelUsage.cacheHitRatio(totals({ input: 100, cacheRead: 100, cacheWrite: 0 }))).toBe(0.5)
+    expect(ModelUsage.cacheHitRatio(totals({ input: 60, cacheRead: 30, cacheWrite: 10 }))).toBe(0.3)
+    // Zero-cache case: traffic with no cache reads is a real 0, not unknown.
+    expect(ModelUsage.cacheHitRatio(totals({ input: 100, cacheRead: 0, cacheWrite: 0 }))).toBe(0)
+    expect(ModelUsage.cacheHitRatio(totals({ input: 0, cacheRead: 0, cacheWrite: 0 }))).toBeNull()
+  })
+
+  test("sum and day reports aggregate cache savings alongside cost", () => {
+    const total = ModelUsage.sum([
+      totals({ cacheRead: 10, cacheSavedUsd: 0.25 }),
+      totals({ cacheRead: 5, cacheSavedUsd: 0.5 }),
+    ])
+    expect(total.cacheRead).toBe(15)
+    expect(total.cacheSavedUsd).toBeCloseTo(0.75)
+    const days = ModelUsage.dayReports([
+      { day: "2026-10-13", providerID: "openai", modelID: "a", ...totals({ cacheRead: 40, cacheSavedUsd: 0.4 }) },
+      { day: "2026-10-13", providerID: "openai", modelID: "b", ...totals({ cacheRead: 10, cacheSavedUsd: 0.1 }) },
+    ])
+    expect(days[0]).toMatchObject({ cacheRead: 50, cacheSavedUsd: 0.5 })
+    expect(days[0]?.providers["openai"]).toMatchObject({ cacheRead: 50, cacheSavedUsd: 0.5 })
   })
 
   test("percent needs a positive limit", () => {
@@ -206,14 +250,137 @@ describe("ModelUsage", () => {
     expect(day?.requests).toBe(18)
     expect(Object.keys(day?.providers ?? {})).toEqual(["__proto__", "constructor", "toString", "anthropic"])
     // Each default totals() row meters 150 (100 input + 50 output).
-    expect(day?.providers["__proto__"]).toEqual({ requests: 8, metered: 300, costUsd: 1.5 })
-    expect(day?.providers["constructor"]).toEqual({ requests: 5, metered: 150, costUsd: 2 })
-    expect(day?.providers["toString"]).toEqual({ requests: 3, metered: 150, costUsd: 3 })
-    expect(day?.providers["anthropic"]).toEqual({ requests: 2, metered: 150, costUsd: 4 })
+    expect(day?.providers["__proto__"]).toEqual({ requests: 8, metered: 300, costUsd: 1.5, cacheRead: 0, cacheSavedUsd: 0 })
+    expect(day?.providers["constructor"]).toEqual({ requests: 5, metered: 150, costUsd: 2, cacheRead: 0, cacheSavedUsd: 0 })
+    expect(day?.providers["toString"]).toEqual({ requests: 3, metered: 150, costUsd: 3, cacheRead: 0, cacheSavedUsd: 0 })
+    expect(day?.providers["anthropic"]).toEqual({ requests: 2, metered: 150, costUsd: 4, cacheRead: 0, cacheSavedUsd: 0 })
     const serialised = JSON.parse(JSON.stringify(day?.providers))
     expect(Object.keys(serialised)).toEqual(["__proto__", "constructor", "toString", "anthropic"])
-    expect(serialised["__proto__"]).toEqual({ requests: 8, metered: 300, costUsd: 1.5 })
-    expect(serialised["constructor"]).toEqual({ requests: 5, metered: 150, costUsd: 2 })
+    expect(serialised["__proto__"]).toEqual({ requests: 8, metered: 300, costUsd: 1.5, cacheRead: 0, cacheSavedUsd: 0 })
+    expect(serialised["constructor"]).toEqual({ requests: 5, metered: 150, costUsd: 2, cacheRead: 0, cacheSavedUsd: 0 })
+  })
+
+  test("turns stitch a response split by output token limit continuations into one cost", () => {
+    const turns = ModelUsage.turns([
+      attemptRow({ id: 1, timeStarted: 1_000, timeEnded: 2_000, input: 1_000, output: 100, costUsd: 0.1 }),
+      attemptRow({
+        id: 2,
+        continuationOf: 1,
+        continuationIndex: 1,
+        assistantMessageID: "msg_chunk_1",
+        timeStarted: 3_000,
+        timeEnded: 4_000,
+        input: 1_100,
+        output: 80,
+        costUsd: 0.08,
+      }),
+      // A failed chunk is still part of the turn: its own failure stays on its row, and its cost counts.
+      attemptRow({
+        id: 3,
+        continuationOf: 1,
+        continuationIndex: 2,
+        assistantMessageID: "msg_chunk_2",
+        outcome: "failure",
+        timeStarted: 5_000,
+        timeEnded: 6_000,
+        input: 1_200,
+        output: 0,
+        costUsd: 0.02,
+      }),
+      attemptRow({
+        id: 4,
+        assistantMessageID: "msg_other",
+        sessionID: "ses_other",
+        timeStarted: 7_000,
+        timeEnded: 8_000,
+      }),
+    ])
+
+    expect(turns).toHaveLength(2)
+    const continued = turns.find((turn) => turn.rootID === 1)
+    expect(continued).toMatchObject({
+      rootID: 1,
+      sessionID: "ses_turn",
+      chunks: 3,
+      requests: 3,
+      failures: 1,
+      input: 3_300,
+      output: 180,
+      first: 1_000,
+      last: 6_000,
+      durationMs: 5_000,
+    })
+    expect(continued?.costUsd).toBeCloseTo(0.2)
+    expect(turns.find((turn) => turn.rootID === 4)).toMatchObject({ chunks: 1, requests: 1, failures: 0 })
+  })
+
+  test("a continuation whose root fell outside the window is still grouped by the id it names", () => {
+    const [turn] = ModelUsage.turns([
+      {
+        id: 5,
+        continuationOf: 9,
+        continuationIndex: 1,
+        assistantMessageID: "msg_partial",
+        sessionID: "ses_turn",
+        providerID: "openai",
+        modelID: "gpt-6-luna",
+        timeStarted: 1_000,
+        timeEnded: 2_000,
+        outcome: "success",
+        input: 100,
+        output: 50,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        costUsd: 0.01,
+      },
+    ])
+    expect(turn).toMatchObject({ rootID: 9, chunks: 2, requests: 1, costUsd: 0.01 })
+  })
+
+  test("retries and hedge legs of the first chunk join its turn instead of splitting it", () => {
+    const turns = ModelUsage.turns([
+      attemptRow({
+        id: 1,
+        assistantMessageID: "msg_retried",
+        outcome: "failure",
+        timeStarted: 1_000,
+        timeEnded: 1_500,
+        input: 400,
+        output: 0,
+        costUsd: 0,
+      }),
+      attemptRow({
+        id: 2,
+        assistantMessageID: "msg_retried",
+        timeStarted: 2_000,
+        timeEnded: 3_000,
+        input: 500,
+        output: 40,
+        costUsd: 0.05,
+      }),
+      attemptRow({
+        id: 3,
+        assistantMessageID: "msg_retried_chunk",
+        continuationOf: 2,
+        continuationIndex: 1,
+        timeStarted: 4_000,
+        timeEnded: 5_000,
+        input: 600,
+        output: 30,
+        costUsd: 0.03,
+      }),
+    ])
+    expect(turns).toHaveLength(1)
+    expect(turns[0]).toMatchObject({
+      rootID: 2,
+      chunks: 2,
+      requests: 3,
+      failures: 1,
+      input: 1_500,
+      output: 70,
+      durationMs: 4_000,
+    })
   })
 
   test("a plan window reports what it has used, its percent and what remains", () => {
@@ -246,5 +413,64 @@ describe("ModelUsage", () => {
     expect(
       ModelUsage.windowReport(plan, { ...window, unit: "percent" } as ModelPlan.QuotaWindow, totals()).percent,
     ).toBeNull()
+  })
+})
+
+describe("ModelUsage serving readout (#1891)", () => {
+  const servingRow = (overrides: Partial<ModelUsage.ServingAttemptRow>): ModelUsage.ServingAttemptRow => ({
+    routeID: "workhorse",
+    providerID: "openai",
+    modelID: "gpt-6-luna",
+    variant: "xhigh",
+    assistantMessageID: "msg_1",
+    outcome: "success",
+    failedOverTo: null,
+    hedged: null,
+    timeStarted: 2_000,
+    timeEnded: 2_500,
+    ...overrides,
+  })
+
+  test("lastServing names the leaf that served, not the leaf first attempted, after a failover", () => {
+    // Newest-first, as sessionAttempts returns: the serving success is newest, the 429 failure older.
+    const rows = [
+      servingRow({ providerID: "vibe-direct", modelID: "mistral-small-latest", variant: "high", timeStarted: 3_000, timeEnded: 3_500 }),
+      servingRow({ outcome: "failure", failedOverTo: "vibe-direct/mistral-small-latest", timeStarted: 2_000, timeEnded: 2_400 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "vibe-direct/mistral-small-latest",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: true,
+      failedOverTo: "vibe-direct/mistral-small-latest",
+      outcome: "success",
+    })
+    expect(ModelUsage.servingSteps(rows).map((step) => step.leaf)).toEqual([
+      "vibe-direct/mistral-small-latest",
+      "openai/gpt-6-luna",
+    ])
+  })
+
+  test("lastServing reports no failover for a single-leaf turn and null for no attempts", () => {
+    expect(ModelUsage.lastServing([servingRow({})])).toMatchObject({
+      leaf: "openai/gpt-6-luna",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+      failedOverTo: null,
+    })
+    expect(ModelUsage.lastServing([])).toBeNull()
+    expect(ModelUsage.servingSteps([])).toEqual([])
+  })
+
+  test("lastServing only groups the newest turn, never an older turn's failover", () => {
+    const rows = [
+      servingRow({ assistantMessageID: "msg_2", timeStarted: 5_000, timeEnded: 5_500 }),
+      servingRow({ outcome: "failure", failedOverTo: "vibe-direct/mistral-small-latest", timeStarted: 2_000, timeEnded: 2_400 }),
+      servingRow({ providerID: "vibe-direct", modelID: "mistral-small-latest", timeStarted: 3_000, timeEnded: 3_500 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "openai/gpt-6-luna",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+    })
   })
 })

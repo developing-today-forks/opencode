@@ -3,8 +3,8 @@ export * as ConfigMigration from "./migrate"
 import { TuiConfigV1 } from "@opencode/tui/config/v1"
 import { TuiKeybind } from "@opencode/tui/config/v1/keybind"
 import { Definitions } from "@opencode/tui/config/keybind"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, FileSystem, Option, Schema } from "effect"
-import { randomUUID } from "crypto"
 import { applyEdits, createScanner, modify, parse, parseTree, type Node, type ParseError } from "jsonc-parser"
 import path from "path"
 import { Info, SchemaURL } from "./schema"
@@ -20,16 +20,11 @@ export const run = Effect.fn("cli.config.migrate")(function* (input: {
   readonly state: string
 }) {
   const fs = yield* FileSystem.FileSystem
+  const fsUtil = yield* FSUtil.Service
   const persist = Effect.fnUntraced(function* (text: string, info: Info) {
-    const temp = `${input.file}.${process.pid}.${randomUUID()}.tmp`
-    const cause = yield* Effect.gen(function* () {
-      yield* fs.makeDirectory(path.dirname(input.file), { recursive: true })
-      yield* fs.writeFileString(temp, text, { mode: 0o600 })
-      yield* fs.rename(temp, input.file)
-    }).pipe(
+    const cause = yield* fsUtil.writeAtomic(input.file, text, { modePolicy: "owner-capped" }).pipe(
       Effect.as(undefined),
       Effect.catchCause((cause) => Effect.succeed(cause)),
-      Effect.ensuring(fs.remove(temp).pipe(Effect.ignore)),
     )
     return cause === undefined ? { info } : { info, cause }
   })

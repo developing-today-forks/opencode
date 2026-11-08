@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { eq } from "drizzle-orm"
 import { DateTime, Effect, Fiber, Stream } from "effect"
 import { TestClock } from "effect/testing"
@@ -10,6 +10,7 @@ import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Messaging } from "@opencode/core/messaging"
 import { MessagingGraph } from "@opencode/core/messaging/graph"
+import { MessagingLog } from "@opencode/core/messaging/log"
 import { MessagingEmbedding } from "@opencode/core/messaging/embedding"
 import { MessagingVectorTable } from "@opencode/core/messaging/sql"
 import { MessagingTemplate } from "@opencode/core/messaging/template"
@@ -691,6 +692,88 @@ describe("Messaging search and listing", () => {
   )
 })
 
+describe("Messaging read limits", () => {
+  // Plugins and the CLI call the service directly, so a limit can arrive without the typed surface's PositiveInt check.
+  const unvalidated = <T>(input: Record<string, unknown>) => input as unknown as T
+
+  it.effect("floors and clamps a caller-supplied limit at the service boundary", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      const dm = `dm@${tree.child.id}`
+      for (let index = 0; index < 25; index++)
+        yield* messaging.send({ as: tree.child.id, to: "parent", text: `report ${index}`, deliver: "none" })
+
+      // A negative limit used to reach SQLite as LIMIT -1, which returns every row.
+      const negative = yield* messaging.query(
+        unvalidated<Messaging.Query>({ as: tree.root.id, topics: [dm], limit: -5, markRead: false }),
+      )
+      expect(negative.messages).toHaveLength(20)
+      expect(negative.more).toBe(true)
+
+      // Zero used to page nothing at all while still reporting more.
+      const zero = yield* messaging.query(
+        unvalidated<Messaging.Query>({ as: tree.root.id, topics: [dm], limit: 0, markRead: false }),
+      )
+      expect(zero.messages).toHaveLength(1)
+      expect(zero.more).toBe(true)
+
+      // A fractional limit used to throw a SQLite datatype mismatch, which orDie turned into a defect.
+      const fractional = yield* messaging.query(
+        unvalidated<Messaging.Query>({ as: tree.root.id, topics: [dm], limit: 2.9, markRead: false }),
+      )
+      expect(fractional.messages).toHaveLength(2)
+
+      // NaN means "absent", so the default page size applies.
+      const nan = yield* messaging.query(
+        unvalidated<Messaging.Query>({ as: tree.root.id, topics: [dm], limit: Number.NaN, markRead: false }),
+      )
+      expect(nan.messages).toHaveLength(20)
+
+      // Valid limits, including ones above the ceiling, behave as before.
+      const aboveCeiling = yield* messaging.query(
+        unvalidated<Messaging.Query>({ as: tree.root.id, topics: [dm], limit: 5000, markRead: false }),
+      )
+      expect(aboveCeiling.messages).toHaveLength(25)
+      expect(aboveCeiling.more).toBe(false)
+    }),
+  )
+
+  it.effect("applies the same floor to topics, sessions and log", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      for (const name of ["alpha", "beta", "gamma"])
+        yield* messaging.send({ as: tree.child.id, topic: name, text: name })
+
+      const topics = (limit: number) =>
+        messaging
+          .topics(unvalidated<Messaging.TopicsInput>({ sessions: [tree.child.id], role: "writer", limit }))
+          .pipe(Effect.map((result) => result.topics.length))
+      expect(yield* topics(0)).toBe(1)
+      expect(yield* topics(1.5)).toBe(1)
+      expect(yield* topics(-1)).toBe(3)
+
+      const sessions = (limit: number) =>
+        messaging
+          .sessions(unvalidated<Messaging.SessionsInput>({ limit }))
+          .pipe(Effect.map((result) => result.sessions.length))
+      expect(yield* sessions(0)).toBe(1)
+      expect(yield* sessions(-1)).toBeGreaterThan(1)
+
+      const bus = yield* Bus.Service
+      for (const text of ["alpha step", "beta step", "gamma step"])
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text })
+      const log = (limit: number) =>
+        messaging
+          .log(unvalidated<Messaging.LogInput>({ sessions: [tree.child.id], limit }))
+          .pipe(Effect.map((result) => result.entries.length))
+      expect(yield* log(0)).toBe(1)
+      expect(yield* log(-1)).toBe(3)
+    }),
+  )
+})
+
 describe("Messaging sessions", () => {
   it.effect("walks the session chain with brief and full detail", () =>
     Effect.gen(function* () {
@@ -891,6 +974,229 @@ describe("Messaging kinds", () => {
       yield* messaging.send({ as: tree.child.id, topic: "x", text: "yes" }, { kind: "vote" })
       const votes = yield* messaging.query({ topics: ["x"], kinds: ["vote"] })
       expect(votes.messages.map((message) => [message.kind, message.data])).toEqual([["vote", "yes"]])
+    }),
+  )
+})
+
+describe("Messaging offset normalisation", () => {
+  it.live("clamps invalid log offsets to the first page instead of wrapping", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const bus = yield* Bus.Service
+      const messaging = yield* Messaging.Service
+      for (const text of ["alpha step", "beta step", "gamma failure", "delta step"])
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text })
+      const head = (offset: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "head", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.entries.map((entry) => entry.text), result.total, result.more] as const))
+
+      // Valid offsets behave as today: first page, then the second, then past-the-end is empty.
+      expect(yield* head(0)).toEqual([["alpha step", "beta step"], 4, true])
+      expect(yield* head(1)).toEqual([["beta step", "gamma failure"], 4, true])
+      expect(yield* head(10)).toEqual([[], 4, false])
+      // Negative and NaN clamp to 0 instead of wrapping slice() to the wrong end.
+      expect(yield* head(-1)).toEqual(yield* head(0))
+      expect(yield* head(-10)).toEqual(yield* head(0))
+      expect(yield* head(NaN)).toEqual(yield* head(0))
+      // Fractional offsets floor.
+      expect(yield* head(1.5)).toEqual(yield* head(1))
+
+      const pull = (offset: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "pull", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.entries.map((entry) => entry.text), result.total, result.more] as const))
+      expect(yield* pull(-1)).toEqual(yield* pull(0))
+      expect(yield* pull(0)).toEqual(yield* head(0))
+
+      const tail = (offset: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "tail", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.entries.map((entry) => entry.text), result.total, result.more] as const))
+      expect(yield* tail(0)).toEqual([["gamma failure", "delta step"], 4, true])
+      expect(yield* tail(1)).toEqual([["beta step", "gamma failure"], 4, true])
+      expect(yield* tail(10)).toEqual([[], 4, false])
+      // A negative tail offset used to push the window past the end and report an empty page with
+      // more: true; it now reads as the latest page.
+      expect(yield* tail(-1)).toEqual(yield* tail(0))
+      expect(yield* tail(-10)).toEqual(yield* tail(0))
+      expect(yield* tail(NaN)).toEqual(yield* tail(0))
+      expect(yield* tail(1.5)).toEqual(yield* tail(1))
+
+      const grep = (offset: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "grep", query: "step", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.entries.map((entry) => entry.text), result.total, result.more] as const))
+      expect(yield* grep(0)).toEqual([["alpha step", "beta step"], 3, true])
+      expect(yield* grep(1)).toEqual([["beta step", "delta step"], 3, false])
+      expect(yield* grep(10)).toEqual([[], 3, false])
+      expect(yield* grep(-1)).toEqual(yield* grep(0))
+      expect(yield* grep(NaN)).toEqual(yield* grep(0))
+      expect(yield* grep(1.5)).toEqual(yield* grep(1))
+
+      const search = (offset: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], query: "step", match: "exact", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.entries.map((entry) => entry.text), result.total, result.more] as const))
+      expect(yield* search(0)).toEqual([["delta step", "beta step"], 3, true])
+      expect(yield* search(1)).toEqual([["beta step", "alpha step"], 3, false])
+      expect(yield* search(10)).toEqual([[], 3, false])
+      expect(yield* search(-1)).toEqual(yield* search(0))
+      expect(yield* search(NaN)).toEqual(yield* search(0))
+      expect(yield* search(1.5)).toEqual(yield* search(1))
+    }),
+  )
+
+  it.effect("clamps invalid topics and sessions offsets to the first page", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      yield* messaging.send({ as: tree.child.id, topic: "off-a", text: "a", deliver: "none" })
+      yield* messaging.send({ as: tree.child.id, topic: "off-b", text: "b", deliver: "none" })
+      yield* messaging.send({ as: tree.child.id, topic: "off-c", text: "c", deliver: "none" })
+      const topics = (offset: number) =>
+        messaging
+          .topics({ search: "off-", sort: "created", order: "asc", limit: 2, offset })
+          .pipe(Effect.map((result) => [result.topics.map((topic) => topic.name), result.total] as const))
+      expect(yield* topics(0)).toEqual([["off-a", "off-b"], 3])
+      expect(yield* topics(1)).toEqual([["off-b", "off-c"], 3])
+      expect(yield* topics(10)).toEqual([[], 3])
+      expect(yield* topics(-5)).toEqual(yield* topics(0))
+      expect(yield* topics(NaN)).toEqual(yield* topics(0))
+      expect(yield* topics(1.5)).toEqual(yield* topics(1))
+
+      const sessions = (offset: number) =>
+        messaging
+          .sessions({ parent: "none", sort: "created", order: "asc", limit: 1, offset })
+          .pipe(Effect.map((result) => [result.sessions.map((node) => node.id), result.total] as const))
+      expect(yield* sessions(0)).toEqual([[tree.root.id], 2])
+      expect(yield* sessions(1)).toEqual([[tree.stranger.id], 2])
+      expect(yield* sessions(10)).toEqual([[], 2])
+      expect(yield* sessions(-1)).toEqual(yield* sessions(0))
+      expect(yield* sessions(NaN)).toEqual(yield* sessions(0))
+      expect(yield* sessions(0.5)).toEqual(yield* sessions(0))
+    }),
+  )
+})
+
+describe("Messaging log chars and context normalisation", () => {
+  it.live("clamps invalid grep context to a non-negative integer instead of throwing", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const bus = yield* Bus.Service
+      const messaging = yield* Messaging.Service
+      for (const text of ["alpha step", "beta step", "gamma failure", "delta step"])
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text })
+      const grep = (context: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "grep", query: "step", context })
+          .pipe(Effect.map((result) => result.entries.map((entry) => entry.text)))
+      // Valid context behaves as today.
+      expect(yield* grep(0)).toEqual(["alpha step", "beta step", "delta step"])
+      expect(yield* grep(1)).toEqual(["alpha step", "beta step", "gamma failure", "delta step"])
+      // Fractional context floors instead of indexing the entry list with fractional keys
+      // (which used to materialise undefined entries and throw in the output stage).
+      expect(yield* grep(1.5)).toEqual(yield* grep(1))
+      // Negative and NaN context clamp to 0.
+      expect(yield* grep(-1)).toEqual(yield* grep(0))
+      expect(yield* grep(NaN)).toEqual(yield* grep(0))
+
+      const fail = (context: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "grep", query: "fail", context })
+          .pipe(Effect.map((result) => result.entries.map((entry) => [entry.text, entry.match] as const)))
+      expect(yield* fail(1.5)).toEqual([
+        ["beta step", false],
+        ["gamma failure", true],
+        ["delta step", false],
+      ])
+    }),
+  )
+
+  it.live("clamps invalid chars to a positive integer within the ceiling instead of corrupting entries", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const bus = yield* Bus.Service
+      const messaging = yield* Messaging.Service
+      const long = "a".repeat(9000)
+      yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text: long })
+      const read = (chars: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "head", chars })
+          .pipe(Effect.map((result) => result.entries[0].text))
+      // Valid budgets behave as today: a small budget clips, the default returns the same clip.
+      expect((yield* read(500)).length).toBeLessThanOrEqual(500)
+      expect(yield* read(NaN)).toEqual(yield* read(500))
+      // Negative, zero and sub-1 budgets clamp to 1 instead of returning the wrong end of the
+      // entry; fractional budgets floor. None of them produce the garbage NaN marker.
+      expect(yield* read(-5)).toEqual("a")
+      expect(yield* read(0)).toEqual("a")
+      expect(yield* read(1.5)).toEqual("a")
+      expect(yield* read(-5)).not.toContain("NaN")
+      // Oversized budgets clamp to the documented ceiling instead of returning entries unclipped.
+      expect((yield* read(1e9)).length).toBeLessThanOrEqual(8000)
+      expect(yield* read(1e9)).toEqual(yield* read(8000))
+      expect(yield* read(Infinity)).toEqual(yield* read(8000))
+
+      const pull = (chars?: number) =>
+        messaging
+          .log({ sessions: [tree.child.id], op: "pull", ...(chars === undefined ? {} : { chars }) })
+          .pipe(Effect.map((result) => result.entries[0].text))
+      // NaN is treated as absent, so pull falls back to its 4000 default.
+      expect(yield* pull(NaN)).toEqual(yield* pull())
+      expect((yield* pull(NaN)).length).toBeLessThanOrEqual(4000)
+    }),
+  )
+})
+
+// Oracle (#1970): every truncation in the messaging door cuts at raw code-unit
+// offsets, so a pair straddling the cut must be dropped whole — the #1966 house
+// rule (messaging/log.ts splitsPair). A lone surrogate re-encodes as U+FFFD in
+// text a session or the person receives.
+describe("Messaging truncations never split a surrogate pair", () => {
+  const astral = "\u{1F600}"
+
+  test("the shared guard reports a straddling pair and only that", () => {
+    expect(MessagingLog.splitsPair(`a${astral}b`, 2)).toBe(true)
+    expect(MessagingLog.splitsPair(`a${astral}b`, 1)).toBe(false)
+    expect(MessagingLog.splitsPair(`a${astral}b`, 3)).toBe(false)
+    expect(MessagingLog.splitsPair("plain ascii text", 4)).toBe(false)
+    expect(MessagingLog.splitsPair(astral, 0)).toBe(false)
+    expect(MessagingLog.splitsPair(astral, 2)).toBe(false)
+  })
+
+  it.effect("the toast and preview drop a straddling pair whole", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      const bus = yield* Bus.Service
+      const toasts = yield* bus.subscribe(TuiEvent.ToastShow).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+
+      // The toast budget is 397 code units: put the pair's halves either side of it.
+      yield* messaging.user({ as: tree.grandchild.id, text: "a".repeat(396) + astral + "b".repeat(50) })
+      const [toast] = Array.from(yield* Fiber.join(toasts))
+      const shown = toast?.data.message ?? ""
+      expect(shown.isWellFormed()).toBe(true)
+      expect(shown).not.toContain(astral)
+      expect(shown).toBe("a".repeat(396) + "...")
+    }),
+  )
+
+  it.effect("the delivered body drops a straddling pair and counts the omission from the adjusted cut", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      // The delivered budget is 8000 code units.
+      const text = "a".repeat(7999) + astral + "b".repeat(50)
+      yield* messaging.send({ as: tree.child.id, to: "parent", text })
+      const pending = yield* pendingSynthetic(tree.root.id)
+      const rendered = pending[0]?.payload.text ?? ""
+      expect(rendered.isWellFormed()).toBe(true)
+      expect(rendered).not.toContain(astral)
+      // 7999 kept, 52 omitted (the straddling pair dropped whole): the count
+      // follows the adjusted cut, not the raw 8000 budget.
+      expect(rendered).toContain("[52 more characters")
     }),
   )
 })

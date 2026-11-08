@@ -7,6 +7,7 @@ import { Location } from "@opencode/core/location"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { NotFoundError } from "@opencode/core/session"
+import { ConfigNormalize } from "@opencode/core/config/normalize"
 import { ModelGovernance } from "@opencode/core/session/model-governance"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { Money } from "@opencode/schema/money"
@@ -53,12 +54,21 @@ type Input = Parameters<typeof ModelGovernance.assertAllowed>[2] & {
   catalogInput?: Record<string, Record<string, { enabled?: boolean; variants?: readonly string[] }>>
 }
 
+// Entries in production are the normalizer's output, so fixtures go through the same
+// seam: flat `experimental.model_routes` inputs fold into the canonical nested
+// `experimental.routes.models` shape governance now reads (#1140).
+const normalizedInfo = (input: Record<string, unknown>) => {
+  const result = ConfigNormalize.normalize(input)
+  if (result.type !== "normalized") throw new Error("expected normalized config")
+  return decodeInfo(result.encoded)
+}
+
 const entriesConfig = (input: Input) => ({
   entries: () =>
     Effect.succeed([
       {
         type: "document" as const,
-        info: decodeInfo(input.configInput ?? {}),
+        info: normalizedInfo(input.configInput ?? {}),
       } as never,
     ]),
   catalog: () =>
@@ -421,6 +431,141 @@ describe("ModelGovernance.assertAllowed", () => {
     expect(passed).toContain("test/a#max")
   })
 
+  test("a provider-route member exclusion denies the route (#1419)", async () => {
+    const parent = info("ses_excluding", { subagentPolicy: { excludedModels: ["openai/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("openai/gpt-6.1-terra")
+  })
+
+  test("a provider-route target passes an allowlist of its concrete members (#1419)", async () => {
+    const parent = info("ses_allowing", {
+      subagentPolicy: { models: ["openai/*", "openai.alternate/*"] },
+    })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    await run({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+  })
+
+  test("a provider route with only excluded members is denied (#1419)", async () => {
+    const parent = info("ses_excluding", {
+      subagentPolicy: { excludedModels: ["openai/*", "openai.alternate/*"] },
+    })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["openai-plan/gpt-6.1-terra"] } },
+        provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"] } },
+      },
+    }
+    const catalogInput = {
+      openai: { "gpt-6.1-terra": {} },
+      "openai.alternate": { "gpt-6.1-terra": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("openai/gpt-6.1-terra")
+  })
+
+  test("a provider-route member reachable only via a suffix-backed variant is still judged (#1428)", async () => {
+    const parent = info("ses_excluding", { subagentPolicy: { excludedModels: ["proxy/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: { main: { targets: ["pool/m#high"] } },
+        provider_routes: { pool: { providers: ["allowed", "proxy"] } },
+      },
+    }
+    const catalogInput = {
+      allowed: { m: { variants: ["high"] } },
+      proxy: { m: {}, "m-high": {} },
+    }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("proxy/m#high")
+  })
+
+  test("a provider route whose id names a configured model route is dropped, not expanded (#1428)", async () => {
+    const parent = info("ses_open", { subagentPolicy: { excludedModels: ["bad/*"] } })
+    const configInput = {
+      experimental: {
+        model_routes: {
+          main: { targets: ["pool/m", "safe/m"] },
+          pool: { targets: ["safe/m"] },
+        },
+        provider_routes: { pool: { providers: ["bad"] } },
+      },
+    }
+    const catalogInput = { safe: { m: {} }, bad: { m: {} } }
+    await run({ all: [parent], parent, configInput, catalogInput, model: ref("opencode-route/main") })
+  })
+
+  test("a route named after an Object.prototype member is judged as an unknown route (#831)", async () => {
+    const configInput = {
+      experimental: { model_routes: { main: { targets: ["test/a"] } } },
+    }
+    // Before the fix, routes["constructor"] read through the prototype chain
+    // and route.targets.flatMap threw a TypeError.
+    const open = info("ses_open")
+    await run({ all: [open], parent: open, configInput, model: ref("opencode-route/constructor") })
+    await run({ all: [open], parent: open, configInput, model: ref("opencode-route/toString") })
+  })
+
+  test("a requested variant named after an Object.prototype member runs as-is (#831)", async () => {
+    const configInput = {
+      experimental: { model_routes: { main: { targets: [{ model: "test/a", variants: { low: "high" } }] } } },
+    }
+    // Unremapped, so it is judged as itself: excluding #constructor denies it.
+    // Before the fix, VariantID.make received the inherited Object constructor.
+    const excluding = info("ses_excluding", { subagentPolicy: { excludedModels: ["test/a#constructor"] } })
+    const message = await runDenied({
+      all: [excluding],
+      parent: excluding,
+      configInput,
+      model: ref("opencode-route/main#constructor"),
+    })
+    expect(message).toContain("test/a#constructor")
+    const open = info("ses_open")
+    await run({ all: [open], parent: open, configInput, model: ref("opencode-route/main#constructor") })
+  })
+
   test("a plain route target is judged at the requested variant", async () => {
     const configInput = {
       experimental: { model_routes: { main: { targets: ["test/a"] } } },
@@ -449,6 +594,86 @@ describe("ModelGovernance.assertAllowed", () => {
     })
     expect(message).toContain("test/b")
     expect(message).toContain("route")
+  })
+
+  test("a door-set route target expanding to an excluded model on a non-excluded door denies (#637)", async () => {
+    const parent = info("ses_parent", { subagentPolicy: { excludedModels: ["other/a"] } })
+    const configInput = { experimental: { model_routes: { main: { targets: [{ model: "*/a" }] } } } }
+    const catalogInput = { test: { a: {} }, other: { a: {} } }
+    const message = await runDenied({
+      all: [parent],
+      parent,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("other/a")
+    expect(message).toContain("route")
+  })
+
+  test("a door-set route target's exclusions win in governance too (#637)", async () => {
+    const parent = info("ses_parent", { subagentPolicy: { excludedModels: ["other/a"] } })
+    const configInput = {
+      experimental: { model_routes: { main: { targets: [{ model: "*/a", exclude: ["other"] }] } } },
+    }
+    const catalogInput = { test: { a: {} }, other: { a: {} } }
+    await run({ all: [parent], parent, configInput, catalogInput, model: ref("opencode-route/main") })
+  })
+
+  test("a door-set route target expanding only to allowed models passes (#637)", async () => {
+    const parent = info("ses_parent", { subagentPolicy: { models: ["test/a", "other/a"] } })
+    const configInput = { experimental: { model_routes: { main: { targets: [{ model: "*/a" }] } } } }
+    const catalogInput = { test: { a: {} }, other: { a: {}, b: {} } }
+    await run({ all: [parent], parent, configInput, catalogInput, model: ref("opencode-route/main") })
+  })
+
+  test("a door-set target pinned to a variant is judged at its remapped variant (#869)", async () => {
+    const configInput = {
+      experimental: { model_routes: { main: { targets: [{ model: "*/a#low", variants: { low: "high" } }] } } },
+    }
+    const catalogInput = { test: { a: { variants: ["high"] } }, other: { a: { variants: ["low", "high"] } } }
+    // Both doors run the target at #high: the test door offers only #high, so judging
+    // the pinned #low literally would drop that door from the judged set entirely and
+    // judge the other door at a variant it never runs.
+    const excluding = info("ses_excluding", { subagentPolicy: { excludedModels: ["test/a#high"] } })
+    const message = await runDenied({
+      all: [excluding],
+      parent: excluding,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main"),
+    })
+    expect(message).toContain("test/a#high")
+    // An allowed list naming the remapped variant on both doors passes.
+    const allowing = info("ses_allowing", { subagentPolicy: { models: ["test/a#high", "other/a#high"] } })
+    await run({ all: [allowing], parent: allowing, configInput, catalogInput, model: ref("opencode-route/main") })
+  })
+
+  test("a leaf that cannot produce the requested variant is pruned from governance, as in expansion (#869)", async () => {
+    const configInput = {
+      experimental: { model_routes: { main: { targets: ["test/a", "test/b"] } } },
+    }
+    const catalogInput = { test: { a: { variants: ["low"] }, b: { variants: ["max"] } } }
+    // Requested at #max, test/a offers only #low, so expansion prunes it: excluding
+    // the bare test/a must not deny the route through a leaf that never runs.
+    const excluding = info("ses_excluding", { subagentPolicy: { excludedModels: ["test/a"] } })
+    await run({
+      all: [excluding],
+      parent: excluding,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main#max"),
+    })
+    // The surviving leaf is judged at the requested variant.
+    const surviving = info("ses_surviving", { subagentPolicy: { excludedModels: ["test/b#max"] } })
+    const message = await runDenied({
+      all: [surviving],
+      parent: surviving,
+      configInput,
+      catalogInput,
+      model: ref("opencode-route/main#max"),
+    })
+    expect(message).toContain("test/b#max")
   })
 
   test("a wildcard route target expanding only to allowed models passes (#530b)", async () => {

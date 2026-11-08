@@ -4,6 +4,7 @@ import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { Layer } from "effect"
 import { Socket } from "effect/socket"
+import { ownValue } from "../util/record.js"
 
 interface WebSocketOptions extends Socket.WebSocketClientOptions {
   readonly protocols?: string | Array<string>
@@ -17,7 +18,7 @@ type BunWebSocketConstructor = new (
 type Environment = Readonly<Record<string, string | undefined>>
 
 const environmentValue = (environment: Environment, name: string) =>
-  environment[name] ?? environment[name.toLowerCase()]
+  ownValue(environment, name) ?? ownValue(environment, name.toLowerCase())
 
 const bypassesProxy = (url: URL, value: string | undefined) => {
   if (!value) return false

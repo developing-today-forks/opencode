@@ -1,11 +1,55 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Exit } from "effect"
-import { existsSync, readdirSync, writeFileSync } from "node:fs"
+import { NodeFileSystem } from "@effect/platform-node-shared"
+import { Context, Effect, Exit, FileSystem, Layer } from "effect"
+import { systemError } from "effect/PlatformError"
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import type { Interaction } from "../src/cassette/model"
 import { HttpRecorder } from "../src"
-import { Service, hasCassetteSync, memory } from "../src/cassette/store"
+import { Service, fileSystem, hasCassetteSync, memory } from "../src/cassette/store"
 import { cassetteLayer } from "../src/http/recorder"
 import { failureText, post, readCassette, runFileCassette, seedCassetteDirectory, tempDirectory } from "./support"
+
+
+type FileSystemOverrides = Partial<FileSystem.FileSystem>
+
+const realFileSystem = async () => {
+  const context = await Effect.runPromise(Effect.scoped(Layer.build(NodeFileSystem.layer)))
+  return Context.get(context, FileSystem.FileSystem)
+}
+
+const runFileCassetteWithFs = async <A, E>(
+  directory: string,
+  effect: Effect.Effect<A, E, Service>,
+  overrides: FileSystemOverrides,
+) => {
+  const real = await realFileSystem()
+  const custom = Layer.succeed(FileSystem.FileSystem, { ...real, ...overrides })
+  return Effect.runPromise(effect.pipe(Effect.provide(fileSystem({ directory })), Effect.provide(custom)))
+}
+
+const transientRenameError = () =>
+  systemError({
+    _tag: "PermissionDenied",
+    module: "FileSystem",
+    method: "rename",
+    syscall: "rename",
+    cause: Object.assign(new Error("rename EPERM: operation not permitted"), { code: "EPERM" }),
+  })
+
+const partialWriteError = () =>
+  systemError({
+    _tag: "WriteZero",
+    module: "FileSystem",
+    method: "write",
+    syscall: "write",
+    cause: new Error("injected partial write failure"),
+  })
+
+const safeInteraction = (index: number): Interaction => ({
+  transport: "http",
+  request: { method: "GET", url: `https://example.test/${index}`, headers: {}, body: "" },
+  response: { status: 200, headers: {}, body: "safe" },
+})
 
 describe("cassette", () => {
   test("UnsafeCassetteError fails the request when a recording would write a known secret", async () => {
@@ -192,4 +236,94 @@ describe("cassette", () => {
     )
     expect(names).toEqual(["alpha/one", "beta"])
   })
+  test("file append retries a transient rename failure and lands at mode 0600", async () => {
+    using directory = tempDirectory("http-recorder-rename-retry-")
+    const real = await realFileSystem()
+    let renames = 0
+    await runFileCassetteWithFs(
+      directory.path,
+      Effect.gen(function* () {
+        const cassette = yield* Service
+        yield* cassette.append("retry", safeInteraction(1))
+      }),
+      {
+        rename: (from, to) => {
+          renames++
+          if (renames === 1) return Effect.fail(transientRenameError())
+          return real.rename(from, to)
+        },
+      },
+    )
+
+    expect(renames).toBe(2)
+    expect(readCassette(`${directory.path}/retry.json`).interactions).toHaveLength(1)
+    if (process.platform !== "win32") expect(statSync(`${directory.path}/retry.json`).mode & 0o777).toBe(0o600)
+    expect(readdirSync(directory.path).filter((file) => file.endsWith(".tmp"))).toEqual([])
+  })
+
+  test("file append refuses a pre-existing temp path without touching it or the target", async () => {
+    using directory = tempDirectory("http-recorder-temp-collision-")
+    const real = await realFileSystem()
+    let collided: string | undefined
+    const outcome = await runFileCassetteWithFs(
+      directory.path,
+      Effect.gen(function* () {
+        const cassette = yield* Service
+        yield* cassette.append("collide", safeInteraction(1))
+      }),
+      {
+        open: (path, options) => {
+          if (options?.flag === "wx" && collided === undefined) {
+            collided = path
+            writeFileSync(path, "sentinel")
+          }
+          return real.open(path, options)
+        },
+      },
+    ).then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(collided).toBeDefined()
+    // The pre-existing temp-named file is not ours: it must survive
+    // byte-identical, and no cassette may have been written.
+    expect(readFileSync(collided!, "utf8")).toBe("sentinel")
+    expect(existsSync(`${directory.path}/collide.json`)).toBe(false)
+  })
+
+  test("file append removes a partially written temp after a write failure", async () => {
+    using directory = tempDirectory("http-recorder-partial-write-")
+    const real = await realFileSystem()
+    let temporary: string | undefined
+    const outcome = await runFileCassetteWithFs(
+      directory.path,
+      Effect.gen(function* () {
+        const cassette = yield* Service
+        yield* cassette.append("partial", safeInteraction(1))
+      }),
+      {
+        open: (path, options) =>
+          real.open(path, options).pipe(
+            Effect.map((handle) => {
+              temporary = path
+              return {
+                ...handle,
+                writeAll: (buffer: Uint8Array) =>
+                  handle.writeAll(buffer.subarray(0, 16)).pipe(Effect.flatMap(() => Effect.fail(partialWriteError()))),
+              }
+            }),
+          ),
+      },
+    ).then(
+      () => "succeeded",
+      () => "failed",
+    )
+
+    expect(outcome).toBe("failed")
+    expect(temporary).toBeDefined()
+    expect(existsSync(temporary!)).toBe(false)
+  })
+
 })

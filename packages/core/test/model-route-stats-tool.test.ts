@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
+import { ModelRoute } from "@opencode/core/model-route"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { Effect, Schema } from "effect"
 
@@ -40,5 +41,62 @@ describe("route_stats configuration view", () => {
       RouteStatsTool.collect({ route: "other" }, { routes: new Map([["cheap-fast", pool]]), notes: [] }),
     )
     expect(report.routes).toEqual([])
+  })
+
+  test("surfaces declared per-target ceilings in the per-pool view", async () => {
+    const mixed = Schema.decodeUnknownSync(ConfigModelRoutes.Route)({
+      selection: "ordered",
+      targets: [{ model: "anthropic/opus", limit: { context: 100_000 } }, "openai/gpt-6-luna"],
+    })
+    const report = await Effect.runPromise(
+      RouteStatsTool.collect({ hours: 24 }, { routes: new Map([["small", mixed]]), notes: [] }),
+    )
+    expect(report.routes).toHaveLength(1)
+    expect(report.routes[0]?.configured).toMatchObject({
+      targets: ["anthropic/opus", "openai/gpt-6-luna"],
+      limits: { "anthropic/opus": 100_000 },
+    })
+    expect(report.routes[0]?.members).toMatchObject([
+      { target: "anthropic/opus", configuredLimit: 100_000 },
+      { target: "openai/gpt-6-luna", configuredLimit: null },
+    ])
+  })
+  test("reports only the adjustments that apply to the source Location (#1461)", async () => {
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([
+      { id: "global-adj", match: "openai/gpt-6-luna", action: "skip" },
+      { id: "loc-a-adj", match: "openai/gpt-6-luna", action: "skip", location: "/loc/a" },
+      { id: "loc-b-adj", match: "openai/gpt-6-luna", action: "skip", location: "/loc/b" },
+    ])
+    try {
+      const report = await Effect.runPromise(
+        RouteStatsTool.collect({ hours: 24 }, { routes: new Map(), notes: [], location: "/loc/a" }),
+      )
+      expect(report.adjustments.map((item) => (item as { id?: string }).id)).toEqual(["global-adj", "loc-a-adj"])
+    } finally {
+      ModelRoute.setAdjustments([])
+      ModelRoute.resetHealth()
+    }
+  })
+
+  test("surfaces active benches with reason and expiry, even for targets with no attempts", async () => {
+    ModelRoute.resetHealth()
+    const target = ModelRoute.ref({ providerID: "benched-provider", model: "quiet-model" })
+    const now = Date.now()
+    ModelRoute.failed(target, ModelRoute.policy(), now, { quota: true }, "cred-stats")
+    const report = await Effect.runPromise(RouteStatsTool.collect({ hours: 24 }, { routes: new Map(), notes: [] }))
+    expect(report.benches).toEqual([
+      expect.objectContaining({
+        providerID: "benched-provider",
+        modelID: "quiet-model",
+        credentialID: "cred-stats",
+        reason: "quota",
+        consecutiveFailures: 1,
+        probeDue: false,
+        probeClaimed: false,
+      }),
+    ])
+    expect(report.benches[0]?.until).toBeGreaterThan(now)
+    ModelRoute.resetHealth()
   })
 })

@@ -190,6 +190,9 @@ export const Info = Schema.Struct({
   cost: Schema.Array(Cost),
   status: Schema.Literals(["alpha", "beta", "deprecated", "active"]),
   enabled: Schema.Boolean,
+  /** Picker-hidden but still routable (#230): set from the config overlay's
+   * `hidden` flag. Absent means listed normally. */
+  hidden: Schema.Boolean.pipe(optional),
   limit: Schema.Struct({
     context: Schema.Int,
     input: Schema.Int.pipe(optional),

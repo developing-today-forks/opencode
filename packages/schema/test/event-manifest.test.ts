@@ -57,7 +57,7 @@ describe("public event manifest", () => {
     expect(Credential.Event.Definitions).toEqual([Credential.Event.Updated, Credential.Event.Switched])
     expect(Project.Event.Definitions).toEqual([Project.Event.Updated])
     expect(Config.Event.Definitions).toEqual([Config.Event.Updated])
-    expect(FileSystem.Event.Definitions).toEqual([FileSystem.Event.Changed])
+    expect(FileSystem.Event.Definitions).toEqual([FileSystem.Event.Changed, FileSystem.Event.Degraded])
     expect(FileSystemV1.Event.Definitions).toEqual([FileSystemV1.Event.Edited])
     expect(Integration.Event.Definitions).toEqual([Integration.Event.Updated])
     expect(Permission.Event.Definitions).toEqual([Permission.Event.Asked, Permission.Event.Replied])

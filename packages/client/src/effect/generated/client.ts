@@ -115,6 +115,21 @@ import type {
   ModelDefaultOutput,
   GenerateTextInput,
   GenerateTextOutput,
+  ServerCompletionsChatInput,
+  ServerCompletionsChatOutput,
+  ServerCompletionsResponsesInput,
+  ServerCompletionsResponsesOutput,
+  ServerCompletionsEmbeddingsInput,
+  ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsMessagesInput,
+  ServerCompletionsMessagesOutput,
+  ServerCompletionsSystemoneInput,
+  ServerCompletionsSystemoneOutput,
+  ServerCompletionsModelsOutput,
+  ServerCompletionsModelInput,
+  ServerCompletionsModelOutput,
+  ServerCompletionsModelRefInput,
+  ServerCompletionsModelRefOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -438,6 +453,7 @@ const EndpointSessionStats = (raw: RawClient["server.session"]) => (input?: Sess
 const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: SessionCreateInput) =>
   preserveEffect<SessionCreateOutput>()(
     raw["session.create"]({
+      query: { directory: input?.["directory"] },
       payload: {
         id: input?.["id"],
         parentID: input?.["parentID"],
@@ -448,6 +464,7 @@ const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: Ses
         metadata: input?.["metadata"],
         permissions: input?.["permissions"],
         subagentPolicy: input?.["subagentPolicy"],
+        detached: input?.["detached"],
       },
     }).pipe(
       Effect.mapError(mapClientError),
@@ -734,9 +751,10 @@ const EndpointSessionLog = (raw: RawClient["server.session"]) => (input: Session
 
 const EndpointSessionInterrupt = (raw: RawClient["server.session"]) => (input: SessionInterruptInput) =>
   preserveEffect<SessionInterruptOutput>()(
-    raw["session.interrupt"]({ params: { sessionID: input["sessionID"] }, query: { resume: input["resume"] } }).pipe(
-      Effect.mapError(mapClientError),
-    ),
+    raw["session.interrupt"]({
+      params: { sessionID: input["sessionID"] },
+      query: { resume: input["resume"], force: input["force"] },
+    }).pipe(Effect.mapError(mapClientError)),
   )
 
 const EndpointSessionBackground = (raw: RawClient["server.session"]) => (input: SessionBackgroundInput) =>
@@ -900,6 +918,77 @@ const EndpointGenerateText = (raw: RawClient["server.generate"]) => (input: Gene
   )
 
 const adaptGroupGenerate = (raw: RawClient["server.generate"]) => ({ text: EndpointGenerateText(raw) })
+
+type ServerCompletionsChatRequest = Parameters<RawClient["server.completions"]["completions.chat"]>[0]
+const EndpointServerCompletionsChat = (raw: RawClient["server.completions"]) => (input: ServerCompletionsChatInput) =>
+  preserveEffect<ServerCompletionsChatOutput>()(
+    raw["completions.chat"]({ payload: input["payload"] } as ServerCompletionsChatRequest).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
+type ServerCompletionsResponsesRequest = Parameters<RawClient["server.completions"]["completions.responses"]>[0]
+const EndpointServerCompletionsResponses =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsResponsesInput) =>
+    preserveEffect<ServerCompletionsResponsesOutput>()(
+      raw["completions.responses"]({ payload: input["payload"] } as ServerCompletionsResponsesRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+type ServerCompletionsEmbeddingsRequest = Parameters<RawClient["server.completions"]["completions.embeddings"]>[0]
+const EndpointServerCompletionsEmbeddings =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsEmbeddingsInput) =>
+    preserveEffect<ServerCompletionsEmbeddingsOutput>()(
+      raw["completions.embeddings"]({ payload: input["payload"] } as ServerCompletionsEmbeddingsRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+type ServerCompletionsMessagesRequest = Parameters<RawClient["server.completions"]["completions.messages"]>[0]
+const EndpointServerCompletionsMessages =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsMessagesInput) =>
+    preserveEffect<ServerCompletionsMessagesOutput>()(
+      raw["completions.messages"]({ payload: input["payload"] } as ServerCompletionsMessagesRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+type ServerCompletionsSystemoneRequest = Parameters<RawClient["server.completions"]["completions.systemone"]>[0]
+const EndpointServerCompletionsSystemone =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsSystemoneInput) =>
+    preserveEffect<ServerCompletionsSystemoneOutput>()(
+      raw["completions.systemone"]({ payload: input["payload"] } as ServerCompletionsSystemoneRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+const EndpointServerCompletionsModels = (raw: RawClient["server.completions"]) => () =>
+  preserveEffect<ServerCompletionsModelsOutput>()(raw["completions.models"]({}).pipe(Effect.mapError(mapClientError)))
+
+const EndpointServerCompletionsModel = (raw: RawClient["server.completions"]) => (input: ServerCompletionsModelInput) =>
+  preserveEffect<ServerCompletionsModelOutput>()(
+    raw["completions.model"]({ params: { id: input["id"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const EndpointServerCompletionsModelRef =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsModelRefInput) =>
+    preserveEffect<ServerCompletionsModelRefOutput>()(
+      raw["completions.modelRef"]({ params: { provider: input["provider"], model: input["model"] } }).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
+const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
+  chat: EndpointServerCompletionsChat(raw),
+  responses: EndpointServerCompletionsResponses(raw),
+  embeddings: EndpointServerCompletionsEmbeddings(raw),
+  messages: EndpointServerCompletionsMessages(raw),
+  systemone: EndpointServerCompletionsSystemone(raw),
+  models: EndpointServerCompletionsModels(raw),
+  model: EndpointServerCompletionsModel(raw),
+  modelRef: EndpointServerCompletionsModelRef(raw),
+})
 
 const EndpointProviderList = (raw: RawClient["server.provider"]) => (input?: ProviderListInput) =>
   preserveEffect<ProviderListOutput>()(
@@ -1915,6 +2004,7 @@ const adaptClient = (raw: RawClient) => ({
   message: adaptGroupMessage(raw["server.message"]),
   model: adaptGroupModel(raw["server.model"]),
   generate: adaptGroupGenerate(raw["server.generate"]),
+  "server.completions": adaptGroupServerCompletions(raw["server.completions"]),
   provider: adaptGroupProvider(raw["server.provider"]),
   integration: adaptGroupIntegration(raw["server.integration"]),
   mcp: adaptGroupMcp(raw["server.mcp"]),

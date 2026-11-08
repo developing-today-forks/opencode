@@ -997,14 +997,14 @@ describe("Config", () => {
     const migrated = migrateV1({
       experimental: { model_route_tuning: { enabled: true, intervalMinutes: 30, windowHours: 12 } },
     })
-    expect(migrated.experimental?.model_route_tuning).toEqual({ enabled: true, intervalMinutes: 30, windowHours: 12 })
+    expect(migrated.experimental?.routes?.tuning).toEqual({ enabled: true, intervalMinutes: 30, windowHours: 12 })
     expect(migrateV1({ experimental: { model_route_tuning: { intervalMinutes: 0 } } }).experimental).toBeUndefined()
   })
 
   test("keeps the tuner's notes, which the configuration docs describe under model_route_tuning", () => {
     const notes = ["openai/gpt-6-luna: out of quota, back in 3 hours"]
     const migrated = migrateV1({ experimental: { model_route_tuning: { enabled: true, notes } } })
-    expect(migrated.experimental?.model_route_tuning).toEqual({ enabled: true, notes })
+    expect(migrated.experimental?.routes?.tuning).toEqual({ enabled: true, notes })
   })
 
   test("normalizes ordered model routes inside experimental config", () => {
@@ -1032,7 +1032,7 @@ describe("Config", () => {
       },
     })
 
-    expect(migrated.experimental?.model_routes?.["cheap-fast"]).toMatchObject({
+    expect(migrated.experimental?.routes?.models?.["cheap-fast"]).toMatchObject({
       name: "Cheap / fast",
       targets: [
         { providerID: "openai", model: "gpt-6-luna" },
@@ -1040,7 +1040,7 @@ describe("Config", () => {
       ],
       health: { maxResponseTimeMs: 45_000 },
     })
-    expect(migrated.experimental?.model_routes?.["luna-stack"]).toMatchObject({
+    expect(migrated.experimental?.routes?.models?.["luna-stack"]).toMatchObject({
       selection: "weighted",
       weights: { "openai/gpt-6-luna": 3, "anthropic/claude-sonnet-5": 1 },
       targets: [
@@ -1505,6 +1505,26 @@ describe("Config", () => {
         plain: "user-",
         url: "http://127.0.0.1:18744/v1",
       })
+    }).pipe(Effect.provide(AppNodeBuilder.build(FSUtil.node))),
+  )
+
+  it.effect("resolves env references by own property, not through the prototype chain", () =>
+    Effect.gen(function* () {
+      const substitute = (text: string, env?: Record<string, string>) =>
+        ConfigVariable.substitute({ type: "virtual", source: "test", dir: "/", text, ...(env ? { env } : {}) })
+      for (const name of ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"]) {
+        const text = `{ "v": "{env:${name}}", "f": "{env:${name}:-FALLBACK}" }`
+        // Not actually set in the supplied env: resolves as unset ("" / the :- fallback),
+        // never as the inherited Object.prototype member.
+        expect(JSON.parse(yield* substitute(text, {}))).toEqual({ v: "", f: "FALLBACK" })
+        // Same on the process.env path (no env supplied, the normal config-file path).
+        expect(JSON.parse(yield* substitute(text))).toEqual({ v: "", f: "FALLBACK" })
+        // Genuinely set under a prototype name in the supplied env: substitutes its real value.
+        expect(JSON.parse(yield* substitute(text, Object.fromEntries([[name, "real"]])))).toEqual({
+          v: "real",
+          f: "real",
+        })
+      }
     }).pipe(Effect.provide(AppNodeBuilder.build(FSUtil.node))),
   )
 

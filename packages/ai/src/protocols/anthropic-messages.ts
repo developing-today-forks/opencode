@@ -34,8 +34,18 @@ import { Lifecycle } from "./utils/lifecycle.js"
 import { ToolStream } from "./utils/tool-stream.js"
 
 const ADAPTER = "anthropic-messages"
-export const DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
-export const PATH = "/messages"
+// The protocol's endpoint render appends PATH ("/messages") to this
+// base, so the base is the API origin only - "https://api.anthropic.com/v1"
+// here produced https://api.anthropic.com/v1/v1/messages at runtime
+// (Anthropic 404), which broke every AnthropicMessages consumer that
+// relied on the default (notably the claude-code provider, #6117).
+export const DEFAULT_BASE_URL = "https://api.anthropic.com"
+// NOTE: the path carries the /v1 prefix, and DEFAULT_BASE_URL above is
+// the bare origin, so the version segment lives here exactly once.
+// Endpoint.render de-duplicates a trailing "/v1" on a provider-supplied
+// baseURL against this prefix (#1956), so consumers may also pass a
+// "/v1"-suffixed baseURL safely.
+export const PATH = "/v1/messages"
 export const DEFAULT_MAX_TOKENS = 32_000
 const MIN_THINKING_BUDGET = 1_024
 const DEFAULT_EFFORT = "high"
@@ -1193,7 +1203,11 @@ const SERVER_TOOL_RESULT_NAMES: Record<AnthropicServerToolResultType, string> = 
   web_fetch_tool_result: "web_fetch",
 }
 
-const isServerToolResultType = (type: string): type is AnthropicServerToolResultType => type in SERVER_TOOL_RESULT_NAMES
+// Own keys only: `in` reads through the prototype chain, so a streamed block typed
+// "constructor" (or toString, __proto__, ...) would pass this gate and kill the stream
+// when the mapped name turns out to be an Object prototype member instead of a string.
+const isServerToolResultType = (type: string): type is AnthropicServerToolResultType =>
+  Object.hasOwn(SERVER_TOOL_RESULT_NAMES, type)
 
 const serverToolResultEvent = (block: AnthropicStreamBlock, providerMetadataKey: string): LLMEvent | undefined => {
   if (!block.type || !isServerToolResultType(block.type)) return undefined
@@ -1383,10 +1397,7 @@ const onContentBlockDelta = Effect.fnUntraced(function* (
   return [state, NO_EVENTS] satisfies StepResult
 })
 
-const onContentBlockStop = Effect.fnUntraced(function* (
-  state: ParserState,
-  event: AnthropicEvent,
-) {
+const onContentBlockStop = Effect.fnUntraced(function* (state: ParserState, event: AnthropicEvent) {
   if (event.index === undefined) return [state, NO_EVENTS] satisfies StepResult
   if (event.index in state.compactions) {
     const { [event.index]: content, ...compactions } = state.compactions
@@ -1646,9 +1657,12 @@ function requiredBetaHeaders(body: Pick<AnthropicMessagesBody, "messages" | "con
   // model and ignores it where unsupported, while manual-thinking models need
   // it for thinking between tool calls.
   const betas: string[] = ["interleaved-thinking-2025-05-14"]
-  const requestsCompaction = (body.context_management?.edits.length ?? 0) > 0
+  const requestsCompaction = (body.context_management?.edits?.length ?? 0) > 0
+  // A verbatim pass-through body (#1146) may carry string message content,
+  // which the Messages dialect allows; only array content can replay a
+  // compaction block.
   const replaysCompaction = body.messages.some((message) =>
-    message.content.some((block) => block.type === "compaction"),
+    Array.isArray(message.content) && message.content.some((block) => block.type === "compaction"),
   )
   if (requestsCompaction || replaysCompaction) betas.push("compact-2026-01-12")
 

@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
@@ -24,8 +25,10 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
   })
   const registration = path.join(root, "state", ServiceConfig.filename())
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer), Effect.scoped))
+  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service | Scope.Scope>) =>
+    Effect.runPromise(
+      effect.pipe(Effect.provide(layer), Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer), Effect.scoped),
+    )
 
   try {
     await fs.mkdir(path.dirname(registration), { recursive: true })
@@ -59,8 +62,10 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
 test("explicit server resolution retries a starting server until it answers", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-server-starting-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer), Effect.scoped))
+  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service | Scope.Scope>) =>
+    Effect.runPromise(
+      effect.pipe(Effect.provide(layer), Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer), Effect.scoped),
+    )
   let probes = 0
   const server = Bun.serve({
     port: 0,
@@ -85,8 +90,10 @@ test("explicit server resolution retries a starting server until it answers", as
 test("explicit server resolution retries a refused connection until the server starts", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-server-refused-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer), Effect.scoped))
+  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service | Scope.Scope>) =>
+    Effect.runPromise(
+      effect.pipe(Effect.provide(layer), Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer), Effect.scoped),
+    )
   const placeholder = Bun.serve({ port: 0, fetch: () => new Response() })
   const url = placeholder.url.toString()
   const port = placeholder.port
@@ -114,8 +121,10 @@ test("explicit server resolution retries a refused connection until the server s
 test("explicit server resolution does not retry an unauthorized server", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-server-unauthorized-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer), Effect.scoped))
+  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service | Scope.Scope>) =>
+    Effect.runPromise(
+      effect.pipe(Effect.provide(layer), Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer), Effect.scoped),
+    )
   const previousPassword = process.env.OPENCODE_PASSWORD
   const previousServerPassword = process.env.OPENCODE_SERVER_PASSWORD
   delete process.env.OPENCODE_PASSWORD
@@ -147,8 +156,10 @@ test("explicit server resolution does not retry an unauthorized server", async (
 test("service options only require a matching version when requested", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-options-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer), Effect.scoped))
+  const runPromise = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service | Scope.Scope>) =>
+    Effect.runPromise(
+      effect.pipe(Effect.provide(layer), Effect.provide(FSUtil.layer), Effect.provide(NodeFileSystem.layer), Effect.scoped),
+    )
 
   try {
     expect((await runPromise(ServiceConfig.options())).version).toBeUndefined()

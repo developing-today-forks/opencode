@@ -508,12 +508,54 @@ test("spells GitLab Duo variants for gitlab-ai-provider routes", () => {
   expect(resolve(gitlab("duo-workflow-opus-5-5"), [{ type: "effort" }])).toEqual([])
 })
 
+test("resolves no variants for prototype-named packages (#862)", () => {
+  // PROTOCOLS is a plain-object table keyed by the externally supplied model.package; without an
+  // own-property guard these names read through the prototype chain to inherited values.
+  for (const packageName of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    expect(resolve(model(packageName, "test-model"), [{ type: "effort" }])).toEqual([])
+    expect(resolve(model(packageName, "test-model"), [{ type: "toggle" }])).toEqual([])
+  }
+})
+
 test("spells reasoning variants for every bundled native package", () => {
   const supports: Variant.Support[] = [{ type: "toggle" }, { type: "effort" }, { type: "budget_tokens" }]
   const missing = Array.from(Provider.builtinPackages).filter(
     (packageName) => Variant.resolve(model(packageName, "test-model", 32_000), supports).length === 0,
   )
   expect(missing).toEqual([])
+})
+
+test("spells Antigravity variants as thinking levels", () => {
+  const pkg = "@opencode/ai/providers/antigravity"
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "effort", values: ["low", "high"] }])).toEqual([
+    { id: "low", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } } },
+    { id: "high", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } } },
+  ])
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "effort" }])).toEqual([
+    { id: "low", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } } },
+    { id: "medium", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } } },
+    { id: "high", settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } } },
+  ])
+  // The wire never lowers thinkingBudget, so budget and toggle supports spell nothing.
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "budget_tokens" }])).toEqual([])
+  expect(resolve(model(pkg, "gemini-3-pro"), [{ type: "toggle" }])).toEqual([])
+})
+
+test("spells vibe variants as reasoning effort (Mistral parity, #1692)", () => {
+  // Vibe reuses the MistralChat protocol unchanged (#1653), so it spells
+  // exactly like the mistral package: effort as settings.reasoningEffort.
+  const pkg = "@opencode/ai/providers/vibe"
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "effort", values: ["low", "high"] }])).toEqual([
+    { id: "low", settings: { reasoningEffort: "low" } },
+    { id: "high", settings: { reasoningEffort: "high" } },
+  ])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "effort" }])).toEqual([
+    { id: "low", settings: { reasoningEffort: "low" } },
+    { id: "medium", settings: { reasoningEffort: "medium" } },
+    { id: "high", settings: { reasoningEffort: "high" } },
+  ])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "budget_tokens" }])).toEqual([])
+  expect(resolve(model(pkg, "mistral-vibe-cli-latest"), [{ type: "toggle" }])).toEqual([])
 })
 
 test("spells Mantle variants for the API each model is routed through", () => {

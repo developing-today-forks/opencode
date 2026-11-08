@@ -26,6 +26,12 @@ export const Compatibility = Schema.Struct({
   /** Require every assistant message to include its reasoning field, even when empty. */
   requireReasoning: Schema.Boolean.pipe(optional),
   maxTokensField: MaxTokensField.pipe(optional),
+  /** Supports the OpenAI `store` request field. Gateway-door family defaults (e.g. GLM/Kimi/Gemini/DeepSeek models behind cline-pass, opendesign, opencode-go) are carried as per-model entries here, not detected in the shared protocol (#1824). */
+  supportsStore: Schema.Boolean.pipe(optional),
+  /** Supports the strict field on tool definitions. */
+  supportsStrictMode: Schema.Boolean.pipe(optional),
+  /** Sends `tool_stream` for GLM models on ZAI-shaped endpoints. */
+  zaiToolStream: Schema.Boolean.pipe(optional),
   requireFinishReason: Schema.Boolean.pipe(optional),
   requireAssistantAfterTool: Schema.Boolean.pipe(optional),
   supportsPromptCacheKey: Schema.Boolean.pipe(optional),

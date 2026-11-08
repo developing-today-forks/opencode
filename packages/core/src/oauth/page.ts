@@ -114,18 +114,46 @@ const AUTO_CLOSE_SCRIPT = `setTimeout(function(){try{window.close()}catch(e){}},
 function bootstrapScript(options: BootstrapOptions) {
   return `var PROVIDER=${scriptString(options.provider ?? "")};
 var TOKEN_URL=new URL(${scriptString(options.tokenPath)},window.location.origin).href;
+var TOKEN_POST_TIMEOUT_MS=5000,ERROR_EXCERPT_MAX_BYTES=65536;
 (function(){
   var card=document.getElementById("oc-card"),headline=document.getElementById("oc-headline"),message=document.getElementById("oc-message"),detail=document.getElementById("oc-detail"),footnote=document.getElementById("oc-footnote");
   function fail(text){card.dataset.status="error";headline.textContent="Authorization failed";message.textContent=PROVIDER?("OpenCode couldn't finish connecting to "+PROVIDER+"."):"OpenCode couldn't complete authorization.";if(text){detail.textContent=text;detail.hidden=false}footnote.textContent="Close this window and try again from OpenCode."}
   function ok(){card.dataset.status="success";headline.textContent="Authorization successful";message.textContent=PROVIDER?("OpenCode is now connected to "+PROVIDER+"."):"OpenCode is now authorized.";detail.hidden=true;footnote.textContent="You can close this window.";setTimeout(function(){try{window.close()}catch(e){}},2500)}
+  function excerpt(res,maximumBytes,signal){
+    var reader=res.body&&res.body.getReader?res.body.getReader():null;
+    if(!reader)return Promise.resolve("");
+    var chunks=[],size=0,finished=false;
+    function finish(cancel){
+      if(finished)return "";
+      finished=true;
+      if(signal)signal.removeEventListener("abort",onAbort);
+      if(cancel)try{void reader.cancel().catch(function(){})}catch(e){}
+      try{reader.releaseLock()}catch(e){}
+      var bytes=new Uint8Array(size),offset=0;
+      chunks.forEach(function(chunk){bytes.set(chunk,offset);offset+=chunk.byteLength});
+      return new TextDecoder().decode(bytes);
+    }
+    function onAbort(){try{void reader.cancel(signal.reason).catch(function(){})}catch(e){}}
+    if(signal){if(signal.aborted)onAbort();else signal.addEventListener("abort",onAbort,{once:true})}
+    function read(){return reader.read().then(function(next){
+      if(next.done)return finish(false);
+      var chunk=next.value||new Uint8Array(0),remaining=maximumBytes-size;
+      if(chunk.byteLength>remaining){chunks.push(chunk.subarray(0,remaining));size+=remaining;return finish(true)}
+      chunks.push(chunk);size+=chunk.byteLength;
+      if(size>=maximumBytes)return finish(true);
+      return read();
+    })}
+    return read().catch(function(){return finish(true)});
+  }
   try{
     var hash=new URLSearchParams((window.location.hash||"").slice(1));
     var search=new URLSearchParams(window.location.search||"");
     var err=hash.get("error")||search.get("error");
     var errDescription=hash.get("error_description")||search.get("error_description");
     var body=err?{error:err,error_description:errDescription||""}:{access_token:hash.get("access_token")||"",expires_in:hash.get("expires_in")||"0",state:hash.get("state")||""};
-    fetch(TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(res){
-      if(!res.ok)return res.text().catch(function(){return""}).then(function(t){throw new Error(t||("callback failed ("+res.status+")"))});
+    var signal=AbortSignal.timeout(TOKEN_POST_TIMEOUT_MS);
+    fetch(TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:signal}).then(function(res){
+      if(!res.ok)return excerpt(res,ERROR_EXCERPT_MAX_BYTES,signal).then(function(t){throw new Error(t||("callback failed ("+res.status+")"))});
       if(err){fail(errDescription||err);return}
       ok();
     }).catch(function(e){fail(String(e&&e.message?e.message:e))});

@@ -9,6 +9,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { State } from "../state.js"
 import { which } from "../util/which.js"
+import { ownValue } from "../util/record.js"
 
 const META: Record<string, { deny?: boolean; login?: boolean; ps?: boolean }> = {
   bash: { login: true },
@@ -72,7 +73,7 @@ function full(file: string, options?: Options, bin?: string) {
 }
 
 function meta(file: string) {
-  return META[name(file)]
+  return ownValue(META, name(file))
 }
 
 function compatible(file: string) {

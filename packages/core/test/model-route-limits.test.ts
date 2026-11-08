@@ -125,6 +125,42 @@ describe("ModelRouteLimits.holdUntil", () => {
     expect(ModelRouteLimits.holdUntil(whitespace, at)).toBe(0)
     expect(ModelRouteLimits.holdUntil(snap({ remaining: { requests: "0" } }), at)).toBe(at + 60_000)
   })
+
+  test("looks up limit and reset entries only when they are own properties", () => {
+    const constructor = snap({
+      limit: { requests: "100" },
+      remaining: { constructor: "5", requests: "50" },
+    })
+    expect(ModelRouteLimits.windows(constructor)).toEqual([
+      { name: "constructor", remaining: 5, limit: undefined, resetAt: undefined },
+      { name: "requests", remaining: 50, limit: 100, resetAt: undefined },
+    ])
+    expect(ModelRouteLimits.holdUntil(constructor, at)).toBe(0)
+
+    const toString = snap({
+      limit: { requests: "100" },
+      remaining: { toString: "0", requests: "50" },
+      reset: { requests: "30s" },
+    })
+    expect(ModelRouteLimits.windows(toString)).toEqual([
+      { name: "toString", remaining: 0, limit: undefined, resetAt: undefined },
+      { name: "requests", remaining: 50, limit: 100, resetAt: at + 30_000 },
+    ])
+    expect(ModelRouteLimits.holdUntil(toString, at)).toBe(at + 60_000)
+  })
+
+  test("handles a JSON-parsed snapshot with an own __proto__ window", () => {
+    const value = JSON.parse(
+      `{"at":${at},"remaining":{"__proto__":"0","requests":"3"},"limit":{"requests":"100"}}`,
+    ) as ModelRouteLimits.Snapshot
+
+    expect(Object.hasOwn(value.remaining ?? {}, "__proto__")).toBe(true)
+    expect(ModelRouteLimits.windows(value)).toEqual([
+      { name: "__proto__", remaining: 0, limit: undefined, resetAt: undefined },
+      { name: "requests", remaining: 3, limit: 100, resetAt: undefined },
+    ])
+    expect(ModelRouteLimits.holdUntil(value, at)).toBe(at + 60_000)
+  })
 })
 
 describe("ModelRouteLimits.retryHintFromMessage", () => {
@@ -190,6 +226,20 @@ describe("ModelRouteLimits.retryHintFromMessage", () => {
     }
   })
 
+  test("treats calendar-invalid non-ISO dates as unparseable instead of rolling them forward (#798)", () => {
+    // The ISO round-trip does not reach named or slash-ordered forms, but V8 rolls their
+    // overflow days the same way: Feb 30 states no reset in any spelling.
+    for (const value of ["Feb 30 2026", "Feb 30, 2026", "30 Feb 2026", "2026/02/30", "April 31 2026", "2026/04/31"]) {
+      expect(ModelRouteLimits.parseAbsoluteTime(value)).toBeUndefined()
+    }
+    // Hour 24 is rejected in non-ISO forms too, not only ISO ones.
+    expect(ModelRouteLimits.parseAbsoluteTime("Feb 28 2026 24:00")).toBeUndefined()
+    // Valid non-ISO forms parse exactly as before, leap day included.
+    for (const value of ["Jan 5 2026", "5 Jan 2026", "Feb 29 2024", "Wed, 21 Oct 2015 07:28:00 GMT"]) {
+      expect(ModelRouteLimits.parseAbsoluteTime(value)).toBe(Date.parse(value))
+    }
+  })
+
   test("reads decimal and compound relative waits as the total", () => {
     expect(ModelRouteLimits.retryHintFromMessage("try again in 1.5 hours", at)).toBe(5_400_000)
     expect(ModelRouteLimits.resetAtFromMessage("try again in 1.5 hours", at)).toBe(at + 5_400_000)
@@ -197,6 +247,29 @@ describe("ModelRouteLimits.retryHintFromMessage", () => {
     expect(ModelRouteLimits.resetAtFromMessage("try again in 1 hour 30 minutes", at)).toBe(at + 5_400_000)
     expect(ModelRouteLimits.retryHintFromMessage("try again in 1 hour and 30 minutes", at)).toBe(5_400_000)
     expect(ModelRouteLimits.retryHintFromMessage("try again in 2.5 minutes", at)).toBe(150_000)
+  })
+
+  test("reads compact relative units (resets in 6d 13h)", () => {
+    const total = 6 * 86_400_000 + 13 * 3_600_000
+    expect(ModelRouteLimits.retryHintFromMessage("your quota resets in 6d 13h", at)).toBe(total)
+    expect(ModelRouteLimits.resetAtFromMessage("your quota resets in 6d 13h", at)).toBe(at + total)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 2d", at)).toBe(at + 2 * 86_400_000)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 3h", at)).toBe(at + 3 * 3_600_000)
+    // The letter units must not eat the head of a word: these state no wait at all.
+    expect(ModelRouteLimits.resetAtFromMessage("come back in 5 deals", at)).toBeUndefined()
+    expect(ModelRouteLimits.resetAtFromMessage("come back in 2 homes", at)).toBeUndefined()
+    expect(ModelRouteLimits.resetAtFromMessage("come back in 5 marks", at)).toBeUndefined()
+  })
+
+  test("reads compact minute units and adjacent compact compounds (#996)", () => {
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30m", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30min", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30mins", at)).toBe(at + 1_800_000)
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 1h 30m", at)).toBe(at + 5_400_000)
+    // Adjacent compact parts sum too: "1h30m" is a 90-minute wait, not 1 hour.
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 1h30m", at)).toBe(at + 5_400_000)
+    // "ms" is not "m": a millisecond wait stays milliseconds.
+    expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30ms", at)).toBe(at + 30)
   })
 
   test("reads every absolute-time keyword parseQuotaReset reads (paired with model-route-tuning)", () => {

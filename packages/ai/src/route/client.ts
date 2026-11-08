@@ -590,7 +590,25 @@ const compile = Effect.fn("LLM.compile")(function* (request: LLMRequest, options
   const resolved = prepareRequest(request)
   const route = resolved.model.route
 
-  const body = yield* route.body.from(resolved)
+  // A verbatim pre-encoded body (the façade pass-through, #1146) replaces protocol compilation:
+  // the parsed raw body is what endpoint rendering and transport preparation see, and the HTTP
+  // transport sends the raw text byte-for-byte (see HttpOptions.rawBody). The response still
+  // decodes through the route's protocol, exactly as for a compiled body.
+  const rawBody = resolved.http?.rawBody
+  const body =
+    rawBody === undefined
+      ? yield* route.body.from(resolved)
+      : yield* Effect.try({
+          try: () => JSON.parse(rawBody) as unknown,
+          catch: () =>
+            ProviderShared.invalidRequest("http.rawBody must be valid JSON"),
+        }).pipe(
+          Effect.flatMap((parsed) =>
+            ProviderShared.isRecord(parsed)
+              ? Effect.succeed(parsed)
+              : Effect.fail(ProviderShared.invalidRequest("http.rawBody must be a JSON object")),
+          ),
+        )
   const prepared = yield* route.prepareTransport(body, resolved, options)
 
   return {

@@ -4,6 +4,7 @@ import {
   formDisplayValue,
   formInitialValues,
   formLabel,
+  formNumberValue,
   formRows,
   formSelected,
   formSetMultiselectCustom,
@@ -190,7 +191,11 @@ export function formCommitInput(state: FormBodyState, form: FormInfo, text: stri
   const field = formCurrent(form, state)
   if (!field || field.type === "external" || field.type === "boolean") return state
   const input = text.trim()
-  const value = !input ? undefined : field.type === "number" || field.type === "integer" ? Number(input) : input
+  const value = !input
+    ? undefined
+    : field.type === "number" || field.type === "integer"
+      ? formNumberValue(input)
+      : input
   if (field.type === "multiselect") {
     const values = formSetMultiselectCustom(state.answers[field.key], state.custom[field.key], input)
     const invalid = formValidateValue(field, values)

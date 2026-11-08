@@ -15,9 +15,13 @@ import {
   copilotEndpointDiscoveryNeeded,
   copilotEntitlementError,
   copilotFetch,
+  deviceIntervalMs,
   discoverCopilotApiEndpoint,
   GithubCopilotPlugin,
+  oauthMaxResponseBytes,
+  slowDownWaitMs,
   utilityTitle,
+  utilityTitleMaxResponseBytes,
 } from "@opencode/core/plugin/provider/github-copilot"
 import { Message, SystemPart } from "@opencode/ai"
 import { Provider } from "@opencode/core/provider"
@@ -128,6 +132,55 @@ describe("GithubCopilotPlugin", () => {
         fetch: async () => new Response("nope", { status: 500 }),
       }).pipe(Effect.flip)
       expect(String(error)).toContain("500")
+    }),
+  )
+
+  it.live("fails plan endpoint discovery on a declared oversized response before reading it (#1026)", () =>
+    Effect.gen(function* () {
+      let bodyRead = false
+      const error = yield* discoverCopilotApiEndpoint({
+        token: "token",
+        app: App.make({ name: "test", version: "1.2.3", channel: "beta" }),
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("small body"))
+              },
+              pull(controller) {
+                bodyRead = true
+                controller.close()
+              },
+            }),
+            { headers: { "content-length": String(oauthMaxResponseBytes + 1) } },
+          ),
+      }).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
+      expect(bodyRead).toBe(false)
+    }),
+  )
+
+  it.live("fails plan endpoint discovery on a streamed oversized response with no declared length (#1026)", () =>
+    Effect.gen(function* () {
+      const chunkBytes = oauthMaxResponseBytes / 2
+      const totalChunks = 8
+      let pulled = 0
+      const error = yield* discoverCopilotApiEndpoint({
+        token: "token",
+        app: App.make({ name: "test", version: "1.2.3", channel: "beta" }),
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              pull(controller) {
+                if (pulled === totalChunks) return controller.close()
+                pulled++
+                controller.enqueue(new Uint8Array(chunkBytes))
+              },
+            }),
+          ),
+      }).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
+      expect(pulled).toBeLessThan(totalChunks)
     }),
   )
 
@@ -359,6 +412,41 @@ describe("GithubCopilotPlugin", () => {
         titleRequest,
       ).pipe(Effect.flip)
       expect(String(error)).toContain("429")
+    }),
+  )
+
+  it.live("fails the utility title on a declared oversized response before reading it", () =>
+    Effect.gen(function* () {
+      const error = yield* utilityTitle(
+        utilityInput(
+          () =>
+            new Response("small body, lying header", {
+              headers: { "content-length": String(utilityTitleMaxResponseBytes + 1) },
+            }),
+        ),
+        titleRequest,
+      ).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
+    }),
+  )
+
+  it.live("fails the utility title on a streamed oversized response with no declared length", () =>
+    Effect.gen(function* () {
+      const error = yield* utilityTitle(
+        utilityInput(
+          () =>
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(new TextEncoder().encode("x".repeat(utilityTitleMaxResponseBytes + 1)))
+                  controller.close()
+                },
+              }),
+            ),
+        ),
+        titleRequest,
+      ).pipe(Effect.flip)
+      expect(String(error)).toContain("exceeded")
     }),
   )
 
@@ -728,4 +816,37 @@ describe("GithubCopilotPlugin", () => {
       expect(result.language).toBeUndefined()
     }),
   )
+})
+
+describe("GithubCopilotPlugin device polling", () => {
+  test("bounds the device poll interval and falls back on unusable values (#915)", () => {
+    // Ordinary GitHub interval: 5s, polled with the safety margin on top.
+    expect(deviceIntervalMs(5)).toBe(5000)
+    expect(deviceIntervalMs(10)).toBe(10_000)
+    expect(deviceIntervalMs(1)).toBe(1000)
+    // Sub-second values are floored to 1 second instead of flooding the
+    // token endpoint.
+    expect(deviceIntervalMs(0.5)).toBe(1000)
+    // An oversized or unit-confused interval is clamped to the 60-second
+    // ceiling instead of outlasting the 10-minute attempt lifetime.
+    expect(deviceIntervalMs(600)).toBe(60_000)
+    expect(deviceIntervalMs(999_999)).toBe(60_000)
+    // Zero, negative, and non-finite values take the 5-second fallback
+    // instead of busy-polling or never polling.
+    for (const value of [0, -3, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])
+      expect(deviceIntervalMs(value)).toBe(5000)
+  })
+
+  test("slow_down never shortens the wait (#915)", () => {
+    // No usable interval in the response: the sibling flows' +5s.
+    expect(slowDownWaitMs(5000, undefined)).toBe(10_000)
+    expect(slowDownWaitMs(5000, Number.NaN)).toBe(10_000)
+    // A smaller positive interval must not speed polling up against an
+    // endpoint asking the client to back off.
+    expect(slowDownWaitMs(5000, 1)).toBe(10_000)
+    expect(slowDownWaitMs(5000, 8)).toBe(10_000)
+    // A larger server interval is honoured, through the same ceiling.
+    expect(slowDownWaitMs(5000, 30)).toBe(30_000)
+    expect(slowDownWaitMs(5000, 600)).toBe(60_000)
+  })
 })

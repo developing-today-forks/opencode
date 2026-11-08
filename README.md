@@ -1,12 +1,12 @@
 <!--
-  developing-today/opencode fork notice:
+  developing-today-forks/opencode fork notice:
   This fork tracks the upstream v2 line (anomalyco/opencode branch dev) exclusively.
   Following upstream's promotion of v2 to dev (with legacy v1 branched to v1), this fork tracks dev.
   Latest upstream commit merged: 00e7472faa2ef15b30db6110440117e4e7e1a72a (Fri Oct 16 15:15:15 2026 +0530).
 -->
 
 > [!NOTE]
-> **Fork Information (`developing-today/opencode`):**
+> **Fork Information (`developing-today-forks/opencode`):**
 > This repository is a fork of [OpenCode](https://github.com/anomalyco/opencode) tracking the upstream **`v2`** codebase on `dev` exclusively (upstream promoted v2 to `dev` on Oct 10, 2026; legacy v1 is on `v1`).
 > - **Latest upstream commit merged**: `00e7472faa2ef15b30db6110440117e4e7e1a72a` (Fri Oct 16 2026).
 >

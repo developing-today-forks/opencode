@@ -5,7 +5,10 @@ import path from "node:path"
 import { Effect } from "effect"
 
 // Python standard-library top-level module names (CPython 3.14;
-// underscore-prefixed private internals omitted). A `<name>.py` file in a
+// underscore-prefixed private internals omitted). The list was verified
+// complete against sys.stdlib_module_names on CPython 3.14.7 (2026-10-28,
+// #760): annotationlib, antigravity, and cProfile were the only missing
+// non-underscore names, and the set has no non-stdlib extras. A `<name>.py` file in a
 // directory that sits first on sys.path — the working directory of a
 // `python3` invocation, or a directory on PYTHONPATH — shadows the standard
 // library module of the same name. The shared tmp root is exactly such a
@@ -13,6 +16,8 @@ import { Effect } from "effect"
 // `re.py` there breaks every Python run with a misleading traceback (#132).
 const stdlib = new Set([
   "abc",
+  "annotationlib",
+  "antigravity",
   "argparse",
   "array",
   "ast",
@@ -40,6 +45,7 @@ const stdlib = new Set([
   "contextvars",
   "copy",
   "copyreg",
+  "cProfile",
   "csv",
   "ctypes",
   "curses",

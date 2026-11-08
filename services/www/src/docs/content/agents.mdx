@@ -115,6 +115,18 @@ Set `mode` according to where the agent should run:
 
 Subagents run with fresh context in foreground or background child sessions. The parent agent's `subagent` permissions control which agents it may launch; the child uses its own configured permissions.
 
+Foreground calls wait for the result. `background: true` returns immediately and the parent is notified when the child finishes. Any session, including a subagent, can background a task.
+
+### Stop policies
+
+Choose what interrupting the parent does to a background subagent with `stopPolicy`:
+
+| Policy | Behavior | How to stop |
+| --- | --- | --- |
+| `independent` | Default. Keeps running when the parent is interrupted. | Stop the child session directly, or force-stop the parent. |
+| `cascade` | Stops with the parent. Interrupting the parent also interrupts its cascade background children, and theirs. | Interrupt the parent, stop the child directly, or force-stop the parent. |
+| `detached` | Survives plain interrupt and cascade alike. Only force-stop terminates it. | Force-stop the parent or stop the child directly with force. |
+
 ```jsonc
 {
   "agents": {
@@ -128,9 +140,11 @@ Subagents run with fresh context in foreground or background child sessions. The
 }
 ```
 
+Force-stop terminates everything under a session regardless of stop policy. It is available as `session.interrupt` with `force: true` and stops the session's background children, their children, and any foreground work below them.
+
 ### Nested subagents
 
-A subagent can launch its own subagents. Those launches always run in the foreground, so the subagent's final answer includes their results. Nesting stops five levels below the top-level session; the next launch fails and the agent does that work itself. Set `experimental.subagent_depth` to change the limit:
+A subagent can launch its own subagents in the foreground or the background, so a background child notifies its direct parent when it finishes. Nesting stops five levels below the top-level session; the next launch fails and the agent does that work itself. Set `experimental.subagent_depth` to change the limit:
 
 ```jsonc
 {

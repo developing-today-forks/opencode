@@ -1,4 +1,5 @@
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../version"
 import { Hash } from "@opencode/util/hash"
 import { Service } from "@opencode/client/effect/service"
@@ -167,11 +168,9 @@ function route() {
 }
 
 const write = Effect.fn("cli.service-config.write")(function* (value: Info) {
-  const { fs, configFile } = yield* paths
-  const temp = configFile + ".tmp"
-  yield* fs.makeDirectory(path.dirname(configFile), { recursive: true })
-  yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
-  yield* fs.rename(temp, configFile)
+  const { configFile } = yield* paths
+  const fsUtil = yield* FSUtil.Service
+  yield* fsUtil.writeAtomic(configFile, JSON.stringify(value, null, 2) + "\n", { modePolicy: "owner-capped" })
 })
 
 export const password = Effect.fn("cli.service-config.password")(function* (value?: string) {
@@ -270,7 +269,12 @@ export const set = Effect.fn("cli.service-config.set")(function* (key: string, v
       return
     }
     case "port": {
-      const port = Number(value)
+      // Only a plain decimal spelling names a port (#875): bare Number() would
+      // reinterpret "0x10" as 16, "1e3" as 1000, and "8080.0" as 8080 before
+      // the range check ever ran. Surrounding whitespace is trimmed, matching
+      // the repo's other strict numeric parsers.
+      const text = value.trim()
+      const port = /^\d+$/.test(text) ? Number(text) : Number.NaN
       if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("Port must be between 1 and 65535")
       yield* Service.stop(yield* options())
       yield* write({ ...(yield* read()), port })

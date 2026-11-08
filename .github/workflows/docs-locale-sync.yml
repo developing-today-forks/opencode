@@ -10,11 +10,10 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  push:
-    branches:
-      - dev
-    paths:
-      - packages/web/src/content/docs/*.mdx
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   sync-locales:

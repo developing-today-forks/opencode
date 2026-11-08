@@ -101,7 +101,11 @@ export const substitute = Effect.fn("ConfigVariable.substitute")(function* (inpu
       const separator = token.indexOf(":-")
       const name = separator === -1 ? token : token.slice(0, separator)
       const fallback = separator === -1 ? "" : token.slice(separator + 2)
-      const value = (input.env?.[name] ?? process.env[name]) || fallback
+      // Own-property resolution only: a plain lookup reads through the prototype
+      // chain, so {env:constructor} would inject the Object function source (and
+      // ignore any :- fallback) instead of resolving as unset.
+      const supplied = input.env && Object.hasOwn(input.env, name) ? input.env[name] : undefined
+      const value = (supplied ?? (Object.hasOwn(process.env, name) ? process.env[name] : undefined)) || fallback
       push(escape ? JSON.stringify(value).slice(1, -1) : value, false)
       cursor = match.index + match[0].length
     }

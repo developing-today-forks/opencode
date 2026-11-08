@@ -659,6 +659,64 @@ describe("LocationServiceMap", () => {
     ),
   )
 
+  it.live("presents the smallest per-target ceiling of a flat mixed-ceiling pool", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  pool: {
+                    name: "Pool",
+                    package: "test-provider",
+                    models: {
+                      one: { limit: { context: 200_000 } },
+                      two: { limit: { context: 200_000 } },
+                      three: { limit: { context: 500_000 } },
+                    },
+                  },
+                },
+                experimental: {
+                  model_routes: {
+                    small: {
+                      targets: [
+                        { model: "pool/one", limit: { context: 100_000 } },
+                        { model: "pool/two", limit: { context: 100_000 } },
+                        { model: "pool/three", limit: { context: 200_000 } },
+                      ],
+                    },
+                  },
+                },
+              }),
+            ),
+          )
+          yield* Effect.gen(function* () {
+            yield* Reference.Service
+            const plugins = yield* Plugin.Service
+            yield* plugins.awaitActivation
+            const models = yield* Model.Service
+            const presented = yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("small"))
+            // The flat pool needs no nested sub-route: the route presents the smallest
+            // per-element ceiling, so compaction cannot bypass any target's cap.
+            expect(presented?.limit.context).toBe(100_000)
+            const definition = presented ? ModelRoute.definition(presented) : undefined
+            expect(definition?.targetLimits).toEqual([
+              { context: 100_000 },
+              { context: 100_000 },
+              { context: 200_000 },
+            ])
+          }).pipe(
+            Effect.provide(
+              LocationServiceMap.Service.get(Location.Ref.make({ directory: AbsolutePath.make(dir.path) })),
+            ),
+          )
+        }),
+      ),
+    ),
+  )
+
   it.live("presents a route's context cap as its input limit when targets define one", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((dir) =>

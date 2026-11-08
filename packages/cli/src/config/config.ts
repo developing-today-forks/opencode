@@ -2,6 +2,7 @@ export * as Config from "./config"
 
 import { Global } from "@opencode/util/global"
 import { Flock } from "@opencode/util/flock"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
 import { produce, type Draft } from "immer"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
@@ -27,6 +28,7 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
+    const fsUtil = yield* FSUtil.Service
     const global = yield* Global.Service
     const file = path.join(global.config, "cli.json")
     const content = process.env.OPENCODE_CLI_CONFIG_CONTENT
@@ -40,14 +42,12 @@ export const layer = Layer.effect(
     })
 
     const write = Effect.fnUntraced(function* (text: string) {
-      const temp = file + ".tmp"
-      yield* fs.makeDirectory(path.dirname(file), { recursive: true })
-      yield* fs.writeFileString(temp, text, { mode: 0o600 })
-      yield* fs.rename(temp, file)
+      yield* fsUtil.writeAtomic(file, text, { modePolicy: "owner-capped" })
     })
 
     const migrate = ConfigMigration.run({ file, config: global.config, state: global.state }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(FSUtil.Service, fsUtil),
     )
     const withLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.scoped(

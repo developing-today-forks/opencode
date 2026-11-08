@@ -1,6 +1,7 @@
 export * as ModelRouteReview from "./model-route-review.js"
 
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
+import { ownOr, ownValue } from "./util/record.js"
 
 /**
  * The per-pool view behind `route_stats`: what each pool is configured to do, what it actually did,
@@ -15,6 +16,8 @@ export interface Configured {
   readonly hedgeAfterMs?: number
   readonly targets: readonly string[]
   readonly weights: Readonly<Record<string, number>>
+  /** Per-target context ceilings declared in config, keyed by bare `provider/model`. */
+  readonly limits: Readonly<Record<string, number>>
 }
 
 /** One request to one concrete target (`route_attempt`). */
@@ -35,6 +38,11 @@ export interface Attempt {
 export interface Decision {
   readonly routeID: string
   readonly sessionID: string | null
+  /** The pool's selection mode as recorded for this selection (`route_decision.selection`), when
+   * the row carries it. Rows surfaced before this field was read, and hand-built fixtures, omit
+   * it; the expectation then falls back to the configured pool's mode, and to the tiers the
+   * selection recorded when neither is known. */
+  readonly selection?: string
   readonly candidates: readonly string[]
   readonly chosen: string | null
   readonly reason: string
@@ -63,12 +71,19 @@ export interface Member {
   /** New-session draws it was eligible for. Only draws are decided by weight. */
   readonly draws: number
   readonly drawsWon: number
-  /** The share of a draw its weight promised, averaged over the draws it was in. Null without draws. */
+  /** The share of a draw it should have won under the pool's selection mode, averaged over the
+   * draws it was in. Null without draws. In a `weighted` pool that is the proportional share of
+   * its effective weight. In a `round-robin` pool weights are priority tiers (#1122), so only
+   * the top tier among a draw's candidates expects anything, split evenly (1/n of that tier),
+   * and every lower tier expects 0; in a draw whose candidates omit the tiers above, the
+   * highest tier present is the top tier for that draw. */
   readonly expectedShare: number | null
   /** The share of those draws it won. Compare with `expectedShare`. */
   readonly takeRate: number | null
-  /** Selections in which it was left out, by reason: cooldown, provider-limit, user-skip, soft-budget, already-tried. */
+  /** Selections in which it was left out, by reason: cooldown, provider-limit, user-skip, soft-budget, over-limit, already-tried. */
   readonly excluded: Readonly<Record<string, number>>
+  /** The per-target context ceiling the pool declares for this target, or null when it declares none. */
+  readonly configuredLimit: number | null
   /** Per-layer weight attribution from the most recent selection it was a candidate in, or null
    * when no recorded decision carries layers for it (decisions recorded before #589, or none). */
   readonly weightLayers: WeightLayers | null
@@ -117,11 +132,19 @@ export const configured = (route: ConfigModelRoutes.Route): Configured => ({
   selection: route.selection ?? "ordered",
   ...(route.autonomy !== undefined ? { autonomy: route.autonomy } : {}),
   ...(route.hedgeAfterMs !== undefined ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
-  targets: route.targets.map((target) =>
-    bare("providerID" in target ? referenceOf(target) : referenceOf(target.model)),
-  ),
+  targets: route.targets.map((target) => {
+    if (typeof target === "string") return bare(target)
+    return bare("providerID" in target ? referenceOf(target) : referenceOf(target.model))
+  }),
   weights: Object.fromEntries(
     Object.entries(route.weights ?? {}).map(([reference, weight]) => [bare(reference), weight]),
+  ),
+  limits: Object.fromEntries(
+    route.targets.flatMap((target): [string, number][] => {
+      if (typeof target === "string" || "providerID" in target) return []
+      const ceiling = target.limit?.context
+      return ceiling === undefined ? [] : [[bare(referenceOf(target.model)), ceiling]]
+    }),
   ),
 })
 
@@ -184,6 +207,66 @@ export const layersOf = (detail: Record<string, unknown> | null): Readonly<Recor
   return layers
 }
 
+/** The priority tier a candidate sorted into in one selection, as the selector recorded it for
+ * round-robin nodes (#1122): the pre-demotion weight it tiers by, and whether quota demotion
+ * holds it below every live tier. */
+export interface Tier {
+  readonly weight: number
+  readonly demoted: boolean
+}
+
+/** The per-candidate tiers a selection recorded, per candidate label. Empty for non-round-robin
+ * selections and for decisions recorded before #1122. */
+export const tiersOf = (detail: Record<string, unknown> | null): Readonly<Record<string, Tier>> => {
+  const value = detail?.tiers
+  if (typeof value !== "object" || value === null) return {}
+  const tiers: Record<string, Tier> = {}
+  for (const [label, item] of Object.entries(value)) {
+    if (typeof item !== "object" || item === null) continue
+    const fields = item as Record<string, unknown>
+    if (typeof fields.weight !== "number") continue
+    tiers[label] = { weight: fields.weight, demoted: fields.demoted === true }
+  }
+  return tiers
+}
+
+/** The share of one draw a candidate should have won, mirroring the selector in model-route.ts.
+ * Weighted pools draw in proportion to the effective weights over the whole candidate set.
+ * Round-robin pools are tiered (#1122): the tier key is the pre-demotion weight the selection
+ * recorded in `tiers` (falling back to the recorded per-layer `adjustment` weight, then to the
+ * effective weight, for decisions recorded before tiers were kept), a demoted candidate sorts
+ * below every live tier, distinct weights are distinct tiers and equal weights are one tier,
+ * and only the top tier among the draw's candidates expects anything, split evenly. Because the
+ * candidate set is the draw's own, a draw that omits the higher tiers expects the highest tier
+ * present to take it — the selector's fallthrough, stated as an expectation. Null when the draw
+ * carries no usable weights (a weighted draw whose weights sum to zero). */
+const expectedShareOf = (decision: Decision, pool: Configured | null, target: string): number | null => {
+  const tiers = tiersOf(decision.detail)
+  const mode = decision.selection ?? pool?.selection ?? (Object.keys(tiers).length > 0 ? "round-robin" : undefined)
+  if (mode !== "round-robin") {
+    const weights = weightsOf(decision.detail)
+    const total = decision.candidates.reduce((sum, candidate) => sum + ownOr(weights, candidate, 1), 0)
+    return total > 0 ? ownOr(weights, target, 1) / total : null
+  }
+  const weights = weightsOf(decision.detail)
+  const layers = layersOf(decision.detail)
+  const tierOf = (candidate: string): Tier => {
+    const recorded = ownValue(tiers, candidate)
+    if (recorded) return recorded
+    const layer = ownValue(layers, candidate)
+    if (layer) return { weight: layer.adjustment, demoted: layer.demotion < layer.adjustment }
+    return { weight: ownOr(weights, candidate, 1), demoted: false }
+  }
+  const entries = decision.candidates.map(tierOf)
+  // Tier order, as the selector's byTier: non-demoted first, heavier tier first.
+  const head = entries.toSorted((left, right) =>
+    left.demoted !== right.demoted ? (left.demoted ? 1 : -1) : right.weight - left.weight,
+  )[0]
+  if (!head) return null
+  const inTop = (tier: Tier) => tier.demoted === head.demoted && tier.weight === head.weight
+  return inTop(tierOf(target)) ? 1 / entries.filter(inTop).length : 0
+}
+
 /** Who a selection left out and why. The `-until:<time>` suffix is dropped so that reasons group. */
 const excludedOf = (detail: Record<string, unknown> | null) => {
   const value = detail?.excluded
@@ -235,21 +318,20 @@ const memberOf = (
       // First found wins: decisions arrive newest-first (see summarize), so the first
       // layers recorded for a target are its most recent selection's. A decision without
       // layers for the target leaves the value untouched rather than clearing it.
-      if (weightLayers === null) weightLayers = layersOf(decision.detail)[target] ?? null
+      if (weightLayers === null) weightLayers = ownValue(layersOf(decision.detail), target) ?? null
       if (decision.chosen === target) chosen += 1
       if (decision.reason === "drawn") {
-        const weights = weightsOf(decision.detail)
-        const total = decision.candidates.reduce((sum, candidate) => sum + (weights[candidate] ?? 1), 0)
         draws += 1
         if (decision.chosen === target) drawsWon += 1
-        if (total > 0) {
+        const share = expectedShareOf(decision, pool, target)
+        if (share !== null) {
           shares += 1
-          shareTotal += (weights[target] ?? 1) / total
+          shareTotal += share
         }
       }
     }
     for (const item of excludedOf(decision.detail)) {
-      if (item.candidate === target) excluded[item.reason] = (excluded[item.reason] ?? 0) + 1
+      if (item.candidate === target) excluded[item.reason] = ownOr(excluded, item.reason, 0) + 1
     }
   }
   const firstTokens = present(attempts.map((row) => row.firstTokenMs))
@@ -261,7 +343,8 @@ const memberOf = (
   const inputs = present(attempts.map((row) => row.tokensInput))
   return {
     target,
-    configuredWeight: pool?.weights[target] ?? null,
+    configuredWeight: pool ? (ownValue(pool.weights, target) ?? null) : null,
+    configuredLimit: pool ? (ownValue(pool.limits, target) ?? null) : null,
     attempts: attempts.length,
     failures,
     timeouts: attempts.filter((row) => row.outcome === "timeout").length,
@@ -288,7 +371,7 @@ const routeOf = (
   decisions: readonly Decision[],
 ): RouteSummary => {
   const reasons: Record<string, number> = {}
-  for (const decision of decisions) reasons[decision.reason] = (reasons[decision.reason] ?? 0) + 1
+  for (const decision of decisions) reasons[decision.reason] = ownOr(reasons, decision.reason, 0) + 1
   const sessions = new Set<string>()
   for (const row of attempts) if (row.sessionID) sessions.add(row.sessionID)
   for (const row of decisions) if (row.sessionID) sessions.add(row.sessionID)

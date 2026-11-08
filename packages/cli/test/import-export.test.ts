@@ -2,6 +2,19 @@ import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
+import { Readable } from "node:stream"
+import { readBoundedResponseBody, readBoundedStdin } from "../src/util/io"
+import { readAuthLocal, MAX_AUTH_TRANSFER_BYTES } from "../src/commands/handlers/auth/import"
+import {
+  fetchRemote,
+  fetchServerLocation,
+  postSessionImport,
+  readLocal,
+  MAX_SESSION_INFO_BYTES,
+} from "../src/commands/handlers/session/import"
+import { OpenCode } from "@opencode/client"
 import { OPENCODE_VERSION } from "../src/version"
 
 const info = {
@@ -225,3 +238,327 @@ test("import reports an existing session without a stack trace", async () => {
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test("readBoundedResponseBody returns a body under the cap and cuts a chunked body over it", async () => {
+  const encoder = new TextEncoder()
+  const chunked = (chunks: string[]) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    )
+
+  await expect(readBoundedResponseBody(chunked(["hello ", "world"]), 1024)).resolves.toBe("hello world")
+  // A UTF-8 BOM is stripped, matching the previous response.text() behaviour.
+  await expect(readBoundedResponseBody(chunked(["\uFEFFhello"]), 1024)).resolves.toBe("hello")
+  await expect(readBoundedResponseBody(chunked(["12345", "67890"]), 8)).rejects.toThrow(
+    "Session data too large: response body exceeds the 8-byte limit",
+  )
+})
+
+test("readBoundedResponseBody aborts a stalled body read when the signal fires", async () => {
+  const encoder = new TextEncoder()
+  const stalled = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("first chunk"))
+        // Never enqueues again and never closes: without a deadline this
+        // read waits forever, far under the size cap.
+      },
+    }),
+  )
+  await expect(readBoundedResponseBody(stalled, 1024, AbortSignal.timeout(100))).rejects.toThrow()
+})
+
+test("readLocal returns a file under the cap and rejects a file over it before reading", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-import-local-"))
+  const file = path.join(root, "session.json")
+  try {
+    await fs.writeFile(file, "hello world")
+    await expect(readLocal(file, 1024)).resolves.toBe("hello world")
+    await expect(readLocal(file, 8)).rejects.toThrow(
+      "Session data too large: file exceeds the 8-byte limit",
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("readAuthLocal returns a file under the cap and rejects a file over it before reading", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-auth-import-local-"))
+  const file = path.join(root, "auth.json")
+  try {
+    await fs.writeFile(file, "hello world")
+    await expect(readAuthLocal(file, 1024)).resolves.toBe("hello world")
+    await expect(readAuthLocal(file, 8)).rejects.toThrow(
+      "Auth data too large: file exceeds the 8-byte limit",
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("readBoundedStdin returns stdin under the cap and cuts a stream over it", async () => {
+  await expect(readBoundedStdin(1024, Readable.from(["hello ", "world"]))).resolves.toBe("hello world")
+  await expect(readBoundedStdin(8, Readable.from(["12345", "67890"]))).rejects.toThrow(
+    "Auth data too large: stdin exceeds the 8-byte limit",
+  )
+})
+
+test("auth import rejects a local file over the cap without reading it", async () => {
+  // A sparse file sized just over the cap: the import can only fail fast
+  // via the stat pre-check, since buffering 10 MiB of zeros would reach
+  // the credential decode instead and fail differently.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-auth-import-oversize-"))
+  const file = path.join(root, "auth.json")
+  await fs.writeFile(file, "")
+  await fs.truncate(file, MAX_AUTH_TRANSFER_BYTES + 1)
+
+  try {
+    const [stdout, stderr, exitCode] = await run(["auth", "import", file])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Auth data too large: file exceeds the ${MAX_AUTH_TRANSFER_BYTES}-byte limit`,
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test("import rejects a local file over the cap without reading it", async () => {
+  // A sparse file sized just over the cap: the import can only fail fast
+  // via the stat pre-check, since buffering 256 MiB of zeros would reach
+  // the session decode instead and fail differently.
+  const maximumBytes = 256 * 1024 * 1024
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-import-oversize-"))
+  const file = path.join(root, "session.json")
+  await fs.writeFile(file, "")
+  await fs.truncate(file, maximumBytes + 1)
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname === "/api/info") return status()
+      return new Response("Not found", { status: 404 })
+    },
+  })
+
+  try {
+    const [stdout, stderr, exitCode] = await run([
+      "session",
+      "import",
+      file,
+      "--server",
+      server.url.toString(),
+    ])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Failed to read session data: Session data too large: file exceeds the ${maximumBytes}-byte limit`,
+    )
+  } finally {
+    await server.stop(true)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test("fetchRemote cuts a slow-dripping remote body at the deadline", async () => {
+  // Exercises the production import fetch: one AbortSignal.timeout deadline
+  // is passed to fetch and threaded into readBoundedResponseBody, so the
+  // body phase is bounded by the same deadline as the headers phase.
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("x"))
+            await Bun.sleep(50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(fetchRemote(`${server.url}session.json`, 150)).rejects.toThrow()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("fetchRemote cuts a header stall at the deadline and reads a normal body unchanged", async () => {
+  const stalled = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(fetchRemote(`${stalled.url}session.json`, 100)).rejects.toThrow()
+  } finally {
+    stalled.stop(true)
+  }
+
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) =>
+      new URL(request.url).pathname === "/missing"
+        ? new Response("nope", { status: 404, statusText: "Not Found" })
+        : Response.json({ ok: true }),
+  })
+  try {
+    await expect(fetchRemote(`${server.url}session.json`, 5_000)).resolves.toBe(JSON.stringify({ ok: true }))
+    await expect(fetchRemote(`${server.url}missing`, 5_000)).rejects.toThrow("Failed to fetch session data: Not Found")
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("import rejects a remote body whose declared content-length is over the cap without reading it", async () => {
+  // A raw HTTP stub, because Bun.serve rewrites content-length to the real
+  // body size: this declares far over the cap and never sends a body, so
+  // the import can only fail via the pre-read content-length check.
+  const maximumBytes = 256 * 1024 * 1024
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": String(maximumBytes + 1),
+    })
+    response.flushHeaders()
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const { port } = server.address() as AddressInfo
+
+  try {
+    const [stdout, stderr, exitCode] = await run([
+      "session",
+      "import",
+      `http://127.0.0.1:${port}/session.json`,
+      "--server",
+      `http://127.0.0.1:${port}`,
+    ])
+
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain(
+      `Failed to read session data: Session data too large: response body exceeds the ${maximumBytes}-byte limit`,
+    )
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}, 15_000)
+
+test("postSessionImport reads a healthy Session.Info response under the cap", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: info }),
+  })
+  try {
+    const { response, text } = await postSessionImport(server.url.toString(), {}, "{}", 5_000)
+    expect(response.status).toBe(200)
+    expect(text).toBe(JSON.stringify({ data: info }))
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("postSessionImport cuts a header stall at the deadline", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 150)).rejects.toThrow(
+      "Timed out after 150ms importing the session via /api/experimental/session/import",
+    )
+  } finally {
+    server.stop(true)
+  }
+}, 15_000)
+
+test("postSessionImport cuts a slow-dripping response body at the deadline", async () => {
+  // The deadline is threaded into the bounded body read, so a body that
+  // never finishes is cut by the same deadline as the headers phase.
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            controller.enqueue(new TextEncoder().encode("x"))
+            await Bun.sleep(50)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 150)).rejects.toThrow(
+      "Timed out after 150ms importing the session via /api/experimental/session/import",
+    )
+  } finally {
+    server.stop(true)
+  }
+}, 15_000)
+
+test("postSessionImport rejects a Session.Info body over the 1 MiB cap", async () => {
+  const chunk = new Uint8Array(600 * 1024).fill(120)
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(chunk)
+            controller.enqueue(chunk)
+            controller.close()
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    },
+  })
+  try {
+    await expect(postSessionImport(server.url.toString(), {}, "{}", 5_000)).rejects.toThrow(
+      `Session data too large: response body exceeds the ${MAX_SESSION_INFO_BYTES}-byte limit`,
+    )
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("fetchServerLocation resolves a healthy location and cuts a stalled one at the deadline", async () => {
+  const healthy = Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({
+        directory: "/project",
+        project: { id: "global", directory: "/project", canonical: "/project" },
+      }),
+  })
+  try {
+    const location = await fetchServerLocation(OpenCode.make({ baseUrl: healthy.url.toString() }), "/project", 5_000)
+    expect(location.directory).toBe("/project")
+  } finally {
+    healthy.stop(true)
+  }
+
+  const stalled = Bun.serve({
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
+  })
+  try {
+    await expect(
+      fetchServerLocation(OpenCode.make({ baseUrl: stalled.url.toString() }), "/project", 150),
+    ).rejects.toThrow("Timed out after 150ms waiting for the server location at /api/location")
+  } finally {
+    stalled.stop(true)
+  }
+}, 15_000)

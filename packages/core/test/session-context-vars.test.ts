@@ -25,7 +25,9 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
 
 const sessionID = SessionSchema.ID.make("ses_context_vars_test")
+const detachedSessionID = SessionSchema.ID.make("ses_context_detached_test")
 const empty = { load: () => Effect.succeed(Instructions.empty) }
+const disabledTools: (ReadonlySet<string> | undefined)[] = []
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -48,7 +50,11 @@ const it = testEffect(
       PluginSupervisor.node.replace(Layer.empty),
       Tool.node.replace(
         Layer.mock(Tool.Service, {
-          snapshot: () => Effect.succeed({ definitions: [], execute: () => Effect.die(new Error("unused")) }),
+          snapshot: (_permissions, disabled) =>
+            Effect.sync(() => {
+              disabledTools.push(disabled)
+              return { definitions: [], execute: () => Effect.die(new Error("unused")) }
+            }),
         }),
       ),
       Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
@@ -93,6 +99,7 @@ it.effect("renders session variables in instruction files that opt in through fr
 
     const selection = yield* context.select(sessionID)
     const observed = yield* Instructions.read(selection.instructions)
+    expect(disabledTools.at(-1)).toBeUndefined()
     const values = Object.fromEntries(
       observed.flatMap((entry) => (typeof entry.value === "object" ? [[entry.key, entry.value]] : [])),
     )
@@ -102,5 +109,37 @@ it.effect("renders session variables in instruction files that opt in through fr
         "Instructions from: /project/PLAIN.md\nLiteral {session_id}.",
       ].join("\n\n"),
     )
+  }),
+)
+
+it.effect("passes detached tool exclusions from the stored session into its tool snapshot", () =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const projects = yield* Project.Service
+    const agents = yield* Agent.Service
+    const context = yield* SessionContext.Service
+    disabledTools.length = 0
+    yield* agents.transform((editor) =>
+      editor.update(Agent.ID.make("build"), (agent) => {
+        agent.mode = "primary"
+      }),
+    )
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: detachedSessionID,
+        project_id: (yield* projects.resolve(AbsolutePath.make("/project"))).id,
+        slug: "context-detached",
+        directory: "/project",
+        version: "test",
+        agent: Agent.ID.make("build"),
+        detached: true,
+      })
+      .run()
+      .pipe(Effect.orDie)
+
+    yield* context.select(detachedSessionID)
+
+    expect(disabledTools.at(-1)?.has("question")).toBe(true)
   }),
 )

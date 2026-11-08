@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -84,6 +85,87 @@ describe("ModelRouteOverrides storage", () => {
       now,
     )
     expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["live"])
+  })
+
+  test("a save leaves no temporary file behind and round-trips through current() (#924)", () => {
+    ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)
+    expect(fs.readdirSync(dir)).toEqual(["route-overrides.json"])
+    if (process.platform !== "win32") expect(fs.statSync(ModelRouteOverrides.filePath()).mode & 0o777).toBe(0o600)
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+    ModelRouteOverrides.save([draft({ id: "b", providers: ["openai"] })], now)
+    expect(fs.readdirSync(dir)).toEqual(["route-overrides.json"])
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["b"])
+  })
+
+  test("save replaces through a symlink and preserves the target mode", () => {
+    const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "route-overrides-target-"))
+    const target = path.join(targetDir, "route-overrides.json")
+    fs.writeFileSync(target, JSON.stringify({ version: 1, overrides: [] }, null, 2))
+    fs.chmodSync(target, 0o640)
+    fs.symlinkSync(target, ModelRouteOverrides.filePath())
+
+    try {
+      ModelRouteOverrides.save([draft({ id: "linked", providers: ["openai"] })], now)
+      expect(fs.lstatSync(ModelRouteOverrides.filePath()).isSymbolicLink()).toBe(true)
+      expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["linked"])
+      if (process.platform !== "win32") expect(fs.statSync(target).mode & 0o777).toBe(0o640)
+      expect(fs.readdirSync(targetDir)).toEqual(["route-overrides.json"])
+    } finally {
+      fs.rmSync(targetDir, { recursive: true, force: true })
+    }
+  })
+
+  test("save refuses a colliding exclusive temp without changing either file", () => {
+    const file = ModelRouteOverrides.filePath()
+    const temporary = path.join(dir, `.tmp-${process.pid}-616263646566`)
+    fs.writeFileSync(file, JSON.stringify({ version: 1, overrides: [] }, null, 2))
+    fs.writeFileSync(temporary, "sentinel")
+    const randomBytes = spyOn(crypto, "randomBytes").mockImplementation(() => Buffer.from("abcdef") as never)
+
+    try {
+      expect(() => ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)).toThrow()
+      expect(fs.readFileSync(file, "utf8")).toBe(JSON.stringify({ version: 1, overrides: [] }, null, 2))
+      expect(fs.readFileSync(temporary, "utf8")).toBe("sentinel")
+    } finally {
+      randomBytes.mockRestore()
+    }
+  })
+
+  test("a save retries a transient rename failure and lands (#924)", () => {
+    const rename = fs.renameSync
+    let calls = 0
+    const spy = spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+      calls += 1
+      if (calls === 1) throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+      rename(source, destination)
+    })
+    try {
+      ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)
+      expect(calls).toBe(2)
+      expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+      expect(fs.readdirSync(dir)).toEqual(["route-overrides.json"])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("a save whose rename keeps failing throws, leaves no temporary file, and keeps the old store (#924)", () => {
+    ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)
+    let calls = 0
+    const spy = spyOn(fs, "renameSync").mockImplementation(() => {
+      calls += 1
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+    })
+    try {
+      expect(() => ModelRouteOverrides.save([draft({ id: "b", providers: ["openai"] })], now)).toThrow(
+        "operation not permitted",
+      )
+      expect(calls).toBe(5)
+      expect(fs.readdirSync(dir)).toEqual(["route-overrides.json"])
+      expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test("a missing or corrupt file means no overrides, never an error", () => {

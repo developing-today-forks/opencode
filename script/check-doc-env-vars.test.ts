@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { deadVars, documentedVars, gitHasReader } from "./check-doc-env-vars"
+import { check, deadVars, documentedVars, englishDocsFiles, gitHasReader } from "./check-doc-env-vars"
 
 describe("documentedVars", () => {
   test("extracts distinct OPENCODE_* names, sorted", () => {
@@ -72,5 +72,46 @@ describe("deadVars", () => {
 
   test("is empty when every variable has a reader", () => {
     expect(deadVars(["OPENCODE_READ_SOMEWHERE"], () => true)).toEqual([])
+  })
+})
+
+describe("englishDocsFiles", () => {
+  test("scans non-cli pages in both trees and skips locale directories (#931)", () => {
+    const root = mkdtempSync(join(tmpdir(), "check-doc-env-vars-docs-"))
+    scratchRepos.push(root)
+    const write = (path: string, contents: string) => {
+      mkdirSync(join(root, path, ".."), { recursive: true })
+      writeFileSync(join(root, path), contents)
+    }
+    write("packages/web/src/content/docs/cli.mdx", "`OPENCODE_ON_CLI`\n")
+    write("packages/web/src/content/docs/config.mdx", "`OPENCODE_DEAD_PLANTED`\n")
+    write("packages/web/src/content/docs/fr/config.mdx", "`OPENCODE_LOCALE_ONLY`\n")
+    write("services/www/src/docs/content/console/api/index.mdx", "`OPENCODE_ON_WWW`\n")
+    const files = englishDocsFiles(root)
+    const vars = [...new Set(files.flatMap((file) => documentedVars(readFileSync(join(root, file), "utf8"))))].sort()
+    expect(vars).toEqual(["OPENCODE_DEAD_PLANTED", "OPENCODE_ON_CLI", "OPENCODE_ON_WWW"])
+    expect(deadVars(vars, () => false)).toContain("OPENCODE_DEAD_PLANTED")
+  })
+})
+
+describe("check allowlist", () => {
+  test("an allowlisted dead name passes with no stale entry (#931)", () => {
+    const result = check(["OPENCODE_EXAMPLE"], () => false, [{ name: "OPENCODE_EXAMPLE", reason: "example shape" }])
+    expect(result).toEqual({ dead: [], stale: [] })
+  })
+
+  test("an unknown dead name still fails (#931)", () => {
+    const result = check(["OPENCODE_DEAD_NEW"], () => false, [{ name: "OPENCODE_EXAMPLE", reason: "example shape" }])
+    expect(result.dead).toEqual(["OPENCODE_DEAD_NEW"])
+  })
+
+  test("a stale allowlist entry fails: name no longer documented (#931)", () => {
+    const result = check(["OPENCODE_READ"], () => true, [{ name: "OPENCODE_GONE", reason: "was documented" }])
+    expect(result.stale).toEqual(["OPENCODE_GONE"])
+  })
+
+  test("a stale allowlist entry fails: name gained a real reader (#931)", () => {
+    const result = check(["OPENCODE_NOW_READ"], () => true, [{ name: "OPENCODE_NOW_READ", reason: "was dead" }])
+    expect(result.stale).toEqual(["OPENCODE_NOW_READ"])
   })
 })

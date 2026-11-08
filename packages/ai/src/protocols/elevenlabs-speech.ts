@@ -96,7 +96,10 @@ const OUTPUT_FORMATS: Readonly<Record<string, string>> = {
 
 /** WAV is served only by the non-streaming endpoints. */
 const outputFormat = Effect.fnUntraced(function* (request: MediaProtocol.Addressed<Request>) {
-  const format = request.providerOptions?.outputFormat ?? OUTPUT_FORMATS[request.format ?? "mp3"]
+  const requested = request.format ?? "mp3"
+  const format =
+    request.providerOptions?.outputFormat ??
+    (Object.hasOwn(OUTPUT_FORMATS, requested) ? OUTPUT_FORMATS[requested] : undefined)
   if (format === undefined)
     return yield* route.unsupported(
       "media.format",
@@ -170,7 +173,7 @@ const describeOutput = (format: string) => {
   // all of which would be reported as the audio's sample rate.
   const parsed = rate !== undefined && /^\d+$/.test(rate) ? Number(rate) : undefined
   const sampleRate = parsed !== undefined && parsed > 0 ? parsed : undefined
-  const encoding = PCM_CODECS[codec]
+  const encoding = Object.hasOwn(PCM_CODECS, codec) ? PCM_CODECS[codec] : undefined
   return encoding === undefined ? SpeechStream.container(codec, sampleRate) : SpeechStream.pcm(encoding, sampleRate)
 }
 

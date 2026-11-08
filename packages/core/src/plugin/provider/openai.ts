@@ -1,5 +1,6 @@
 import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import { define } from "@opencode/plugin/effect/plugin"
+import { expiresInSeconds } from "./expires.js"
 import type { SessionRequest } from "@opencode/plugin/effect/session"
 import { Deferred, Effect, Option, Schema, Semaphore, Stream } from "effect"
 import type { Server } from "node:http"
@@ -10,6 +11,7 @@ import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
+import { readBoundedResponseText } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
 import { eachInstance } from "./instance.js"
@@ -176,6 +178,20 @@ function addressInUse(error: Error) {
   return "code" in error && error.code === "EADDRINUSE"
 }
 
+/** Poll interval for the device flow, in milliseconds. The server-supplied
+ * `interval` string is restricted to a plain unsigned decimal integer
+ * spelling (the #715/#724 grammar family): spellings like "0x10", "1e1",
+ * "5junk", or "2.9" are not reinterpreted — they take the 5-second fallback,
+ * and the result is clamped to [1s, 60s] (#771, #941): the ceiling is the
+ * Copilot bound from #915 — a large or unit-confused value would otherwise
+ * make a sleep outlast the login attempt, and this flow's poll loop has no
+ * deadline of its own. */
+export const deviceIntervalMs = (raw: string): number => {
+  const text = raw.trim()
+  const parsed = /^\d+$/.test(text) ? Number.parseInt(text, 10) : Number.NaN
+  return Math.min(Math.max(parsed || 5, 1), 60) * 1000
+}
+
 const headless = (app: App.Info, integrationID: Integration.ID) =>
   ({
     integrationID,
@@ -194,7 +210,7 @@ const headless = (app: App.Info, integrationID: Integration.ID) =>
             body: JSON.stringify({ client_id: clientID }),
           },
         )
-        const interval = Math.max(Number.parseInt(device.interval) || 5, 1) * 1000
+        const interval = deviceIntervalMs(device.interval)
         return {
           mode: "auto" as const,
           url: `${issuer}/codex/device`,
@@ -212,7 +228,13 @@ const headless = (app: App.Info, integrationID: Integration.ID) =>
                 catch: (cause) => cause,
               })
               if (response.ok) {
-                const data = (yield* Effect.promise(() => response.json())) as {
+                const data = (yield* Effect.tryPromise({
+                  try: async () =>
+                    JSON.parse(
+                      await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
+                    ),
+                  catch: (cause) => cause,
+                })) as {
                   authorization_code: string
                   code_verifier: string
                 }
@@ -392,12 +414,25 @@ function refresh(methodID: Integration.MethodID, value: Pick<Credential.OAuth, "
   )
 }
 
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
 function request<A>(url: string, init: RequestInit) {
   return Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return response.json() as Promise<A>
+      const text = await readBoundedResponseText(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`),
+      )
+      return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(text) as A
     },
     catch: (cause) => cause,
   })
@@ -410,7 +445,7 @@ function credential(methodID: Integration.MethodID, tokens: TokenResponse) {
     methodID,
     refresh: tokens.refresh_token,
     access: tokens.access_token,
-    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    expires: Date.now() + expiresInSeconds(tokens.expires_in, 3600) * 1000,
     metadata: accountID ? { accountID } : undefined,
   })
 }

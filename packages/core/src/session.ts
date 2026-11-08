@@ -92,6 +92,8 @@ type CreateBaseInput = {
   metadata?: SessionSchema.Metadata
   permissions?: Permission.Ruleset
   subagentPolicy?: SessionSchema.SubagentPolicy
+  /** Detached (non-interactive) mode; children always inherit it from their parent. */
+  detached?: true
   /** Per-call governance override from the launching tool; see ModelGovernance. */
   subagentOverride?: SessionSchema.AgentOverride
 }
@@ -237,7 +239,10 @@ export interface Interface {
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
   readonly background: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
-  readonly interrupt: (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) => Effect.Effect<boolean>
+  readonly interrupt: (
+    sessionID: SessionSchema.ID,
+    options?: { readonly resume?: boolean; readonly force?: boolean },
+  ) => Effect.Effect<boolean>
   readonly synthetic: (
     input: Parameters<Session.Handle["synthetic"]>[0] & { sessionID: SessionSchema.ID },
   ) => ReturnType<Session.Handle["synthetic"]>
@@ -297,6 +302,85 @@ const layer = Layer.effect(
         ),
       )
 
+    const stopPolicyOf = (recovery: Job.Recovery): Job.StopPolicy =>
+      recovery.kind === "subagent" ? (recovery.stopPolicy ?? "independent") : "independent"
+
+    // A detached background subagent survives every plain interrupt, including a
+    // direct one aimed at the child session itself: only force-stop terminates it.
+    const detachedRunning = Effect.fn("Session.detachedRunning")(function* (sessionID: SessionSchema.ID) {
+      const pending = yield* jobs.pendingBackground
+      return pending.some(
+        (marker) =>
+          marker.status === "running" &&
+          marker.recovery.kind === "subagent" &&
+          marker.recovery.childSessionID === sessionID &&
+          stopPolicyOf(marker.recovery) === "detached",
+      )
+    })
+
+    const interruptOne = Effect.fn("Session.interruptOne")(function* (sessionID: SessionSchema.ID) {
+      const session = yield* store.get(sessionID)
+      if (!session) return false
+      const interrupted = yield* sessions.forSession(sessionID).interrupt()
+      const cancelled = yield* jobs.cancel(sessionID)
+      return interrupted || cancelled !== undefined
+    })
+
+    const cascadeStopDescendants = Effect.fn("Session.cascadeStop")(function* (rootID: SessionSchema.ID) {
+      const pending = yield* jobs.pendingBackground
+      const policyByChild = new Map<string, { policy: Job.StopPolicy; status: Job.Status }>()
+      for (const marker of pending) {
+        if (marker.recovery.kind !== "subagent") continue
+        policyByChild.set(marker.recovery.childSessionID, {
+          policy: stopPolicyOf(marker.recovery),
+          status: marker.status,
+        })
+      }
+      const visited = new Set<string>([rootID])
+      const queue: SessionSchema.ID[] = [rootID]
+      let stopped = false
+      while (queue.length > 0) {
+        const current = queue.shift() as SessionSchema.ID
+        const children = yield* store.list({ parentID: current })
+        for (const child of children) {
+          if (visited.has(child.id)) continue
+          visited.add(child.id)
+          const marker = policyByChild.get(child.id)
+          if (marker && marker.status === "running") {
+            // Background child: only cascade policy follows a plain interrupt.
+            // Independent and detached subtrees survive untouched.
+            if (marker.policy !== "cascade") continue
+            if (yield* interruptOne(child.id)) stopped = true
+            queue.push(child.id)
+            continue
+          }
+          // Foreground (or idle) child: tied to the parent's execution through
+          // the subagent tool's interrupt handler. Interrupt explicitly so a
+          // cascade also settles foreground work below a stopped background child.
+          if (yield* interruptOne(child.id)) stopped = true
+          queue.push(child.id)
+        }
+      }
+      return stopped
+    })
+
+    const forceStopDescendants = Effect.fn("Session.forceStop")(function* (rootID: SessionSchema.ID) {
+      const visited = new Set<string>([rootID])
+      const queue: SessionSchema.ID[] = [rootID]
+      let stopped = false
+      while (queue.length > 0) {
+        const current = queue.shift() as SessionSchema.ID
+        const children = yield* store.list({ parentID: current })
+        for (const child of children) {
+          if (visited.has(child.id)) continue
+          visited.add(child.id)
+          if (yield* interruptOne(child.id)) stopped = true
+          queue.push(child.id)
+        }
+      }
+      return stopped
+    })
+
     const result = Service.of({
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
@@ -310,7 +394,8 @@ const layer = Layer.effect(
         const project = yield* projects.resolve(location.directory)
         // Governance is enforced before anything is created: a denied child
         // fails here and no `session.created` is ever published for it.
-        if (parent !== undefined)
+        let storedModel = input.model
+        if (parent !== undefined) {
           yield* assertModelAllowed({
             location,
             parent,
@@ -318,6 +403,23 @@ const layer = Layer.effect(
             model: input.model,
             override: input.subagentOverride,
           })
+          // A model-less child is checked against the governance chain
+          // (the child agent's configured default, then the parent's model),
+          // but the runner resolves a model-less session against the global
+          // default — a model governance never saw. Store the checked model
+          // on the child so the checked model is the model that runs (#507).
+          // switchAgent stays consistent the same way: its check receives
+          // the child's now-stored model explicitly.
+          if (storedModel === undefined) {
+            const { entries } = yield* GovernanceConfig.load(locations, location)
+            storedModel = ModelGovernance.checkedModel(entries, {
+              parent,
+              agent: input.agent,
+              model: input.model,
+              override: input.subagentOverride,
+            })
+          }
+        }
         const projected = yield* bus
           .publish(
             SessionEvent.Created,
@@ -336,11 +438,13 @@ const layer = Layer.effect(
               metadata: input.metadata ?? parent?.metadata,
               subagentPolicy: input.subagentPolicy,
               permissions: input.permissions ?? parent?.permissions,
-              model: input.model
+              // A detached tree never sprouts an interactive leaf: a child cannot opt out.
+              detached: input.detached ?? parent?.detached,
+              model: storedModel
                 ? {
-                    id: Model.ID.make(input.model.id),
-                    providerID: input.model.providerID,
-                    variant: input.model.variant,
+                    id: Model.ID.make(storedModel.id),
+                    providerID: storedModel.providerID,
+                    variant: storedModel.variant,
                   }
                 : undefined,
             },
@@ -521,7 +625,26 @@ const layer = Layer.effect(
       }),
       resume: (sessionID) => sessions.forSession(sessionID).resume(),
       synthetic: (input) => sessions.forSession(input.sessionID).synthetic(input),
-      interrupt: (sessionID, options) => sessions.forSession(sessionID).interrupt(options),
+      interrupt: Effect.fn("Session.interrupt")(function* (
+        sessionID: SessionSchema.ID,
+        options?: { readonly resume?: boolean; readonly force?: boolean },
+      ) {
+        // Existence is not an error channel on interrupt (the protocol contract is
+        // interrupted=false for the idle no-op): a missing session simply has no
+        // execution to stop and no descendants to cascade to.
+        yield* result.get(sessionID).pipe(Effect.catchTag("Session.NotFoundError", () => Effect.void))
+        const force = options?.force === true
+        // Policy is checked before anything is stopped: a detached target itself
+        // survives a plain interrupt, so neither it nor its subtree is touched.
+        if (!force && (yield* detachedRunning(sessionID))) return false
+        const selfInterrupted = yield* sessions.forSession(sessionID).interrupt(
+          options?.resume !== undefined ? { resume: options.resume } : undefined,
+        )
+        const childInterrupted = yield* Effect.uninterruptible(
+          force ? forceStopDescendants(sessionID) : cascadeStopDescendants(sessionID),
+        )
+        return selfInterrupted || childInterrupted
+      }),
       revert: {
         stage: (input) => sessions.forSession(input.sessionID).revert.stage(input),
         clear: (sessionID) => sessions.forSession(sessionID).revert.clear(),

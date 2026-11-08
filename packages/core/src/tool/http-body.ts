@@ -1,5 +1,8 @@
 import { Effect, Stream } from "effect"
 import { HttpClientResponse } from "effect/http"
+import { readBoundedResponseText, readExcerptResponseText } from "@opencode/util/http-body"
+
+export { readBoundedResponseText, readExcerptResponseText }
 
 export const collectBoundedResponseBody = (
   response: HttpClientResponse.HttpClientResponse,
@@ -28,3 +31,10 @@ export const collectBoundedResponseBody = (
     })
     return body.subarray(0, size)
   })
+
+/**
+ * The native fetch reader is the shared `@opencode/util` implementation
+ * (design #1127 phase 1, #1128): one implementation per layer, never per
+ * call site. It is re-exported here so existing core/cli call sites keep
+ * importing it from this module, next to the Effect variant above.
+ */

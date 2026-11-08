@@ -50,20 +50,40 @@ const UNITS: Readonly<Record<string, number>> = {
  * rolls overflow days such as Feb 30 into the next month instead of returning NaN, so an
  * ISO date's components must round-trip through a real calendar date (the same check
  * Model.parseReleaseDate makes) before the parsed instant is trusted. */
+const MONTH_NUMBERS: Readonly<Record<string, number>> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+}
+
+/** Calendar components of a non-ISO date whose parts are named or ordered unambiguously
+ * (#798): "Feb 30 2026", "30 Feb 2026", "2026/02/30". Ambiguous numeric forms (02/03/2026)
+ * and shapes without named components keep the lenient bare-parse behaviour. */
+function namedDateParts(text: string): readonly [number, number, number] | undefined {
+  const ymd = /(\d{4})[/.](\d{1,2})[/.](\d{1,2})(?!\d)/.exec(text)
+  if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+  const monthFirst =
+    /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)/i.exec(text)
+  if (monthFirst)
+    return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+  const dayFirst =
+    /(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})(?!\d)/i.exec(text)
+  if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+  return undefined
+}
+
 export const parseAbsoluteTime = (text: string): number | undefined => {
   const date = Date.parse(text)
   if (Number.isNaN(date)) return undefined
   const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text)
-  if (!iso) return date
-  const year = Number(iso[1])
-  const month = Number(iso[2])
-  const day = Number(iso[3])
-  const probe = new Date(0)
-  probe.setUTCFullYear(year, month - 1, day)
-  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
-    return undefined
+  const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(text)
+  if (parts) {
+    const [year, month, day] = parts
+    const probe = new Date(0)
+    probe.setUTCFullYear(year, month - 1, day)
+    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
+      return undefined
+  }
   // V8 rolls hour 24 into the next day instead of returning NaN (minutes/seconds 60+ are
-  // Invalid), so an ISO time part must not carry hour > 23 (RFC 3339 time-hour is 00-23).
+  // Invalid), so a time part must not carry hour > 23 (RFC 3339 time-hour is 00-23).
   const time = /[T ](\d{2}):\d{2}/i.exec(text)
   if (time && Number(time[1]) > 23) return undefined
   return date
@@ -95,17 +115,34 @@ export const ABSOLUTE_TIME =
   /(?:retry|try again|wait|back|resume|reset|returns?|available|until|expires?(?: at)?)[-a-z ]{0,20}(?:after|at|on|by)?\s*(\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?)/
 
 // A relative wait is one amount+unit part or a compound sequence of them ("in 1 hour 30
-// minutes"), and an amount may be decimal ("in 1.5 hours") — providers phrase resets both ways.
-const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|s)s?(?![a-z])`
-const RELATIVE_TIME = new RegExp(String.raw`in\s+(${RELATIVE_PART}(?:[\s,]+(?:and\s+)?${RELATIVE_PART})*)`)
-const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|s)s?(?![a-z])/g
-const RELATIVE_UNITS = { second: 1_000, sec: 1_000, s: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 } as Record<
-  string,
-  number
->
+// minutes"), and an amount may be decimal ("in 1.5 hours") — providers phrase resets both
+// ways, and some use compact units ("resets in 6d 13h", "in 30m", "in 1h30m": adjacent
+// compact parts sum). The letter units are safe here: every part must start with an
+// amount and the (?![a-z]) guard keeps a unit from matching the head of a following
+// word ("in 5 deals", "in 5 marks" state no wait). "ms" precedes "m" in the grammar so
+// "in 30ms" stays 30 milliseconds, not 30 minutes. This grammar is the one both
+// quota-reset parsers use (ModelRouteTuning.parseQuotaReset calls relativeMs below):
+// a message honoured by one door must be honoured by the other (#996).
+const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|mins?|ms|h|d|m|s)s?(?![a-z])`
+const RELATIVE_TIME = new RegExp(String.raw`in\s+(${RELATIVE_PART}(?:[\s,]*(?:and\s+)?${RELATIVE_PART})*)`)
+const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|min|ms|h|d|m|s)s?(?![a-z])/g
+const RELATIVE_UNITS = {
+  second: 1_000,
+  sec: 1_000,
+  s: 1_000,
+  ms: 1,
+  minute: 60_000,
+  min: 60_000,
+  m: 60_000,
+  hour: 3_600_000,
+  h: 3_600_000,
+  day: 86_400_000,
+  d: 86_400_000,
+} as Record<string, number>
 
-/** The total wait a relative phrase states, summed over its parts; undefined when it states none. */
-const relativeMs = (message: string): number | undefined => {
+/** The total wait a relative phrase states, summed over its parts; undefined when it states none.
+ * Shared with ModelRouteTuning.parseQuotaReset so the two parsers cannot drift apart (#996). */
+export const relativeMs = (message: string): number | undefined => {
   const sequence = RELATIVE_TIME.exec(message)?.[1]
   if (!sequence) return undefined
   let total = 0
@@ -140,6 +177,13 @@ export const retryHintFromMessage = (message: string | undefined, now: number): 
   return at === undefined ? undefined : Math.max(0, at - now)
 }
 
+/** Deliberate invariants, not settings knobs (#1424): per-window rate-limit holds stay
+ * bounded by provider-window semantics, not by the quota-gate ceiling. MAX_WINDOW_MS caps how
+ * far one window's stated reset may hold a target (a day — windows roll over far sooner than
+ * quota grants), and UNKNOWN_RESET_MS is the assumed hold for an emptied window that states
+ * no reset (a minute — the next request may well fit, unlike the quota gate's 30-minute
+ * fallback for an exhaustion reading with no usable reset). Wiring either to
+ * quotaGate.maxMs/fallbackMs would conflate the two mechanisms. */
 const MAX_WINDOW_MS = 86_400_000
 /** With nothing said about when it resets, an emptied window is assumed to last this long. */
 const UNKNOWN_RESET_MS = 60_000
@@ -175,8 +219,10 @@ export const windows = (value: Snapshot): Window[] =>
     if (raw.trim() === "") return []
     const remaining = plainCount(raw)
     if (!Number.isFinite(remaining)) return []
-    const limit = plainCount(value.limit?.[name])
-    const reset = value.reset?.[name] === undefined ? undefined : resetMs(value.reset[name], value.at)
+    const limitValue = Object.hasOwn(value.limit ?? {}, name) ? value.limit?.[name] : undefined
+    const resetValue = Object.hasOwn(value.reset ?? {}, name) ? value.reset?.[name] : undefined
+    const limit = plainCount(limitValue)
+    const reset = resetValue === undefined ? undefined : resetMs(resetValue, value.at)
     return [
       {
         name,
@@ -186,6 +232,16 @@ export const windows = (value: Snapshot): Window[] =>
       },
     ]
   })
+
+/** The latest future reset among this fresh snapshot's actually exhausted windows. A nearby
+ * unexhausted window is not evidence of when a quota failure can recover. */
+export const exhaustedWindowResetAt = (value: Snapshot, now: number, maxAgeMs: number): number | undefined => {
+  if (value.at > now || now - value.at > maxAgeMs) return undefined
+  const resets = windows(value).flatMap((window) =>
+    window.remaining <= 0 && window.resetAt !== undefined && window.resetAt > now ? [window.resetAt] : [],
+  )
+  return resets.length > 0 ? Math.max(...resets) : undefined
+}
 
 /**
  * When the provider's own numbers say a target should be left alone until: a window that is empty,

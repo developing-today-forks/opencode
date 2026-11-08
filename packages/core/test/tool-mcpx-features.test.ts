@@ -167,8 +167,9 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
       expect(repair.repairedParams).toBeUndefined()
     }
 
-    // Already-integer strings keep coercing, including "3.0".
-    for (const [value, expected] of [["42", 42], ["3.0", 3], ["-2", -2]] as const) {
+    // Already-integer strings keep coercing. "3.0" no longer does: it is not
+    // an integer spelling under the plain-decimal grammar (#769).
+    for (const [value, expected] of [["42", 42], ["-2", -2]] as const) {
       const repair = attemptParameterRepair(schema, { count: value })
       expect(repair.repaired).toBe(true)
       expect(repair.repairedParams?.count).toBe(expected)
@@ -199,7 +200,7 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
     expect(JSON.parse(JSON.stringify(repair.repairedParams))).toEqual({ ratio: 1.5 })
   })
 
-  it("pins hex and exponent forms as accepted when finite and integral as required", () => {
+  it("pins the plain-decimal grammar: non-decimal spellings are left unrepaired (#769)", () => {
     const numberSchema = {
       type: "object",
       properties: { ratio: { type: "number" } },
@@ -211,13 +212,19 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
       required: ["count"],
     }
 
-    // Number() grammar: hex and exponent forms stay accepted.
-    expect(attemptParameterRepair(integerSchema, { count: "0x10" }).repairedParams?.count).toBe(16)
-    expect(attemptParameterRepair(integerSchema, { count: "1e3" }).repairedParams?.count).toBe(1000)
-    expect(attemptParameterRepair(numberSchema, { ratio: "1e3" }).repairedParams?.ratio).toBe(1000)
-    // A non-integral exponent result still cannot coerce to an integer.
-    expect(attemptParameterRepair(integerSchema, { count: "1e-1" }).repaired).toBe(false)
-    expect(attemptParameterRepair(numberSchema, { ratio: "1e-1" }).repairedParams?.ratio).toBe(0.1)
+    // Spellings Number() would reinterpret are not plain decimals, so neither
+    // parameter kind coerces them (previously "0x10" -> 16 and "1e3" -> 1000).
+    for (const value of ["0x10", "0b101", "0o17", "1e3", "1e-1", "+42", "5."]) {
+      expect(attemptParameterRepair(integerSchema, { count: value }).repaired).toBe(false)
+      expect(attemptParameterRepair(numberSchema, { ratio: value }).repaired).toBe(false)
+    }
+    // Integer "3.0" is not an integer spelling and stays unrepaired, aligned
+    // with ToolInputRepair; a number parameter still coerces it to 3.
+    expect(attemptParameterRepair(integerSchema, { count: "3.0" }).repaired).toBe(false)
+    expect(attemptParameterRepair(numberSchema, { ratio: "3.0" }).repairedParams?.ratio).toBe(3)
+    // Plain decimals keep coercing for both kinds.
+    expect(attemptParameterRepair(integerSchema, { count: "42" }).repairedParams?.count).toBe(42)
+    expect(attemptParameterRepair(numberSchema, { ratio: "42" }).repairedParams?.ratio).toBe(42)
   })
 })
 

@@ -167,6 +167,7 @@ const table = sqliteTable("session", {
 - Test actual implementation, do not duplicate logic into tests
 - Tests cannot run from repo root (guard: `do-not-run-tests-from-root`); run from package directories such as `packages/core`.
 - Before writing or changing tests, read the matching skill in `.opencode/skills`: `unit-tests` (bun test), `tui-tests` (OpenTUI renderer tests), `app-e2e-tests` (Playwright in `packages/app/e2e`) or `component-tests` (Storybook Playwright). They cover what has made tests slow or flaky in CI.
+- **Testing doctrine:** prefer property-based tests where code has meaningful invariants — state the invariant, then let a generator hammer the code with thousands of random inputs to find counterexamples (PBT; `fast-check` is in the catalog for this). Where behavior has a spec or design model, generate tests and their expected results from the model (MBT) instead of hand-writing cases only. Every test names its oracle — the reference implementation, model, invariant check, or golden corpus that decides pass/fail; a test with no decidable oracle is a smell to fix, not ship. Example-based tests stay fine for smoke/acceptance; they do not replace PBT/MBT where those fit.
 
 ## Checks
 

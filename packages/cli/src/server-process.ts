@@ -3,6 +3,7 @@ export * as ServerProcess from "./server-process"
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
 import { AppProcess } from "@opencode/util/process"
@@ -33,7 +34,7 @@ export type Options = {
 export const run = Effect.fnUntraced(function* (options: Options) {
   return yield* processEffect(options).pipe(
     Effect.provide(
-      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node]), {
+      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, FSUtil.node]), {
         replacements: [
           Global.node.replace(
             Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
@@ -247,9 +248,15 @@ function addressInUse(error: unknown): boolean {
   return "cause" in error && addressInUse(error.cause)
 }
 
-function shutdownGrace() {
-  const value = Number(process.env.OPENCODE_SHUTDOWN_GRACE_MS)
-  return Number.isFinite(value) && value >= 0 ? value : 30_000
+export function shutdownGrace() {
+  // Mirror of serverShutdownGrace() in packages/client/src/service-timing.ts; the two copies
+  // must agree, because the client's stop path has to outwait the server's drain. A blank value
+  // is absent, not an authored 0 (#874): bare Number() reads "" as 0 and also accepts hex and
+  // exponent spellings, so only a plain non-negative decimal (surrounding whitespace trimmed)
+  // names a duration; anything else falls back to the default.
+  const raw = process.env.OPENCODE_SHUTDOWN_GRACE_MS?.trim()
+  const value = raw && /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+  return Number.isFinite(value) ? value : 30_000
 }
 
 // The first SIGTERM is the shutdown being drained; a second one ends the drain wait at once.

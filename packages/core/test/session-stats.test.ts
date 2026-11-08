@@ -246,6 +246,47 @@ describe("SessionStats", () => {
       expect(future._tag).toBe("SessionStats.InvalidRangeError")
     }),
   )
+
+  it.effect("rejects extreme spans in both directions instead of scanning unbounded windows", () =>
+    Effect.gen(function* () {
+      // Ancient `from` (year 1) against an ordinary `to`.
+      const ancient = yield* Effect.flip(
+        SessionStats.get({ from: -62_135_596_800_000, to: Date.UTC(2026, 0, 1), tools: "none" }),
+      )
+      expect(ancient).toEqual(
+        new SessionStats.InvalidRangeError({ from: -62_135_596_800_000, to: Date.UTC(2026, 0, 1) }),
+      )
+
+      // Minimum Date value as `from`.
+      const minimum = yield* Effect.flip(
+        SessionStats.get({ from: -8_640_000_000_000_000, to: Date.UTC(2026, 0, 1), tools: "none" }),
+      )
+      expect(minimum._tag).toBe("SessionStats.InvalidRangeError")
+
+      // Far-future `to` (year 9999) against an ordinary `from`.
+      const farFuture = yield* Effect.flip(
+        SessionStats.get({ from: Date.UTC(2026, 0, 1), to: Date.UTC(9999, 0, 1), tools: "none" }),
+      )
+      expect(farFuture).toEqual(
+        new SessionStats.InvalidRangeError({ from: Date.UTC(2026, 0, 1), to: Date.UTC(9999, 0, 1) }),
+      )
+
+      // Maximum safe integer as `to`, and extreme values in both fields.
+      const maxTo = yield* Effect.flip(
+        SessionStats.get({ from: Date.UTC(2026, 0, 1), to: Number.MAX_SAFE_INTEGER, tools: "none" }),
+      )
+      expect(maxTo._tag).toBe("SessionStats.InvalidRangeError")
+      const both = yield* Effect.flip(
+        SessionStats.get({ from: -8_640_000_000_000_000, to: Number.MAX_SAFE_INTEGER, tools: "none" }),
+      )
+      expect(both._tag).toBe("SessionStats.InvalidRangeError")
+
+      // A wide but plausible range (five years) is still accepted.
+      const valid = yield* SessionStats.get({ from: Date.UTC(2021, 0, 1), to: Date.UTC(2026, 0, 1), tools: "none" })
+      expect(DateTime.toEpochMillis(valid.range.from)).toBe(Date.UTC(2021, 0, 1))
+      expect(DateTime.toEpochMillis(valid.range.to)).toBe(Date.UTC(2026, 0, 1))
+    }),
+  )
 })
 
 function assistant(

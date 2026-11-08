@@ -349,6 +349,31 @@ describe("Session.create", () => {
     }),
   )
 
+  it.effect("stores the governance-checked model on a model-less child", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const model = Model.Ref.make({
+        id: Model.ID.make("sonnet"),
+        providerID: Provider.ID.anthropic,
+      })
+      const parent = yield* session.create({ location, model })
+      // No explicit model: governance checks the child against the parent's
+      // model, so creation stores that checked model on the child — the
+      // runner must not fall back to the global default for it (#507).
+      const child = yield* session.create({ parentID: parent.id })
+      expect(child.model).toMatchObject(model)
+      expect(child.model?.id).toBe(model.id)
+      expect(child.model?.providerID).toBe(model.providerID)
+      // An explicit child model still wins over the inherited checked model.
+      const explicit = Model.Ref.make({
+        id: Model.ID.make("haiku"),
+        providerID: Provider.ID.anthropic,
+      })
+      const chosen = yield* session.create({ parentID: parent.id, model: explicit })
+      expect(chosen.model).toMatchObject(explicit)
+    }),
+  )
+
   it.effect("stores creation metadata and inherits it through children and forks", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service
@@ -427,6 +452,33 @@ describe("Session.create", () => {
         yield* session.setPermissions({ sessionID: Session.ID.create(), permissions: replaced }).pipe(Effect.flip),
       ).toBeInstanceOf(Session.NotFoundError)
     }),
+  )
+
+  it.effect(
+    "stores detached mode, inherits it through every child and fork, and leaves interactive sessions untouched",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const bus = yield* Bus.Service
+        const { db } = yield* Database.Service
+
+        const interactive = yield* session.create({ location })
+        expect(interactive.detached).toBeUndefined()
+        expect((yield* session.create({ parentID: interactive.id })).detached).toBeUndefined()
+
+        const detached = yield* session.create({ location, detached: true })
+        expect(detached.detached).toBe(true)
+        expect((yield* session.get(detached.id)).detached).toBe(true)
+
+        // The mode reaches every depth; it has no off value, so a child cannot opt out.
+        const child = yield* session.create({ parentID: detached.id })
+        const grandchild = yield* session.create({ parentID: child.id })
+        expect([child.detached, grandchild.detached]).toEqual([true, true])
+
+        yield* session.prompt({ sessionID: detached.id, text: "Fork context", resume: false })
+        yield* SessionInbox.promote(db, bus, detached.id, "steer")
+        expect((yield* session.fork({ sessionID: detached.id })).detached).toBe(true)
+      }),
   )
 
   it.effect("inherits location from an existing parent when omitted", () =>

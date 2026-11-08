@@ -26,8 +26,11 @@ export interface Definition {
 
 export type Definitions = Readonly<Record<string, Definition>>
 
+// Own keys only: the in operator reads through the prototype chain, so a provider output item
+// typed "constructor" (or toString, __proto__, ...) would be classified as a hosted-tool
+// item and kill the stream when the inherited member turns out not to be a Definition.
 export const isItem = <Tools extends Definitions>(item: OpenResponses.OutputItem, tools: Tools): item is Item =>
-  item.type in tools
+  Object.hasOwn(tools, item.type)
 
 export const onDone: (
   state: OpenResponses.ParserState,
@@ -35,7 +38,7 @@ export const onDone: (
   tools: Definitions,
 ) => Effect.Effect<OpenResponses.StepResult, AIError> = Effect.fnUntraced(
   function* (state, item, tools) {
-    const tool = tools[item.type]
+    const tool = Object.hasOwn(tools, item.type) ? tools[item.type] : undefined
     if (!tool) return [state, []] satisfies OpenResponses.StepResult
     const providerMetadata = OpenResponses.providerMetadata(state, { itemId: item.id })
     const events: LLMEvent[] = []

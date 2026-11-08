@@ -40,7 +40,9 @@ export const DialogSelectModelUnpaid: Component<{ model?: ModelState }> = (props
   const providerName = (provider: { id: string; name: string }) =>
     provider.id === "opencode" ? language.t("provider.connect.opencode.name") : provider.name
 
-  const freeModels = createMemo(() => model.list().filter(isFree))
+  // Hidden models (#230) stay out of this picker too; they remain in the
+  // catalog for validity, just not listed here.
+  const freeModels = createMemo(() => model.list().filter((item) => !item.hidden).filter(isFree))
 
   const openProviders = (provider?: string) => {
     void import("@/providers/connect/dialog").then((x) => {

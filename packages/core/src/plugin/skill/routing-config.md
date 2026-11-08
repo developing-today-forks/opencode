@@ -86,7 +86,10 @@ model `opencode-route/<id>`.
   an epoch-millisecond time after which the target leaves the pool. A target can be
   another pool, written `"opencode-route/<id>"`.
 - `selection`: `ordered` (the default), `round-robin`, or `weighted`.
-- `weights`: relative ratios keyed by target. A target not listed weighs 1.
+- `weights`: keyed by target; a target not listed weighs 1. In a `weighted` pool a
+  weight is a relative ratio. In a `round-robin` pool it is a priority tier instead:
+  equal weights rotate evenly, and a lower tier is tried only once every target above
+  it has failed. In an `ordered` pool weights rank the failover order.
 - `autonomy`: `fixed`, `rules`, `adaptive`, `predictive`, or `agent`. Each level
   includes the ones before it. `agent` also exposes `route_stats`, `route_usage` and
   `route_adjust` to the model.
@@ -94,7 +97,8 @@ model `opencode-route/<id>`.
 
 Common changes:
 
-- Change a member's share: edit its `weights` entry. Ordered pools rank failover by
+- Change a member's share or tier: edit its `weights` entry — a share in a `weighted`
+  pool, a priority tier in a `round-robin` pool. Ordered pools rank failover by
   weight too, so a weight change there also changes the order.
 - Add a member: append it to `targets`, and give it a `weights` entry if it should
   not weigh 1.
@@ -102,6 +106,37 @@ Common changes:
   removal, give it an `until` instead, or use `route_adjust` skip.
 - A new pool: add a new key under `model_routes`. Then point a category at
   `opencode-route/<id>` in OpenChamber (Settings → Routing).
+
+## Provider routes: one pool of providers for every model
+
+- A provider route is a named selection over concrete providers, declared once
+  under `experimental.provider_routes` and then used like a provider in any pool:
+  `"<provider-route>/<model>"`. One definition serves every model the members offer - use
+  it when the same accounts should back several models (two subscriptions for one
+  provider's models, say), instead of repeating the pair in a pool per model.
+
+```jsonc
+"experimental": {
+  "provider_routes": {
+    "openai-plan": { "providers": ["openai.alternate", "openai"], "selection": "ordered" },
+  },
+},
+```
+
+- `providers` is the member list, in order. `selection` is `ordered` (the default),
+  `round-robin`, or `weighted` - the same modes pools use, tiered weights included.
+  `weights` keys by member provider id (an unset member weighs 1) and applies the
+  same way pool weights do.
+- A member serves a dispatch only when it offers the model and can produce the
+  target's variant - the same skip rule as a direct leaf. Health is per concrete
+  provider, model, and credential, so a benched or quota-demoted member falls
+  through inside the provider route's own selection; nothing is tracked per provider route.
+- Members must be concrete providers: provider routes do not nest. An id that
+  names a concrete provider, a pool, or `opencode-route` is dropped at load
+  with a warning - references always resolve to the concrete provider.
+- Decision records show the provider route as its own step (provider route id, chosen member),
+  and pools label the member group `"<provider-route>/<model>"`, so a walk stays
+  explainable.
 
 ## Time-of-day and temporary weights
 
@@ -152,6 +187,52 @@ Common changes:
   skips targets. It lapses on its own; it does not rewrite config.
 - `notes`: one line each as `match: text`, where `match` is part of provider/model.
   A text that states a return time skips the match until then.
+
+## Machinery constants: bench ladder, demotion, quota gate
+
+The machinery that benches, demotes and gates targets has global defaults under
+`model_route_settings`. Every value below already defaults to what the machinery does
+without the block, so the block only ever carries what should differ.
+
+```jsonc
+{
+  "experimental": {
+    "model_route_settings": {
+      "bench": { "maxCooldownMs": 86400000, "multiplier": 2, "retryAfterMinMs": 1000 },
+      "demotion": { "after": 3, "windowMs": 14400000, "factor": 0.01 },
+      "quotaGate": { "maxMs": 2592000000, "fallbackMs": 1800000 },
+    },
+  },
+}
+```
+
+- `bench.maxCooldownMs` (default 86400000, 24h): the longest bench any failure can impose.
+- `bench.multiplier` (default 2): each consecutive failure multiplies the bench by this;
+  the failure count resets only on a success. `bench.retryAfterMinMs` (default 1000) is
+  the floor under a provider's stated retry-after, and `bench.cooldownCapMs` (default
+  3600000) / `bench.quotaCooldownCapMs` (default 86400000) cap the bench bases a pool's own
+  health block may set.
+- `demotion.after` (default 3) and `demotion.windowMs` (default 14400000, 4h): quota errors
+  within the window that move a target to the end of every order; `demotion.factor`
+  (default 0.01) is what its weight is multiplied by while demoted.
+- `quotaGate.maxMs` (default 2592000000, 30 days): a stated quota reset further out than
+  this is capped rather than believed. `quotaGate.fallbackMs` (default 1800000, 30 minutes)
+  is the hold when an exhaustion reading states no reset. `quotaGate.feedTtlMs` (default
+  60000) is how often quota snapshots are fed into the gate.
+- `escalation.enabled` (default true) and `escalation.afterGiveUps` (default 2): after
+  that many give-ups among a target's last `escalation.outcomeWindow` (default 5)
+  finished requests, a route races its next target at once.
+- `network.windowMs` (default 30000), `network.providers` (default 3),
+  `network.providerModels` (default 2): when several models of one provider are cooling,
+  the provider itself is demoted; when several unrelated providers fail inside the window,
+  the fault is read as the local network and no target is punished.
+- `continuity.hedgeRequests` (default 2): requests a session that just failed over may
+  hedge back to its origin for. `overrides.preferredFactor` (default 3): how much a
+  "prefer" without an amount lifts a target.
+
+These are global defaults: a pool's own `health` block still overrides the bench bases
+for that pool, bounded by the bench caps here. Change one only when the machinery itself
+should behave differently everywhere, never to fix a single pool.
 
 ## Applying a change
 

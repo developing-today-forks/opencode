@@ -16,6 +16,19 @@ describe("TmpGuard.findCollisions", () => {
     ])
   })
 
+  test("flags the CPython 3.14 names a hand-maintained list can miss", () => {
+    // Verified against sys.stdlib_module_names on CPython 3.14.7 (#760):
+    // annotationlib (new in 3.14), antigravity, and the mixed-case cProfile
+    // were absent; case sensitivity is deliberate (Re.py stays a
+    // non-collision in the next test).
+    expect(TmpGuard.findCollisions(["annotationlib.py", "antigravity.py", "cProfile.py"])).toEqual([
+      "annotationlib.py",
+      "antigravity.py",
+      "cProfile.py",
+    ])
+    expect(TmpGuard.isStdlibPythonFile("cProfile.py")).toBe(true)
+  })
+
   test("ignores non-stdlib names, non-Python files, and extension lookalikes", () => {
     expect(
       TmpGuard.findCollisions(["helper.py", "re.py.bak", "re.pyc", "notes.txt", "reminders.py", "Re.py", "re"]),

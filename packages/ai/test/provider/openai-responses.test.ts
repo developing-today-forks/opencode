@@ -4656,6 +4656,22 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  it.effect("ignores output items typed with Object prototype member names instead of dying on them", () =>
+    Effect.gen(function* () {
+      for (const type of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+        const item = { type, id: "proto_1", status: "completed" }
+        const body = sseEvents(
+          { type: "response.output_item.done", item },
+          { type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 1 } } },
+        )
+        const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(body)))
+        expect(response.events.filter((event) => event.type === "tool-call" || event.type === "tool-result")).toEqual(
+          [],
+        )
+      }
+    }),
+  )
+
   it.effect("decodes computer_call as provider-executed tool-call + tool-result", () =>
     Effect.gen(function* () {
       const item = {

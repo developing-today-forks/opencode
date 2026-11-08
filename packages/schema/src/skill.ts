@@ -29,9 +29,9 @@ export const Info = Schema.Struct({
   name: Name,
   description: Schema.String.pipe(optional),
   autoinvoke: Schema.Boolean.pipe(optional),
-  vars: Schema.Boolean.pipe(optional).annotate({
+  vars: Schema.Boolean.annotate({
     description: "Replace {variable} placeholders in the body with the invoking session's values",
-  }),
+  }).pipe(optional),
   path: AbsolutePath,
   content: Schema.String,
 }).annotate({ identifier: "Skill.Info" })

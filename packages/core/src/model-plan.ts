@@ -1,10 +1,12 @@
 export * as ModelPlan from "./model-plan.js"
 
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { Global } from "@opencode/util/global"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
+import { ownValue } from "./util/record.js"
 
 /**
  * The plan store: subscriptions and their quota windows, the cost tier of each model, what each pool is for,
@@ -120,6 +122,15 @@ export const readStore = (dataDir?: string): Store => {
   return Schema.decodeUnknownSync(Store)(parsed)
 }
 
+/**
+ * Whether a plan still describes capacity the quota gate may act on. A plan that has
+ * ended (`expired` or `cancelled`) stays in the store as history but must not feed the
+ * gate: its smaller window could otherwise produce the gating snapshot for a provider
+ * whose current plan has room (#1340). A plan whose status is `unknown` was never
+ * verified as ended, so it keeps feeding — only a positively ended plan drops out.
+ */
+export const feedsGate = (plan: Plan): boolean => plan.status !== "expired" && plan.status !== "cancelled"
+
 const transientRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
 const renameRetryDelays = [10, 25, 50, 100]
 const renameWait = new Int32Array(new SharedArrayBuffer(4))
@@ -130,10 +141,7 @@ function isTransientRenameError(error: unknown) {
   return typeof error.code === "string" && transientRenameCodes.has(error.code)
 }
 
-// On Windows, renaming over a destination another handle is reading fails
-// with EPERM and the update would be lost; retry briefly before giving up
-// (same fix as #85 for the TUI persistence helper, kept in sync with the
-// desktop copy in packages/desktop/src/main/atomic-write.ts).
+// Sync writers follow the atomic-replace contract in design #1345.
 function renameSyncWithRetry(source: string, destination: string) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -151,16 +159,70 @@ function renameSyncWithRetry(source: string, destination: string) {
 export const writeStore = (store: Store, dataDir?: string) => {
   const dir = directory(dataDir)
   fs.mkdirSync(dir, { recursive: true })
-  const file = path.join(dir, "plans.json")
+  const file = resolveAtomicTarget(path.join(dir, "plans.json"))
+  fs.mkdirSync(path.dirname(file), { recursive: true })
   const valid = Schema.decodeUnknownSync(Store)(store)
-  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  const temporary = path.join(path.dirname(file), `.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`)
+  const mode = fileMode(file)
+  let created = false
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(valid, null, 2)}\n`)
-    renameSyncWithRetry(temporary, file)
-  } catch (error) {
+    const descriptor = fs.openSync(temporary, "wx", 0o600)
+    created = true
     try {
-      fs.rmSync(temporary, { force: true })
-    } catch {}
+      fs.writeFileSync(descriptor, `${JSON.stringify(valid, null, 2)}\n`)
+    } finally {
+      fs.closeSync(descriptor)
+    }
+    fs.chmodSync(temporary, mode)
+    renameSyncWithRetry(temporary, file)
+    created = false
+  } catch (error) {
+    if (created) {
+      try {
+        fs.rmSync(temporary, { force: true })
+      } catch {}
+    }
+    throw error
+  }
+}
+
+function resolveAtomicTarget(file: string, remaining = 8): string {
+  const absolute = path.resolve(file)
+  try {
+    return fs.realpathSync(absolute)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+  }
+
+  let parent: string
+  try {
+    parent = fs.realpathSync(path.dirname(path.resolve(file)))
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+    parent = path.dirname(absolute)
+  }
+
+  const target = path.join(parent, path.basename(absolute))
+  let link: string
+  try {
+    link = fs.readlinkSync(target)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EINVAL") return target
+    throw error
+  }
+  if (remaining === 0) throw new Error(`Too many levels of symbolic links: ${file}`)
+  return resolveAtomicTarget(path.resolve(parent, link), remaining - 1)
+}
+
+function fileMode(file: string) {
+  // These stores use the contract's preserve policy: keep an existing mode, or use 0o600 for a new file.
+  try {
+    return fs.statSync(file).mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600
     throw error
   }
 }
@@ -230,7 +292,9 @@ export const setModel = (
   patch: { tier?: Tier; coveredBy?: readonly string[] | null; note?: string | null },
   now: string,
 ): Store => {
-  const existing = store.models[model]
+  // Own-property reads: an id named for an inherited key ("constructor", "toString") must
+  // start from an empty entry rather than merging whatever the prototype chain answers.
+  const existing = ownValue(store.models, model)
   const tier = patch.tier ?? existing?.tier
   if (!tier) throw new Error(`${model} needs a tier: cheap, standard or frontier.`)
   const entry = Schema.decodeUnknownSync(ModelEntry)(merge(existing ?? {}, { ...patch, tier, updatedAt: now }))
@@ -244,7 +308,8 @@ export const setPool = (
   patch: { tier?: Tier | null; purpose?: string | null },
   now: string,
 ): Store => {
-  const entry = Schema.decodeUnknownSync(PoolEntry)(merge(store.pools[poolID] ?? {}, { ...patch, updatedAt: now }))
+  const existing = ownValue(store.pools, poolID) ?? {}
+  const entry = Schema.decodeUnknownSync(PoolEntry)(merge(existing, { ...patch, updatedAt: now }))
   return { ...store, pools: { ...store.pools, [poolID]: entry } }
 }
 
@@ -348,8 +413,11 @@ export const readNotes = (filter: NoteFilter = {}, dataDir?: string): { notes: N
   // slice(-0) is slice(0): a limit of 0 (or less) must keep no notes, not every note.
   // A non-finite limit slips past that guard (NaN <= 0 is false, and slice(-Infinity) is
   // also slice(0)), so it keeps no notes either (#733).
-  const limited =
-    filter.limit === undefined ? matching : !Number.isFinite(filter.limit) || filter.limit <= 0 ? [] : matching.slice(-filter.limit)
+  // A fractional limit truncates the same way in slice: slice(-0.5) is also slice(0), so
+  // a limit in (0, 1) would return every note (#904). Floor the limit first: a floored
+  // limit of 0 keeps no notes, and a fractional limit >= 1 keeps at most the floored count.
+  const floored = filter.limit === undefined ? undefined : Math.floor(filter.limit)
+  const limited = floored === undefined ? matching : !Number.isFinite(floored) || floored <= 0 ? [] : matching.slice(-floored)
   return { notes: limited, skipped }
 }
 

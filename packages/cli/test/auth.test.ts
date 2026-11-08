@@ -75,6 +75,30 @@ describe("auth command", () => {
     expect(requests.indexOf("/api/model/default")).toBeLessThan(requests.indexOf("/api/integration"))
   })
 
+  test("shows the active OpenAI credential method and backend in text output", async () => {
+    using server = authServer((request, url) => {
+      if (url.pathname === "/api/integration") {
+        return Response.json(
+          located([
+            {
+              id: "openai",
+              name: "OpenAI",
+              methods: [],
+              connections: [
+                { type: "credential", method: "oauth", methodID: "chatgpt-token-sharing", id: "cred_test", label: "default" },
+              ],
+            },
+          ]),
+        )
+      }
+      return new Response("Not found", { status: 404 })
+    })
+    const result = await cli(["auth", "list", "--server", server.url.toString()])
+    expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(result.stdout).toContain("chatgpt-token-sharing")
+    expect(result.stdout).toContain("https://api.openai.com/v1")
+  })
+
   test("lists OpenCode Go before Zen and preserves the remaining integration order", async () => {
     using server = authServer((request, url) => {
       if (url.pathname === "/api/integration") {

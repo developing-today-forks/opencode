@@ -116,8 +116,11 @@ export const make = Effect.fn("Session.make")(function* () {
     // the switch, else its current model — assertAllowed falls back to the
     // incoming agent's configured default, then the parent's model, when
     // neither exists.
-    if (session.parentID) {
-      const parent = yield* get(session.parentID)
+    // A fork has no parentID but is a child of its source for governance
+    // (#505), so its switches are checked against the source's chain.
+    const governanceParentID = session.parentID ?? session.fork?.sessionID
+    if (governanceParentID) {
+      const parent = yield* get(governanceParentID)
       const { entries, catalog } = yield* GovernanceConfig.load(locations, session.location)
       yield* ModelGovernance.assertAllowed(
         { get },
@@ -143,9 +146,11 @@ export const make = Effect.fn("Session.make")(function* () {
     )
       return
     // A child session may only switch to a model its subtree's governance
-    // allows; top-level sessions are unchecked.
-    if (session.parentID) {
-      const parent = yield* get(session.parentID)
+    // allows; top-level sessions are unchecked. A fork is governed as a
+    // child of its source (#505), as in switchAgent above.
+    const governanceParentID = session.parentID ?? session.fork?.sessionID
+    if (governanceParentID) {
+      const parent = yield* get(governanceParentID)
       const { entries, catalog } = yield* GovernanceConfig.load(locations, session.location)
       yield* ModelGovernance.assertAllowed(
         { get },
@@ -368,8 +373,13 @@ export const make = Effect.fn("Session.make")(function* () {
       ),
   )
   const interrupt = Effect.fn("Session.interrupt")(
-    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) =>
-      Effect.uninterruptible(execution.interrupt(sessionID, options)),
+    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean; readonly force?: boolean }) =>
+      Effect.uninterruptible(
+        execution.interrupt(
+          sessionID,
+          options?.resume !== undefined ? { resume: options.resume } : undefined,
+        ),
+      ),
   )
   const stage = Effect.fn("Session.revert.stage")(function* (
     sessionID: SessionSchema.ID,

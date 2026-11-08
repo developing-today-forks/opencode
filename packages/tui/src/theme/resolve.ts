@@ -19,7 +19,7 @@ export function resolveThemeColors(
         throw new Error(`Circular color reference: ${[...chain, color].join(" -> ")}`)
       }
 
-      const next = defs[color] ?? theme.theme[color as ThemeColor]
+      const next = (Object.hasOwn(defs, color) ? defs[color] : undefined) ?? (Object.hasOwn(theme.theme, color) ? theme.theme[color as ThemeColor] : undefined)
       if (next === undefined) {
         throw new Error(`Color reference "${color}" not found in defs or theme`)
       }

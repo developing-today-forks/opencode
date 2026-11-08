@@ -10,6 +10,7 @@ import { DataProvider, useData, type FormWithLocation } from "../../../src/conte
 import { Keymap } from "../../../src/context/keymap"
 import { InteractivityProvider } from "../../../src/context/interactivity"
 import { LocationProvider } from "../../../src/context/location"
+import { RouteProvider } from "../../../src/context/route"
 import { ThemeProvider } from "../../../src/context/theme"
 import { FormPrompt, FORM_MODE } from "../../../src/routes/session/form"
 import { PermissionPrompt } from "../../../src/routes/session/permission"
@@ -81,7 +82,9 @@ async function mountPanes(root: string, render: () => JSX.Element, parentID?: st
                 <LocationProvider>
                   <ThemeProvider mode="dark" source={emptyThemeSource}>
                     <ToastProvider>
-                      <Panes />
+                      <RouteProvider initialRoute={{ type: "session", sessionID: "ses_scoped" }}>
+                        <Panes />
+                      </RouteProvider>
                     </ToastProvider>
                   </ThemeProvider>
                 </LocationProvider>

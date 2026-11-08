@@ -4,6 +4,7 @@ import { Effect, Ref, Schema } from "effect"
 import { FileSystem } from "effect"
 import { HttpClientRequest } from "effect/http"
 import { AIError, Media, Message } from "../src/index.js"
+import { fileMediaType, mediaTypeExtension } from "../src/utils/media-type.js"
 import { it } from "./lib/effect.js"
 import { dynamicResponse, scriptedResponses } from "./lib/http.js"
 
@@ -73,6 +74,19 @@ describe("Media", () => {
       expect(Media.bytes(PNG).mediaType).toBe("image/png")
       expect(Media.bytes(Uint8Array.from([1, 2, 3])).mediaType).toBe("application/octet-stream")
       expect(Media.bytes(Uint8Array.from([1, 2, 3]), "image/x-custom").mediaType).toBe("image/x-custom")
+    }),
+  )
+
+  it.effect("does not read media-type lookups through the prototype chain", () =>
+    Effect.sync(() => {
+      for (const name of ["constructor", "__proto__", "toString"]) {
+        expect(mediaTypeExtension(name)).toBeUndefined()
+        expect(fileMediaType(Uint8Array.from([1, 2, 3]), `file.${name}`)).toBeUndefined()
+      }
+      expect(mediaTypeExtension("audio/mp3")).toBe("mp3")
+      expect(mediaTypeExtension("audio/wav")).toBe("wav")
+      expect(mediaTypeExtension("image/png")).toBe("png")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "notes.txt")).toBe("text/plain")
     }),
   )
 
@@ -208,6 +222,62 @@ describe("Media", () => {
       expect(error.reason.http?.status).toBe(404)
       expect(error.reason.http?.url).toBe("https://cdn.example.test/expired.png")
       expect(error.reason.body).toBe(body)
+    }),
+  )
+
+  it.effect("rejects url downloads over the size cap, declared or streamed", () =>
+    Effect.gen(function* () {
+      const asset = Media.url("https://cdn.example.test/huge.png")
+      // The declared-size rejection must abort the response, not leave it downloading:
+      // the stub body's cancel callback records whether the reader was cancelled.
+      let declaredCancelled = false
+      const declared = yield* asset.bytes().pipe(
+        Effect.flip,
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.succeed(
+              input.respond(
+                new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(new TextEncoder().encode("small"))
+                  },
+                  cancel() {
+                    declaredCancelled = true
+                  },
+                }),
+                {
+                  headers: { "content-length": String(Media.MAX_DOWNLOAD_BYTES + 1) },
+                },
+              ),
+            ),
+          ),
+        ),
+      )
+      expect(declared).toBeInstanceOf(AIError)
+      expect(declaredCancelled).toBe(true)
+      expect(declared.reason._tag).toBe("InvalidProviderOutput")
+      expect(declared.message).toContain("too large")
+
+      const chunk = new Uint8Array(Media.MAX_DOWNLOAD_BYTES + 1)
+      const streamed = yield* asset.bytes().pipe(
+        Effect.flip,
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.succeed(
+              input.respond(
+                new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(chunk)
+                    controller.close()
+                  },
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+      expect(streamed).toBeInstanceOf(AIError)
+      expect(streamed.message).toContain("too large")
     }),
   )
 

@@ -104,6 +104,10 @@
       "dependsOn": ["transit"],
       "outputs": []
     },
+    "@opencode/web#test": {
+      "dependsOn": ["transit"],
+      "outputs": []
+    },
     "@opencode/session-ui#test": {
       "dependsOn": ["transit"],
       "outputs": []

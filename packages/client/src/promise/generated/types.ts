@@ -370,16 +370,54 @@ export type ConfigModelReasoning =
   | { supported: false }
   | { supported: true; toggle?: boolean; effort?: Array<string>; budget?: { min?: number; max?: number } }
 
-export type ConfigModelRouteTarget =
-  | string
-  | { providerID: string; model: string; variant?: string }
-  | {
-      model: string | { providerID: string; model: string; variant?: string }
-      defaultVariant?: string
-      variants?: { [x: string]: string }
-      until?: number
-      window?: string | { name: string; invert?: boolean }
-    }
+export type ConfigModelRouteProviderRoutes = {
+  [x: string]: {
+    providers: Array<string>
+    selection?: "ordered" | "round-robin" | "weighted"
+    weights?: { [x: string]: number }
+    windows?: { [x: string]: string | { name: string; invert?: boolean } }
+    schedules?: Array<{
+      id?: string
+      targets?: Array<string>
+      when:
+        | {
+            daysOfWeek?: Array<
+              | "sun"
+              | "sunday"
+              | "mon"
+              | "monday"
+              | "tue"
+              | "tuesday"
+              | "tues"
+              | "wed"
+              | "wednesday"
+              | "thu"
+              | "thursday"
+              | "thur"
+              | "thurs"
+              | "fri"
+              | "friday"
+              | "sat"
+              | "saturday"
+              | number
+            >
+            daysOfMonth?: Array<-1 | number>
+            dates?: Array<string>
+            excludeDates?: Array<string>
+            excludeWindows?: Array<string>
+            start?: string
+            end?: string
+            timezone?: string
+            from?: number
+            until?: number
+          }
+        | string
+      factor?: number
+      weight?: number
+      note?: string
+    }>
+  }
+}
 
 export type ConfigModelRouteWindows = {
   [x: string]: {
@@ -404,6 +442,9 @@ export type ConfigModelRouteWindows = {
       | number
     >
     daysOfMonth?: Array<-1 | number>
+    dates?: Array<string>
+    excludeDates?: Array<string>
+    excludeWindows?: Array<string>
     start?: string
     end?: string
     timezone?: string
@@ -744,6 +785,9 @@ export type ModelCompatibility = {
   reasoningField?: ModelReasoningField
   requireReasoning?: boolean
   maxTokensField?: ModelMaxTokensField
+  supportsStore?: boolean
+  supportsStrictMode?: boolean
+  zaiToolStream?: boolean
   requireFinishReason?: boolean
   requireAssistantAfterTool?: boolean
   supportsPromptCacheKey?: boolean
@@ -756,11 +800,28 @@ export type ProviderCompatibility = {
   reasoningField?: ModelReasoningField
   requireReasoning?: boolean
   maxTokensField?: ModelMaxTokensField
+  supportsStore?: boolean
+  supportsStrictMode?: boolean
+  zaiToolStream?: boolean
   requireFinishReason?: boolean
   requireAssistantAfterTool?: boolean
   supportsPromptCacheKey?: boolean
   cacheFormat?: ModelCacheFormat
 }
+
+export type ConfigModelRouteTarget =
+  | string
+  | { providerID: string; model: string; variant?: string }
+  | {
+      model: string | { providerID: string; model: string; variant?: string }
+      exclude?: Array<string>
+      defaultVariant?: string
+      variants?: { [x: string]: string }
+      until?: number
+      limit?: { context: number }
+      cache_format?: ModelCacheFormat
+      window?: string | { name: string; invert?: boolean }
+    }
 
 export type ModelCost = {
   tier?: { type: "context"; size: number }
@@ -796,6 +857,7 @@ export type ConnectionCredentialInfo = {
   id: CredentialID
   label: string
   method: "key" | "oauth" | "external"
+  methodID?: IntegrationMethodID
   status?: ConnectionStatus
 }
 
@@ -1022,74 +1084,6 @@ export type ConfigModelCapabilities = {
   output?: Array<string>
   temperature?: boolean
   reasoning?: ConfigModelReasoning
-}
-
-export type ConfigModelRoutes = {
-  [x: string]: {
-    name?: string
-    targets: Array<ConfigModelRouteTarget>
-    health?: {
-      firstTokenTimeoutMs?: number | false
-      maxResponseTimeMs?: number
-      minOutputTokensPerSecond?: number
-      sampleWindow?: number
-      slowThreshold?: number
-      cooldownMs?: number
-      quotaCooldownMs?: number
-    }
-    budgets?: {
-      [x: string]: {
-        requestsPerMinute?: number
-        requestsPerDay?: number
-        tokensPerMinute?: number
-        tokensPerDay?: number
-        softLimit?: number
-      }
-    }
-    hedgeAfterMs?: number
-    attempts?: number
-    autonomy?: "fixed" | "rules" | "adaptive" | "predictive" | "agent"
-    selection?: "ordered" | "round-robin" | "weighted"
-    weights?: { [x: string]: number }
-    schedules?: Array<{
-      id?: string
-      targets?: Array<string>
-      when:
-        | {
-            daysOfWeek?: Array<
-              | "sun"
-              | "sunday"
-              | "mon"
-              | "monday"
-              | "tue"
-              | "tuesday"
-              | "tues"
-              | "wed"
-              | "wednesday"
-              | "thu"
-              | "thursday"
-              | "thur"
-              | "thurs"
-              | "fri"
-              | "friday"
-              | "sat"
-              | "saturday"
-              | number
-            >
-            daysOfMonth?: Array<-1 | number>
-            start?: string
-            end?: string
-            timezone?: string
-            from?: number
-            until?: number
-          }
-        | string
-      factor?: number
-      weight?: number
-      note?: string
-    }>
-    limit?: { context: number }
-  }
 }
 
 export type SessionMessageLocationSwitched = {
@@ -1805,6 +1799,15 @@ export type FilesystemChanged = {
   data: { file: string; event: "add" | "change" | "unlink" }
 }
 
+export type FilesystemWatcherDegraded = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "filesystem.watcher-degraded"
+  location?: LocationRef
+  data: { directory: string; cause: "timeout" | "inotify-limit" | "unsupported" | "error" }
+}
+
 export type ReferenceUpdated = {
   id: EventID
   created: number
@@ -2199,18 +2202,77 @@ export type CredentialKey = {
   configuration?: FormAnswer
 }
 
-export type ProviderInfo = {
-  id: ProviderID
-  canonical?: ProviderID
-  integrationID?: IntegrationID
-  instanceOf?: ProviderID
-  name: string
-  activation: "auto" | "enabled" | "disabled"
-  package: string
-  compatibility?: ProviderCompatibility
-  settings?: ProviderSettings
-  headers?: { [x: string]: string }
-  body?: { [x: string]: any }
+export type ConfigModelRoutes = {
+  [x: string]: {
+    name?: string
+    system?: string
+    targets: Array<ConfigModelRouteTarget>
+    cache_format?: ModelCacheFormat
+    health?: {
+      firstTokenTimeoutMs?: number | false
+      maxResponseTimeMs?: number
+      minOutputTokensPerSecond?: number
+      sampleWindow?: number
+      slowThreshold?: number
+      cooldownMs?: number
+      quotaCooldownMs?: number
+    }
+    budgets?: {
+      [x: string]: {
+        requestsPerMinute?: number
+        requestsPerDay?: number
+        tokensPerMinute?: number
+        tokensPerDay?: number
+        softLimit?: number
+      }
+    }
+    hedgeAfterMs?: number
+    attempts?: number
+    autonomy?: "fixed" | "rules" | "adaptive" | "predictive" | "agent"
+    selection?: "ordered" | "round-robin" | "weighted"
+    weights?: { [x: string]: number }
+    schedules?: Array<{
+      id?: string
+      targets?: Array<string>
+      when:
+        | {
+            daysOfWeek?: Array<
+              | "sun"
+              | "sunday"
+              | "mon"
+              | "monday"
+              | "tue"
+              | "tuesday"
+              | "tues"
+              | "wed"
+              | "wednesday"
+              | "thu"
+              | "thursday"
+              | "thur"
+              | "thurs"
+              | "fri"
+              | "friday"
+              | "sat"
+              | "saturday"
+              | number
+            >
+            daysOfMonth?: Array<-1 | number>
+            dates?: Array<string>
+            excludeDates?: Array<string>
+            excludeWindows?: Array<string>
+            start?: string
+            end?: string
+            timezone?: string
+            from?: number
+            until?: number
+          }
+        | string
+      factor?: number
+      weight?: number
+      note?: string
+    }>
+    limit?: { context: number }
+  }
 }
 
 export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
@@ -2425,6 +2487,7 @@ export type ModelInfo = {
   cost: Array<ModelCost>
   status: "alpha" | "beta" | "deprecated" | "active"
   enabled: boolean
+  hidden?: boolean
   limit: { context: number; input?: number; output: number }
 }
 
@@ -2456,6 +2519,55 @@ export type SessionPermissions = {
   location?: LocationRef
   data: { sessionID: SessionID; permissions: PermissionRuleset }
 }
+
+export type SessionInboxUser = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "user"
+  payload: SessionInboxUserPayload
+  delivery: SessionInboxDelivery
+}
+
+export type SessionMessageAssistantTool = {
+  type: "tool"
+  id: string
+  name: string
+  executed?: boolean
+  providerState?: SessionMessageProviderState
+  providerResultState?: SessionMessageProviderState
+  state:
+    | SessionMessageToolStateStreaming
+    | SessionMessageToolStateRunning
+    | SessionMessageToolStateCompleted
+    | SessionMessageToolStateError
+  time: { created: number; ran?: number; completed?: number }
+}
+
+export type SessionInboxItem =
+  | { type: "user"; payload: SessionInboxUserPayload1; delivery: SessionInboxDelivery }
+  | { type: "synthetic"; payload: SessionInboxSyntheticPayload1; delivery: SessionInboxDelivery }
+  | { type: "compaction"; payload: SessionInboxCompactionPayload; delivery: SessionInboxDelivery }
+  | { type: "move"; payload: SessionInboxMovePayload1; delivery: SessionInboxDelivery }
+
+export type SessionMessageAssistantTool1 = {
+  type: "tool"
+  id: string
+  name: string
+  executed?: boolean
+  providerState?: SessionMessageProviderState1
+  providerResultState?: SessionMessageProviderState1
+  state:
+    | SessionMessageToolStateStreaming
+    | SessionMessageToolStateRunning1
+    | SessionMessageToolStateCompleted1
+    | SessionMessageToolStateError1
+  time: { created: number; ran?: number; completed?: number }
+}
+
+export type FormFields = [FormField, ...Array<FormField>]
+
+export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
 
 export type ConfigEntry =
   | {
@@ -2597,6 +2709,8 @@ export type ConfigEntry =
             | {
                 tier?: string
                 url?: string
+                sha256?: string
+                size?: number
                 path?: string
                 pooling?: "last" | "mean" | "cls"
                 query?: string
@@ -2650,6 +2764,7 @@ export type ConfigEntry =
                       cache?: { read?: MoneyUSDPerMillionTokens; write?: MoneyUSDPerMillionTokens }
                     }>
                 disabled?: boolean
+                hidden?: boolean
                 limit?: { context?: number; input?: number; output?: number }
               }
             }
@@ -2674,7 +2789,74 @@ export type ConfigEntry =
             resource: string
             effect: "allow" | "deny"
           }>
+          model_route_demotion?: { threshold?: number; window_ms?: number }
+          routes?: {
+            models?: ConfigModelRoutes
+            providers?: ConfigModelRouteProviderRoutes
+            schedules?: Array<{
+              id?: string
+              providers?: Array<string>
+              models?: Array<string>
+              targets?: Array<string>
+              routes?: Array<string>
+              when:
+                | {
+                    daysOfWeek?: Array<
+                      | "sun"
+                      | "sunday"
+                      | "mon"
+                      | "monday"
+                      | "tue"
+                      | "tuesday"
+                      | "tues"
+                      | "wed"
+                      | "wednesday"
+                      | "thu"
+                      | "thursday"
+                      | "thur"
+                      | "thurs"
+                      | "fri"
+                      | "friday"
+                      | "sat"
+                      | "saturday"
+                      | number
+                    >
+                    daysOfMonth?: Array<-1 | number>
+                    dates?: Array<string>
+                    excludeDates?: Array<string>
+                    excludeWindows?: Array<string>
+                    start?: string
+                    end?: string
+                    timezone?: string
+                    from?: number
+                    until?: number
+                  }
+                | string
+              factor?: number
+              weight?: number
+              note?: string
+            }>
+            windows?: ConfigModelRouteWindows
+            tuning?: { enabled?: boolean; intervalMinutes?: number; windowHours?: number; notes?: Array<string> }
+            log?: { captureErrorBodies?: boolean }
+            settings?: {
+              bench?: {
+                maxCooldownMs?: number
+                multiplier?: number
+                retryAfterMinMs?: number
+                cooldownCapMs?: number
+                quotaCooldownCapMs?: number
+              }
+              demotion?: { after?: number; windowMs?: number; factor?: number }
+              quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
+              escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
+              network?: { windowMs?: number; providers?: number; providerModels?: number }
+              continuity?: { hedgeRequests?: number }
+              overrides?: { preferredFactor?: number }
+            }
+          }
           model_routes?: ConfigModelRoutes
+          provider_routes?: ConfigModelRouteProviderRoutes
           model_route_schedules?: Array<{
             id?: string
             providers?: Array<string>
@@ -2704,6 +2886,9 @@ export type ConfigEntry =
                     | number
                   >
                   daysOfMonth?: Array<-1 | number>
+                  dates?: Array<string>
+                  excludeDates?: Array<string>
+                  excludeWindows?: Array<string>
                   start?: string
                   end?: string
                   timezone?: string
@@ -2723,59 +2908,25 @@ export type ConfigEntry =
             notes?: Array<string>
           }
           model_route_log?: { captureErrorBodies?: boolean }
+          model_route_settings?: {
+            bench?: {
+              maxCooldownMs?: number
+              multiplier?: number
+              retryAfterMinMs?: number
+              cooldownCapMs?: number
+              quotaCooldownCapMs?: number
+            }
+            demotion?: { after?: number; windowMs?: number; factor?: number }
+            quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
+            escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
+            network?: { windowMs?: number; providers?: number; providerModels?: number }
+            continuity?: { hedgeRequests?: number }
+            overrides?: { preferredFactor?: number }
+          }
         }
       }
     }
   | { type: "directory"; path: AbsolutePath }
-
-export type SessionInboxUser = {
-  id: SessionMessageID
-  sessionID: SessionID
-  time: { created: number }
-  type: "user"
-  payload: SessionInboxUserPayload
-  delivery: SessionInboxDelivery
-}
-
-export type SessionMessageAssistantTool = {
-  type: "tool"
-  id: string
-  name: string
-  executed?: boolean
-  providerState?: SessionMessageProviderState
-  providerResultState?: SessionMessageProviderState
-  state:
-    | SessionMessageToolStateStreaming
-    | SessionMessageToolStateRunning
-    | SessionMessageToolStateCompleted
-    | SessionMessageToolStateError
-  time: { created: number; ran?: number; completed?: number }
-}
-
-export type SessionInboxItem =
-  | { type: "user"; payload: SessionInboxUserPayload1; delivery: SessionInboxDelivery }
-  | { type: "synthetic"; payload: SessionInboxSyntheticPayload1; delivery: SessionInboxDelivery }
-  | { type: "compaction"; payload: SessionInboxCompactionPayload; delivery: SessionInboxDelivery }
-  | { type: "move"; payload: SessionInboxMovePayload1; delivery: SessionInboxDelivery }
-
-export type SessionMessageAssistantTool1 = {
-  type: "tool"
-  id: string
-  name: string
-  executed?: boolean
-  providerState?: SessionMessageProviderState1
-  providerResultState?: SessionMessageProviderState1
-  state:
-    | SessionMessageToolStateStreaming
-    | SessionMessageToolStateRunning1
-    | SessionMessageToolStateCompleted1
-    | SessionMessageToolStateError1
-  time: { created: number; ran?: number; completed?: number }
-}
-
-export type FormFields = [FormField, ...Array<FormField>]
-
-export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
 
 export type FormFields2 = [FormField1, ...Array<FormField1>]
 
@@ -2801,6 +2952,7 @@ export type SessionInfo = {
   metadata?: SessionMetadata
   subagentPolicy?: SessionSubagentPolicy
   permissions?: PermissionRuleset
+  detached?: true
   revert?: SessionRevert
   location: LocationPublicRef
 }
@@ -2825,6 +2977,7 @@ export type SessionCreated = {
     metadata?: SessionMetadata
     subagentPolicy?: SessionSubagentPolicy
     permissions?: PermissionRuleset
+    detached?: true
     version: string
   }
 }
@@ -2843,6 +2996,21 @@ export type SessionMessageCompaction =
   | SessionMessageCompactionRunning
   | SessionMessageCompactionCompleted
   | SessionMessageCompactionFailed
+
+export type ProviderInfoWithModels = {
+  id: ProviderID
+  canonical?: ProviderID
+  integrationID?: IntegrationID
+  instanceOf?: ProviderID
+  name: string
+  activation: "auto" | "enabled" | "disabled"
+  package: string
+  compatibility?: ProviderCompatibility
+  settings?: ProviderSettings
+  headers?: { [x: string]: string }
+  body?: { [x: string]: any }
+  models: Array<ModelInfo>
+}
 
 export type SessionInboxInfo = SessionInboxUser | SessionInboxSynthetic | SessionInboxCompaction | SessionInboxMove
 
@@ -3073,6 +3241,7 @@ export type V2Event =
   | SessionRevertCleared
   | SessionRevertCommitted
   | FilesystemChanged
+  | FilesystemWatcherDegraded
   | ReferenceUpdated
   | PermissionAsked
   | PermissionReplied
@@ -3539,6 +3708,7 @@ export type SessionStatsInput = {
 export type SessionStatsOutput = { data: SessionStatsInfo }["data"]
 
 export type SessionCreateInput = {
+  readonly directory?: { readonly directory?: string | undefined }["directory"]
   readonly id?: {
     readonly id?: string | null
     readonly parentID?: string | null
@@ -3566,6 +3736,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["id"]
   readonly parentID?: {
     readonly id?: string | null
@@ -3594,6 +3765,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["parentID"]
   readonly title?: {
     readonly id?: string | null
@@ -3622,6 +3794,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["title"]
   readonly agent?: {
     readonly id?: string | null
@@ -3650,6 +3823,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["agent"]
   readonly model?: {
     readonly id?: string | null
@@ -3678,6 +3852,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["model"]
   readonly location?: {
     readonly id?: string | null
@@ -3706,6 +3881,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["location"]
   readonly metadata?: {
     readonly id?: string | null
@@ -3734,6 +3910,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["metadata"]
   readonly permissions?: {
     readonly id?: string | null
@@ -3762,6 +3939,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["permissions"]
   readonly subagentPolicy?: {
     readonly id?: string | null
@@ -3790,7 +3968,37 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["subagentPolicy"]
+  readonly detached?: {
+    readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly location?: { readonly directory: string } | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly permissions?: ReadonlyArray<{
+      readonly action: string
+      readonly resource: string
+      readonly effect: "allow" | "deny" | "ask"
+    }> | null
+    readonly subagentPolicy?: {
+      readonly models?: ReadonlyArray<string>
+      readonly excludedModels?: ReadonlyArray<string>
+      readonly agentOverrides?: {
+        readonly [x: string]: {
+          readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+          readonly models?: ReadonlyArray<string>
+          readonly excludedModels?: ReadonlyArray<string>
+          readonly subagentModels?: ReadonlyArray<string>
+          readonly subagentExcludedModels?: ReadonlyArray<string>
+          readonly force?: boolean
+        }
+      }
+    } | null
+    readonly detached?: true | null
+  }["detached"]
 }
 
 export type SessionCreateOutput = { data: SessionInfo }["data"]
@@ -3846,6 +4054,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string
@@ -4203,6 +4412,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string
@@ -4560,6 +4770,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string
@@ -5492,7 +5703,8 @@ export type SessionLogOutput = SessionLogItem
 
 export type SessionInterruptInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
-  readonly resume?: { readonly resume?: boolean | undefined }["resume"]
+  readonly resume?: { readonly resume?: boolean | undefined; readonly force?: boolean | undefined }["resume"]
+  readonly force?: { readonly resume?: boolean | undefined; readonly force?: boolean | undefined }["force"]
 }
 
 export type SessionInterruptOutput = SessionInterruptResponse
@@ -6500,18 +6712,51 @@ export type GenerateTextInput = {
 
 export type GenerateTextOutput = GenerateTextResponse["data"]
 
+export type ServerCompletionsChatInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsChatOutput = any
+
+export type ServerCompletionsResponsesInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsResponsesOutput = any
+
+export type ServerCompletionsEmbeddingsInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsEmbeddingsOutput = any
+
+export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsMessagesOutput = any
+
+export type ServerCompletionsSystemoneInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsSystemoneOutput = any
+
+export type ServerCompletionsModelsOutput = any
+
+export type ServerCompletionsModelInput = { readonly id: { readonly id: string }["id"] }
+
+export type ServerCompletionsModelOutput = any
+
+export type ServerCompletionsModelRefInput = {
+  readonly provider: { readonly provider: string; readonly model: string }["provider"]
+  readonly model: { readonly provider: string; readonly model: string }["model"]
+}
+
+export type ServerCompletionsModelRefOutput = any
+
 export type ProviderListInput = {
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
 }
 
-export type ProviderListOutput = { location: LocationPublicRef; data: Array<ProviderInfo> }
+export type ProviderListOutput = { location: LocationPublicRef; data: Array<ProviderInfoWithModels> }
 
 export type ProviderGetInput = {
   readonly providerID: { readonly providerID: string }["providerID"]
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
 }
 
-export type ProviderGetOutput = { location: LocationPublicRef; data: ProviderInfo }
+export type ProviderGetOutput = { location: LocationPublicRef; data: ProviderInfoWithModels }
 
 export type IntegrationListInput = {
   readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]

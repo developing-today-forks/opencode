@@ -23,6 +23,51 @@ import { Credential } from "../credential.js"
 import { OauthCallbackPage } from "../oauth/page.js"
 import type { Integration } from "../integration.js"
 import { ErrorSummary } from "../util/error-summary.js"
+import { serverSeconds } from "../util/number.js"
+import { readBoundedResponseText, readExcerptResponseText } from "../tool/http-body.js"
+
+/**
+ * Timeout in milliseconds for fetching configured OAuth authorization server metadata.
+ * Sized in line with sibling provider fetches to prevent silent endpoints from hanging connect/authorize.
+ */
+export const CONFIGURED_DISCOVERY_TIMEOUT_MS = 5_000
+
+/**
+ * Maximum response body size in bytes for configured OAuth authorization server metadata.
+ * RFC 8414 authorization server and OpenID Connect discovery metadata documents are typically
+ * a few kilobytes; 64 KiB allows ample headroom while bounding memory usage against malicious endpoints.
+ */
+export const CONFIGURED_DISCOVERY_MAX_BYTES = 64 * 1024
+
+/**
+ * Maximum response body size in bytes for an OAuth token-endpoint error body read for logging.
+ * Error documents are small JSON objects; the cap matches CONFIGURED_DISCOVERY_MAX_BYTES so a
+ * malicious or broken endpoint cannot make the client buffer an unbounded rejection body (#1049).
+ */
+export const ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+/**
+ * Parses an OAuth error response for logging, reading the body through the excerpt
+ * reader: at most ERROR_RESPONSE_MAX_BYTES are read, an over-cap body truncates (its
+ * JSON then fails to parse) and an unreadable body yields undefined ("no parsed
+ * error") instead of buffering unbounded (#1049). Excerpt semantics are load-bearing
+ * here, not just a bound: the caller hands over a clone whose original the SDK still
+ * has to read, and the excerpt reader never awaits cancellation of the tee'd clone —
+ * the bounded reader's awaited cancel can pend until the original branch is consumed,
+ * deadlocking exactly the oversized rejections this guards.
+ */
+export const parseErrorBody = async (response: Response) => {
+  try {
+    const text = await readExcerptResponseText(response, ERROR_RESPONSE_MAX_BYTES)
+    // Fail closed at the cap: an excerpt that filled the cap may be truncated
+    // mid-document (or carry a near-cap description into the log), so it counts as
+    // over-cap — "no parsed error" — exactly as the bounded reader's refusal did.
+    if (new TextEncoder().encode(text).byteLength >= ERROR_RESPONSE_MAX_BYTES) return undefined
+    return await parseErrorResponse(text)
+  } catch {
+    return undefined
+  }
+}
 
 /** Client ID Metadata Document: servers that support CIMD accept this URL as the client_id without registration. */
 export const CLIENT_METADATA_URL = "https://opencode.ai/oauth/opencode/client.json"
@@ -65,9 +110,12 @@ export const loggedFetch = (fields: { readonly server: string; readonly director
           const response = yield* Effect.tryPromise({ try: () => send(url, init), catch: (error) => error })
           const result = { status: response.status, durationMs: Date.now() - started }
           if (operation && !response.ok) {
-            const error = yield* Effect.tryPromise(async () => parseErrorResponse(await response.clone().text())).pipe(
-              Effect.orElseSucceed(() => undefined),
-            )
+            const error = yield* Effect.tryPromise(() =>
+              // SAFETY: the SDK FetchLike response and the bounded reader's Response are the
+              // same runtime fetch Response; only their type packages differ (undici-types
+              // vs the Bun lib types), and the reader uses only headers/body/text.
+              parseErrorBody(response.clone() as Response),
+            ).pipe(Effect.orElseSucceed(() => undefined))
             yield* Effect.logWarning("mcp oauth request rejected", {
               ...result,
               error: error?.code,
@@ -107,12 +155,32 @@ export const loggedFetch = (fields: { readonly server: string; readonly director
 export const configuredDiscovery = async (input: {
   readonly config: typeof ConfigMCP.Remote.Type
   readonly fetchFn: FetchLike
+  readonly timeoutMs?: number
+  readonly maxBytes?: number
 }): Promise<OAuthDiscoveryState | undefined> => {
   const url = input.config.oauth ? input.config.oauth.auth_server_metadata_url : undefined
   if (!url) return undefined
-  const response = await input.fetchFn(url, { headers: { accept: "application/json" } })
-  if (!response.ok) throw new Error(`HTTP ${response.status} trying to load OAuth authorization server metadata`)
-  const body = await response.json()
+  const origin = URL.canParse(url) ? new URL(url).origin : url
+  const timeoutMs = input.timeoutMs ?? CONFIGURED_DISCOVERY_TIMEOUT_MS
+  const maxBytes = input.maxBytes ?? CONFIGURED_DISCOVERY_MAX_BYTES
+  const signal = AbortSignal.timeout(timeoutMs)
+  const onTimeout = (error: unknown) => {
+    if (signal.aborted || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")))
+      throw new Error(`Timeout trying to load OAuth authorization server metadata from ${origin}`, { cause: error })
+    throw error
+  }
+  const response = await input.fetchFn(url, { headers: { accept: "application/json" }, signal }).catch(onTimeout)
+  if (!response.ok)
+    throw new Error(`HTTP ${response.status} trying to load OAuth authorization server metadata from ${origin}`)
+  const text = await readBoundedResponseText(
+    response,
+    maxBytes,
+    () =>
+      new Error(
+        `Response body exceeded ${maxBytes} bytes trying to load OAuth authorization server metadata from ${origin}`,
+      ),
+  ).catch(onTimeout)
+  const body = JSON.parse(text)
   const metadata = OAuthMetadataSchema.safeParse(body).data ?? OpenIdProviderDiscoveryMetadataSchema.parse(body)
   return {
     authorizationServerUrl: metadata.issuer,
@@ -199,7 +267,9 @@ export const provider = (options: Options): OAuthClientProvider => {
     redirectToAuthorization: (url) => {
       if (!redirect) throw refuse("user authorization")
       if (url.protocol !== "http:" && url.protocol !== "https:")
-        throw new Error(`MCP server "${options.config.url}" returned a ${url.protocol} authorization URL; only http and https are supported`)
+        throw new Error(
+          `MCP server "${options.config.url}" returned a ${url.protocol} authorization URL; only http and https are supported`,
+        )
       return redirect.open(url)
     },
     ...(options.invalidate ? { invalidateCredentials: options.invalidate } : {}),
@@ -235,19 +305,31 @@ export const memoryStore = (): Store => {
 export const clientFromCredential = (credential: Credential.OAuth) =>
   credential.metadata?.client as StoredOAuthClientInformation | undefined
 
+
 export const toCredential = (input: {
   readonly methodID: Integration.MethodID
   readonly serverUrl: string
   readonly tokens: StoredOAuthTokens
   readonly client: StoredOAuthClientInformation | undefined
-}) =>
-  Credential.OAuth.make({
+}) => {
+  // Server-supplied `expires_in` seconds, validated before it becomes a stored
+  // expiry (#885, #994): a non-finite or non-positive value must not fabricate a
+  // past expiry, so it collapses to 0 (the SDK's non-expiring sentinel); a
+  // millisecond-confused value beyond 30 days (e.g. 7_200_000 for a 2h token,
+  // an ~83-day stored expiry) is CLAMPED to 30 days, never to the fallback -
+  // the fallback here is 0, which would make the credential non-expiring.
+  const expiresIn = serverSeconds(input.tokens.expires_in, {
+    fallback: 0,
+    max: 30 * 24 * 60 * 60,
+    oversized: "clamp",
+  })
+  return Credential.OAuth.make({
     type: "oauth",
     methodID: input.methodID,
     access: input.tokens.access_token,
     refresh: input.tokens.refresh_token ?? "",
     // 0 is non-expiring; toTokens then omits expires_in so the SDK does not force a refresh.
-    expires: input.tokens.expires_in ? Date.now() + input.tokens.expires_in * 1000 : 0,
+    expires: expiresIn ? Date.now() + expiresIn * 1000 : 0,
     metadata: {
       serverUrl: input.serverUrl,
       tokenType: input.tokens.token_type,
@@ -256,6 +338,7 @@ export const toCredential = (input: {
       ...(input.client ? { client: input.client } : {}),
     },
   })
+}
 
 export const toTokens = (credential: Credential.OAuth): StoredOAuthTokens => {
   const metadata = credential.metadata ?? {}
@@ -376,7 +459,9 @@ export const authorize = (input: {
       if (!value) return fail("Missing authorization code", "missing_code")
       // The page waits for the token exchange so the browser never reports success for a rejected code.
       if (
-        !Effect.runSync(Deferred.succeed(code, { code: value, iss: url.searchParams.get("iss") ?? undefined, response }))
+        !Effect.runSync(
+          Deferred.succeed(code, { code: value, iss: url.searchParams.get("iss") ?? undefined, response }),
+        )
       )
         response.writeHead(409).end("OAuth callback already received")
     })

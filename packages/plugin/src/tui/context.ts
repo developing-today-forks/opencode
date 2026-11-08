@@ -14,7 +14,7 @@ import type {
   PermissionSavedInfo,
   PermissionRequest,
   Project,
-  ProviderInfo,
+  ProviderInfoWithModels,
   ReferenceInfo,
   SessionInfo,
   SessionMessageInfo,
@@ -133,7 +133,7 @@ export interface Data {
       readonly resource: LocationCollection<McpResource>
     }
     readonly model: LocationCollection<ModelInfo>
-    readonly provider: LocationCollection<ProviderInfo>
+    readonly provider: LocationCollection<ProviderInfoWithModels>
     readonly reference: LocationCollection<ReferenceInfo>
     readonly skill: LocationCollection<SkillInfo>
   }

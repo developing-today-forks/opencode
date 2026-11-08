@@ -9,7 +9,7 @@ import { MetaResponses } from "../../src/protocols/meta-responses.js"
 import { compileRequest } from "../../src/route/client.js"
 import { it } from "../lib/effect.js"
 import { dynamicResponse } from "../lib/http.js"
-import { sseEvents } from "../lib/sse.js"
+import { sseEvents, sseNamedEvent } from "../lib/sse.js"
 
 it.effect("Meta composes baseline protocols with provider-owned endpoints and defaults", () =>
   Effect.gen(function* () {
@@ -76,6 +76,57 @@ it.effect("Meta Responses stays on HTTP when a WebSocket executor is supplied", 
       expect(response.text).toBe("Hello")
       expect(response.finishReason.normalized).toBe("stop")
     }
+  }),
+)
+
+it.effect("Meta Responses ignores subscription usage SSE events and keeps terminal usage", () =>
+  Effect.gen(function* () {
+    const body = [
+      sseNamedEvent("response.subscription_usage", {
+        type: "response.subscription_usage",
+        subscription_usage: { used_tokens: 12 },
+      }),
+      sseEvents(
+        { type: "response.created", response: { id: "resp_usage_event" } },
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { id: "msg_usage_event", type: "message", role: "assistant", content: [] },
+        },
+        { type: "response.output_text.delta", item_id: "msg_usage_event", delta: "Meta is responding" },
+        { type: "response.output_text.done", item_id: "msg_usage_event", text: "Meta is responding" },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            id: "msg_usage_event",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Meta is responding" }],
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            id: "resp_usage_event",
+            usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+          },
+        },
+      ),
+    ].join("\n\n")
+    const response = yield* LLMClient.generate(
+      LLM.request({ model: Meta.configure({ apiKey: "fixture" }).model("muse-spark-1.3"), prompt: "Hello" }),
+      { webSocket: { execute: () => Effect.die("Meta must not execute WebSocket requests") } },
+    ).pipe(
+      Effect.provide(
+        dynamicResponse((input) =>
+          Effect.sync(() => input.respond(body, { headers: { "content-type": "text/event-stream" } })),
+        ),
+      ),
+    )
+    expect(response.text).toBe("Meta is responding")
+    expect(response.usage?.inputTokens).toBe(12)
+    expect(response.usage?.outputTokens).toBe(4)
   }),
 )
 

@@ -33,6 +33,7 @@
     "@smithy/eventstream-codec": "4.2.14",
     "@smithy/util-utf8": "4.2.2",
     "@opencode/schema": "workspace:*",
+    "@opencode/util": "workspace:*",
     "aws4fetch": "1.0.20",
     "effect": "catalog:",
     "google-auth-library": "10.5.0"

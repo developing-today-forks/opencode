@@ -1,5 +1,15 @@
-import { describe, expect } from "bun:test"
-import { Effect } from "effect"
+import { describe, expect, test } from "bun:test"
+import { DateTime, Effect } from "effect"
+import { mkdtemp, mkdir, rm, writeFile } from "fs/promises"
+import os from "os"
+import path from "path"
+import { Directory, type Entry } from "@opencode/schema/config"
+import { Money } from "@opencode/schema/money"
+import { ConfigAgentDocuments } from "@opencode/core/config/agent-documents"
+import { NotFoundError } from "@opencode/core/session"
+import { SessionSchema } from "@opencode/core/session/schema"
+import { SubagentDepth } from "@opencode/core/session/subagent-depth"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Agent } from "@opencode/core/agent"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -17,6 +27,11 @@ import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionStore } from "@opencode/core/session/store"
 import { ModelGovernance } from "@opencode/core/session/model-governance"
+import { GovernanceConfig } from "@opencode/core/session/governance-config"
+import { Global } from "@opencode/util/global"
+import { buildLocationServiceMap } from "@opencode/core/location-services"
+import { tempGlobalLayer } from "./fixture/global"
+import { offlineModels } from "./fixture/models"
 import { EventTable } from "@opencode/core/event/sql"
 import { eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -202,6 +217,49 @@ describe("Session model governance", () => {
     }),
   )
 
+  it.effect("forking a child does not escape the policy above its source", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const grandparent = yield* session.create({
+        location,
+        model: model("haiku"),
+        subagentPolicy: { models: ["test/haiku"] },
+      })
+      const child = yield* session.create({
+        parentID: grandparent.id,
+        agent: Agent.ID.make("worker"),
+        model: model("haiku"),
+      })
+      yield* session.prompt({ sessionID: child.id, text: "Fork context", resume: false })
+      yield* SessionInbox.promote(db, bus, child.id, "steer")
+
+      const forked = yield* session.fork({ sessionID: child.id })
+      // The fork is projected top-level, but governance still binds it to
+      // the chain above its source.
+      expect(forked.parentID).toBeUndefined()
+
+      const switchError = yield* session
+        .switchModel({ sessionID: forked.id, model: model("opus") })
+        .pipe(Effect.flip)
+      expect(switchError).toBeInstanceOf(ModelGovernance.DeniedError)
+      expect((yield* session.get(forked.id)).model?.id).toBe(Model.ID.make("haiku"))
+
+      const childError = yield* session
+        .create({ parentID: forked.id, agent: Agent.ID.make("worker"), model: model("opus") })
+        .pipe(Effect.flip)
+      expect(childError).toBeInstanceOf(ModelGovernance.DeniedError)
+
+      const grandchild = yield* session.create({
+        parentID: forked.id,
+        agent: Agent.ID.make("worker"),
+        model: model("haiku"),
+      })
+      expect(grandchild.model?.id).toBe(Model.ID.make("haiku"))
+    }),
+  )
+
   it.effect("a policy agent override narrows the models a named agent may launch with", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service
@@ -231,4 +289,130 @@ describe("Session model governance", () => {
       expect(other.model?.id).toBe(Model.ID.make("b"))
     }),
   )
+})
+
+describe("Markdown-defined agents in governance (#1107)", () => {
+  test(
+    "GovernanceConfig.load expands Markdown agents through the production location graph",
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "opencode-governance-graph-"))
+      try {
+        await mkdir(path.join(root, ".opencode", "agents"), { recursive: true })
+        await writeFile(path.join(root, "opencode.json"), "{}")
+        await writeFile(
+          path.join(root, ".opencode", "agents", "pinned.md"),
+          ["---", "model: test/pinned", "excluded_models:", "  - test/denied", "max_depth: 1", "---", "Pinned agent."].join(
+            "\n",
+          ),
+        )
+        const ref = Location.Ref.make({ directory: AbsolutePath.make(root) })
+        // The seam Codex flagged on PR #1165: FSUtil must be an exposed root of
+        // the production Instance graph, or GovernanceConfig.load finds no FS in
+        // the location context and Markdown agents stay ungoverned in production
+        // even though test graphs that add FSUtil.node pass.
+        const result = await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const locations = yield* LocationServiceMap.Service
+              // Production session paths only ever read an already-initialized
+              // location; boot this one the same way before loading.
+              yield* locations.contextEffect(ref)
+              return yield* GovernanceConfig.load(locations, ref)
+            }).pipe(
+              Effect.provide(
+                buildLocationServiceMap([Global.node.replace(tempGlobalLayer), offlineModels]),
+              ),
+            ),
+          ),
+        )
+        const pinned = ModelGovernance.agentDefinitions(result.entries).get("pinned")
+        expect(pinned?.model?.providerID).toBe(Provider.ID.make("test"))
+        expect(pinned?.model?.id).toBe(Model.ID.make("pinned"))
+        expect(pinned?.excludedModels).toEqual(["test/denied"])
+        expect(pinned?.maxDepth).toBe(1)
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
+
+  test("a Markdown-defined agent is governed through directory expansion", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "opencode-governance-"))
+    try {
+      await mkdir(path.join(root, "agents"), { recursive: true })
+      await writeFile(
+        path.join(root, "agents", "pinned.md"),
+        ["---", "model: test/pinned", "excluded_models:", "  - test/denied", "max_depth: 1", "---", "Pinned agent."].join(
+          "\n",
+        ),
+      )
+      const entries: Entry[] = [new Directory({ type: "directory", path: AbsolutePath.make(root) })]
+      // The governance definition layer sees nothing in a raw directory entry:
+      // directory expansion is the seam that makes Markdown agents visible.
+      expect(ModelGovernance.agentDefinitions(entries).size).toBe(0)
+
+      const info = (
+        id: string,
+        options: { parentID?: string; agent?: string } = {},
+      ): SessionSchema.Info =>
+        SessionSchema.Info.make({
+          id: SessionSchema.ID.make(id),
+          parentID: options.parentID ? SessionSchema.ID.make(options.parentID) : undefined,
+          projectID: Project.ID.global,
+          agent: options.agent ? Agent.ID.make(options.agent) : undefined,
+          cost: Money.USD.zero,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+          location,
+        })
+      const parent = info("ses_parent")
+      const pinnedSession = info("ses_pinned", { agent: "pinned" })
+      const child = info("ses_child", { parentID: "ses_pinned" })
+      const byID = new Map([parent, pinnedSession, child].map((session) => [session.id, session]))
+      const sessions = {
+        get: (sessionID: SessionSchema.ID) => {
+          const session = byID.get(sessionID)
+          return session ? Effect.succeed(session) : Effect.fail(new NotFoundError({ sessionID }))
+        },
+      }
+
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const fs = yield* FSUtil.Service
+          const expanded = yield* ConfigAgentDocuments.expandEntries(fs, entries)
+          const definitions = ModelGovernance.agentDefinitions(expanded)
+          const checked = ModelGovernance.checkedModel(expanded, { parent, agent: Agent.ID.make("pinned") })
+          const denied = yield* ModelGovernance.assertAllowed(
+            sessions,
+            { entries: () => Effect.succeed(expanded) },
+            { parent, agent: Agent.ID.make("pinned"), model: model("denied") },
+          ).pipe(Effect.flip)
+          const depthError = yield* SubagentDepth.assertWithinLimit(
+            sessions,
+            { entries: () => Effect.succeed(entries) },
+            child,
+            fs,
+          ).pipe(Effect.flip)
+          return { definitions, checked, denied, depthError }
+        }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))),
+      )
+
+      const pinned = result.definitions.get("pinned")
+      expect(pinned?.model?.providerID).toBe(Provider.ID.make("test"))
+      expect(pinned?.model?.id).toBe(Model.ID.make("pinned"))
+      expect(pinned?.excludedModels).toEqual(["test/denied"])
+      expect(pinned?.maxDepth).toBe(1)
+      // A model-less child of the Markdown agent runs its pinned default.
+      expect(result.checked?.providerID).toBe(Provider.ID.make("test"))
+      expect(result.checked?.id).toBe(Model.ID.make("pinned"))
+      // The Markdown agent's own excluded_models bind its model choice.
+      expect(result.denied).toBeInstanceOf(ModelGovernance.DeniedError)
+      // And its max_depth binds launches below a session it runs.
+      expect(result.depthError).toBeInstanceOf(SubagentDepth.LimitError)
+      expect((result.depthError as SubagentDepth.LimitError).message).toContain("max_depth")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

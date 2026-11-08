@@ -7,6 +7,7 @@ import path from "path"
 import { Money } from "@opencode/schema/money"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
+import { FSUtil } from "@opencode/util/fs-util"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
@@ -132,6 +133,7 @@ const subagentPluginSupervisor = makeLocationNode({
     SubagentJob.node,
     Tool.node,
     PluginHooks.node,
+    FSUtil.node,
   ],
 })
 
@@ -320,7 +322,7 @@ describe("SubagentTool", () => {
     ),
   )
 
-  it.live("lets a subagent launch its own subagent in the foreground by default", () =>
+  it.live("lets a subagent background its own subagent", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),
       (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
@@ -342,15 +344,15 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-nested-subagent",
               name: SubagentTool.name,
-              // A nested launch blocks even when asked to background, so the parent's answer includes it.
+              // A nested launch may background; the child notifies its direct parent.
               input: { agent: "reviewer", description: "nested", prompt: "should run", background: true },
             },
           })
 
           expect(settled).toMatchObject({
             status: "completed",
-            metadata: { status: "completed" },
-            content: [{ type: "text", text: expect.stringContaining(childText) }],
+            metadata: { status: "running" },
+            content: [{ type: "text", text: expect.stringContaining("background") }],
           })
           expect((yield* sessions.get(outputSessionID(settled.metadata))).parentID).toBe(parent.id)
         }),
@@ -744,6 +746,39 @@ describe("SubagentTool", () => {
           })
           const fallbackChild = yield* sessions.get(outputSessionID(fallback.metadata))
           expect(fallbackChild).toMatchObject({ parentID: parent.id, model: parentModel })
+        }),
+      ),
+    ),
+  )
+
+  it.live("launches children of a detached session detached and children of an interactive one interactive", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const detached = yield* sessions.create({ location, model: parentModel, detached: true })
+          const interactive = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(detached.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(detached.location)))
+          const launch = (sessionID: Session.ID, id: string) =>
+            executeTool(registry, {
+              sessionID,
+              ...toolIdentity,
+              call: {
+                type: "tool-call",
+                id,
+                name: SubagentTool.name,
+                input: { agent: "reviewer", description: "review", prompt: "review this" },
+              },
+            }).pipe(Effect.flatMap((settled) => sessions.get(outputSessionID(settled.metadata))))
+
+          expect((yield* launch(detached.id, "call-detached")).detached).toBe(true)
+          expect((yield* launch(interactive.id, "call-interactive")).detached).toBeUndefined()
         }),
       ),
     ),

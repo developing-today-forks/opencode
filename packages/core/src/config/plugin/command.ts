@@ -98,7 +98,7 @@ export const Plugin = define({
                 })
                 if (subagent ?? commandAgent?.mode === "subagent") {
                   const parent = yield* sessions.get(input.sessionID)
-                  yield* SubagentDepth.assertWithinLimit(sessions, config, parent)
+                  yield* SubagentDepth.assertWithinLimit(sessions, config, parent, fs)
                   const selected = yield* agents.select(agent ?? parent.agent)
                   const child = yield* sessions.create({
                     parentID: parent.id,

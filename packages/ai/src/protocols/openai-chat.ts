@@ -679,7 +679,11 @@ const hasToolHistory = (messages: ReadonlyArray<LLMRequest["messages"][number]>)
 // explicit `compatibility.maxTokensField` is not set. Aligned with
 // models.dev provider naming: DeepSeek, Moonshot AI, Together AI, ZAI
 // (Zhipu + Coding Plan variants), Nvidia, Cerebras, Chutes, etc. still
-// require `max_tokens`.
+// require `max_tokens`. Model-family defaults for the multi-family gateway
+// doors (cline-pass, opendesign, opencode-go) are NOT detected here: they
+// live as per-model `compatibility` entries in the catalog/config layer
+// (#1824), so a family-shaped model id on any other provider keeps the
+// provider/baseURL behavior below.
 const detectMaxTokensField = (
   provider: string,
   baseURL: string | undefined,
@@ -768,6 +772,14 @@ const detectSupportsStrictMode = (provider: string, baseURL: string | undefined)
   return !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia
 }
 
+// GLM 4.5-family models are excluded from tool streaming. The comparison
+// uses the final id segment so vendor-prefixed ids ("zai/glm-4.5") are
+// excluded exactly like the bare id.
+const isGlmToolStreamExcluded = (modelID: string): boolean => {
+  const segment = modelID.toLowerCase().split("/").pop() ?? ""
+  return segment === "glm-4.5" || segment === "glm-4.5-air" || segment === "glm-4.5-flash" || segment === "glm-4.5v"
+}
+
 const detectZaiToolStream = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
@@ -779,9 +791,7 @@ const detectZaiToolStream = (provider: string, baseURL: string | undefined, mode
     url.includes("api.z.ai") ||
     url.includes("open.bigmodel.cn")
   if (!isZai) return false
-  const id = modelID.toLowerCase()
-  if (id === "glm-4.5" || id === "glm-4.5-air" || id === "glm-4.5-flash" || id === "glm-4.5v") return false
-  return true
+  return !isGlmToolStreamExcluded(modelID)
 }
 
 const lowerOptions = (request: LLMRequest, supportsStore: boolean) => {

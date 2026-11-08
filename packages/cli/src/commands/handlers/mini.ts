@@ -9,6 +9,7 @@ import { Global } from "@opencode/util/global"
 export default Runtime.handler(Commands.commands.mini, (input) =>
   Effect.gen(function* () {
     const { runMini, validateMiniTerminal } = yield* Effect.promise(() => import("../../mini"))
+    const runFork = Effect.runForkWith(yield* Effect.context<never>())
     yield* Effect.promise(async () => validateMiniTerminal())
     const serverURL = Option.getOrUndefined(input.server)
     const server = yield* ServerConnection.resolve({
@@ -24,6 +25,7 @@ export default Runtime.handler(Commands.commands.mini, (input) =>
     const service = server.service
     yield* Effect.promise(() =>
       runMini({
+        log: (message) => runFork(Effect.logInfo(message)),
         server: {
           endpoint: server.endpoint,
           reconnect: service ? (signal) => runServicePromise(service.reconnect(), { signal }) : undefined,

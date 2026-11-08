@@ -22,6 +22,7 @@ import { authorizedRequest, unauthorizedResponse } from "./middleware/authorizat
 import { withoutParentSpan } from "./request-tracing"
 import { createRoutes } from "./routes"
 import { ServerInfo } from "./server-info"
+import { PluginServerUrl } from "@opencode/core/plugin/server-url"
 import { Status } from "./service-status"
 import type { ServerOptions } from "./options"
 
@@ -91,6 +92,9 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     return ServerInfo.connectionURLs(`http://${host}:${address.port}`, hostname)
   }
   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
+  // Plugins read the active listener through Plugin.Context.serverUrl.
+  const activeUrl = urls()[0]
+  PluginServerUrl.setServerUrl(activeUrl)
   const application = yield* Ref.make(Option.none<App>())
   const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
@@ -117,6 +121,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     status.beginStopping.pipe(
       Effect.andThen(Ref.set(application, Option.none())),
       Effect.andThen(Effect.sync(() => bound.server.closeAllConnections())),
+      Effect.andThen(
+        Effect.sync(() => {
+          if (PluginServerUrl.getServerUrl() === activeUrl) PluginServerUrl.setServerUrl(undefined)
+        }),
+      ),
     ),
   )
 

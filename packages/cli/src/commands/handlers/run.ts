@@ -6,6 +6,7 @@ import { ServerConnection } from "../../services/server-connection"
 export default Runtime.handler(Commands.commands.run, (input) =>
   Effect.gen(function* () {
     const { runNonInteractive } = yield* Effect.promise(() => import("../../run/run"))
+    const runFork = Effect.runForkWith(yield* Effect.context<never>())
     const separator = process.argv.indexOf("--", 2)
     const server = yield* ServerConnection.resolve({
       server: Option.getOrUndefined(input.server),
@@ -14,6 +15,7 @@ export default Runtime.handler(Commands.commands.run, (input) =>
     yield* Effect.promise(() =>
       runNonInteractive({
         server,
+        log: (message) => runFork(Effect.logInfo(message)),
         message: [...input.message, ...(separator === -1 ? [] : process.argv.slice(separator + 1))],
         continue: input.continue,
         session: Option.getOrUndefined(input.session),

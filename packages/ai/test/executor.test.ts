@@ -38,6 +38,66 @@ const expectAIError = (error: unknown) => {
 const largeProviderMessage = `Upstream request failed: ${"validation failed; ".repeat(1_000)}`
 
 describe("RequestExecutor", () => {
+  it.effect("bounds declared and streamed oversized status bodies by bytes", () =>
+    Effect.gen(function* () {
+      const prefix = "x".repeat(64 * 1024)
+      const streamed = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(prefix.slice(0, 32000)))
+          controller.enqueue(new TextEncoder().encode(prefix.slice(32000) + "extra"))
+          controller.close()
+        },
+      })
+      for (const [body, headers] of [
+        [prefix + "extra", { "content-length": "1000000" }],
+        [streamed, {}],
+      ] as const) {
+        const error = yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          return yield* executor.execute(request).pipe(Effect.flip)
+        }).pipe(Effect.provide(fixedResponse(body, { status: 503, headers })))
+        expect(error.reason.body).toBe(prefix)
+        expect(error.reason._tag).toBe("ProviderInternal")
+      }
+    }),
+  )
+
+  it.effect("stops reading an endless status body at the cap", () =>
+    Effect.gen(function* () {
+      let pulls = 0
+      let cancelled = false
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++
+          controller.enqueue(new Uint8Array(8192).fill(120))
+        },
+        cancel() {
+          cancelled = true
+        },
+      })
+      const error = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(request).pipe(Effect.flip)
+      }).pipe(Effect.provide(fixedResponse(body, { status: 503 })))
+      expect(error.reason.body).toBe("x".repeat(64 * 1024))
+      expect(pulls).toBeLessThanOrEqual(9)
+      expect(cancelled).toBeTrue()
+    }),
+  )
+
+  it.effect("classifies small status bodies without truncation", () =>
+    Effect.gen(function* () {
+      const body = '{"error":{"message":"Rate limited","type":"rate_limit_error"}}'
+      const error = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(request).pipe(Effect.flip)
+      }).pipe(Effect.provide(fixedResponse(body, { status: 429 })))
+      expect(error.reason._tag).toBe("RateLimit")
+      expect(error.reason.body).toBe(body)
+      expect(error.message).toBe("Rate limited")
+    }),
+  )
+
   it.effect("preserves externally captured HTTP errors without inventing response context", () =>
     Effect.sync(() => {
       const cause = new Error("upstream request failed")
@@ -519,6 +579,28 @@ describe("RequestExecutor", () => {
             "x-ratelimit-remaining-tokens": "29900",
             "x-ratelimit-reset-requests": "1s",
             "x-ratelimit-reset-tokens": "10s",
+          },
+        }),
+      ),
+    ),
+  )
+
+  it.effect("records a __proto__ rate-limit window as an own entry", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectAIError(error)
+      if (error.reason._tag !== "RateLimit") throw new Error("expected rate-limit details")
+      expect(Object.hasOwn(error.reason.rateLimit.remaining, "__proto__")).toBe(true)
+      expect(error.reason.rateLimit.remaining?.["__proto__"]).toBe("5")
+    }).pipe(
+      Effect.provide(
+        fixedResponse("rate limited", {
+          status: 429,
+          headers: {
+            "x-ratelimit-limit-requests": "100",
+            "x-ratelimit-remaining-__proto__": "5",
           },
         }),
       ),

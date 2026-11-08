@@ -149,8 +149,10 @@ const read = Effect.fnUntraced(function* (client: OpenCodeClient, cwd: string) {
   ).pipe(Effect.mapError((cause) => new ACPError.CatalogLoadError({ cause })))
   const models = modelResult.data.filter((model) => model.enabled)
   const preferred = defaultResult.data
-  // The parallel default read can name a model missing from this list.
-  const defaultModel = preferred ? findModel(models, preferred) : models[0]
+  // The parallel default read can name a model missing from this list. The
+  // implicit fallback skips hidden models (#230): hiding is picker-only, but a
+  // hidden model should not become the default nobody picked.
+  const defaultModel = preferred ? findModel(models, preferred) : (models.find((model) => !model.hidden) ?? models[0])
   if (!defaultModel) return yield* new ACPError.CatalogNotReadyError({ reason: "models" })
   const agents = agentResult.data.filter((agent) => agent.mode !== "subagent" && !agent.hidden)
   // Core lists its resolved default agent first, the same one a new session runs.

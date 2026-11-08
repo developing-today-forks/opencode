@@ -47,7 +47,8 @@ const FORMATS: Readonly<Record<string, { readonly encoding: string; readonly con
 }
 
 const audioFormat = (request: Request) => {
-  const format = request.format === undefined ? undefined : FORMATS[request.format]
+  const format =
+    request.format === undefined || !Object.hasOwn(FORMATS, request.format) ? undefined : FORMATS[request.format]
   return {
     encoding: request.providerOptions?.encoding ?? format?.encoding,
     container: request.providerOptions?.container ?? format?.container,
@@ -72,7 +73,7 @@ const fromRequest = Effect.fn("DeepgramSpeech.fromRequest")(function* (request: 
     return yield* route.unsupported("media.timestamps", `${route.name} does not return timestamps`)
   if (
     request.format !== undefined &&
-    FORMATS[request.format] === undefined &&
+    !Object.hasOwn(FORMATS, request.format) &&
     request.providerOptions?.encoding === undefined
   )
     return yield* route.unsupported(
@@ -102,7 +103,8 @@ const finish = (state: State, context: MediaProtocol.ResponseContext<Request>) =
   const headers = context.http.headers
   const mediaType = headers["content-type"]
   const format = audioFormat(context.request)
-  const headerless = HEADERLESS_ENCODINGS[format.encoding ?? ""]
+  const headerlessKey = format.encoding ?? ""
+  const headerless = Object.hasOwn(HEADERLESS_ENCODINGS, headerlessKey) ? HEADERLESS_ENCODINGS[headerlessKey] : undefined
   const container = format.container ?? (headerless === undefined ? undefined : "wav")
   const requestID = headers["dg-request-id"]
   const modelName = headers["dg-model-name"]

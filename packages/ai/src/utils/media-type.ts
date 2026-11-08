@@ -48,8 +48,10 @@ const EXTENSIONS: Readonly<Record<string, string>> = {
   csv: "text/csv",
 }
 
-const extensionMediaType = (path: string): string | undefined =>
-  EXTENSIONS[path.slice(path.lastIndexOf(".") + 1).toLowerCase()]
+const extensionMediaType = (path: string): string | undefined => {
+  const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase()
+  return Object.hasOwn(EXTENSIONS, extension) ? EXTENSIONS[extension] : undefined
+}
 
 /** Media type of a file's contents: sniffed magic bytes, then the path's extension. */
 export const fileMediaType = (bytes: Uint8Array, path: string) => detectMediaType(bytes) ?? extensionMediaType(path)
@@ -66,5 +68,8 @@ const EXTENSION_ALIASES: Readonly<Record<string, string>> = {
 
 export const mediaTypeExtension = (mediaType: string): string | undefined => {
   const type = mediaType.split(";", 1)[0].trim().toLowerCase()
-  return EXTENSION_ALIASES[type] ?? Object.entries(EXTENSIONS).find(([, known]) => known === type)?.[0]
+  return (
+    (Object.hasOwn(EXTENSION_ALIASES, type) ? EXTENSION_ALIASES[type] : undefined) ??
+    Object.entries(EXTENSIONS).find(([, known]) => known === type)?.[0]
+  )
 }

@@ -279,13 +279,20 @@ export function attemptParameterRepair(schema: unknown, input: unknown): Paramet
 
     // String to number coercion. Only a type fix is allowed, never a value
     // change: the parsed number must be finite, and for an integer parameter
-    // it must already be an integer ("3.0" coerces, "3.9" does not). The
-    // accepted grammar is Number()'s, so hex ("0x10") and exponent ("1e3")
-    // forms coerce when they satisfy those checks.
+    // it must already be an integer ("3.9" does not coerce). The accepted
+    // grammar is plain decimal, the same grammar ToolInputRepair uses,
+    // tested against the trimmed value (mcpx trims first; the sibling tests
+    // the raw string): integer /^-?\d+$/, number /^-?\d+(?:\.\d+)?$/.
+    // Number()'s wider grammar would reinterpret hex ("0x10" -> 16),
+    // binary/octal, and exponent ("1e3" -> 1000) spellings the model never
+    // wrote as decimals, so those are left unrepaired. Integer "3.0" is
+    // likewise left unrepaired (not an integer spelling), while a number
+    // parameter still coerces "3.0" to 3 via the fraction grammar.
     if ((expectedType === "number" || expectedType === "integer") && typeof val === "string") {
       const trimmed = val.trim()
+      const decimal = expectedType === "integer" ? /^-?\d+$/ : /^-?\d+(?:\.\d+)?$/
       const num = Number(trimmed)
-      if (trimmed !== "" && Number.isFinite(num) && (expectedType !== "integer" || Number.isInteger(num))) {
+      if (decimal.test(trimmed) && Number.isFinite(num) && (expectedType !== "integer" || Number.isInteger(num))) {
         repaired[prop] = num
         explanations.push(`Coerced parameter "${prop}" from string "${val}" to number ${repaired[prop]}.`)
         madeChanges = true

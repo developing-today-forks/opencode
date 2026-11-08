@@ -28,7 +28,7 @@ describe("web UI", () => {
         },
       })
       const server = yield* ServerProcess.start<never, never>(
-        { hostname: "127.0.0.1", port: 0, password: "secret", database: { path: ":memory:" } },
+        { hostname: "127.0.0.1", port: 0, password: "secret", database: { path: ":memory:" }, models: { fetch: false } },
         undefined,
         transform,
       )
@@ -56,19 +56,67 @@ describe("web UI", () => {
             )
           }),
       )
-      yield* Effect.forEach(["/api", "/api/info", "/api/event", "/api/missing", "/openapi.json"], (pathname) =>
-        Effect.gen(function* () {
-          const response = yield* Effect.promise(() => fetch(new URL(pathname, origin)))
-          expect(response.status).toBe(401)
-          expect(response.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
-          yield* Effect.promise(() => response.arrayBuffer())
-        }),
+      yield* Effect.forEach(
+        ["/api", "/api/info", "/api/event", "/api/missing", "/openapi.json", "/v1/models", "/v1/missing"],
+        (pathname) =>
+          Effect.gen(function* () {
+            const response = yield* Effect.promise(() => fetch(new URL(pathname, origin)))
+            expect(response.status).toBe(401)
+            expect(response.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
+            yield* Effect.promise(() => response.arrayBuffer())
+          }),
       )
       const response = yield* Effect.promise(() =>
         fetch(new URL("/api/info", origin), { headers: { authorization: `Basic ${btoa("opencode:secret")}` } }),
       )
       expect(response.status).toBe(200)
       expect(yield* Effect.promise(() => response.json())).toHaveProperty("pid")
+
+      // The facade doors (#1627): /v1/* belongs to the API router, so an authenticated
+      // request gets the facade's JSON — never the SPA shell (GET) or the shell's 405 (POST).
+      const authHeaders = { authorization: `Basic ${btoa("opencode:secret")}`, "content-type": "application/json" }
+      const models = yield* Effect.promise(() => fetch(new URL("/v1/models", origin), { headers: authHeaders }))
+      expect(models.status).toBe(200)
+      expect(models.headers.get("content-type")).toContain("application/json")
+      const modelsBody = (yield* Effect.promise(() => models.json())) as { object?: unknown; data?: unknown }
+      expect(modelsBody.object).toBe("list")
+      expect(Array.isArray(modelsBody.data)).toBe(true)
+
+      const chat = yield* Effect.promise(() =>
+        fetch(new URL("/v1/chat/completions", origin), {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ model: "no-such-model", messages: [{ role: "user", content: "hello" }] }),
+        }),
+      )
+      expect(chat.status).toBe(400)
+      expect(chat.headers.get("content-type")).toContain("application/json")
+      const chatBody = (yield* Effect.promise(() => chat.json())) as { error?: { type?: unknown } }
+      expect(chatBody.error?.type).toBe("invalid_request_error")
+
+      const systemone = yield* Effect.promise(() =>
+        fetch(new URL("/v1/systemone", origin), {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ model: "not-a-clef-model", state: {}, questions: {} }),
+        }),
+      )
+      expect(systemone.status).toBe(400)
+      expect(systemone.headers.get("content-type")).toContain("application/json")
+      const systemoneBody = (yield* Effect.promise(() => systemone.json())) as Record<string, unknown>
+      expect(typeof systemoneBody.error).toBe("string")
+
+      const embeddings = yield* Effect.promise(() =>
+        fetch(new URL("/v1/embeddings", origin), {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ model: "no-such-model", input: "hello" }),
+        }),
+      )
+      expect(embeddings.status).not.toBe(405)
+      expect(embeddings.headers.get("content-type")).toContain("application/json")
+      const embeddingsBody = (yield* Effect.promise(() => embeddings.json())) as Record<string, unknown>
+      expect("error" in embeddingsBody || "data" in embeddingsBody).toBe(true)
 
       const pairing = yield* Effect.promise(() =>
         fetch(new URL("/api/pair", origin), {
@@ -106,7 +154,12 @@ describe("web UI", () => {
                 Effect.gen(function* () {
                   const request = yield* HttpServerRequest.HttpServerRequest
                   const pathname = new URL(request.url, "http://localhost").pathname
-                  if (pathname === "/api/info" || pathname === "/openapi.json" || pathname.startsWith("/auth/"))
+                  if (
+                    pathname === "/api/info" ||
+                    pathname === "/openapi.json" ||
+                    pathname.startsWith("/auth/") ||
+                    pathname.startsWith("/v1/")
+                  )
                     return HttpServerResponse.jsonUnsafe({ via: "api" })
                   return yield* Effect.fail(
                     new HttpServerError.HttpServerError({
@@ -136,11 +189,13 @@ describe("web UI", () => {
         "/openapi.json",
         "/auth/connect/example",
         "/api/missing",
+        "/v1/models",
       ])
       for (const result of disabled.slice(0, 4)) expect(result).toMatchObject({ status: 404, body: "" })
       for (const result of disabled.slice(4, 7))
         expect(result).toEqual({ pathname: result.pathname, status: 200, body: '{"via":"api"}' })
       expect(disabled[7]).toMatchObject({ status: 404, body: "" })
+      expect(disabled[8]).toEqual({ pathname: "/v1/models", status: 200, body: '{"via":"api"}' })
 
       const enabled = await probe(false, ["/", "/_assets/app.js"])
       expect(enabled[0]?.status).toBe(200)
@@ -247,6 +302,10 @@ describe("web UI", () => {
           const missing = yield* Effect.promise(() => fetch(`${origin}/api/missing`))
           expect(missing.status).toBe(404)
           expect(yield* Effect.promise(() => missing.text())).toBe("")
+
+          const missingFacade = yield* Effect.promise(() => fetch(`${origin}/v1/missing`))
+          expect(missingFacade.status).toBe(404)
+          expect(yield* Effect.promise(() => missingFacade.text())).toBe("")
 
           yield* Effect.forEach(["/_assets/old.js", "/_assets/old.css", "/_assets/missing"], (pathname) =>
             Effect.gen(function* () {

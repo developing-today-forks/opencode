@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import {
   AIError,
+  AuthenticationError,
   HttpRateLimitDetails,
   InvalidRequestError,
   LanguageModel,
@@ -9,11 +10,14 @@ import {
   ProviderInternalError,
   QuotaExceededError,
   RateLimitError,
+  TimeoutError,
+  UnknownProviderError,
 } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
+import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { EventTable } from "@opencode/core/event/sql"
@@ -598,6 +602,489 @@ it.effect("cools a target that reports an exhausted quota for the quota cooldown
   }),
 )
 
+it.effect("benches a routed target after repeated non-retryable timeout failures", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-timeout",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "timeout-model", provider: "timeout-provider", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("timeout-route"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ cooldownMs: 30_000, firstTokenTimeoutMs: false }),
+        fallback: () => Effect.succeed(primary),
+      },
+    })
+    const attempt = () =>
+      steps.attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+
+    const fail = () =>
+      TestLLM.failAfter(
+        new AIError({ reason: new TimeoutError({ message: "request deadline elapsed", timeoutMs: 1_000 }) }),
+      )
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    const first = ModelRoute.cooldownUntil(primary.ref)
+    expect(first).toBeGreaterThan(Date.now())
+
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    expect(ModelRoute.cooldownUntil(primary.ref) - first).toBeGreaterThan(25_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("benches a routed target after repeated non-retryable 402 billing failures", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-billing",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "billing-model", provider: "billing-provider", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("billing-route"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ cooldownMs: 30_000, firstTokenTimeoutMs: false }),
+        fallback: () => Effect.succeed(primary),
+      },
+    })
+    const attempt = () =>
+      steps.attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+
+    const fail = () =>
+      TestLLM.failAfter(
+        new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }),
+      )
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    const first = ModelRoute.cooldownUntil(primary.ref)
+    expect(first).toBeGreaterThan(Date.now())
+
+    yield* llm.push(fail())
+    yield* attempt().pipe(Effect.exit)
+    expect(ModelRoute.cooldownUntil(primary.ref) - first).toBeGreaterThan(25_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("fails over to the next target when the retry hook declines a route failure", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("smart-slow"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+        fallback: () => {
+          fallbackCalls++
+          return Effect.succeed(fallback)
+        },
+      },
+    })
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        // The hook declines another request to the SAME target; that must not veto the route
+        // moving on to an eligible candidate (#1014).
+        retry: () => Effect.succeed({ retry: false as const }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+
+    expect(Exit.isSuccess(result)).toBe(true)
+    if (Exit.isSuccess(result))
+      expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+    expect(fallbackCalls).toBe(1)
+    expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
+it.effect("switches to the next credential again on a second quota failure in the same message", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const otherTarget = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let routeFallbackCalls = 0
+    const credentialModel = (credentialID: string, next?: ReturnType<typeof SessionRunnerModel.resolved>) =>
+      SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("smart-slow"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          credentialID: Credential.ID.make(credentialID),
+          ...(next ? { credentialFallback: () => Effect.succeed(next) } : {}),
+          fallback: () => {
+            routeFallbackCalls++
+            return Effect.succeed(otherTarget)
+          },
+        },
+      })
+    const modelC = credentialModel("cred-c")
+    const modelB = credentialModel("cred-b", modelC)
+    const modelA = credentialModel("cred-a", modelB)
+    const attempt = (model: ReturnType<typeof SessionRunnerModel.resolved>) =>
+      steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: (_cause, _error, retry) =>
+            Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    const first = yield* attempt(modelA)
+    expect(Exit.isSuccess(first)).toBe(true)
+    if (Exit.isSuccess(first))
+      expect(first.value).toEqual(SessionStep.Outcome.Failover({ model: modelB, error: expect.anything() }))
+
+    // A second quota failure on the switched credential, in the same assistant message, tries
+    // the next credential on the same provider before any different target (proximity order:
+    // credential -> leaf -> sibling plan -> next route, #1014).
+    yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    const second = yield* attempt(modelB)
+    expect(Exit.isSuccess(second)).toBe(true)
+    if (Exit.isSuccess(second))
+      expect(second.value).toEqual(SessionStep.Outcome.Failover({ model: modelC, error: expect.anything() }))
+    expect(routeFallbackCalls).toBe(0)
+    expect(yield* llm.requests()).toHaveLength(2)
+  }),
+)
+
+it.effect("does not fail over within the same message when a quota failure follows partial output", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("smart-slow"),
+        target: primary.ref,
+        attempts: 1,
+        policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+        fallback: () => {
+          fallbackCalls++
+          return Effect.succeed(fallback)
+        },
+      },
+    })
+    yield* llm.push(
+      TestLLM.failAfter(
+        new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }),
+        LLMEvent.textStart({ id: "answer" }),
+        LLMEvent.textDelta({ id: "answer", text: "partial" }),
+      ),
+    )
+
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+
+    // Pinned gate (#1014): partial output is already published on this assistant message, so a
+    // different model must not append to it via Failover; the post-output cascade is the
+    // Continue outcome on a new message when a retry is authorized. The target is still
+    // marked failed, so a later re-selection sees it cooling.
+    expect(Exit.isSuccess(result) ? result.value._tag : undefined).not.toBe("Failover")
+    expect(fallbackCalls).toBe(0)
+    expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
+    expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
 it.effect("cools a rate-limited target for exactly what the provider asked", () =>
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
@@ -995,6 +1482,9 @@ it.live("fails over when a routed provider misses the first-output deadline", ()
     expect(Exit.isSuccess(result)).toBe(true)
     if (Exit.isSuccess(result)) expect(result.value._tag).toBe("Failover")
     expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
+    // The failover completes on the deadline, not on the provider stream: wait for the
+    // request to actually be recorded before snapshotting llm.requests() (issue #488).
+    yield* llm.wait(1)
     expect(yield* llm.requests()).toHaveLength(1)
   }),
 )
@@ -1713,6 +2203,9 @@ describe("escalation follows the route's autonomy", () => {
 
           // A racing route answers from the next target at once; one that only fails over hands the turn back.
           expect(Exit.isSuccess(result) ? result.value._tag : undefined).toBe(races ? "Completed" : "Failover")
+          // The non-racing branch ends on the first-output deadline, which does not wait
+          // for the provider stream fiber that records the request (issue #488 audit).
+          yield* llm.wait(races ? 2 : 1)
           expect(yield* llm.requests()).toHaveLength(races ? 2 : 1)
           const starts = logged.filter((event) => event.kind === "decision" && event.row.reason === "hedge-started")
           expect(starts).toHaveLength(races ? 1 : 0)
@@ -2009,6 +2502,173 @@ describe("the route log and pool health time the model's response, not the step 
       expect(
         step.attempt.time_ended - step.attempt.time_started - (step.attempt.response_ms ?? Number.NaN),
       ).toBeGreaterThanOrEqual(WAIT_MS / 2)
+    }),
+  )
+})
+
+// #1806: the failover gate must admit every failure class that indicts the target, not
+// only retryable/auth/quota ones — a session moves to the next candidate on ANY
+// candidate error and errors only when every candidate is exhausted (Drew, 2026-11-06).
+describe("SessionStep failover classes (#1806)", () => {
+  const attemptWith = (error: AIError, serveFallback: boolean) =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const sessionID = Session.ID.create()
+      const assistantMessageID = SessionMessage.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "failover-classes",
+          directory: "/project",
+          version: "test",
+        })
+        .run()
+      const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+      const cost = [
+        {
+          input: Money.USDPerMillionTokens.make(1),
+          output: Money.USDPerMillionTokens.make(2),
+          cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+        },
+      ]
+      const limit = { context: 100_000, output: 1_000 }
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const fallback = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      let fallbackCalls = 0
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("failover-classes"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => {
+            fallbackCalls++
+            return Effect.succeed(serveFallback ? fallback : undefined)
+          },
+        },
+      })
+      yield* llm.push(TestLLM.failAfter(error))
+      const result = yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: (_cause, _error, retry) =>
+            Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+      return { result, fallbackCalls, fallback }
+    })
+
+  it.effect("fails over on an authentication failure (the not-signed-in class)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new AuthenticationError({ message: "Claude Code is not signed in on this machine" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on a quota-exhausted failure", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new QuotaExceededError({ message: "Individual quota reached" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on an unclassified InvalidRequest (a model the provider no longer serves)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new InvalidRequestError({ message: "model not found" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on a target-side timeout", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({ reason: new TimeoutError({ message: "provider timed out" }) }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("does not fail over a context-overflow InvalidRequest — size recovery owns the request", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls } = yield* attemptWith(
+        new AIError({
+          reason: new InvalidRequestError({ message: "context length exceeded", classification: "context-overflow" }),
+        }),
+        true,
+      )
+      expect(fallbackCalls).toBe(0)
+      if (Exit.isSuccess(result)) expect(result.value._tag).not.toBe("Failover")
+    }),
+  )
+
+  it.effect("errors once with the candidate's failure when every candidate is exhausted", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls } = yield* attemptWith(
+        new AIError({ reason: new InvalidRequestError({ message: "model not found" }) }),
+        false,
+      )
+      expect(fallbackCalls).toBe(1)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(JSON.stringify(result.cause)).toContain("model not found")
     }),
   )
 })

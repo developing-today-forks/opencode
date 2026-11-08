@@ -4,6 +4,7 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { Effect, Schema, Scope } from "effect"
 import { HttpClient } from "effect/http"
 import { App } from "../../app.js"
+import { ModelRouteLimits } from "../../model-route-limits.js"
 import { WebSearchMcp } from "./mcp.js"
 
 export const endpoint = "https://search.parallel.ai/mcp"
@@ -87,12 +88,16 @@ export const Plugin = define<HttpClient.HttpClient | Scope.Scope>({
             )
             return (
               result?.structuredContent.results.map((item) => {
-                const published = item.publish_date ? Date.parse(item.publish_date) : undefined
+                // Calendar check via ModelRouteLimits.parseAbsoluteTime (#785): bare Date.parse
+                // rolls calendar-invalid dates (Feb 30 -> Mar 2) into fabricated instants.
+                const published = item.publish_date
+                  ? ModelRouteLimits.parseAbsoluteTime(item.publish_date)
+                  : undefined
                 return {
                   url: item.url,
                   ...(item.title ? { title: item.title } : {}),
                   ...(item.excerpts.length ? { content: item.excerpts.join("\n\n") } : {}),
-                  time: { ...(published !== undefined && Number.isFinite(published) ? { published } : {}) },
+                  time: { ...(published !== undefined ? { published } : {}) },
                 }
               }) ?? []
             )

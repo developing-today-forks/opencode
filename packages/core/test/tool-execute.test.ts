@@ -119,6 +119,15 @@ test("foreign typed failures settle as Tool.Error at the untrusted boundary", as
   expect(error.message).toBe("transport died")
 })
 
+test("execute exposes the std library", async () => {
+  const result = await Effect.runPromise(
+    createCodeMode(new Map()).execute({ code: "return [std.version, std.chunk([1, 2, 3], 2)]" }, context),
+  )
+
+  expect(result.output.error).toBeUndefined()
+  expect(result.content).toEqual([{ type: "text", text: '["1.0.0",[[1,2],[3]]]' }])
+})
+
 test("execute supports callable namespace tools", async () => {
   const callable: Info = {
     name: "admin",

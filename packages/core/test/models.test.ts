@@ -151,6 +151,8 @@ interface MockState {
   body: string
   status: number
   calls: Array<{ url: string; userAgent: string | null }>
+  headers?: Record<string, string>
+  streamChunks?: number
 }
 
 const makeMockClient = (state: Ref.Ref<MockState>) =>
@@ -161,7 +163,21 @@ const makeMockClient = (state: Ref.Ref<MockState>) =>
         calls: [...s.calls, { url: request.url, userAgent: request.headers["user-agent"] ?? null }],
       }))
       const s = yield* Ref.get(state)
-      return HttpClientResponse.fromWeb(request, new Response(s.body, { status: s.status }))
+      if (s.streamChunks !== undefined) {
+        // An effectively endless chunked body (1 MiB per pull, no
+        // content-length): the bounded reader must fail and cancel it once
+        // the 16 MiB cap trips instead of buffering it whole.
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(new Uint8Array(1024 * 1024).fill(97))
+          },
+        })
+        return HttpClientResponse.fromWeb(request, new Response(stream, { status: s.status, headers: s.headers }))
+      }
+      return HttpClientResponse.fromWeb(
+        request,
+        new Response(s.body, { status: s.status, headers: s.headers }),
+      )
     }),
   )
 
@@ -254,6 +270,78 @@ describe("ModelsDev Service", () => {
         ModelsDev.Service.use((s) => s.get()),
       )
       expect(result[0]?.models.map((model) => model.time.released)).toEqual([0, Date.UTC(2026, 1, 1), Date.UTC(2024, 1, 29)])
+    }),
+  )
+
+  it.live("attaches gateway-door compatibility entries to family-shaped door models only (#1824)", () =>
+    Effect.gen(function* () {
+      const base = fixture.acme.models["acme-1"]
+      const model = (id: string) => ({ ...base, id, name: id, interleaved: undefined })
+      const cache = makeCache()
+      writeCache(cache, {
+        "opencode-go": {
+          id: "opencode-go",
+          name: "OpenCode Go",
+          env: ["OPENCODE_API_KEY"],
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://opencode.ai/inference/go/openai/v1",
+          models: {
+            "glm-5.3": model("glm-5.3"),
+            "glm-4.5": model("glm-4.5"),
+            "kimi-k2.6": model("kimi-k2.6"),
+            "gemini-2.5-flash": model("gemini-2.5-flash"),
+            "deepseek-v4-pro": model("deepseek-v4-pro"),
+            "future-model": model("future-model"),
+          },
+        },
+        "cline-pass": {
+          id: "cline-pass",
+          name: "Cline Pass",
+          env: ["CLINE_API_KEY"],
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://api.cline.bot/api/v1",
+          models: { "cline-pass/glm-5.3": model("cline-pass/glm-5.3") },
+        },
+        acme: { ...fixture.acme, models: { "glm-5.3": model("glm-5.3") } },
+      })
+      const state = yield* Ref.make(initialState)
+      const result = yield* provided(
+        state,
+        cache,
+        ModelsDev.Service.use((s) => s.get()),
+      )
+      const byProvider = new Map(result.map((snapshot) => [String(snapshot.info.id), snapshot]))
+      const compat = (provider: string, id: string) =>
+        byProvider.get(provider)?.models.find((item) => String(item.id) === id)?.compatibility
+      expect(compat("opencode-go", "glm-5.3")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
+      })
+      expect(compat("opencode-go", "glm-4.5")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: false,
+      })
+      expect(compat("opencode-go", "kimi-k2.6")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        supportsStrictMode: false,
+      })
+      expect(compat("opencode-go", "gemini-2.5-flash")).toEqual({ supportsStore: false })
+      expect(compat("opencode-go", "deepseek-v4-pro")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+      })
+      expect(compat("opencode-go", "future-model")).toBeUndefined()
+      expect(compat("cline-pass", "cline-pass/glm-5.3")).toEqual({
+        maxTokensField: "max_tokens",
+        supportsStore: false,
+        zaiToolStream: true,
+      })
+      // The same family-shaped id on a non-door provider carries no entry:
+      // family defaults are a door catalog property, not a protocol rule.
+      expect(compat("acme", "glm-5.3")).toBeUndefined()
     }),
   )
 
@@ -453,6 +541,50 @@ describe("ModelsDev Service", () => {
       expect(final.calls.length).toBe(1)
       expect(final.calls[0].url).toContain("/api.json")
       expect(final.calls[0].userAgent).toContain("/opencode")
+    }),
+  )
+
+  it.live("refresh(true) rejects a catalog whose declared content-length exceeds the cap (#1078)", () =>
+    Effect.gen(function* () {
+      const cache = makeCache()
+      writeCache(cache, fixture)
+      const state = yield* Ref.make<MockState>({
+        ...initialState,
+        body: JSON.stringify(fixture2),
+        headers: { "content-length": String(17 * 1024 * 1024) },
+      })
+      const result = yield* provided(
+        state,
+        cache,
+        Effect.gen(function* () {
+          const svc = yield* ModelsDev.Service
+          yield* svc.refresh(true)
+          return yield* svc.get()
+        }),
+      )
+      // The over-cap body never reaches decode/writeCache: the cached
+      // catalog stays in force.
+      expect(result).toEqual(fixtureSnapshot)
+      expect(cache.values.get(cacheKey)).toMatchObject({ body: JSON.stringify(fixture) })
+    }),
+  )
+
+  it.live("refresh(true) bounds a chunked catalog body in flight, not after buffering (#1078)", () =>
+    Effect.gen(function* () {
+      const cache = makeCache()
+      writeCache(cache, fixture)
+      const state = yield* Ref.make<MockState>({ ...initialState, body: "", streamChunks: 64 })
+      const result = yield* provided(
+        state,
+        cache,
+        Effect.gen(function* () {
+          const svc = yield* ModelsDev.Service
+          yield* svc.refresh(true)
+          return yield* svc.get()
+        }),
+      )
+      expect(result).toEqual(fixtureSnapshot)
+      expect(cache.values.get(cacheKey)).toMatchObject({ body: JSON.stringify(fixture) })
     }),
   )
 

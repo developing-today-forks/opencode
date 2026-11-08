@@ -12,6 +12,7 @@ import { AbsolutePath, RelativePath } from "./schema.js"
 import { ID } from "@opencode/schema/snapshot"
 import { Hash } from "@opencode/util/hash"
 import { State } from "./state.js"
+import { diffContext } from "./vcs/patch.js"
 
 export { ID }
 
@@ -210,7 +211,8 @@ const layer = Layer.effect(
           repository: compared.repository,
           from: compared.from,
           to: compared.to,
-          context: input.context,
+          // An explicit context is normalised like Vcs.diff; an omitted one keeps the Git adapter default.
+          context: input.context === undefined ? undefined : diffContext(input.context),
           paths: input.paths,
         })
         .pipe(Effect.mapError((cause) => failure("diff", cause)))

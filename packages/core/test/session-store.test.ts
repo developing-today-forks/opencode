@@ -100,6 +100,36 @@ describe("SessionStore", () => {
     }),
   )
 
+  it.effect("normalises a present list limit and leaves an omitted limit unbounded", () =>
+    Effect.gen(function* () {
+      yield* seedSessions([
+        { id: "ses_list_a", updated: 30 },
+        { id: "ses_list_b", updated: 20 },
+        { id: "ses_list_c", updated: 10 },
+      ])
+      const store = yield* SessionStore.Service
+      // Direct (unvalidated) callers can pass limits the ListInput schema
+      // would reject; the store boundary must normalise them, never raw.
+      const count = (limit?: number) =>
+        store
+          .list(limit === undefined ? {} : ({ limit } as unknown as SessionStore.ListInput))
+          .pipe(Effect.map((sessions) => sessions.length))
+
+      expect(yield* count()).toBe(3)
+      expect(yield* count(2)).toBe(2)
+      expect(yield* count(2.9)).toBe(2)
+      expect(yield* count(1.5)).toBe(1)
+      expect(yield* count(0.5)).toBe(1)
+      expect(yield* count(0)).toBe(1)
+      expect(yield* count(-1)).toBe(1)
+      expect(yield* count(-5)).toBe(1)
+      // Documented policy: a present non-finite limit is treated as absent.
+      expect(yield* count(Number.NaN)).toBe(3)
+      expect(yield* count(Number.POSITIVE_INFINITY)).toBe(3)
+      expect(yield* count(Number.NEGATIVE_INFINITY)).toBe(3)
+    }),
+  )
+
   it.effect("pages messages by durable sequence, not timestamp or ID, and scopes cursor lookup", () =>
     Effect.gen(function* () {
       const sessionID = Session.ID.make("ses_messages")
@@ -185,6 +215,43 @@ describe("SessionStore", () => {
           cursor: { id: SessionMessage.ID.make("msg_foreign"), direction: "next" },
         }),
       ).toEqual([])
+    }),
+  )
+
+  it.effect("normalises a present message limit and leaves an omitted limit unbounded", () =>
+    Effect.gen(function* () {
+      const sessionID = Session.ID.make("ses_message_limits")
+      const bus = yield* seedSessions([{ id: sessionID, updated: 0 }])
+      // More than the documented ceiling (200) so clamped and unbounded results stay distinguishable.
+      const total = 250
+      yield* Effect.forEach(
+        Array.from({ length: total }, (_, index) => index),
+        (index) =>
+          bus.replay({
+            id: Event.ID.make(`evt_limit_${index}`),
+            created: index,
+            aggregateID: sessionID,
+            seq: index + 2,
+            type: Bus.versionedType(SessionEvent.Synthetic.type, 1),
+            data: { sessionID, text: `limit-${index}` },
+          }),
+      )
+      const store = yield* SessionStore.Service
+      const count = (limit?: number) =>
+        store
+          .messages({ sessionID, ...(limit === undefined ? {} : { limit }) })
+          .pipe(Effect.map((messages) => messages.length))
+
+      expect(yield* count()).toBe(total)
+      expect(yield* count(2)).toBe(2)
+      expect(yield* count(2.9)).toBe(2)
+      expect(yield* count(1.5)).toBe(1)
+      expect(yield* count(0)).toBe(1)
+      expect(yield* count(-5)).toBe(1)
+      expect(yield* count(Number.NaN)).toBe(50)
+      expect(yield* count(Number.POSITIVE_INFINITY)).toBe(50)
+      expect(yield* count(Number.NEGATIVE_INFINITY)).toBe(50)
+      expect(yield* count(500)).toBe(200)
     }),
   )
 })

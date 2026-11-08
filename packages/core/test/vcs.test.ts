@@ -14,6 +14,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { State } from "@opencode/core/state"
 import { Vcs } from "@opencode/core/vcs"
 import { VcsGitPlugin } from "@opencode/core/plugin/vcs/git"
+import { branchListLimit, listBranches } from "@opencode/core/plugin/vcs/branch-list"
 import type { VcsDefinition, VcsDiffInput } from "@opencode/plugin/effect/vcs"
 import { FileSystem } from "@opencode/schema/filesystem"
 import { VcsEvent } from "@opencode/schema/vcs-event"
@@ -552,6 +553,74 @@ describe("Vcs", () => {
     ),
   )
 
+  it.live("service branch pages normalise an invalid limit before it reaches git", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "file.txt"), "one\n")
+          await commitAll(directory, "initial")
+          await $`git checkout -b z-recent`.cwd(directory).quiet()
+          await fs.writeFile(path.join(directory, "file.txt"), "two\n")
+          await $`git add -A`.cwd(directory).quiet()
+          await $`git commit -m recent`
+            .cwd(directory)
+            .env({
+              ...process.env,
+              GIT_AUTHOR_DATE: "2030-01-01T00:00:00Z",
+              GIT_COMMITTER_DATE: "2030-01-01T00:00:00Z",
+            })
+            .quiet()
+        })
+        const vcs = yield* Vcs.Service
+        expect(Vcs.branchLimit()).toBe(50)
+        expect(Vcs.branchLimit(0)).toBe(1)
+        expect(Vcs.branchLimit(-5)).toBe(1)
+        expect(Vcs.branchLimit(1.5)).toBe(1)
+        expect(Vcs.branchLimit(2.9)).toBe(2)
+        expect(Vcs.branchLimit(Number.NaN)).toBe(50)
+        expect(Vcs.branchLimit(Number.POSITIVE_INFINITY)).toBe(50)
+        expect(Vcs.branchLimit(1_000)).toBe(100)
+        // Direct service calls: invalid limits must never surface as a silent
+        // empty list (git --count usage error swallowed by protect) and limit
+        // 0 must never return every branch.
+        expect(yield* vcs.branches({ limit: -5 })).toEqual(["z-recent"])
+        expect(yield* vcs.branches({ limit: 1.5 })).toEqual(["z-recent"])
+        expect(yield* vcs.branches({ limit: 0 })).toEqual(["z-recent"])
+        expect(yield* vcs.branches({ limit: Number.NaN })).toEqual(["z-recent", "main"])
+        expect(yield* vcs.branches()).toEqual(["z-recent", "main"])
+      }),
+    ),
+  )
+
+  it.live("plugin branch pages default and clamp the limit before it reaches git", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "file.txt"), "one\n")
+          await commitAll(directory, "initial")
+          const names = Array.from({ length: 60 }, (_, index) => `b${String(index + 1).padStart(2, "0")}`)
+          await $`sh -c ${`for name in ${names.join(" ")}; do git branch "$name"; done`}`.cwd(directory).quiet()
+        })
+        const vcs = yield* Vcs.Service
+        expect(branchListLimit()).toBe(50)
+        expect(branchListLimit(0)).toBe(1)
+        expect(branchListLimit(-5)).toBe(1)
+        expect(branchListLimit(1.5)).toBe(1)
+        expect(branchListLimit(2.9)).toBe(2)
+        expect(branchListLimit(Number.NaN)).toBe(50)
+        expect(branchListLimit(Number.POSITIVE_INFINITY)).toBe(50)
+        expect(branchListLimit(1_000)).toBe(100)
+        expect((yield* listBranches(vcs)).length).toBe(50)
+        expect((yield* listBranches(vcs, { limit: 0 })).length).toBe(1)
+        expect((yield* listBranches(vcs, { limit: -5 })).length).toBe(1)
+        expect((yield* listBranches(vcs, { limit: 1.5 })).length).toBe(1)
+        expect((yield* listBranches(vcs, { limit: 3 })).length).toBe(3)
+        expect((yield* listBranches(vcs, { limit: 1_000 })).length).toBe(61)
+        expect((yield* listBranches(vcs, { search: "b1", limit: 2 })).length).toBe(2)
+      }),
+    ),
+  )
+
   it.live("reports modified, deleted, and untracked files", () =>
     withGit((directory) =>
       Effect.gen(function* () {
@@ -703,6 +772,36 @@ describe("Vcs", () => {
         const tight = yield* vcs.diff("working", { context: 1 })
         expect(tight[0].patch).toContain("line-9")
         expect(tight[0].patch).not.toContain("line-0")
+      }),
+    ),
+  )
+
+  it.live("normalises a negative, fractional or NaN diff context before it reaches git", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        const body = Array.from({ length: 20 }, (_, index) => `line-${index}`).join("\n") + "\n"
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "file.txt"), body)
+          await commitAll(directory, "initial")
+          await fs.writeFile(path.join(directory, "file.txt"), body.replace("line-10", "changed"))
+        })
+        const vcs = yield* Vcs.Service
+        expect(Vcs.diffContext()).toBe(2_147_483_647)
+        expect(Vcs.diffContext(0)).toBe(0)
+        expect(Vcs.diffContext(3)).toBe(3)
+        expect(Vcs.diffContext(-1)).toBe(0)
+        expect(Vcs.diffContext(1.5)).toBe(1)
+        expect(Vcs.diffContext(Number.NaN)).toBe(2_147_483_647)
+        expect(Vcs.diffContext(Number.POSITIVE_INFINITY)).toBe(2_147_483_647)
+        const negative = yield* vcs.diff("working", { context: -1 })
+        expect(negative[0].patch).toContain("changed")
+        expect(negative[0].patch).not.toContain("\n line-9")
+        const fractional = yield* vcs.diff("working", { context: 1.5 })
+        expect(fractional[0].patch).toContain("\n line-9")
+        expect(fractional[0].patch).not.toContain("line-0")
+        const nan = yield* vcs.diff("working", { context: Number.NaN })
+        expect(nan[0].patch).toContain("line-0")
+        expect(nan[0].patch).toContain("line-19")
       }),
     ),
   )

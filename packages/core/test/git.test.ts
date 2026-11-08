@@ -373,8 +373,9 @@ describe("Git objects", () => {
           gitDirectory: AbsolutePath.make(path.join(root.path, "storage")),
           seed: source,
         })
-        const capture = () => git.tree.capture({ repository, scopes: [RelativePath.make(".")], ignores: source })
-        const trees = [yield* capture()]
+        const capture = (scope: string) =>
+          git.tree.capture({ repository, scopes: [RelativePath.make(scope)], ignores: source })
+        const trees = [yield* capture(".")]
         // Enough distinct content to cross the loose-object threshold.
         yield* Effect.promise(() =>
           Promise.all(
@@ -383,7 +384,7 @@ describe("Git objects", () => {
             ),
           ),
         )
-        trees.push(yield* capture())
+        trees.push(yield* capture("."))
         const objects = path.join(repository.gitDirectory, "objects")
         const alternates = path.join(objects, "info", "alternates")
         // Objects stored in the snapshot repository itself, excluding anything borrowed through alternates.
@@ -406,7 +407,9 @@ describe("Git objects", () => {
 
         for (let batch = 0; batch < 16; batch++) {
           yield* Effect.promise(() => Bun.write(path.join(project, `batch-${batch}.txt`), `${batch}\n`))
-          trees.push(yield* capture())
+          // Only the file just written changed, so a scoped capture records the same objects without stat-ing the
+          // whole generated tree again, which is the bulk of each batch's wall time on Windows.
+          trees.push(yield* capture(`batch-${batch}.txt`))
           yield* Effect.promise(async () => {
             const list = await looseObjectIDs(objects)
             await $`git --git-dir ${repository.gitDirectory} pack-objects -q ${path.join(objects, "pack", "pack")} < ${Buffer.from(list.join("\n") + "\n")}`.quiet()
@@ -426,7 +429,10 @@ describe("Git objects", () => {
 
         expect((yield* git.tree.files({ repository, from: trees[0]!, to: trees.at(-1)! })).length).toBe(2100 + 16)
       }),
-    { timeout: 60_000 },
+    // 2100 generated files must be created and hashed to cross the loose-object threshold, and git's per-file
+    // overhead is far higher on Windows: a windows-2025 unit run measured ~32s (23s of it the first full capture).
+    // 60s left under 2x headroom and was hit under the suite's normal contention, so this test gets its own budget.
+    { timeout: 180_000 },
   )
 })
 

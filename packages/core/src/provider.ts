@@ -67,11 +67,15 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/amazon-bedrock-mantle", () => import("@opencode/ai/providers/amazon-bedrock-mantle")],
   ["@opencode/ai/providers/anthropic", () => import("@opencode/ai/providers/anthropic")],
   ["@opencode/ai/providers/anthropic-compatible", () => import("@opencode/ai/providers/anthropic-compatible")],
+  ["@opencode/ai/providers/antigravity", () => import("@opencode/ai/providers/antigravity")],
   ["@opencode/ai/providers/azure", () => import("@opencode/ai/providers/azure")],
   ["@opencode/ai/providers/azure/chat", () => import("@opencode/ai/providers/azure/chat")],
   ["@opencode/ai/providers/azure/responses", () => import("@opencode/ai/providers/azure/responses")],
   ["@opencode/ai/providers/baseten", () => import("@opencode/ai/providers/baseten")],
   ["@opencode/ai/providers/cerebras", () => import("@opencode/ai/providers/cerebras")],
+  ["@opencode/ai/providers/claude-code", () => import("@opencode/ai/providers/claude-code")],
+  ["@opencode/ai/providers/muse-direct", () => import("@opencode/ai/providers/muse-direct")],
+  ["@opencode/ai/providers/commandcode", () => import("@opencode/ai/providers/commandcode")],
   ["@opencode/ai/providers/cloudflare-ai-gateway", () => import("@opencode/ai/providers/cloudflare-ai-gateway")],
   ["@opencode/ai/providers/cloudflare-workers-ai", () => import("@opencode/ai/providers/cloudflare-workers-ai")],
   ["@opencode/ai/providers/cohere", () => import("@opencode/ai/providers/cohere")],
@@ -129,6 +133,7 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/openrouter", () => import("@opencode/ai/providers/openrouter")],
   ["@opencode/ai/providers/togetherai", () => import("@opencode/ai/providers/togetherai")],
   ["@opencode/ai/providers/venice", () => import("@opencode/ai/providers/venice")],
+  ["@opencode/ai/providers/vibe", () => import("@opencode/ai/providers/vibe")],
   ["@opencode/ai/providers/vercel-ai-gateway", () => import("@opencode/ai/providers/vercel-ai-gateway")],
   ["@opencode/ai/providers/vercel-ai-gateway/chat", () => import("@opencode/ai/providers/vercel-ai-gateway/chat")],
   [
@@ -207,9 +212,18 @@ export const DEFAULT_TIMEOUT_MS = 300_000
  */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 900_000
 
-/** One timeout setting without a default; invalid values are dropped. */
+/** Largest timeout the raw timers on the AISDK route can honour (2^31 - 1 ms, ~24.8 days): `setTimeout` clamps a
+ * delay above it to ~1 ms and `AbortSignal.timeout` throws on a non-finite delay, so a larger configured value
+ * would invert its meaning — a request meant to get more time would fail instantly (#972). Every route resolves
+ * its timeouts through `timeout()` below, so clamping there keeps the native route (Effect Durations, which
+ * have no such limit) behaving the same as the AISDK route. */
+export const MAX_TIMEOUT_MS = 2_147_483_647
+
+/** One timeout setting without a default; invalid values are dropped, oversized values clamp to MAX_TIMEOUT_MS. */
 export function timeout(value: unknown) {
-  return Option.getOrUndefined(decodeTimeout(value))
+  const decoded = Option.getOrUndefined(decodeTimeout(value))
+  if (decoded === undefined || decoded === false) return decoded
+  return Math.min(decoded, MAX_TIMEOUT_MS)
 }
 
 /** Request timeouts from provider settings, resolved for every route. `timeout` has no default. */

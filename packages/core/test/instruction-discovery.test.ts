@@ -407,6 +407,58 @@ describe("ConfigInstructionPlugin.Plugin", () => {
     ),
   )
 
+  it.live("skips remote instruction bodies over the size cap", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const local = path.join(tmp.path, "local.md")
+        const small = "https://example.test/small.md"
+        const declared = "https://example.test/declared.md"
+        const streamed = "https://example.test/streamed.md"
+        const over = "x".repeat(ConfigInstructionPlugin.maxRemoteInstructionBytes + 1)
+        return Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(local, "local"))
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          // Both over-cap remotes are skipped; the local file and small remote load intact.
+          expect(initialized.text).toBe(
+            [`Instructions from: ${local}\nlocal`, `Instructions from: ${small}\nsmall`].join("\n\n"),
+          )
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [local, small, declared, streamed],
+              http: respond((url) => {
+                if (url === small) return new Response("small")
+                if (url === declared)
+                  return new Response(over, { headers: { "content-length": String(over.length) } })
+                const chunk = new TextEncoder().encode("x".repeat(8192))
+                let pulled = 0
+                return new Response(
+                  new ReadableStream<Uint8Array>({
+                    pull(controller) {
+                      pulled += 1
+                      if (pulled <= 40) controller.enqueue(chunk)
+                      else controller.close()
+                    },
+                  }),
+                  { headers: { "content-type": "text/plain" } },
+                )
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
   it.live("keeps an empty AGENTS.md as available context", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

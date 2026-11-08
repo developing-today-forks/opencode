@@ -872,6 +872,26 @@ describe("github review tools", () => {
     ),
   )
 
+  it.live("a malformed alert id fails without calling the code-scanning API", () =>
+    withEnv(env, () =>
+      Effect.gen(function* () {
+        const github = fakeGitHub(baseRoutes())
+        const { deps } = yield* makeDeps({ http: github.http })
+        const result = yield* run<object, { results: Array<{ status: string; note?: string }> }>(
+          find(GitHubReview.tools(deps), "respond"),
+          {
+            repo: "acme/widgets",
+            pr: 7,
+            responses: [{ id: "alert:not-a-number", resolve: true }],
+          },
+        )
+        expect(result.results[0]?.status).toBe("failed")
+        expect(result.results[0]?.note).toContain("Invalid alert id")
+        expect(github.requests.some((request) => request.path.includes("code-scanning"))).toBe(false)
+      }),
+    ),
+  )
+
   it.live("copilot requests a review when the head commit has not been reviewed", () =>
     withEnv(env, () =>
       Effect.gen(function* () {

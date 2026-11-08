@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { ClientError, type SessionStatsInfo } from "@opencode/client"
 import { Effect } from "effect"
-import { renderStats, request } from "../src/commands/handlers/stats"
+import { MAX_DAYS, daysError, renderStats, request, statsRange } from "../src/commands/handlers/stats"
 
 const tools = {
   mode: "detail",
@@ -33,6 +33,30 @@ const stats: SessionStatsInfo = {
     },
   ],
 }
+
+describe("stats --days ceiling (#1000)", () => {
+  const maxSpanMs = MAX_DAYS * 86_400_000
+
+  test("the largest usable --days is 3720, the stats service span cap", () => {
+    expect(MAX_DAYS).toBe(3720)
+    expect(daysError(3720)).toBeUndefined()
+    expect(daysError(365)).toBeUndefined()
+    expect(daysError(0)).toBeUndefined()
+  })
+
+  test("any --days above the cap fails with a message naming the maximum", () => {
+    expect(daysError(3721)).toContain("3720")
+    expect(daysError(100_000)).toContain("3720")
+    expect(daysError(3721)).toContain("--all")
+  })
+
+  test("statsRange spans exactly respect the cap boundary", () => {
+    const at = statsRange({ days: MAX_DAYS, all: false })
+    expect(at.to - at.from!).toBeLessThanOrEqual(maxSpanMs)
+    const over = statsRange({ days: MAX_DAYS + 1, all: false })
+    expect(over.to - over.from!).toBeGreaterThan(maxSpanMs)
+  })
+})
 
 describe("stats rendering", () => {
   test("keeps the default card shareable", () => {

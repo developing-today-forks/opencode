@@ -200,6 +200,7 @@ export type SessionStatsOutput = {
 export type SessionStatsOperation<E = never> = (input?: SessionStatsInput) => Effect.Effect<SessionStatsOutput, E>
 
 export type SessionCreateInput = {
+  readonly directory?: AbsolutePath | undefined
   readonly id?: Session.ID | undefined
   readonly parentID?: Session.ID | undefined
   readonly title?: string | undefined
@@ -209,6 +210,7 @@ export type SessionCreateInput = {
   readonly metadata?: Session.Metadata | undefined
   readonly permissions?: Permission.Ruleset | undefined
   readonly subagentPolicy?: Session.SubagentPolicy | undefined
+  readonly detached?: true | undefined
 }
 export type SessionCreateOutput = Session.Info
 export type SessionCreateOperation<E = never> = (input?: SessionCreateInput) => Effect.Effect<SessionCreateOutput, E>
@@ -452,6 +454,7 @@ export type SessionLogOutput =
             readonly metadata?: Session.Metadata | undefined
             readonly subagentPolicy?: Session.SubagentPolicy | undefined
             readonly permissions?: Permission.Ruleset | undefined
+            readonly detached?: true | undefined
             readonly version: string
           }
         }
@@ -1239,7 +1242,11 @@ export type SessionLogOutput =
   | EventLog.Synced
 export type SessionLogOperation<E = never> = (input: SessionLogInput) => Stream.Stream<SessionLogOutput, E>
 
-export type SessionInterruptInput = { readonly sessionID: Session.ID; readonly resume?: boolean | undefined }
+export type SessionInterruptInput = {
+  readonly sessionID: Session.ID
+  readonly resume?: boolean | undefined
+  readonly force?: boolean | undefined
+}
 export type SessionInterruptOutput = { readonly interrupted: boolean }
 export type SessionInterruptOperation<E = never> = (
   input: SessionInterruptInput,
@@ -1417,15 +1424,129 @@ export interface GenerateApi<E = never> {
   readonly text: GenerateTextOperation<E>
 }
 
+export type ServerCompletionsChatInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsChatOutput = unknown
+export type ServerCompletionsChatOperation<E = never> = (
+  input: ServerCompletionsChatInput,
+) => Effect.Effect<ServerCompletionsChatOutput, E>
+
+export type ServerCompletionsResponsesInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsResponsesOutput = unknown
+export type ServerCompletionsResponsesOperation<E = never> = (
+  input: ServerCompletionsResponsesInput,
+) => Effect.Effect<ServerCompletionsResponsesOutput, E>
+
+export type ServerCompletionsEmbeddingsInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsEmbeddingsOutput = unknown
+export type ServerCompletionsEmbeddingsOperation<E = never> = (
+  input: ServerCompletionsEmbeddingsInput,
+) => Effect.Effect<ServerCompletionsEmbeddingsOutput, E>
+
+export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsMessagesOutput = unknown
+export type ServerCompletionsMessagesOperation<E = never> = (
+  input: ServerCompletionsMessagesInput,
+) => Effect.Effect<ServerCompletionsMessagesOutput, E>
+
+export type ServerCompletionsSystemoneInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsSystemoneOutput = unknown
+export type ServerCompletionsSystemoneOperation<E = never> = (
+  input: ServerCompletionsSystemoneInput,
+) => Effect.Effect<ServerCompletionsSystemoneOutput, E>
+
+export type ServerCompletionsModelsOutput = unknown
+export type ServerCompletionsModelsOperation<E = never> = () => Effect.Effect<ServerCompletionsModelsOutput, E>
+
+export type ServerCompletionsModelInput = { readonly id: string }
+export type ServerCompletionsModelOutput = unknown
+export type ServerCompletionsModelOperation<E = never> = (
+  input: ServerCompletionsModelInput,
+) => Effect.Effect<ServerCompletionsModelOutput, E>
+
+export type ServerCompletionsModelRefInput = { readonly provider: string; readonly model: string }
+export type ServerCompletionsModelRefOutput = unknown
+export type ServerCompletionsModelRefOperation<E = never> = (
+  input: ServerCompletionsModelRefInput,
+) => Effect.Effect<ServerCompletionsModelRefOutput, E>
+
+export interface ServerCompletionsApi<E = never> {
+  readonly chat: ServerCompletionsChatOperation<E>
+  readonly responses: ServerCompletionsResponsesOperation<E>
+  readonly embeddings: ServerCompletionsEmbeddingsOperation<E>
+  readonly messages: ServerCompletionsMessagesOperation<E>
+  readonly systemone: ServerCompletionsSystemoneOperation<E>
+  readonly models: ServerCompletionsModelsOperation<E>
+  readonly model: ServerCompletionsModelOperation<E>
+  readonly modelRef: ServerCompletionsModelRefOperation<E>
+}
+
 export type ProviderListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
-export type ProviderListOutput = { readonly location: Location.PublicRef; readonly data: ReadonlyArray<Provider.Info> }
+export type ProviderListOutput = {
+  readonly location: Location.PublicRef
+  readonly data: ReadonlyArray<{
+    readonly id: Provider.ID
+    readonly canonical?: Provider.ID | undefined
+    readonly integrationID?: Integration.ID | undefined
+    readonly instanceOf?: Provider.ID | undefined
+    readonly name: string
+    readonly activation: "auto" | "enabled" | "disabled"
+    readonly package: string
+    readonly compatibility?:
+      | {
+          readonly reasoningField?: Model.ReasoningField | undefined
+          readonly requireReasoning?: boolean | undefined
+          readonly maxTokensField?: Model.MaxTokensField | undefined
+          readonly supportsStore?: boolean | undefined
+          readonly supportsStrictMode?: boolean | undefined
+          readonly zaiToolStream?: boolean | undefined
+          readonly requireFinishReason?: boolean | undefined
+          readonly requireAssistantAfterTool?: boolean | undefined
+          readonly supportsPromptCacheKey?: boolean | undefined
+          readonly cacheFormat?: ("anthropic" | "alibaba") | undefined
+        }
+      | undefined
+    readonly settings?: Provider.Settings | undefined
+    readonly headers?: { readonly [x: string]: string } | undefined
+    readonly body?: { readonly [x: string]: any } | undefined
+    readonly models: ReadonlyArray<Model.Info>
+  }>
+}
 export type ProviderListOperation<E = never> = (input?: ProviderListInput) => Effect.Effect<ProviderListOutput, E>
 
 export type ProviderGetInput = {
   readonly providerID: Provider.ID
   readonly location?: { readonly directory?: string | undefined } | undefined
 }
-export type ProviderGetOutput = { readonly location: Location.PublicRef; readonly data: Provider.Info }
+export type ProviderGetOutput = {
+  readonly location: Location.PublicRef
+  readonly data: {
+    readonly id: Provider.ID
+    readonly canonical?: Provider.ID | undefined
+    readonly integrationID?: Integration.ID | undefined
+    readonly instanceOf?: Provider.ID | undefined
+    readonly name: string
+    readonly activation: "auto" | "enabled" | "disabled"
+    readonly package: string
+    readonly compatibility?:
+      | {
+          readonly reasoningField?: Model.ReasoningField | undefined
+          readonly requireReasoning?: boolean | undefined
+          readonly maxTokensField?: Model.MaxTokensField | undefined
+          readonly supportsStore?: boolean | undefined
+          readonly supportsStrictMode?: boolean | undefined
+          readonly zaiToolStream?: boolean | undefined
+          readonly requireFinishReason?: boolean | undefined
+          readonly requireAssistantAfterTool?: boolean | undefined
+          readonly supportsPromptCacheKey?: boolean | undefined
+          readonly cacheFormat?: ("anthropic" | "alibaba") | undefined
+        }
+      | undefined
+    readonly settings?: Provider.Settings | undefined
+    readonly headers?: { readonly [x: string]: string } | undefined
+    readonly body?: { readonly [x: string]: any } | undefined
+    readonly models: ReadonlyArray<Model.Info>
+  }
+}
 export type ProviderGetOperation<E = never> = (input: ProviderGetInput) => Effect.Effect<ProviderGetOutput, E>
 
 export interface ProviderApi<E = never> {
@@ -2512,6 +2633,7 @@ export interface AppApi<E = never> {
   readonly message: MessageApi<E>
   readonly model: ModelApi<E>
   readonly generate: GenerateApi<E>
+  readonly "server.completions": ServerCompletionsApi<E>
   readonly provider: ProviderApi<E>
   readonly integration: IntegrationApi<E>
   readonly mcp: McpApi<E>

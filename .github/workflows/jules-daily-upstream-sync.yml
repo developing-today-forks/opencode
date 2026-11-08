@@ -1,4 +1,4 @@
-name: Jules Daily Upstream Sync (OpenCode)
+name: Daily Upstream Sync (OpenCode)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -6,7 +6,9 @@ concurrency:
   queue: max
 
 # Daily automated upstream sync, conflict resolution, feature-opportunity triage,
-# and safe merging for developing-today/opencode using Google Jules.
+# and safe merging for developing-today-forks/opencode. The sync runs as an OpenCode
+# session launched via pm-dispatch (the pm-dispatch-start reusable action from
+# developing-today/code); the Jules leg is retired fleet-wide.
 
 on:
   schedule:
@@ -32,17 +34,39 @@ jobs:
   daily-upstream-sync:
     timeout-minutes: 30
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
-      - name: Run Jules Upstream Sync Agent
-        uses: google-labs-code/jules-action@bff7875eaa123cac6742b7cfc51005b95ba4d566 # v1.0.0
+      # The pm-dispatch actions are used from a local checkout, not as
+      # remote action references: the
+      # runner's action-download staging for that repo fails in
+      # "Set up job" ("Could not find file .../_staging/code-<sha>/archive",
+      # #1519 -- runs 41629732319, 41797627927, 41824863958 all died
+      # before any step ran), so this workflow never started. A plain
+      # checkout does not go through that staging path. This mirrors
+      # the .pm-central pattern in developing-today/code's own
+      # pm-dispatch-smoke workflow.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          jules_api_key: ${{ secrets.JULES_API_KEY }}
-          include_commit_log: true
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - name: Run upstream sync agent via pm-dispatch
+        id: sync
+        uses: ./.pm-central/.github/actions/pm-dispatch-start
+        with:
+          title: "Daily upstream sync"
           prompt: >-
             Perform the daily upstream sync of OpenCode v2 from upstream anomalyco/opencode (branch `dev`) into `main`.
 
@@ -62,7 +86,7 @@ jobs:
             ### 3. FEATURE OPPORTUNITY TRIAGE & ISSUE CREATION
             - Inspect the newly merged upstream commits (`git log ... --grep="^feat"`).
             - Identify if any new upstream capabilities, refactors, or UI surfaces could be adopted or built upon by our fork's features (such as model routing, tier-aware pooling, token cost accounting, quota tracking, or MCPX).
-            - For each identified high-value synergy, create a comprehensive GitHub issue using `gh issue create --repo developing-today/opencode` containing:
+            - For each identified high-value synergy, create a comprehensive GitHub issue using `gh issue create --repo developing-today-forks/opencode` containing:
               - Clear title and summary
               - Upstream commit references
               - Architectural context and user story
@@ -80,7 +104,8 @@ jobs:
             - Open a clean, conflict-free Pull Request detailing all merged upstream commits and resolved conflicts.
             - Merge the PR into `main` only when you are reasonably certain it is correct: tests pass cleanly, there are no regressions, and the sync is conflict-free. Merging is permitted, never required — when any of that is uncertain, leave the PR open and state your confidence and what a human should check in the description.
 
-      - name: Record a sync failure for the Muse tasks
+      - name: Find an open sync failure tracker
+        id: tracker
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,13 +113,28 @@ jobs:
         run: |
           set -u
           title="chore(deps): automated upstream sync failing"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           number=$(gh issue list --state open --search "\"$title\" in:title" --limit 100 --json number,title | jq -r --arg title "$title" '.[] | select(.title == $title) | .number' | head -n 1)
-          if [ -n "${number}" ]; then
-            gh issue comment "${number}" --body "Upstream sync failed again: ${run_url}. Jules runs this sync itself, so a failed run means Jules could not complete it. Muse repo tasks: please triage and land the sync."
-          else
-            gh issue create --title "$title" --body "The daily Jules upstream-sync workflow failed: ${run_url}. Jules performs this sync itself, so a workflow failure means Jules could not complete it (an unresolvable merge conflict, an API failure, or a failed validation after its PR). Per Drew's escalation chain (2026-10-28), the Muse repo tasks take over from here: reproduce the upstream merge in a laptop worktree, resolve conflicts preserving both sides' features per the workflow prompt, verify, and land the sync as a PR. This issue is maintained by the jules-daily-upstream-sync workflow: repeat failures comment here; close it once a sync run succeeds."
-          fi
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      # No-spam handoff: if an open tracker already exists, the queuer
+      # attaches a fresh task to it (issue_number set) instead of creating
+      # a second issue; otherwise it creates the tracker (issue: "true",
+      # issue_number empty). The old failure step applied no labels at
+      # creation, so there are no extra labels to re-apply here -- the
+      # dispatch-created issue carries queue/queued + source/dispatch.
+      - name: Queue the sync failure via pm-dispatch
+        id: dispatch-failure
+        if: failure()
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
+        with:
+          title: "chore(deps): automated upstream sync failing"
+          prompt: >-
+            The daily upstream-sync workflow failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}.
+            An OpenCode session launched via pm-dispatch performs this sync itself, so a workflow failure means the sync could not complete it (an unresolvable merge conflict, an API failure, or a failed validation after its PR).
+            This failure is handed off to the fleet queue via pm-dispatch: reproduce the upstream merge in a laptop worktree, resolve conflicts preserving both sides' features per the workflow prompt, verify, and land the sync as a PR.
+            This issue is maintained by the daily-upstream-sync workflow: repeat failures attach a fresh task to this issue instead of opening a duplicate; close it once a sync run succeeds.
+          issue: "true"
+          issue_number: ${{ steps.tracker.outputs.number }}
 
       - name: Close the sync failure issue on success
         if: success()

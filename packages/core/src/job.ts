@@ -6,6 +6,9 @@ import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
 
+export const StopPolicy = Schema.Literals(["independent", "cascade", "detached"])
+export type StopPolicy = typeof StopPolicy.Type
+
 const Background = Schema.Struct({
   id: Schema.String,
   notificationID: SessionMessage.ID,
@@ -22,6 +25,7 @@ const Background = Schema.Struct({
       childSessionID: SessionSchema.ID,
       agent: Schema.String,
       description: Schema.String,
+      stopPolicy: Schema.optionalKey(StopPolicy),
     }),
   ]),
   status: Schema.Literals(["running", "completed", "error", "cancelled"]),

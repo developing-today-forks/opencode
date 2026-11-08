@@ -120,6 +120,52 @@ const decodeStatus = Effect.fn("ReplicateImages.decodeStatus")(function* (
   return { id: context.token.id, status: yield* MediaProtocol.status(STATUS, output.value.status, output) }
 })
 
+// Date.parse with a calendar check, the local equivalent of route/executor.ts's
+// parseHttpDate (which is not exported): Date.parse silently rolls overflow days
+// such as Feb 30 into the next month instead of returning NaN, so an ISO date's
+// components must round-trip through a real calendar date before the parsed
+// instant is trusted. An unparseable or calendar-invalid completed_at yields
+// undefined, so the image carries no expiry instead of a NaN or rolled-over one.
+const MONTH_NUMBERS: Readonly<Record<string, number>> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+}
+
+/** Calendar components of a non-ISO date whose parts are named or ordered unambiguously
+ * (#798): "Feb 30 2026", "30 Feb 2026", "2026/02/30". Ambiguous numeric forms (02/03/2026)
+ * and shapes without named components keep the lenient bare-parse behaviour. */
+function namedDateParts(text: string): readonly [number, number, number] | undefined {
+  const ymd = /(\d{4})[/.](\d{1,2})[/.](\d{1,2})(?!\d)/.exec(text)
+  if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
+  const monthFirst =
+    /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)/i.exec(text)
+  if (monthFirst)
+    return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+  const dayFirst =
+    /(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})(?!\d)/i.exec(text)
+  if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
+  return undefined
+}
+
+const parseCompletedAt = (text: string | undefined): number | undefined => {
+  if (text === undefined) return undefined
+  const date = Date.parse(text)
+  if (Number.isNaN(date)) return undefined
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text)
+  const parts = iso ? ([Number(iso[1]), Number(iso[2]), Number(iso[3])] as const) : namedDateParts(text)
+  if (parts) {
+    const [year, month, day] = parts
+    const probe = new Date(0)
+    probe.setUTCFullYear(year, month - 1, day)
+    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
+      return undefined
+  }
+  // V8 rolls hour 24 into the next day instead of returning NaN (minutes/seconds 60+ are
+  // Invalid), so a time part must not carry hour > 23 (RFC 3339 time-hour is 00-23).
+  const time = /[T ](\d{2}):\d{2}/i.exec(text)
+  if (time && Number(time[1]) > 23) return undefined
+  return date
+}
+
 const decodeResult = Effect.fn("ReplicateImages.decodeResult")(function* (
   response: HttpClientResponse.HttpClientResponse,
   context: MediaProtocol.PollContext<Token>,
@@ -140,9 +186,8 @@ const decodeResult = Effect.fn("ReplicateImages.decodeResult")(function* (
   const urls = typeof prediction.output === "string" ? [prediction.output] : prediction.output
   if (urls.length === 0) return yield* output.invalid(`${route.name} prediction ${context.token.id} returned no images`)
   const predictTime = prediction.metrics?.predict_time ?? undefined
-  const completedAt = prediction.completed_at ?? undefined
-  const expiresAt =
-    completedAt === undefined ? undefined : Date.parse(completedAt) + Duration.toMillis(OUTPUT_RETENTION)
+  const completedAt = parseCompletedAt(prediction.completed_at ?? undefined)
+  const expiresAt = completedAt === undefined ? undefined : completedAt + Duration.toMillis(OUTPUT_RETENTION)
   return new ImageResponse({
     images: urls.map((url) => Media.url(url, { expiresAt })),
     usage: predictTime === undefined ? undefined : { type: "compute", seconds: predictTime },

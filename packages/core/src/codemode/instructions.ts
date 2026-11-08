@@ -1,10 +1,27 @@
 export * as CodeModeInstructions from "./instructions.js"
 
-import { searchSignature, toolExpression } from "@opencode/codemode"
+import { Std, searchSignature, toolExpression } from "@opencode/codemode"
 import { Effect, Schema } from "effect"
 import { Instructions } from "../instructions/index.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeRules } from "./rules.js"
+
+const stdListing = `## Standard library \`std@${Std.version}\`
+
+Helpers on the frozen \`std\` global; no imports needed. Async helpers drive your own callbacks in-program; only std.sleep crosses to the host, and it is not a tool call.
+
+- std (11 members) // versioned helpers
+  - std.bind(target, defaults) // wrap a tool callable or namespace; defaults merge under explicit args, explicit wins; calls record as the original tool
+  - std.chunk(array, size) // split an array into chunks of size
+  - std.uniqBy(array, iteratee) // first row per key; iteratee is a function or property name
+  - std.keyBy(array, iteratee) // last row per key; iteratee is a function or property name
+  - std.pick(obj, keys) // copy only the listed keys
+  - std.omit(obj, keys) // copy without the listed keys
+  - std.sleep(ms) // wait, via the host sleep primitive; one sleep is capped and the execution timeout still bounds total time
+  - std.mapLimit(items, limit, fn) // bounded concurrency; results in input order; the first rejection stops new items starting
+  - std.retry(fn, { attempts, delayMs, backoff, shouldRetry }) // retry rejections only; delays go through std.sleep; deterministic, no jitter by default
+  - std.withTimeout(promiseOrFn, ms) // reject after ms WITHOUT cancelling the underlying work: a timed-out tool call may still complete host-side
+  - std.version // "${Std.version}" library version`
 
 // prettier-ignore
 const prompt = (hasMoreTools: boolean) => `# Code Mode
@@ -29,7 +46,9 @@ export function render(catalog: CodeModeCatalog.Summary) {
 
   return `${prompt(catalog.shown < catalog.total)}
 
-${tools.join("\n")}`
+${tools.join("\n")}
+
+${stdListing}`
 }
 
 export function update(previous: CodeModeCatalog.Summary, current: CodeModeCatalog.Summary) {

@@ -3,7 +3,17 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { binaryPath, parseRegistration, startScript } from "./bootstrap"
+import { Effect, Fiber, Layer } from "effect"
+import { TestClock } from "effect/testing"
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+import {
+  binaryPath,
+  collectArchive,
+  downloadArchive,
+  MAX_ARCHIVE_BYTES,
+  parseRegistration,
+  startScript,
+} from "./bootstrap"
 import { RemoteCli } from "./remote-cli"
 
 test("ignores stopped services and registrations that do not match the healthy endpoint", () => {
@@ -75,6 +85,118 @@ test.skipIf(process.platform === "win32")(
     expect(parseRegistration(runStartScript(""))).toEqual(registration)
   },
 )
+
+function archiveResponse(body: ReadableStream<Uint8Array> | string, headers?: Record<string, string>) {
+  return HttpClientResponse.fromWeb(
+    HttpClientRequest.get("https://example.test/archive.tgz"),
+    new Response(body, { headers }),
+  )
+}
+
+function streamOf(...chunks: Array<Uint8Array>) {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk)
+      controller.close()
+    },
+  })
+}
+
+test("collectArchive returns a body under the cap", async () => {
+  const archive = await Effect.runPromise(collectArchive(archiveResponse(streamOf(new Uint8Array([97, 98, 99])))))
+  expect(Array.from(archive)).toEqual([97, 98, 99])
+})
+
+test("collectArchive rejects a declared content-length above the cap before reading the body", async () => {
+  const response = archiveResponse(streamOf(new Uint8Array([97])), {
+    "content-length": String(MAX_ARCHIVE_BYTES + 1),
+  })
+
+  await expect(Effect.runPromise(collectArchive(response))).rejects.toThrow(
+    `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`,
+  )
+})
+
+test("collectArchive bounds a streamed body in flight when no content-length is declared", async () => {
+  // One shared chunk enqueued repeatedly: the logical body exceeds the cap
+  // without allocating a second copy of it.
+  const chunk = new Uint8Array(8 * 1024 * 1024)
+  const repeats = MAX_ARCHIVE_BYTES / chunk.byteLength + 1
+  const response = archiveResponse(streamOf(...Array.from({ length: repeats }, () => chunk)))
+  await expect(Effect.runPromise(collectArchive(response))).rejects.toThrow(
+    `archive exceeds ${MAX_ARCHIVE_BYTES} bytes`,
+  )
+})
+
+function downloadHttp(respond: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response>) {
+  // makeWith, not HttpClient.make: make resolves the request URL against
+  // globalThis.location, which this package's happy-dom test preload
+  // registers as about:blank, so every URL would fail with InvalidUrl.
+  return Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.makeWith(
+      (request: Effect.Effect<HttpClientRequest.HttpClientRequest, HttpClientError.HttpClientError>) =>
+        Effect.flatMap(request, (req) =>
+          respond(req).pipe(Effect.map((response) => HttpClientResponse.fromWeb(req, response))),
+        ),
+      (request: HttpClientRequest.HttpClientRequest) => Effect.succeed(request),
+    ),
+  )
+}
+
+test("downloadArchive returns a prompt body under the deadline", async () => {
+  const http = downloadHttp(() => Effect.succeed(new Response(streamOf(new Uint8Array([97, 98, 99])))))
+
+  const archive = await Effect.runPromise(
+    downloadArchive({ url: "https://example.test/archive.tgz", version: "2.0.0", target: "linux-x64" }).pipe(
+      Effect.provide(http),
+    ),
+  )
+
+  expect(Array.from(archive)).toEqual([97, 98, 99])
+})
+
+test("downloadArchive fails a non-2xx response before reading the body", async () => {
+  const http = downloadHttp(() => Effect.succeed(new Response("missing", { status: 404 })))
+  await expect(
+    Effect.runPromise(
+      downloadArchive({ url: "https://example.test/archive.tgz", version: "2.0.0", target: "linux-x64" }).pipe(
+        Effect.provide(http),
+      ),
+    ),
+  ).rejects.toThrow('"status":404')
+})
+
+test("downloadArchive bounds request + body by one overall deadline, not one per phase", async () => {
+  // The response consumes 100s of the 180s deadline, then the body stalls.
+  // A per-phase timeout would grant the body a fresh 180s (~280s total);
+  // the single overall deadline must cut the download at 180s. Driven on
+  // TestClock against the real ARCHIVE_DOWNLOAD_TIMEOUT — no test-only
+  // budget parameter (packages/app AGENTS.md, Tests).
+  const http = downloadHttp(() =>
+    Effect.sleep("100 seconds").pipe(Effect.map(() => new Response(new ReadableStream<Uint8Array>({ start() {} })))),
+  )
+
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(
+        downloadArchive({ url: "https://example.test/archive.tgz", version: "2.0.0", target: "linux-x64" }).pipe(
+          Effect.provide(http),
+        ),
+      )
+
+      yield* TestClock.adjust("179 seconds")
+      const running = fiber.pollUnsafe()
+
+      yield* TestClock.adjust("2 seconds")
+
+      return { running, exit: yield* Fiber.await(fiber) }
+    }).pipe(Effect.provide(TestClock.layer())),
+  )
+
+  expect(result.running).toBeUndefined()
+  expect(result.exit._tag).toBe("Failure")
+})
 
 test("rejects unsafe versions and platforms in remote installation paths", () => {
   expect(() => binaryPath('2.0.0"; whoami')).toThrow()

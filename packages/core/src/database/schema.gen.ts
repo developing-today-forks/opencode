@@ -180,6 +180,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`provider_id\` text NOT NULL,
           \`model_id\` text NOT NULL,
           \`variant\` text,
+          \`credential_id\` text,
           \`outcome\` text NOT NULL,
           \`error_tag\` text,
           \`error_code\` text,
@@ -200,6 +201,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`tokens_cache_read\` integer,
           \`tokens_cache_write\` integer,
           \`cost_usd\` real,
+          \`cache_savings_usd\` real,
+          \`continuation_of\` integer,
+          \`continuation_index\` integer DEFAULT 0,
           \`quota\` text
         );
       `)
@@ -226,7 +230,8 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`model_id\` text NOT NULL,
           \`kind\` text NOT NULL,
           \`reason\` text,
-          \`until\` integer
+          \`until\` integer,
+          \`credential_id\` text
         );
       `)
       yield* tx.run(`
@@ -236,6 +241,20 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`text\` text NOT NULL,
           \`interpreted\` text,
           \`expires\` integer
+        );
+      `)
+      yield* tx.run(`
+        CREATE TABLE \`openai_facade_response\` (
+          \`id\` text PRIMARY KEY,
+          \`time_created\` integer NOT NULL,
+          \`time_expires\` integer NOT NULL,
+          \`previous_response_id\` text,
+          \`depth\` integer NOT NULL,
+          \`model\` text NOT NULL,
+          \`resolved_model\` text NOT NULL,
+          \`request_items\` text NOT NULL,
+          \`response_items\` text NOT NULL,
+          \`usage\` text
         );
       `)
       yield* tx.run(`
@@ -370,6 +389,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`tokens_cache_write\` integer DEFAULT 0 NOT NULL,
           \`revert\` text,
           \`permission\` text,
+          \`detached\` integer,
           \`agent\` text,
           \`model\` text,
           \`time_created\` integer NOT NULL,
@@ -390,7 +410,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`provider\` text NOT NULL,
           \`binding\` text,
           \`created_at\` integer NOT NULL,
-          \`last_used_at\` integer NOT NULL
+          \`last_used_at\` integer NOT NULL,
+          \`last_snapshot_at\` integer,
+          \`snapshot_retry_at\` integer
         );
       `)
       yield* tx.run(`
@@ -445,12 +467,19 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(
         `CREATE INDEX \`route_attempt_session_idx\` ON \`route_attempt\` (\`session_id\`,\`time_started\`);`,
       )
+      yield* tx.run(`CREATE INDEX \`route_attempt_continuation_idx\` ON \`route_attempt\` (\`continuation_of\`);`)
       yield* tx.run(`CREATE INDEX \`route_decision_route_time_idx\` ON \`route_decision\` (\`route_id\`,\`time\`);`)
       yield* tx.run(`CREATE INDEX \`route_decision_session_idx\` ON \`route_decision\` (\`session_id\`,\`time\`);`)
       yield* tx.run(
         `CREATE INDEX \`route_health_target_time_idx\` ON \`route_health\` (\`provider_id\`,\`model_id\`,\`time\`);`,
       )
       yield* tx.run(`CREATE INDEX \`route_note_time_idx\` ON \`route_note\` (\`time\`);`)
+      yield* tx.run(
+        `CREATE INDEX \`openai_facade_response_expires_idx\` ON \`openai_facade_response\` (\`time_expires\`);`,
+      )
+      yield* tx.run(
+        `CREATE INDEX \`openai_facade_response_previous_idx\` ON \`openai_facade_response\` (\`previous_response_id\`);`,
+      )
       yield* tx.run(
         `CREATE UNIQUE INDEX \`permission_project_action_resource_idx\` ON \`permission\` (\`project_id\`,\`action\`,\`resource\`);`,
       )

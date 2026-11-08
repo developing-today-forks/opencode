@@ -374,7 +374,10 @@ function environment(key: string) {
 
 function prefix(tokens: string[]) {
   for (let length = tokens.length; length > 0; length--) {
-    const arity = ARITY[tokens.slice(0, length).join(" ")]
+    const key = tokens.slice(0, length).join(" ")
+    // Own-property lookup only: a plain index reads through Object.prototype, so
+    // "constructor" and "__proto__" would resolve to inherited values (#792).
+    const arity = Object.hasOwn(ARITY, key) ? ARITY[key] : undefined
     if (arity !== undefined) return tokens.slice(0, arity)
   }
   return tokens.slice(0, 1)

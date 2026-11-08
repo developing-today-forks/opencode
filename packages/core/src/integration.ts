@@ -414,6 +414,7 @@ const layer = Layer.effect(
           id: credential.id,
           label: credential.label,
           method: credential.value.type,
+          ...(credential.value.type === "key" ? {} : { methodID: credential.value.methodID }),
         }))
         .toReversed()
       const env = (entry?.methods ?? [])
@@ -742,6 +743,10 @@ const layer = Layer.effect(
           const credential = yield* credentials.get(connection.id)
           if (!credential) return undefined
           if (credential.value.type !== "oauth") return credential.value
+          // Externally renewed credentials (e.g. imported from the Muse by
+          // credential/codex-sync) keep their external owner as the sole refresher;
+          // refreshing here would rotate the shared refresh-token lineage.
+          if (Credential.refreshManagedExternally(credential.value)) return credential.value
           const implementation = state
             .get()
             .integrations.get(credential.integrationID)

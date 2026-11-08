@@ -1,9 +1,8 @@
 import { EOL } from "node:os"
-import path from "node:path"
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { Effect } from "effect"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Npm } from "@opencode/util/npm"
 import { Host } from "@opencode/plugin/host"
 import { Commands } from "../../commands"
@@ -26,7 +25,7 @@ export default Runtime.handler(
     if (target === "server") {
       const global = yield* Global.Service
       const configPath = yield* Effect.promise(() => resolveConfigPath(global.config))
-      const changed = yield* Effect.promise(() => writePluginConfig(configPath, input.package))
+      const changed = yield* writePluginConfig(configPath, input.package)
       process.stdout.write(
         changed
           ? `Plugin "${input.package}" installed and added to ${configPath}${EOL}`
@@ -49,11 +48,11 @@ export function configurationTarget(server?: string, tui?: string) {
   if (tui) return "tui" as const
 }
 
-export async function writePluginConfig(configPath: string, spec: string) {
-  const text = await readFile(configPath, "utf8").catch((error) => {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return "{}"
-    throw error
-  })
+export const writePluginConfig = Effect.fnUntraced(function* (configPath: string, spec: string) {
+  const fs = yield* FSUtil.Service
+  const text = yield* fs.readFileString(configPath).pipe(
+    Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed("{}")),
+  )
   const errors: ParseError[] = []
   const config: unknown = parse(text, errors, { allowTrailingComma: true })
   if (errors.length || typeof config !== "object" || config === null || Array.isArray(config))
@@ -66,12 +65,11 @@ export async function writePluginConfig(configPath: string, spec: string) {
     text,
     modify(text, ["plugins"], [...(plugins ?? []), spec], { formattingOptions: { tabSize: 2, insertSpaces: true } }),
   )
-  await mkdir(path.dirname(configPath), { recursive: true })
-  const temporary = configPath + ".tmp"
-  await writeFile(temporary, updated.endsWith("\n") ? updated : updated + "\n", { mode: 0o600 })
-  await rename(temporary, configPath)
+  yield* fs.writeAtomic(configPath, updated.endsWith("\n") ? updated : updated + "\n", {
+    modePolicy: "owner-capped",
+  })
   return true
-}
+})
 
 function configured(plugins: readonly unknown[] | undefined, spec: string) {
   return plugins?.some(

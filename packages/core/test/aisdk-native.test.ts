@@ -610,4 +610,19 @@ describe("AISDKNative", () => {
       },
     })
   })
+
+  test("treats Object.prototype names as unknown packages and providers", () => {
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+      expect(AISDKNative.native(name, { providerID: "test-provider" })).toBeUndefined()
+      expect(map(name, {})).toBeUndefined()
+    }
+    for (const providerID of ["constructor", "toString", "__proto__"]) {
+      expect(AISDKNative.native("constructor", { providerID })).toBeUndefined()
+      expect(AISDKNative.native("@ai-sdk/openai", { providerID })).toBe("@opencode/ai/providers/openai")
+    }
+    expect(AISDKNative.native("@ai-sdk/openai", { providerID: "test-provider" })).toBe("@opencode/ai/providers/openai")
+    expect(AISDKNative.native("@ai-sdk/openai-compatible", { providerID: "deepseek" })).toBe(
+      "@opencode/ai/providers/deepseek",
+    )
+  })
 })

@@ -284,7 +284,7 @@ opencode mcp logout sentry
 
 ## Timeouts
 
-Timeouts are positive integer milliseconds. Set defaults under `mcp.timeout`; a server's `timeout` object overrides matching defaults.
+Timeouts are positive integer milliseconds, at most 2147483647 (~24.8 days). A larger value is invalid configuration and is rejected when the config is loaded, naming the field — past that limit the underlying timer would overflow and fire almost immediately, timing out every call to the server. Set defaults under `mcp.timeout`; a server's `timeout` object overrides matching defaults.
 
 ```jsonc title="opencode.jsonc"
 {

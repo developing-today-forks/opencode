@@ -12,10 +12,21 @@ import { Watcher } from "../../filesystem/watcher.js"
 import { InstructionDiscovery } from "../../instruction-discovery.js"
 import { Instructions } from "../../instructions/index.js"
 import { Location } from "../../location.js"
+import { collectBoundedResponseBody } from "../../tool/http-body.js"
 
 type Loaded =
   | { readonly type: "available"; readonly files: InstructionDiscovery.File[] }
   | { readonly type: "unavailable" }
+
+/**
+ * Maximum remote instruction body, in bytes.
+ *
+ * Instruction files (AGENTS.md-style documents) are small; even a large
+ * one is tens of kilobytes, so 256 KiB leaves ample headroom while
+ * keeping a bad or hostile instruction URL from buffering unbounded
+ * content into memory and the model's context at config load.
+ */
+export const maxRemoteInstructionBytes = 256 * 1024
 
 export const Plugin = define({
   id: "opencode.config.instruction",
@@ -143,7 +154,16 @@ export const Plugin = define({
             (url) =>
               HttpClientRequest.get(url).pipe(
                 http.execute,
-                Effect.flatMap((response) => response.text),
+                Effect.flatMap((response) =>
+                  Effect.scoped(
+                    collectBoundedResponseBody(
+                      response,
+                      maxRemoteInstructionBytes,
+                      () => new Error(`instruction url response exceeded ${maxRemoteInstructionBytes} bytes`),
+                    ),
+                  ),
+                ),
+                Effect.map((body) => body.toString("utf8")),
                 Effect.timeout("5 seconds"),
                 Effect.map((content) => new InstructionDiscovery.File({ path: url, content })),
                 Effect.catchCause((cause) =>

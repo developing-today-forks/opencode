@@ -10,6 +10,7 @@ import { Credential } from "../../credential.js"
 import { Integration } from "../../integration.js"
 import { IntegrationConnection } from "../../integration/connection.js"
 import { Model } from "../../model.js"
+import { ModelRouteLimits } from "../../model-route-limits.js"
 import { Provider } from "../../provider.js"
 import { which } from "../../util/which.js"
 import type { PluginInternal } from "../internal.js"
@@ -95,8 +96,16 @@ export function make(
         const result = yield* command(["account", "get-access-token", "--scope", scope, "--output", "json"]).pipe(
           Effect.flatMap(decodeToken),
         )
-        const expires = result.expires_on !== undefined ? result.expires_on * 1000 : Date.parse(result.expiresOn ?? "")
-        if (!Number.isFinite(expires))
+        // The string form needs a calendar check: bare Date.parse rolls
+        // overflow days (Feb 30 -> Mar 2) and hour 24 into the next day, which
+        // would cache the token with a fabricated expiry (#779).
+        const expires =
+          result.expires_on !== undefined
+            ? result.expires_on * 1000
+            : result.expiresOn !== undefined
+              ? ModelRouteLimits.parseAbsoluteTime(result.expiresOn)
+              : undefined
+        if (expires === undefined || !Number.isFinite(expires))
           return yield* Effect.fail(new Error("Azure CLI returned an invalid token expiration"))
         const refreshed = { access: result.accessToken, expires }
         tokens.set(scope, refreshed)

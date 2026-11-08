@@ -201,7 +201,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
         }
 
-        const model = models()?.[0]
+        // Implicit default (#230): never auto-select a hidden model; it stays
+        // valid for explicit selection (recents/configured above) only.
+        const model = (models() ?? []).find((item) => !item.hidden) ?? models()?.[0]
         if (!model) return undefined
         return {
           providerID: model.providerID,

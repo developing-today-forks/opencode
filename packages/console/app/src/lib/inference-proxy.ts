@@ -1,5 +1,20 @@
 import { Resource } from "@opencode/console-resource"
 
+// Time-to-response-headers bound, in the sibling style (stats-proxy.ts
+// STATS_FETCH_TIMEOUT_MS, routes/s/[id].ts PROXY_TIMEOUT_MS). This is NOT a
+// total deadline: the timer is cleared as soon as the upstream fetch settles,
+// so a streaming response that has started is never cut off by it, while a
+// backend that stalls before headers settles as the 503 below.
+export const INFERENCE_HEADERS_TIMEOUT_MS = 8_000
+
+// Generation routes (every POST here) are different: a non-streaming
+// completion sends its headers only when generation finishes, so a short
+// headers deadline would become a short generation deadline and 503 healthy
+// long completions. Their headers bound follows the codebase's LLM provider
+// precedent: packages/core/src/provider.ts resolves the provider
+// headerTimeout default to 300_000 ms.
+export const INFERENCE_GENERATION_HEADERS_TIMEOUT_MS = 300_000
+
 const paths: Record<string, string | undefined> = {
   "POST /zen/v1/chat/completions": "/openai/v1/chat/completions",
   "POST /zen/v1/responses": "/openai/v1/responses",
@@ -47,9 +62,20 @@ export async function proxyInference(request: Request) {
   const requestID = request.headers.get("x-opencode-request-id") ?? request.headers.get("x-opencode-request")
   if (requestID) forwarded.headers.set("x-opencode-request-id", requestID)
 
+  const controller = new AbortController()
+  const headersTimeoutMs =
+    request.method === "GET" ? INFERENCE_HEADERS_TIMEOUT_MS : INFERENCE_GENERATION_HEADERS_TIMEOUT_MS
+  const headersTimer = setTimeout(() => controller.abort(), headersTimeoutMs)
+  // An explicit init.signal replaces the signal a Request inherits, so passing
+  // only the headers-deadline controller dropped the client-disconnect
+  // cancellation the bare `.fetch(forwarded)` had (#1475). Compose both: an
+  // incoming abort still cancels the upstream call, and the headers timer
+  // still bounds a pre-headers stall.
+  const abortSignal = AbortSignal.any([forwarded.signal, controller.signal])
   const response = await (Resource.INFERENCE as { fetch: typeof fetch })
-    .fetch(forwarded, { redirect: "manual" })
+    .fetch(forwarded, { redirect: "manual", signal: abortSignal })
     .catch(() => undefined)
+    .finally(() => clearTimeout(headersTimer))
   if (!response)
     return Response.json(
       { error: { type: "api_error", message: "Inference routing is unavailable. Please retry later." } },

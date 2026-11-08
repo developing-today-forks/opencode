@@ -1,15 +1,21 @@
 import { define } from "@opencode/plugin/effect/plugin"
 import { Clock, Deferred, Effect, Option, Schema } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import type { ServerResponse } from "node:http"
 import { Credential } from "../../credential.js"
 import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
+import { collectBoundedResponseBody } from "../../tool/http-body.js"
+import { MAX_EXPIRES_IN_SECONDS } from "./expires.js"
 
 const integrationID = Integration.ID.make("poe")
 const methodID = Integration.MethodID.make("browser")
 const clientID = "client_728290227fc048cc9262091a1ea197ea"
 const issuer = "https://poe.com"
+/** Cap on OAuth token/error response bodies (#1029): a token response is a few hundred bytes;
+ * the issuer must not stream unbounded data into login. Mirrors the #1026 bound the
+ * native-fetch providers apply via readBoundedResponseText. */
+export const oauthMaxResponseBytes = 64 * 1024
 const maxExpiry = 8_640_000_000_000_000
 const Token = Schema.Struct({
   api_key: Schema.Trim.check(Schema.isNonEmpty(), Schema.isPattern(/^\S+$/)),
@@ -141,7 +147,19 @@ function exchangeCode(http: HttpClient.HttpClient, input: { code: string; redire
       )
       .pipe(Effect.mapError(() => new Error("Poe token exchange request failed")))
     if (response.status < 200 || response.status >= 300) {
-      const error = Option.getOrUndefined(decodeError(yield* response.text.pipe(Effect.orElseSucceed(() => ""))))
+      // Bounded read (#1029): collect the error body under the cap first, then decode the
+      // bounded bytes; an over-cap body reads as empty and the status carries the failure.
+      const text = yield* Effect.scoped(
+        collectBoundedResponseBody(
+          response,
+          oauthMaxResponseBytes,
+          () => new Error(`Poe token error response exceeded ${oauthMaxResponseBytes} bytes`),
+        ),
+      ).pipe(
+        Effect.map((body) => body.toString("utf8")),
+        Effect.orElseSucceed(() => ""),
+      )
+      const error = Option.getOrUndefined(decodeError(text))
       const detail = error?.error_description || error?.error
       return yield* Effect.fail(
         new Error(
@@ -151,11 +169,26 @@ function exchangeCode(http: HttpClient.HttpClient, input: { code: string; redire
         ),
       )
     }
-    const token = yield* HttpClientResponse.schemaBodyJson(Token)(response).pipe(
+    // Bounded read (#1029): collect the token body under the cap first, then decode the
+    // bounded bytes instead of schemaBodyJson on the raw response.
+    const raw = yield* Effect.scoped(
+      collectBoundedResponseBody(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`Poe token response exceeded ${oauthMaxResponseBytes} bytes`),
+      ),
+    )
+    const token = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Token))(raw.toString("utf8")).pipe(
       Effect.mapError(() => new Error("Invalid Poe token response")),
     )
+    // An implausibly long lifetime (the classic millisecond-scale value) would store a
+    // fabricated expiry the consumer trusts for weeks (#892): clamp it to the shared sane
+    // bound from #879 instead of the JS Date maximum. An absent value keeps Poe's
+    // never-expires semantics.
     const expires =
-      token.api_key_expires_in == null ? maxExpiry : (yield* Clock.currentTimeMillis) + token.api_key_expires_in * 1000
+      token.api_key_expires_in == null
+        ? maxExpiry
+        : (yield* Clock.currentTimeMillis) + Math.min(token.api_key_expires_in, MAX_EXPIRES_IN_SECONDS) * 1000
     if (!Number.isSafeInteger(expires) || expires > maxExpiry)
       return yield* Effect.fail(new Error("Invalid Poe API key expiry"))
     return Credential.OAuth.make({ type: "oauth", methodID, access: token.api_key, refresh: "", expires })
