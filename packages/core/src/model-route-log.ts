@@ -8,6 +8,8 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { Text } from "./util/text.js"
 import { DEFAULT_MAX_AGE_MS } from "./quota-snapshot.js"
+import { QuotaCurrent } from "./quota-current.js"
+import { Global } from "@opencode/util/global"
 import { Database } from "./database/database.js"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable, RouteNoteTable } from "./model-route-log/sql.js"
 
@@ -333,7 +335,9 @@ export const onRestoreUsage = (next: typeof restoreUsage) => {
 }
 
 type CooldownRow = { providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }
-let restoreCooldowns: ((rows: readonly CooldownRow[]) => void) | undefined
+let restoreCooldowns:
+  | ((rows: readonly CooldownRow[], readings?: readonly QuotaCurrent.ProviderReading[]) => void)
+  | undefined
 
 export const onRestoreCooldowns = (next: typeof restoreCooldowns) => {
   restoreCooldowns = next
@@ -353,7 +357,10 @@ export const onRestoreDemotion = (next: typeof restoreDemotion) => {
 
 /** Cooldowns still in force, rebuilt from the health history so a restart does not send traffic
  * straight back to a target that was just failing. */
-export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
+export const restoreCooldownsFrom = (
+  db: Database.Interface["db"],
+  readings: readonly QuotaCurrent.ProviderReading[] = [],
+) =>
   Effect.gen(function* () {
     const now = Date.now()
     const rows = yield* db
@@ -454,7 +461,7 @@ export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
           : undefined
       if (resetAt !== undefined && resetAt < row.until) latest.set(id, { ...row, until: resetAt })
     }
-    restoreCooldowns?.([...latest.values()].filter((row) => row.until > now))
+    restoreCooldowns?.([...latest.values()].filter((row) => row.until > now), readings)
     restoreLimits?.(
       [...windows.values()].filter((row) => row.until > now || row.snapshot !== undefined),
     )
@@ -565,7 +572,7 @@ const layer = Layer.effectDiscard(
     yield* Effect.addFinalizer(() => Effect.sync(() => void (activeDb = undefined)))
     yield* restoreNotes(db)
     yield* restoreUsageFrom(db)
-    yield* restoreCooldownsFrom(db)
+    yield* restoreCooldownsFrom(db, QuotaCurrent.readSnapshot(Global.Path.state))
     yield* restoreDemotionFrom(db)
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))

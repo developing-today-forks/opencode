@@ -2698,20 +2698,59 @@ export const removeAdjustment = (id: string) => {
   return existed
 }
 
-/** Re-applies cooldowns that were still running when the process last stopped. */
+/** Re-applies cooldowns that were still running when the process last stopped.
+ *
+ * Quota-class benches are re-judged against the current quota snapshot before they
+ * re-arm (#1976): a persisted bench is evidence from before the restart, and the
+ * gatherer's freshest reading for that exact model/provider leg outranks it. A known
+ * reading with headroom discards the bench outright; a known-full reading keeps it,
+ * bounded by the reading's own reset when that is sooner; no reading for the leg, a
+ * stale reading, or a percent-less reading is no judgement, so the bench restores as
+ * persisted. Judgement is strictly per leg: one model family's reading never lifts or
+ * holds a sibling family's bench on the same credential, no provider/pool verdict is
+ * synthesized, and no attempt is spent probing. Non-quota benches (transport,
+ * rate-limit, auth, slow) restore exactly as persisted, readings or not. */
 export const seedCooldowns = (
   rows: ReadonlyArray<{ providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }>,
+  readings: readonly QuotaCurrent.ProviderReading[] = [],
+  now = Date.now(),
 ) => {
   for (const row of rows) {
     const target = ref({ providerID: row.providerID, model: row.modelID })
+    const benchClass = row.reason?.split(" credential:")[0]
+    let until = row.until
+    let quotaResetAt: number | undefined
+    if ((benchClass === "quota" || benchClass === "quota retry-after") && readings.length > 0) {
+      const reading = modelWindowReading(readings, row.providerID, row.modelID)
+      if (reading) {
+        const snapshot = {
+          planID: "quota-current",
+          window: "gathered",
+          providerID: row.providerID,
+          percent: reading.percent,
+          remaining: null,
+          resetAt: reading.resetAt,
+          observedAt: reading.observedAt,
+          stale: now - reading.observedAt > QuotaSnapshot.DEFAULT_MAX_AGE_MS,
+        }
+        if (QuotaSnapshot.known(snapshot)) {
+          if (!QuotaSnapshot.isKnownFull(snapshot, now, currentConstants().quotaGate.balanceDeadThreshold)) continue
+          if (reading.resetAt !== null && reading.resetAt > now) {
+            quotaResetAt = reading.resetAt
+            if (reading.resetAt < until) until = reading.resetAt
+          }
+        }
+      }
+    }
     // A credential-scoped cooldown restores onto that credential only (#870): the healthy
     // credentials behind the same target stay routable after a restart.
     const state = row.credentialID ? credentialEntry(target, row.credentialID) : entry(target)
-    state.cooldownUntil = row.until
+    state.cooldownUntil = until
     // The bench keeps its class across the restart, so a quota reset learned afterwards can
     // still arm its half-open probe (#1123). The stored reason names the credential on
     // credential rows; the class is the part before that suffix.
-    if (row.reason) state.benchReason = row.reason.split(" credential:")[0]
+    if (benchClass) state.benchReason = benchClass
+    if (quotaResetAt !== undefined) state.benchQuotaResetAt = quotaResetAt
   }
 }
 
