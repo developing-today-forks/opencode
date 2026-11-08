@@ -244,8 +244,7 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       // A multi-valued type union cannot ride the proto's single `type`
       // enum, so emit one branch per concrete member (#1556) through the
       // same branch machinery #1550 uses for anyOf: anyOf for Gemini
-      // targets, oneOf for Anthropic, merged with any branches the node's
-      // own anyOf handling already emitted on that side. The node's other
+      // targets, oneOf for Anthropic. The node's other
       // keywords stay on this node and keep applying to every branch —
       // prefixItems included: the outer node is its carrier, exactly as
       // in the non-union tuple shape, so no branch needs its own copy.
@@ -261,8 +260,24 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
         }
         return branch
       })
-      if (anthropic) out.oneOf = [...(Array.isArray(out.oneOf) ? out.oneOf : []), ...branches]
-      else out.anyOf = [...(Array.isArray(out.anyOf) ? out.anyOf : []), ...branches]
+      // Conjunction (#1926): a node's `type` and its own anyOf/oneOf are
+      // conjunctive in JSON Schema — an instance must satisfy both. If the
+      // node's own composition already emitted branches on this node,
+      // appending the type branches into that same array would flatten the
+      // conjunction into one disjunction: Gemini would admit bare
+      // type-branch matches the source rejects, and Anthropic's
+      // exactly-one would count a type match plus an own-branch match as
+      // two and reject valid instances. Keep the sets separate instead:
+      // the type branches ride in an allOf wrapper beside the node's own
+      // composition (oneOf inside the wrapper for Anthropic, which rejects
+      // anyOf in any position, #1550). With no node-owned composition the
+      // branches keep the flat #1556 shape; a node-owned allOf needs no
+      // wrapper either, since allOf siblings are already conjunctive.
+      if (out.anyOf !== undefined || out.oneOf !== undefined) {
+        const wrapper = anthropic ? { oneOf: branches } : { anyOf: branches }
+        out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), wrapper]
+      } else if (anthropic) out.oneOf = branches
+      else out.anyOf = branches
     }
   } else if (typeof node.type === "string") {
     out.type = node.type.toUpperCase()
