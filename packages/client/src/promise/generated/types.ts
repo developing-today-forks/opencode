@@ -785,6 +785,9 @@ export type ModelCompatibility = {
   reasoningField?: ModelReasoningField
   requireReasoning?: boolean
   maxTokensField?: ModelMaxTokensField
+  supportsStore?: boolean
+  supportsStrictMode?: boolean
+  zaiToolStream?: boolean
   requireFinishReason?: boolean
   requireAssistantAfterTool?: boolean
   supportsPromptCacheKey?: boolean
@@ -797,6 +800,9 @@ export type ProviderCompatibility = {
   reasoningField?: ModelReasoningField
   requireReasoning?: boolean
   maxTokensField?: ModelMaxTokensField
+  supportsStore?: boolean
+  supportsStrictMode?: boolean
+  zaiToolStream?: boolean
   requireFinishReason?: boolean
   requireAssistantAfterTool?: boolean
   supportsPromptCacheKey?: boolean
@@ -2946,6 +2952,7 @@ export type SessionInfo = {
   metadata?: SessionMetadata
   subagentPolicy?: SessionSubagentPolicy
   permissions?: PermissionRuleset
+  detached?: true
   revert?: SessionRevert
   location: LocationPublicRef
 }
@@ -2970,6 +2977,7 @@ export type SessionCreated = {
     metadata?: SessionMetadata
     subagentPolicy?: SessionSubagentPolicy
     permissions?: PermissionRuleset
+    detached?: true
     version: string
   }
 }
@@ -3728,6 +3736,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["id"]
   readonly parentID?: {
     readonly id?: string | null
@@ -3756,6 +3765,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["parentID"]
   readonly title?: {
     readonly id?: string | null
@@ -3784,6 +3794,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["title"]
   readonly agent?: {
     readonly id?: string | null
@@ -3812,6 +3823,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["agent"]
   readonly model?: {
     readonly id?: string | null
@@ -3840,6 +3852,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["model"]
   readonly location?: {
     readonly id?: string | null
@@ -3868,6 +3881,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["location"]
   readonly metadata?: {
     readonly id?: string | null
@@ -3896,6 +3910,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["metadata"]
   readonly permissions?: {
     readonly id?: string | null
@@ -3924,6 +3939,7 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["permissions"]
   readonly subagentPolicy?: {
     readonly id?: string | null
@@ -3952,7 +3968,37 @@ export type SessionCreateInput = {
         }
       }
     } | null
+    readonly detached?: true | null
   }["subagentPolicy"]
+  readonly detached?: {
+    readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly location?: { readonly directory: string } | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly permissions?: ReadonlyArray<{
+      readonly action: string
+      readonly resource: string
+      readonly effect: "allow" | "deny" | "ask"
+    }> | null
+    readonly subagentPolicy?: {
+      readonly models?: ReadonlyArray<string>
+      readonly excludedModels?: ReadonlyArray<string>
+      readonly agentOverrides?: {
+        readonly [x: string]: {
+          readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+          readonly models?: ReadonlyArray<string>
+          readonly excludedModels?: ReadonlyArray<string>
+          readonly subagentModels?: ReadonlyArray<string>
+          readonly subagentExcludedModels?: ReadonlyArray<string>
+          readonly force?: boolean
+        }
+      }
+    } | null
+    readonly detached?: true | null
+  }["detached"]
 }
 
 export type SessionCreateOutput = { data: SessionInfo }["data"]
@@ -4008,6 +4054,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string
@@ -4365,6 +4412,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string
@@ -4722,6 +4770,7 @@ export type SessionImportInput = {
         readonly resource: string
         readonly effect: "allow" | "deny" | "ask"
       }>
+      readonly detached?: true
       readonly revert?: {
         readonly messageID: string
         readonly partID?: string

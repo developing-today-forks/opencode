@@ -75,7 +75,16 @@ export const Plugin = {
                 source: { type: "tool", messageID: context.messageID, id: context.id },
               })
               .pipe(
-                Effect.mapError((error) => new ToolFailure({ message: "Permission denied: question", error })),
+                Effect.mapError(
+                  (error) =>
+                    new ToolFailure({
+                      message:
+                        error._tag === "Permission.BlockedError" && error.reason
+                          ? error.reason
+                          : "Permission denied: question",
+                      error,
+                    }),
+                ),
                 Effect.andThen(
                   forms
                     .ask({

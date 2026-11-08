@@ -454,6 +454,33 @@ describe("Session.create", () => {
     }),
   )
 
+  it.effect(
+    "stores detached mode, inherits it through every child and fork, and leaves interactive sessions untouched",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const bus = yield* Bus.Service
+        const { db } = yield* Database.Service
+
+        const interactive = yield* session.create({ location })
+        expect(interactive.detached).toBeUndefined()
+        expect((yield* session.create({ parentID: interactive.id })).detached).toBeUndefined()
+
+        const detached = yield* session.create({ location, detached: true })
+        expect(detached.detached).toBe(true)
+        expect((yield* session.get(detached.id)).detached).toBe(true)
+
+        // The mode reaches every depth; it has no off value, so a child cannot opt out.
+        const child = yield* session.create({ parentID: detached.id })
+        const grandchild = yield* session.create({ parentID: child.id })
+        expect([child.detached, grandchild.detached]).toEqual([true, true])
+
+        yield* session.prompt({ sessionID: detached.id, text: "Fork context", resume: false })
+        yield* SessionInbox.promote(db, bus, detached.id, "steer")
+        expect((yield* session.fork({ sessionID: detached.id })).detached).toBe(true)
+      }),
+  )
+
   it.effect("inherits location from an existing parent when omitted", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service

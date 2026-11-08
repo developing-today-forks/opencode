@@ -100,6 +100,25 @@ export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
   return rulesets.flat()
 }
 
+export const DETACHED_QUESTION_MESSAGE =
+  "The question tool is disabled in this mode: this session is detached (non-interactive) and nobody can answer. Record the question in your final report, take the most conservative documented default, and continue."
+
+/**
+ * The rules that govern a session: the agent's, then the session's own, then the detached-mode
+ * override. Detached mode is a separate axis from permissions: its deny rule comes last so no
+ * agent or session rule can restore `question`.
+ */
+export function effectiveRules(
+  agent: Permission.Ruleset,
+  session: { readonly permissions?: Permission.Ruleset; readonly detached?: true },
+): Permission.Ruleset {
+  return merge(
+    agent,
+    session.permissions ?? [],
+    session.detached ? [{ action: "question", resource: "*", effect: "deny" }] : [],
+  )
+}
+
 export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
@@ -159,7 +178,10 @@ const layer = Layer.effect(
       const session = yield* sessions.get(sessionID)
       if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
       const agent = yield* agents.resolve(agentID ?? session.agent)
-      return merge(agent?.permissions ?? missingAgentPermissions, session.permissions ?? [])
+      return {
+        rules: effectiveRules(agent?.permissions ?? missingAgentPermissions, session),
+        detached: session.detached === true,
+      }
     })
 
     function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
@@ -171,8 +193,13 @@ const layer = Layer.effect(
     }
 
     const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
-      const rules = yield* configured(input.sessionID, input.agent)
-      if (denied(input, rules)) return { effect: "deny" as const, rules }
+      const { rules, detached } = yield* configured(input.sessionID, input.agent)
+      if (denied(input, rules))
+        return {
+          effect: "deny" as const,
+          rules,
+          message: detached && input.action === "question" ? DETACHED_QUESTION_MESSAGE : undefined,
+        }
       const all = [...rules, ...(yield* savedRules())]
       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"

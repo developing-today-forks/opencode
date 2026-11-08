@@ -464,6 +464,7 @@ const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: Ses
         metadata: input?.["metadata"],
         permissions: input?.["permissions"],
         subagentPolicy: input?.["subagentPolicy"],
+        detached: input?.["detached"],
       },
     }).pipe(
       Effect.mapError(mapClientError),

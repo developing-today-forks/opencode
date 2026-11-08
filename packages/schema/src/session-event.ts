@@ -63,6 +63,8 @@ export const Created = Event.durable({
     metadata: SessionMetadata.pipe(optional),
     subagentPolicy: SessionSubagentPolicy.pipe(optional),
     permissions: Permission.Ruleset.pipe(optional),
+    /** Detached (non-interactive) mode, resolved at creation including inheritance from a parent. */
+    detached: Schema.Literal(true).pipe(optional),
     version: Schema.String,
   },
 })
