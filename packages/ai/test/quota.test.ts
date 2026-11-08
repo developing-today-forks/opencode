@@ -1398,6 +1398,45 @@ describe("deepseek quota mapping (#1800)", () => {
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
   })
 
+  test("keeps the zero fallback for a third currency when no USD or CNY row exists (#2129)", async () => {
+    const result = await fetchWith({ balance_infos: [{ currency: "EUR", total_balance: 0 }] })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("EUR 0.00")
+
+    const stringZero = await fetchWith({ balance_infos: [{ currency: "GBP", total_balance: "0" }] })
+    expect(stringZero.ok).toBe(true)
+    expect(stringZero.usage?.windows.credits_balance?.valueLabel).toBe("GBP 0.00")
+  })
+
+  test("a zero third-currency balance wins over a negative USD balance (#2129)", async () => {
+    const result = await fetchWith({
+      balance_infos: [
+        { currency: "USD", total_balance: -5 },
+        { currency: "EUR", total_balance: 0 },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.credits_balance?.valueLabel).toBe("EUR 0.00")
+  })
+
+  test("zero USD and zero CNY stay ahead of a zero third-currency balance (#2129)", async () => {
+    const usd = await fetchWith({
+      balance_infos: [
+        { currency: "EUR", total_balance: 0 },
+        { currency: "USD", total_balance: 0 },
+      ],
+    })
+    expect(usd.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
+
+    const cny = await fetchWith({
+      balance_infos: [
+        { currency: "EUR", total_balance: 0 },
+        { currency: "CNY", total_balance: 0 },
+      ],
+    })
+    expect(cny.usage?.windows.credits_balance?.valueLabel).toBe("¥0.00")
+  })
+
   test("does not publish a negative-only USD balance", async () => {
     const result = await fetchWith({ balance_infos: [{ currency: "USD", total_balance: "-5" }] })
     expect(result.ok).toBe(false)
