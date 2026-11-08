@@ -49,12 +49,33 @@ describe("SessionStep.failureHint", () => {
   })
 
   test("flags an exhausted quota, which carries no retry-after", () => {
-    expect(SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))).toEqual({
+    const hint = SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))
+    expect(hint).toEqual({
       retryAfterMs: undefined,
       quota: true,
       auth: false,
       network: false,
     })
+    expect("quotaResetAtMs" in hint).toBe(false)
+  })
+
+  test("omits quotaResetAtMs when no reset is stated, and sets it when stated in text (#2113)", () => {
+    const withoutReset = SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))
+    expect("quotaResetAtMs" in withoutReset).toBe(false)
+    expect(withoutReset.quotaResetAtMs).toBeUndefined()
+
+    const before = Date.now()
+    const withReset = SessionStep.failureHint(
+      error(
+        new QuotaExceededError({
+          message: "Individual quota reached. Resets in 2 hours.",
+        }),
+      ),
+    )
+    const after = Date.now()
+    expect("quotaResetAtMs" in withReset).toBe(true)
+    expect(withReset.quotaResetAtMs).toBeGreaterThanOrEqual(before + 2 * 3600 * 1000)
+    expect(withReset.quotaResetAtMs).toBeLessThanOrEqual(after + 2 * 3600 * 1000)
   })
 
   test("an ordinary provider failure may carry a retry-after and is never a quota", () => {
