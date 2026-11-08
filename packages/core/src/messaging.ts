@@ -122,6 +122,15 @@ const DELIVERED_CHARS = 8000
 const MAX_CHARS = 8000
 
 /**
+ * Cuts `text` to at most `chars` code units without splitting a surrogate
+ * pair (#1970). A pair straddling the cut is dropped whole, so the result is
+ * always well-formed; callers that report how much was omitted must measure
+ * from the returned length, not from `chars`.
+ */
+const cutText = (text: string, chars: number) =>
+  MessagingLog.splitsPair(text, chars) ? text.slice(0, chars - 1) : text.slice(0, chars)
+
+/**
  * Normalises a log chars budget at the service boundary. HTTP payload decode already enforces
  * the contract PositiveInt, but plugin and tool callers reach the service directly with plain
  * numbers, so a negative chars would make clip() return the wrong end of an entry and NaN would
@@ -558,7 +567,7 @@ const layer = Layer.effect(
           type: input.type,
           writer: input.writer,
           time: message.time,
-          preview: input.data.length > 200 ? `${input.data.slice(0, 197)}...` : input.data,
+          preview: input.data.length > 200 ? `${cutText(input.data, 197)}...` : input.data,
           ...(topic.kind === "user" ? { inbox: true } : {}),
         },
         { global: true },
@@ -616,7 +625,7 @@ const layer = Layer.effect(
         TuiEvent.ToastShow,
         {
           title,
-          message: input.text.length > 400 ? `${input.text.slice(0, 397)}...` : input.text,
+          message: input.text.length > 400 ? `${cutText(input.text, 397)}...` : input.text,
           variant: "info",
           duration: 15_000,
         },
@@ -1068,7 +1077,7 @@ const layer = Layer.effect(
         if (top.length === 0) return take(top, "advanced")
         const order = yield* options.rerank(
           text,
-          top.map((item) => ({ key: keyOf(item.row), text: content(item.row).slice(0, 600) })),
+          top.map((item) => ({ key: keyOf(item.row), text: cutText(content(item.row), 600) })),
         )
         const position = new Map(order.map((key, index) => [key, index]))
         const reranked = top
@@ -2218,7 +2227,7 @@ function firstLine(text: string) {
       .split("\n")
       .find((item) => item.trim() !== "")
       ?.trim() ?? ""
-  return line.length > 100 ? `${line.slice(0, 97)}...` : line
+  return line.length > 100 ? `${cutText(line, 97)}...` : line
 }
 
 function round(value: number) {
@@ -2247,7 +2256,10 @@ function render(
   ]
   const body =
     message.data.length > DELIVERED_CHARS
-      ? `${message.data.slice(0, DELIVERED_CHARS)}\n…[${message.data.length - DELIVERED_CHARS} more characters; read ${topic}#${message.seq} for the rest]`
+      ? (() => {
+          const kept = cutText(message.data, DELIVERED_CHARS)
+          return `${kept}\n…[${message.data.length - kept.length} more characters; read ${topic}#${message.seq} for the rest]`
+        })()
       : message.data
   return {
     text: `<message ${attributes.join(" ")}>\n${MessagingLog.escapeBody(body)}\n</message>`,

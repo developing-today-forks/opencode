@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { eq } from "drizzle-orm"
 import { DateTime, Effect, Fiber, Stream } from "effect"
 import { TestClock } from "effect/testing"
@@ -10,6 +10,7 @@ import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Messaging } from "@opencode/core/messaging"
 import { MessagingGraph } from "@opencode/core/messaging/graph"
+import { MessagingLog } from "@opencode/core/messaging/log"
 import { MessagingEmbedding } from "@opencode/core/messaging/embedding"
 import { MessagingVectorTable } from "@opencode/core/messaging/sql"
 import { MessagingTemplate } from "@opencode/core/messaging/template"
@@ -1144,6 +1145,58 @@ describe("Messaging log chars and context normalisation", () => {
       // NaN is treated as absent, so pull falls back to its 4000 default.
       expect(yield* pull(NaN)).toEqual(yield* pull())
       expect((yield* pull(NaN)).length).toBeLessThanOrEqual(4000)
+    }),
+  )
+})
+
+// Oracle (#1970): every truncation in the messaging door cuts at raw code-unit
+// offsets, so a pair straddling the cut must be dropped whole — the #1966 house
+// rule (messaging/log.ts splitsPair). A lone surrogate re-encodes as U+FFFD in
+// text a session or the person receives.
+describe("Messaging truncations never split a surrogate pair", () => {
+  const astral = "\u{1F600}"
+
+  test("the shared guard reports a straddling pair and only that", () => {
+    expect(MessagingLog.splitsPair(`a${astral}b`, 2)).toBe(true)
+    expect(MessagingLog.splitsPair(`a${astral}b`, 1)).toBe(false)
+    expect(MessagingLog.splitsPair(`a${astral}b`, 3)).toBe(false)
+    expect(MessagingLog.splitsPair("plain ascii text", 4)).toBe(false)
+    expect(MessagingLog.splitsPair(astral, 0)).toBe(false)
+    expect(MessagingLog.splitsPair(astral, 2)).toBe(false)
+  })
+
+  it.effect("the toast and preview drop a straddling pair whole", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      const bus = yield* Bus.Service
+      const toasts = yield* bus.subscribe(TuiEvent.ToastShow).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+
+      // The toast budget is 397 code units: put the pair's halves either side of it.
+      yield* messaging.user({ as: tree.grandchild.id, text: "a".repeat(396) + astral + "b".repeat(50) })
+      const [toast] = Array.from(yield* Fiber.join(toasts))
+      const shown = toast?.data.message ?? ""
+      expect(shown.isWellFormed()).toBe(true)
+      expect(shown).not.toContain(astral)
+      expect(shown).toBe("a".repeat(396) + "...")
+    }),
+  )
+
+  it.effect("the delivered body drops a straddling pair and counts the omission from the adjusted cut", () =>
+    Effect.gen(function* () {
+      const tree = yield* family
+      const messaging = yield* Messaging.Service
+      // The delivered budget is 8000 code units.
+      const text = "a".repeat(7999) + astral + "b".repeat(50)
+      yield* messaging.send({ as: tree.child.id, to: "parent", text })
+      const pending = yield* pendingSynthetic(tree.root.id)
+      const rendered = pending[0]?.payload.text ?? ""
+      expect(rendered.isWellFormed()).toBe(true)
+      expect(rendered).not.toContain(astral)
+      // 7999 kept, 52 omitted (the straddling pair dropped whole): the count
+      // follows the adjusted cut, not the raw 8000 budget.
+      expect(rendered).toContain("[52 more characters")
     }),
   )
 })

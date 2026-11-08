@@ -167,8 +167,12 @@ export function unescapeBody(value: string) {
  * side alone leaves ill-formed text that re-encodes as U+FFFD (#1966). The
  * house rule is to never split a pair (messaging/search.ts, session
  * compaction), so a straddling pair is dropped whole instead.
+ *
+ * Exported so every truncation in the messaging door shares this one rule
+ * (#1970): the delivered body, preview, toast, firstLine and rerank text all
+ * cut at raw code-unit offsets.
  */
-const splitsPair = (text: string, index: number) =>
+export const splitsPair = (text: string, index: number) =>
   index > 0 &&
   index < text.length &&
   text.charCodeAt(index - 1) >= 0xd800 &&
