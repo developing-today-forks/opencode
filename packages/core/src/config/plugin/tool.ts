@@ -155,7 +155,7 @@ export const Plugin = define({
           fs
             .scan("{tool,tools}/*.{ts,js}", { cwd: entry.path, absolute: true, dot: true, symlink: true })
             .pipe(Effect.orElseSucceed(() => [] as string[])),
-      ).pipe(Effect.map((items) => items.flat().toSorted()))
+      ).pipe(Effect.map((items) => items.flatMap((files) => files.toSorted())))
       // Registration order is config priority order: later (project) tools
       // override earlier (global) ones, and all of them override built-ins.
       return yield* Effect.forEach(files, loadFile).pipe(Effect.map((items) => items.flat()))
