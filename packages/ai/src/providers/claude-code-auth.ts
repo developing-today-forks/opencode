@@ -107,6 +107,8 @@ export interface CredentialSources {
   readonly writeFile?: (path: string, contents: string) => Promise<void>
   /** Rename used by the atomic credential write (tests); defaults to fs rename. */
   readonly renameFile?: (from: string, to: string) => Promise<void>
+  /** Remove a failed atomic-write temp file (tests); defaults to fs rm with force. */
+  readonly removeFile?: (path: string) => Promise<void>
   /** Fetch used for the OAuth token exchange (tests); defaults to the global fetch. */
   readonly fetchFn?: typeof fetch
   /** Override for the token-exchange deadline (tests); defaults to 15 seconds. */
@@ -244,10 +246,23 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
       const { rename } = await import("node:fs/promises")
       await rename(from, to)
     })
+  const removeFile =
+    sources.removeFile ??
+    (async (target: string) => {
+      const { rm } = await import("node:fs/promises")
+      await rm(target, { force: true })
+    })
   const suffix = Array.from(randomBytes(sources, 6), (byte) => byte.toString(16).padStart(2, "0")).join("")
   const temp = `${path}.tmp-${process.pid}-${suffix}`
-  await writeFile(temp, contents)
-  await renameFile(temp, path)
+  try {
+    await writeFile(temp, contents)
+    await renameFile(temp, path)
+  } catch (cause) {
+    try {
+      await removeFile(temp)
+    } catch {}
+    throw cause
+  }
 }
 
 /** A refresh failure with a named, token-free message (#1818). */

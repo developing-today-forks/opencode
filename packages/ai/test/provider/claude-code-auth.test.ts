@@ -279,6 +279,51 @@ describe("writeCredential — the shared atomic write helper (#1852)", () => {
       expiresAt: 42,
     })
   })
+
+  test("removes the temp file when rename fails and leaves the target untouched", async () => {
+    const path = "/fixture/claude-dir/.credentials.json"
+    const original = JSON.stringify({ claudeAiOauth: { accessToken: "tok-old" } })
+    const files = new Map([[path, original]])
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      readFile: (target) => files.get(target),
+      writeFile: async (target, contents) => {
+        files.set(target, contents)
+      },
+      renameFile: async () => {
+        throw new Error("EACCES")
+      },
+      removeFile: async (target) => {
+        files.delete(target)
+      },
+      randomValues: (length) => new Uint8Array(length).fill(7),
+    }
+
+    await expect(writeCredential(sources, { accessToken: "tok-new" })).rejects.toThrow("EACCES")
+    expect(files.get(path)).toBe(original)
+    expect([...files.keys()]).toEqual([path])
+  })
+
+  test("preserves the rename error when temp-file cleanup also fails", async () => {
+    const renameError = new Error("EACCES")
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      readFile: () => undefined,
+      writeFile: async () => {},
+      renameFile: async () => {
+        throw renameError
+      },
+      removeFile: async () => {
+        throw new Error("EPERM")
+      },
+      randomValues: (length) => new Uint8Array(length).fill(7),
+    }
+
+    const error = await writeCredential(sources, { accessToken: "tok-new" }).catch((cause: unknown) => cause)
+    expect(error).toBe(renameError)
+  })
 })
 
 describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () => {
