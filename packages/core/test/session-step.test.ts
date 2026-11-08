@@ -7,11 +7,15 @@ import {
   LanguageModel,
   LLM,
   LLMEvent,
+  ModelID,
+  NoRouteError,
+  ProviderID,
   ProviderInternalError,
   QuotaExceededError,
   RateLimitError,
   TimeoutError,
   UnknownProviderError,
+  UnsupportedOperationError,
 } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
@@ -2644,6 +2648,54 @@ describe("SessionStep failover classes (#1806)", () => {
       if (Exit.isSuccess(result))
         expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
       expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on an UnsupportedOperation (the target does not support the operation)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({
+          reason: new UnsupportedOperationError({ message: "operation not supported by this route", operation: "request" }),
+        }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("fails over on a NoRoute failure (the route does not resolve)", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback } = yield* attemptWith(
+        new AIError({
+          reason: new NoRouteError({
+            message: "no route to the target",
+            route: "route",
+            provider: ProviderID.make("openai"),
+            model: ModelID.make("primary"),
+          }),
+        }),
+        true,
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+    }),
+  )
+
+  it.effect("does not fail over a payload-too-large InvalidRequest — size recovery owns the request", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls } = yield* attemptWith(
+        new AIError({
+          reason: new InvalidRequestError({ message: "request entity too large", classification: "payload-too-large" }),
+        }),
+        true,
+      )
+      expect(fallbackCalls).toBe(0)
+      if (Exit.isSuccess(result)) expect(result.value._tag).not.toBe("Failover")
     }),
   )
 
