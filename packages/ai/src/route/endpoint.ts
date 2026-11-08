@@ -55,7 +55,18 @@ export const render = <Body, Request = LLMRequest>(
   endpoint: Definition<Body, Request>,
   input: EndpointInput<Body, Request>,
 ) => {
-  const url = new URL(`${trimBaseUrl(endpoint.baseURL ?? "")}${renderPart(endpoint.path, input)}`)
+  const baseURL = trimBaseUrl(endpoint.baseURL ?? "")
+  let path = renderPart(endpoint.path, input)
+  // A baseURL that already ends in the path's leading version segment must
+  // not render that segment twice: a provider baseURL ending in "/v1"
+  // (Cloudflare's ".../anthropic/v1" passthrough, Bedrock Mantle's
+  // ".../anthropic/v1", a user's ".../v1" Anthropic-compatible baseURL)
+  // combined with the Anthropic Messages path "/v1/messages" posted to
+  // "/v1/v1/messages" and 404'd (#1956). The version segment lives in
+  // exactly one place after this de-duplication.
+  if (baseURL.endsWith("/v1") && (path === "/v1" || path.startsWith("/v1/") || path.startsWith("/v1?")))
+    path = path.slice("/v1".length) || "/"
+  const url = new URL(`${baseURL}${path}`)
   for (const [key, value] of Object.entries(endpoint.query ?? {})) url.searchParams.set(key, value)
   return url
 }
