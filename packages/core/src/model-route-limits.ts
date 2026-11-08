@@ -123,9 +123,9 @@ export const ABSOLUTE_TIME =
 // "in 30ms" stays 30 milliseconds, not 30 minutes. This grammar is the one both
 // quota-reset parsers use (ModelRouteTuning.parseQuotaReset calls relativeMs below):
 // a message honoured by one door must be honoured by the other (#996).
-const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|mins?|ms|h|d|m|s)s?(?![a-z])`
+const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|week|sec|mins?|wk|ms|h|d|w|m|s)s?(?![a-z])`
 const RELATIVE_TIME = new RegExp(String.raw`in\s+(${RELATIVE_PART}(?:[\s,]*(?:and\s+)?${RELATIVE_PART})*)`)
-const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|min|ms|h|d|m|s)s?(?![a-z])/g
+const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|week|sec|min|wk|ms|h|d|w|m|s)s?(?![a-z])/g
 const RELATIVE_UNITS = {
   second: 1_000,
   sec: 1_000,
@@ -138,6 +138,12 @@ const RELATIVE_UNITS = {
   h: 3_600_000,
   day: 86_400_000,
   d: 86_400_000,
+  // A week is exactly 7 days (#2096): week/weeks plus the compact wk/wks/w forms,
+  // mirroring the day/d pairing. The (?![a-z]) guard keeps "w" from eating the
+  // head of a following word ("in 5 windows" states no wait).
+  week: 604_800_000,
+  wk: 604_800_000,
+  w: 604_800_000,
 } as Record<string, number>
 
 /** The total wait a relative phrase states, summed over its parts; undefined when it states none.
