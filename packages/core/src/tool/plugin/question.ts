@@ -2,7 +2,7 @@ export * as QuestionTool from "./question.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { ToolFailure } from "@opencode/ai"
-import { Effect, Schema } from "effect"
+import { Duration, Effect, Schema } from "effect"
 import { Form } from "../../form.js"
 import { Permission } from "../../permission.js"
 import { Question } from "@opencode/schema/question"
@@ -98,6 +98,16 @@ export const Plugin = {
                         toField(input.questions[0], 0),
                         ...input.questions.slice(1).map((question, index) => toField(question, index + 1)),
                       ],
+                    }, {
+                      // Bounded and deduped (#1883): an unanswered question must not stall a
+                      // session (or a foreground parent waiting on it) forever, and a resumed
+                      // session must not re-issue an identical pending question. The timeout
+                      // resolves as a cancelled-with-message state, which the mapping below
+                      // surfaces to the model as ordinary handleable feedback.
+                      timeout: Duration.minutes(10),
+                      timeoutMessage:
+                        "The question was not answered within 10 minutes and has been cancelled. Do not ask it again: record the question, state the default you chose, and continue.",
+                      dedupePending: true,
                     })
                     .pipe(Effect.orDie),
                 ),
