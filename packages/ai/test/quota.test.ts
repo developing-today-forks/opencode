@@ -16,7 +16,7 @@ import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
-import { listConfiguredQuotaProviders } from "../src/quota/index.js"
+import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -1909,5 +1909,62 @@ describe("toUsageWindow remainingPercent derivation (#1904)", () => {
     expect(toUsageWindow({ usedPercent: 50 }).remainingPercent).toBe(50)
     expect(toUsageWindow({ usedPercent: 100 }).remainingPercent).toBe(0)
     expect(toUsageWindow({ usedPercent: null }).remainingPercent).toBeNull()
+  })
+})
+
+describe("listing probe failure is a result, never absence (#1729)", () => {
+  // A credential row whose value cannot even be decoded: every
+  // projectAuth-based isConfigured probe throws when it touches it.
+  // Oracle: the listing contract from task 10000 - a probe failure
+  // produces an error row; the provider never silently vanishes, and
+  // the listing resolution then agrees with a named ask.
+  const throwingCtx = () => {
+    const row: Record<string, unknown> = { id: "throwing-1", integrationID: "deepseek", active: true }
+    Object.defineProperty(row, "value", {
+      enumerable: true,
+      get() {
+        throw new Error("credential store decode boom")
+      },
+    })
+    return {
+      credentials: [row],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+    } as never
+  }
+
+  test("configuredProviderProbeFailureProducesErrorRow", async () => {
+    const listing = await listConfiguredQuotaProvidersDetailed(throwingCtx())
+    const failure = listing.probeFailures.find((entry) => entry.providerId === "deepseek")
+    expect(failure).toBeDefined()
+    expect(failure?.error).toContain("credential store decode boom")
+    expect(listing.providerIds).not.toContain("deepseek")
+    const row = quotaProbeFailureResult(failure!)
+    expect(row.ok).toBe(false)
+    expect(row.configured).toBe(true)
+    expect(row.providerId).toBe("deepseek")
+    expect(row.error).toContain("probe failed")
+    expect(row.error).toContain("credential store decode boom")
+  })
+
+  test("fullListingEmitsEveryConfiguredProviderAndCredential", async () => {
+    const groups = await fetchAllQuota(throwingCtx())
+    const deepseek = groups.find((group) => group.providerId === "deepseek")
+    expect(deepseek).toBeDefined()
+    expect(deepseek?.results).toHaveLength(1)
+    expect(deepseek?.results[0]?.ok).toBe(false)
+    expect(deepseek?.results[0]?.error).toContain("probe failed")
+    // No provider group is duplicated: exactly one deepseek group.
+    expect(groups.filter((group) => group.providerId === "deepseek")).toHaveLength(1)
+  })
+
+  test("named-vs-listing parity: a provider resolvable by name appears in the listing as an error row", async () => {
+    const { resolveQuotaProviderName } = await import("../src/quota/index.js")
+    const ctx = throwingCtx()
+    // The named ask resolves deepseek (catalogue resolution never probes).
+    expect(resolveQuotaProviderName(ctx, "deepseek")).toBe("deepseek")
+    const groups = await fetchAllQuota(ctx)
+    expect(groups.some((group) => group.providerId === "deepseek")).toBe(true)
   })
 })

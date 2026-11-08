@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { collectNamedQuotaGroups, readConfigFacts, quotaRunSucceeded, renderQuotaResults } from "../src/commands/handlers/quota"
+import { collectNamedQuotaGroups, fetchWithQuotaTimeout, quotaTimeoutMsForProvider, readConfigFacts, quotaRunSucceeded, renderQuotaResults, DEFAULT_QUOTA_TIMEOUT_MS, MISTRAL_QUOTA_TIMEOUT_MS } from "../src/commands/handlers/quota"
 import type { QuotaContext, QuotaResult } from "@opencode/ai/quota"
 
 const window = (usedPercent: number | null, valueLabel?: string) => ({
@@ -189,5 +189,35 @@ describe("quota config facts discovery (#1733)", () => {
     } finally {
       rmSync(tree.root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("quota per-provider timeout budget (#1729)", () => {
+  test("mistralCdpReadUsesExtendedProviderBudget", () => {
+    expect(MISTRAL_QUOTA_TIMEOUT_MS).toBe(60_000)
+    expect(quotaTimeoutMsForProvider("mistral", {})).toBe(60_000)
+    // An explicit override below the CDP budget does not shrink mistral.
+    expect(quotaTimeoutMsForProvider("mistral", { OPENCODE_QUOTA_TIMEOUT_MS: "45000" })).toBe(60_000)
+    // An explicit override above it is honoured.
+    expect(quotaTimeoutMsForProvider("mistral", { OPENCODE_QUOTA_TIMEOUT_MS: "90000" })).toBe(90_000)
+  })
+
+  test("otherProvidersKeepDefaultQuotaBudget", () => {
+    expect(DEFAULT_QUOTA_TIMEOUT_MS).toBe(30_000)
+    expect(quotaTimeoutMsForProvider("deepseek", {})).toBe(30_000)
+    expect(quotaTimeoutMsForProvider("meta", {})).toBe(30_000)
+    expect(quotaTimeoutMsForProvider("deepseek", { OPENCODE_QUOTA_TIMEOUT_MS: "45000" })).toBe(45_000)
+  })
+
+  test("a slow-but-progressing fetch inside its budget succeeds; outside it becomes a timeout error row", async () => {
+    const slow = async (): Promise<QuotaResult[]> => {
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      return [okResult]
+    }
+    await expect(fetchWithQuotaTimeout("mistral", slow, 500)).resolves.toEqual([okResult])
+    const timedOut = await fetchWithQuotaTimeout("deepseek", slow, 5)
+    expect(timedOut).toHaveLength(1)
+    expect(timedOut[0]?.ok).toBe(false)
+    expect(timedOut[0]?.error).toContain("timed out after 5ms")
   })
 })
