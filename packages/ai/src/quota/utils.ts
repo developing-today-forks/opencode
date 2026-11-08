@@ -28,8 +28,9 @@ export const toNumber = (value: JsonValue | undefined): number | null => {
     // An empty/blank string is an absent field, not zero: Number("") === 0
     // would mint a real 0 (a 0% window, a zero balance, a 100%-used pool
     // computed from 0 remaining) out of no data (#1741).
-    if (value.trim() === "") return null
-    const parsed = Number(value)
+    const text = value.trim()
+    if (!/^-?\d+(?:\.\d+)?$/.test(text)) return null
+    const parsed = Number(text)
     return Number.isFinite(parsed) ? parsed : null
   }
   return null

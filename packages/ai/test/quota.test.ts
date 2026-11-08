@@ -313,6 +313,28 @@ describe("meta portal subscription-quota mapping", () => {
     expect(parsed?.windows.weekly?.resetAt).toBe(1793980800 * 1000)
   })
 
+  test("rejects non-decimal weighted usage and preserves decimal percentages (#2102)", () => {
+    const invalid = ["0x64", "0b1100100", "0o144", "1e2"].map((window_weighted_used) =>
+      parseSubscriptionQuota({
+        subscription_quota: {
+          ...payload.subscription_quota,
+          window_weighted_used,
+          window_weighted_limit: "100",
+        },
+      }),
+    )
+    expect(invalid).toEqual([null, null, null, null])
+
+    const decimal = parseSubscriptionQuota({
+      subscription_quota: {
+        ...payload.subscription_quota,
+        window_weighted_used: "42",
+        window_weighted_limit: "100",
+      },
+    })
+    expect(decimal?.windows["5h"]?.usedPercent).toBe(42)
+  })
+
   test("a payload with no window_resets_at still parses (live 2026-11-05 shape)", () => {
     // Observed live 2026-11-05 after re-login: the rolling window
     // had not started (used "0") and the portal omitted
@@ -677,6 +699,20 @@ describe("toNumber blank-string handling (#1741)", () => {
   })
 })
 
+describe("toNumber plain-decimal strings (#2102)", () => {
+  test("accepts signed decimal figures and rejects non-decimal Number spellings", () => {
+    expect(toNumber("42")).toBe(42)
+    expect(toNumber("4.5")).toBe(4.5)
+    expect(toNumber("-5")).toBe(-5)
+    expect(toNumber(" 42 ")).toBe(42)
+
+    // A leading plus is intentionally non-canonical and rejected, along
+    // with Number's hex, binary, octal, and exponent spellings.
+    const invalid = ["+42", "0x64", "0b1100100", "0o144", "1e2", "1e3"]
+    invalid.forEach((text) => expect(toNumber(text)).toBeNull())
+  })
+})
+
 describe("command-code monthly over-included credits (#1744)", () => {
   test("remaining above the included amount publishes a 0%-used monthly window", () => {
     const windows = parseCommandCodeCredits({ credits: { monthlyCredits: 25 } })
@@ -789,6 +825,16 @@ describe("claude usage transform (#1750)", () => {
     expect(legacy.windows["7d"]).toBeUndefined()
     expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
     expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
+  })
+
+  test("rejects non-decimal session percentages and preserves decimal controls (#2102)", () => {
+    const windows = ["0x50", "1e2"].map(
+      (percent) => toClaudeUsage({ limits: [{ kind: "session", percent, resets_at: resets }] }).windows,
+    )
+    expect(windows.map((item) => item["5h"])).toEqual([undefined, undefined])
+
+    const decimal = toClaudeUsage({ limits: [{ kind: "session", percent: "4.5", resets_at: resets }] })
+    expect(decimal.windows["5h"]?.usedPercent).toBe(4.5)
   })
 })
 
