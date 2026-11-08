@@ -27,8 +27,13 @@ export const providerName = "OpenRouter"
 export const aliases = ["openrouter"]
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-const PERIOD_SECONDS: Record<string, number> = { daily: 86400, weekly: 604800, monthly: 30 * 86400 }
-
+// The reset periods are OpenRouter's calendar, resolved in UTC (the
+// wire format is UTC): daily is the next UTC midnight, monthly the
+// first UTC day of the next month. Weekly is the next UTC Monday —
+// `getUTCDay()` is 0 on Sunday and 1 on Monday, so `(8 - dow) % 7`
+// counts days forward to Monday and its `|| 7` fallback makes Monday
+// itself jump a full week rather than resolve to today. Pinned by the
+// "OpenRouter calendar reset calculation" suite (#1725).
 export const resolveResetAt = (limitReset: JsonValue | undefined, nowMs: number): number | null => {
   const now = new Date(nowMs)
   const y = now.getUTCFullYear()
@@ -117,7 +122,13 @@ export const provider: QuotaProvider = {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
       }
       const usageMonthly = toNumber(data.usage_monthly)
-      if (limit === null && usageMonthly === null) {
+      // A negative spend is impossible wire data (#1913): read it as
+      // absent, the way sibling parsers read negative amounts
+      // (turso numNonNegative, opencode-go toMicroCents). On the
+      // unlimited path the spend is the only figure, so absent is
+      // the no-data contract — the same disposition as the
+      // zero/negative limit above (#1799, contract rule 4).
+      if (limit === null && (usageMonthly === null || usageMonthly < 0)) {
         return buildResult({ providerId, providerName, ok: false, configured: true, error: "No quota data in response" })
       }
 
@@ -130,7 +141,7 @@ export const provider: QuotaProvider = {
 
       if (limit === null) {
         windowKey = "monthly"
-        windowSeconds = PERIOD_SECONDS.monthly
+        windowSeconds = 30 * 86400
         resetAt = resolveResetAt("monthly", nowMs)
         usedPercent = null
         valueLabel = `$${formatMoney(usageMonthly)} spent`
@@ -140,9 +151,17 @@ export const provider: QuotaProvider = {
         const percent = limit > 0 ? (used / limit) * 100 : null
         usedPercent = percent === null ? null : Math.min(100, percent)
         valueLabel = `$${formatMoney(used)} / $${formatMoney(limit)}`
-        if (typeof data.limit_reset === "string" && Object.hasOwn(PERIOD_SECONDS, data.limit_reset)) {
+        if (data.limit_reset === "daily") {
           windowKey = data.limit_reset
-          windowSeconds = PERIOD_SECONDS[data.limit_reset]
+          windowSeconds = 86400
+          resetAt = resolveResetAt(data.limit_reset, nowMs)
+        } else if (data.limit_reset === "weekly") {
+          windowKey = data.limit_reset
+          windowSeconds = 604800
+          resetAt = resolveResetAt(data.limit_reset, nowMs)
+        } else if (data.limit_reset === "monthly") {
+          windowKey = data.limit_reset
+          windowSeconds = 30 * 86400
           resetAt = resolveResetAt(data.limit_reset, nowMs)
         } else {
           windowKey = "key_limit"

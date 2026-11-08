@@ -161,11 +161,33 @@ export function unescapeBody(value: string) {
     .replace(/&amp;(?=(?:amp|lt);)/g, "&")
 }
 
+/**
+ * A cut at `index` splits a surrogate pair when the code unit before it is a
+ * high surrogate and the one at it is that pair's low half: keeping either
+ * side alone leaves ill-formed text that re-encodes as U+FFFD (#1966). The
+ * house rule is to never split a pair (messaging/search.ts, session
+ * compaction), so a straddling pair is dropped whole instead.
+ *
+ * Exported so every truncation in the messaging door shares this one rule
+ * (#1970): the delivered body, preview, toast, firstLine and rerank text all
+ * cut at raw code-unit offsets.
+ */
+export const splitsPair = (text: string, index: number) =>
+  index > 0 &&
+  index < text.length &&
+  text.charCodeAt(index - 1) >= 0xd800 &&
+  text.charCodeAt(index - 1) <= 0xdbff &&
+  text.charCodeAt(index) >= 0xdc00 &&
+  text.charCodeAt(index) <= 0xdfff
+
 /** Shortens long entries to a head and tail around an omission marker. */
 export function clip(text: string, chars: number) {
   if (text.length <= chars) return text
   let head = Math.ceil(chars * 0.7)
-  const tail = Math.max(0, chars - head - 20)
+  let tail = Math.max(0, chars - head - 20)
+  // Drop a pair straddling the tail cut whole: the kept tail starts one
+  // code unit later, and the marker below counts it as omitted.
+  if (tail > 0 && splitsPair(text, text.length - tail)) tail -= 1
   // The 20-char reserve above only shrinks the tail: when the tail has
   // already clamped to 0 the marker itself can push the result past
   // `chars`, so shrink the head by the overflow instead. If the marker
@@ -175,6 +197,13 @@ export function clip(text: string, chars: number) {
     head -= 1
     marker = ` …[${text.length - head - tail} chars]… `
   }
-  if (head + marker.length + tail > chars) return text.slice(0, chars)
+  // The shrink loop can land the head cut inside a pair (or start there):
+  // drop the pair whole and recount the omission. The result only shrinks,
+  // so the budget still holds.
+  if (splitsPair(text, head)) {
+    head -= 1
+    marker = ` …[${text.length - head - tail} chars]… `
+  }
+  if (head + marker.length + tail > chars) return text.slice(0, splitsPair(text, chars) ? chars - 1 : chars)
   return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`
 }

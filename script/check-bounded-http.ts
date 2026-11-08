@@ -15,7 +15,8 @@
  * (since #1394) every script tree (root `script/`, each package
  * script/scripts tree — including nested package trees such as
  * `packages/console/app/script` and `packages/plugins/figma/script`
- * (#1425) — and `services/www/script`), in
+ * (#1425) — and `services/www/script`), plus the published
+ * GitHub Action under `github/` (since #1436), in
  * (`.ts`/`.tsx`/`.astro` files - Astro frontmatter executes server-side, so its fetch/read sites are in scope) with the two sweep
  * patterns —
  *   P-A: a `fetch(` call site. The pattern is deliberately line-shaped:
@@ -49,9 +50,11 @@
  * release, publish, and CI paths against api.github.com and registries
  * with a token in env, and every top-level `script/` fetch bug found
  * before this extension (#1275, #1329, #1332, #1337, #1344) escaped
- * precisely because this gate did not scan them. This gate's own
- * checker and tests self-match (pattern literals, fixtures); those
- * hits are dispositioned in the allowlist as fixtures, not hidden.
+ * precisely because this gate did not scan them. Since #1436 the
+ * top-level `github/` tree (the published GitHub Action) is in scope
+ * too: it runs in third-party CI on commenter-controlled input. This
+ * gate's own checker and tests self-match (pattern literals, fixtures);
+ * those hits are dispositioned in the allowlist as fixtures, not hidden.
  *
  * Usage:
  *   bun run script/check-bounded-http.ts   # exit 1 listing unlisted/stale hits
@@ -129,6 +132,18 @@ export const SCAN_ROOTS: string[] = [
   "packages/ui/script",
   "packages/util/script",
   "services/www/script",
+  // The published GitHub Action tree (#1436): standalone package with
+  // its own lockfile, running in third-party CI on commenter-controlled
+  // input — its token-exchange, attachment-download and token-revoke
+  // fetches escaped the net precisely because this root was missing.
+  "github",
+  // Escaped trees (#1758): the vscode extension package lives outside
+  // packages//services. Its script files are shell (no scanned extension),
+  // and github/script is already walked via the github root above; both
+  // are listed explicitly so the tree check records them as scanned.
+  "github/script",
+  "sdks/vscode/script",
+  "sdks/vscode/src",
 ]
 
 export const ALLOWLIST_PATH = "script/check-bounded-http.allowlist.txt"

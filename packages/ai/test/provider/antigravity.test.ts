@@ -2,9 +2,15 @@ import { expect } from "bun:test"
 import { Effect } from "effect"
 import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
 import { Antigravity } from "../../src/providers/antigravity.js"
-import { Antigravity as AntigravityProtocol, convertSchema, resolveModelAndEffort } from "../../src/protocols/antigravity.js"
+import {
+  Antigravity as AntigravityProtocol,
+  convertSchema,
+  resolveModelAndEffort,
+  WIRE_COMPLETE_MODEL_IDS,
+} from "../../src/protocols/antigravity.js"
 import { compileRequest } from "../../src/route/client.js"
 import { Endpoint } from "../../src/route/endpoint.js"
+import { ANTIGRAVITY_MODEL_CATALOG } from "../fixtures/antigravity-model-catalog.js"
 import { it } from "../lib/effect.js"
 import { dynamicResponse, fixedResponse } from "../lib/http.js"
 import { sseEvents } from "../lib/sse.js"
@@ -24,7 +30,7 @@ it.effect("Antigravity route points at the v1internal stream endpoint", () =>
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse")
-    expect(model.provider).toBe("antigravity")
+    expect(model.provider).toBe("_antigravity")
   }),
 )
 
@@ -145,6 +151,41 @@ it.effect("resolveModelAndEffort ports the door's suffix + effort rules", () =>
     expect(resolveModelAndEffort("gemini-2.5-flash-medium").fullName).toBe("gemini-2.5-flash")
     expect(resolveModelAndEffort("gemini-3.8-flash-tiered").fullName).toBe("gemini-3.8-flash-tiered")
     expect(resolveModelAndEffort("gemini-2.5-pro", "low").fullName).toBe("gemini-2.5-pro")
+  }),
+)
+
+it.effect("Antigravity model classification matches the dated upstream catalog", () =>
+  Effect.sync(() => {
+    const daily = ANTIGRAVITY_MODEL_CATALOG.endpoints.dailyCloudcodePa
+    const production = ANTIGRAVITY_MODEL_CATALOG.endpoints.cloudcodePa
+    expect(daily).toEqual([...daily].sort())
+    expect(production).toEqual(daily)
+
+    const classifications = [
+      ...ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds,
+      ...ANTIGRAVITY_MODEL_CATALOG.effortModelIds,
+      ...ANTIGRAVITY_MODEL_CATALOG.internalModelIds,
+    ]
+    expect([...classifications].sort()).toEqual(daily)
+    expect(new Set(classifications).size).toBe(classifications.length)
+    expect([...WIRE_COMPLETE_MODEL_IDS].sort()).toEqual([...ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds].sort())
+
+    const catalog = new Set(daily)
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.wireCompleteModelIds) {
+      for (const effort of ["low", "medium", "high"] as const) {
+        expect(resolveModelAndEffort(model, effort).fullName).toBe(model)
+        expect(resolveModelAndEffort(`${model}-${effort}`).fullName).toBe(model)
+      }
+    }
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.effortModelIds) {
+      const separator = model.lastIndexOf("-")
+      const base = model.slice(0, separator)
+      const effort = model.slice(separator + 1)
+      const resolved = resolveModelAndEffort(base, effort).fullName
+      expect(resolved).toBe(model)
+      expect(catalog.has(resolved)).toBe(true)
+    }
+    for (const model of ANTIGRAVITY_MODEL_CATALOG.internalModelIds) expect(/^(chat|tab)_/.test(model)).toBe(true)
   }),
 )
 
@@ -371,6 +412,83 @@ it.effect("convertSchema expands multi-valued type unions into branches (#1556)"
   }),
 )
 
+it.effect("convertSchema keeps multi-valued type conjunctive with the node's own anyOf/oneOf (#1926)", () =>
+  Effect.sync(() => {
+    // Oracle: JSON Schema conjunction — an instance must satisfy the node's
+    // `type` AND its anyOf/oneOf independently. The type-union branches must
+    // not flatten into the node's own composition array: on Gemini the bare
+    // {STRING} branch would admit "ab" (the source rejects it: a string must
+    // pass the anyOf, whose string branch needs minLength 5); on Anthropic
+    // the merged oneOf would count a type match plus an own-branch match as
+    // two and reject valid instances. The type branches ride in an allOf
+    // wrapper beside the node's own composition instead.
+    const combined = {
+      type: "object",
+      properties: {
+        v: {
+          type: ["string", "integer"],
+          anyOf: [
+            { type: "string", minLength: 5 },
+            { type: "integer", minimum: 10 },
+          ],
+        },
+      },
+    }
+    expect(convertSchema(combined as never)).toEqual({
+      type: "OBJECT",
+      properties: {
+        v: {
+          anyOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+    })
+    expect(convertSchema(combined as never, true)).toEqual({
+      type: "OBJECT",
+      properties: {
+        v: {
+          oneOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+    })
+    // The node's own oneOf gets the same conjunctive treatment.
+    const combinedOneOf = {
+      type: ["string", "integer"],
+      oneOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }
+    expect(convertSchema(combinedOneOf as never)).toEqual({
+      oneOf: [
+        { type: "STRING", minLength: 5 },
+        { type: "INTEGER", minimum: 10 },
+      ],
+      allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+    })
+    expect(convertSchema(combinedOneOf as never, true)).toEqual({
+      oneOf: [
+        { type: "STRING", minLength: 5 },
+        { type: "INTEGER", minimum: 10 },
+      ],
+      allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+    })
+    // A node-owned allOf alone needs no wrapper: allOf siblings are already
+    // conjunctive, so the type branches keep the flat #1556 shape beside it.
+    expect(convertSchema({ type: ["string", "integer"], allOf: [{ type: "string", minLength: 2 }] } as never)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+      anyOf: [{ type: "STRING" }, { type: "INTEGER" }],
+    })
+  }),
+)
+
 it.effect("convertSchema keeps prefixItems on the node in type unions, branches carry items (#1820)", () =>
   Effect.sync(() => {
     // prefixItems is a node-level keyword (#1820, triage task 10959): in a
@@ -475,6 +593,62 @@ it.effect("convertSchema leaves allOf/not-only roots self-describing (#1667)", (
       type: "OBJECT",
       description: "a thing",
     })
+  }),
+)
+
+it.effect("convertSchema leaves enum/items/prefixItems-only roots self-describing (#1901)", () =>
+  Effect.sync(() => {
+    // An enum root enumerates its values verbatim: forcing type OBJECT
+    // onto a non-object enum makes it unsatisfiable (no value is both an
+    // object and "a"), for Gemini and Anthropic targets alike.
+    expect(convertSchema({ enum: ["a", "b"] } as never)).toEqual({ enum: ["a", "b"] })
+    expect(convertSchema({ enum: ["a", "b"] } as never, true)).toEqual({ enum: ["a", "b"] })
+    // An object enum is already fully enumerated by the enum itself, so
+    // it likewise takes no OBJECT default — the enum is the whole schema.
+    expect(convertSchema({ enum: [{ a: 1 }] } as never)).toEqual({ enum: [{ a: 1 }] })
+    // An items-only root describes an array: items constrains arrays
+    // only, so a forced OBJECT would strand the element constraint.
+    expect(convertSchema({ items: { type: "string" } } as never)).toEqual({
+      items: { type: "STRING" },
+    })
+    expect(convertSchema({ items: { type: "string" } } as never, true)).toEqual({
+      items: { type: "STRING" },
+    })
+    // A prefixItems-only root is the same shape (the node synthesises
+    // items: {} for the prefixItems carrier, #1820); no OBJECT either.
+    expect(convertSchema({ prefixItems: [{ type: "string" }] } as never)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+    })
+    expect(convertSchema({ prefixItems: [{ type: "string" }] } as never, true)).toEqual({
+      items: {},
+      prefixItems: [{ type: "STRING" }],
+    })
+  }),
+)
+
+it.effect("convertSchema leaves constraint-only roots self-describing (#1950)", () =>
+  Effect.sync(() => {
+    // A root whose only keyword constrains one non-object type describes
+    // that type: minItems/maxItems constrain arrays, minLength/maxLength/
+    // pattern constrain strings, minimum/maximum constrain numbers.
+    // Forcing type OBJECT onto it narrows it to objects only and strands
+    // the keyword on a type it can never reach — the #1901 defect, one
+    // keyword family past that fix's guard. Both targets behave alike.
+    for (const anthropic of [false, true]) {
+      expect(convertSchema({ minItems: 2 } as never, anthropic)).toEqual({ minItems: 2 })
+      expect(convertSchema({ maxItems: 3 } as never, anthropic)).toEqual({ maxItems: 3 })
+      expect(convertSchema({ minLength: 2 } as never, anthropic)).toEqual({ minLength: 2 })
+      expect(convertSchema({ maxLength: 5 } as never, anthropic)).toEqual({ maxLength: 5 })
+      expect(convertSchema({ pattern: "^a+$" } as never, anthropic)).toEqual({ pattern: "^a+$" })
+      expect(convertSchema({ minimum: 5 } as never, anthropic)).toEqual({ minimum: 5 })
+      expect(convertSchema({ minimum: 5, maximum: 9 } as never, anthropic)).toEqual({ minimum: 5, maximum: 9 })
+    }
+    // Controls: object keywords still take the OBJECT default — a
+    // minProperties root constrains objects, and the empty schema is the
+    // unconstrained parameters shape the default exists for.
+    expect(convertSchema({ minProperties: 1 } as never)).toEqual({ minProperties: 1, type: "OBJECT" })
+    expect(convertSchema({} as never)).toEqual({ type: "OBJECT" })
   }),
 )
 
@@ -656,7 +830,7 @@ it.effect("Antigravity stream: wrapped SSE events become text, reasoning, tool c
     expect(call.name).toBe("get_weather")
     expect(call.input).toEqual({ city: "Oslo" })
     expect(call.id).toMatch(/^call_[0-9a-f]{32}$/)
-    expect(call.providerMetadata?.antigravity).toEqual({ thoughtSignature: "sig-1" })
+    expect(call.providerMetadata?.["_antigravity"]).toEqual({ thoughtSignature: "sig-1" })
     expect(response.usage?.inputTokens).toBe(11)
     expect(response.usage?.outputTokens).toBe(10)
     expect(response.usage?.reasoningTokens).toBe(3)
@@ -786,7 +960,7 @@ it.effect("Antigravity tool_choice naming an undeclared function fails closed be
 it.effect("Antigravity protocol exports stay wired to the provider package", () =>
   Effect.sync(() => {
     expect(AntigravityProtocol.protocol.id).toBe("antigravity")
-    expect(Antigravity.provider.id).toBe("antigravity")
+    expect(Antigravity.provider.id).toBe("_antigravity")
     expect(typeof Antigravity.model).toBe("function")
   }),
 )

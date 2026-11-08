@@ -51,12 +51,14 @@ const registry = new Map(quotaProviders.map((provider) => [provider.providerId, 
 
 export const getQuotaProvider = (providerId: string): QuotaProvider | undefined => registry.get(providerId)
 
-// The disabled filter keys on the provider's own quota id (its
-// `disabledBy`, by default itself): quota ids and OpenCode provider
-// ids are different namespaces (config disables `claude-code` and
-// `commandcode`, which must not hide the `claude` and `command-code`
-// quota rows), so alias matching would hide live rows — the module's
-// rule, kept.
+// The disabled filter keys on the provider's `disabledBy` (by
+// default its own quota id): since the #1823 rename the fleet quota
+// ids equal the config provider ids, so the renamed providers pin
+// `disabledBy` to their pre-rename quota ids (`claude`,
+// `command-code`, `antigravity`) — config disabled_providers must
+// not hide live quota rows, and alias matching would hide more —
+// the module's rule, kept.
+
 const disabledIdsOf = (provider: QuotaProvider): string[] => provider.disabledBy ?? [provider.providerId]
 
 export const isProviderDisabled = (ctx: QuotaContext, provider: QuotaProvider): boolean =>
@@ -81,17 +83,60 @@ const resolveInstanceProvider = (ctx: QuotaContext, instanceId: string) => {
  * the filter governs the listing, never an explicit ask
  * (developing-today/code#6125).
  */
-export const listConfiguredQuotaProviders = async (
+/**
+ * A configuration probe that threw during listing (#1729): the
+ * provider is neither confirmed configured nor confirmed absent —
+ * the listing contract is that it surfaces as an error row, never
+ * as a silent omission (a named ask bypasses the listing filter and
+ * may still answer, so omission makes the two resolutions disagree).
+ */
+export interface QuotaProbeFailure {
+  providerId: string
+  providerName: string
+  error: string
+}
+
+/** The error row a probe failure publishes in a listing. */
+export const quotaProbeFailureResult = (failure: QuotaProbeFailure): QuotaResult =>
+  buildResult({
+    providerId: failure.providerId,
+    providerName: failure.providerName,
+    ok: false,
+    configured: true,
+    error: `Quota configuration probe failed: ${failure.error}`,
+    failureClass: "probe-failed",
+  })
+
+const probeErrorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+export interface ConfiguredQuotaProviders {
+  providerIds: string[]
+  probeFailures: QuotaProbeFailure[]
+}
+
+/**
+ * The listing, with probe failures carried alongside the configured
+ * ids instead of dropped: callers that render results (the CLI
+ * handler, `fetchAllQuota`) emit one error row per failure, so every
+ * provider the listing probed appears exactly once — as a fetch
+ * target or as an error row (#1729).
+ */
+export const listConfiguredQuotaProvidersDetailed = async (
   ctx: QuotaContext,
   { includeDisabled = false }: { includeDisabled?: boolean } = {},
-): Promise<string[]> => {
+): Promise<ConfiguredQuotaProviders> => {
   const configured: string[] = []
+  const probeFailures: QuotaProbeFailure[] = []
   for (const provider of quotaProviders) {
     if (provider.providerId === turso.providerId) continue
     try {
       if (await provider.isConfigured(ctx)) configured.push(provider.providerId)
-    } catch {
-      // A provider-specific probe error decides nothing in the listing.
+    } catch (error) {
+      probeFailures.push({
+        providerId: provider.providerId,
+        providerName: provider.providerName,
+        error: probeErrorMessage(error),
+      })
     }
   }
 
@@ -139,10 +184,26 @@ export const listConfiguredQuotaProviders = async (
     visible.push(baseId)
   }
 
-  // The built-in turso fetcher is part of every default listing.
-  visible.push(turso.providerId)
-  return visible
+  // The built-in turso fetcher is part of every default listing,
+  // subject to the same disabled filter as every other provider
+  // (#1923): a `disabled_providers` entry naming turso leaves it out
+  // unless `includeDisabled` is set, so a default run never fetches it.
+  if (includeDisabled || !isProviderDisabled(ctx, turso)) visible.push(turso.providerId)
+  // A probe failure on a disabled provider is not surfaced: the
+  // provider is out of the listing by configuration, not by accident.
+  const visibleFailures = probeFailures.filter((failure) => {
+    if (visible.includes(failure.providerId)) return false
+    if (includeDisabled) return true
+    const provider = registry.get(failure.providerId)
+    return provider ? !isProviderDisabled(ctx, provider) : true
+  })
+  return { providerIds: visible, probeFailures: visibleFailures }
 }
+
+export const listConfiguredQuotaProviders = async (
+  ctx: QuotaContext,
+  { includeDisabled = false }: { includeDisabled?: boolean } = {},
+): Promise<string[]> => (await listConfiguredQuotaProvidersDetailed(ctx, { includeDisabled })).providerIds
 
 export interface QuotaCatalogueEntry {
   id: string
@@ -326,10 +387,13 @@ export const fetchAllQuota = async (
   ctx: QuotaContext,
   { includeDisabled = false }: { includeDisabled?: boolean } = {},
 ): Promise<{ providerId: string; results: QuotaResult[] }[]> => {
-  const ids = await listConfiguredQuotaProviders(ctx, { includeDisabled })
+  const { providerIds, probeFailures } = await listConfiguredQuotaProvidersDetailed(ctx, { includeDisabled })
   const out: { providerId: string; results: QuotaResult[] }[] = []
-  for (const id of ids) {
+  for (const id of providerIds) {
     out.push({ providerId: id, results: await fetchQuotaForProviderInstances(ctx, id) })
+  }
+  for (const failure of probeFailures) {
+    out.push({ providerId: failure.providerId, results: [quotaProbeFailureResult(failure)] })
   }
   return out
 }

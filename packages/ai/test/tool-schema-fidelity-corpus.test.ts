@@ -9,8 +9,10 @@
 // until the table row is updated in the same change — that flip is the intended review signal.
 //
 // Known-lossy rows assert the CURRENT (lossy) projection and are marked with their issue: antigravity
-// `const` -> #1557, Moonshot `prefixItems` with `items` present -> #1574. When either fix lands, exactly
-// that row flips to its conforming disposition.
+// `const` -> #1557. When its fix lands, exactly that row flips to its conforming disposition. (The Moonshot
+// `prefixItems` with `items` present row was reclassified to approximated/widening under #1933: its issue
+// #1574 closed via PR #1647, which adopted the fold as the intended projection, so the stale known-lossy
+// link was removed — the meta-test below guards against a known-lossy row linking a closed issue.)
 //
 // Recorded approximations (probed against live endpoints by the family fixes, not changed here):
 // Gemini loop-cut to {} (#1585), antigravity anyOf->oneOf fold for Anthropic targets (#1550), Moonshot
@@ -197,6 +199,58 @@ export const antigravityTable: ReadonlyArray<Row> = [
     input: P({ type: ["string", "integer"] }),
     expected: {
       properties: { v: { oneOf: [{ type: "STRING" }, { type: "INTEGER" }] } },
+      type: "OBJECT",
+      required: ["v"],
+    },
+  },
+  {
+    shape: "multi-valued type + anyOf",
+    disposition: "preserved",
+    note: "Type and anyOf are conjunctive in JSON Schema: the type branches ride in an allOf wrapper beside the node's own anyOf instead of flattening into it (#1926).",
+    input: P({
+      type: ["string", "integer"],
+      anyOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }),
+    expected: {
+      properties: {
+        v: {
+          anyOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+      type: "OBJECT",
+      required: ["v"],
+    },
+  },
+  {
+    shape: "multi-valued type + anyOf (Anthropic target)",
+    disposition: "approximated",
+    direction: "narrowing",
+    note: "The node's anyOf folds into oneOf (#1550), and the type branches ride in an allOf wrapper as oneOf — the conjunction itself is preserved, so valid instances are no longer rejected by an exactly-one miscount (#1926).",
+    anthropic: true,
+    input: P({
+      type: ["string", "integer"],
+      anyOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }),
+    expected: {
+      properties: {
+        v: {
+          oneOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
       type: "OBJECT",
       required: ["v"],
     },
@@ -741,9 +795,9 @@ export const moonshotTable: ReadonlyArray<Row> = [
   },
   {
     shape: "prefixItems with items present",
-    disposition: "known-lossy",
-    issue: "#1574",
-    note: "prefixItems is dropped as a keyword and folded with the items schema into one items:anyOf: position 0 may now be a number and later positions may be strings — the projection contradicts the source tuple.",
+    disposition: "approximated",
+    direction: "widening",
+    note: "prefixItems is dropped as a keyword and folded with the items schema into one items:anyOf — per-position types are lost, every position accepts either. The fold is the projection #1647 adopted for Moonshot tuples; the residual loss is widening only (#1933).",
     input: P({ type: "array", prefixItems: [{ type: "string" }], items: { type: "number" } }),
     expected: P({ type: "array", items: { anyOf: [{ type: "string" }, { type: "number" }] } }),
   },
@@ -883,8 +937,25 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     }
   })
 
-  test("the two known-lossy rows are present and marked", () => {
+  test("the remaining known-lossy row is present and marked", () => {
     expect(antigravityTable.find((row) => row.shape === "const")?.issue).toBe("#1557")
-    expect(moonshotTable.find((row) => row.shape === "prefixItems with items present")?.issue).toBe("#1574")
+  })
+
+  test("known-lossy rows cannot link a closed issue", () => {
+    // #1574 closed completed on 2026-11-05 via PR #1647 while its Moonshot row
+    // still pointed at it as a live known-lossy link; the row was reclassified
+    // to approximated/widening under #1933. When a known-lossy row's issue
+    // closes, reclassify the row (or re-link it to a live tracking issue) in
+    // the same change and add the closed number here, so a stale link cannot
+    // return unnoticed. The antigravity `const` row above (#1557, open) is
+    // the live positive control.
+    const closedIssues = new Set(["#1574"])
+    for (const { table } of translators) {
+      for (const row of table) {
+        if (row.disposition !== "known-lossy") continue
+        expect(row.issue, row.shape).toBeDefined()
+        expect(closedIssues.has(row.issue ?? ""), row.shape).toBe(false)
+      }
+    }
   })
 })

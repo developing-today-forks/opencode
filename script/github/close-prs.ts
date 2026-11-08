@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { parseArgs } from "util"
+import { resolveGitHubToken } from "./token"
 
 const defaultRepo = process.env.GITHUB_REPOSITORY ?? "developing-today-forks/opencode"
 const defaultAgeMonths = 1
@@ -447,7 +448,7 @@ function requireRepo(value: string | undefined) {
 }
 
 async function requireToken() {
-  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  const envToken = resolveGitHubToken()
   if (envToken) return envToken
 
   const proc = Bun.spawn(["gh", "auth", "token"], {

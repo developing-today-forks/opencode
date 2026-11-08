@@ -19,6 +19,7 @@ import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ModelPlan } from "./model-plan.js"
+import { QuotaCurrent } from "./quota-current.js"
 import { ModelUsage } from "./model-usage.js"
 import { QuotaSnapshot } from "./quota-snapshot.js"
 import { Global } from "@opencode/util/global"
@@ -543,6 +544,23 @@ const refreshQuotaGate = (
     ).pipe(Effect.orDie)
   })
 
+/** The attempt-reported half of the quota gate's re-judgement (#1974): a reactive
+ * quota skip is a judgement from one attempt's error, and the fleet's measured quota
+ * snapshot — the gatherer's `quota-current.json` (code#1151), rewritten every ~15
+ * minutes from the providers' own endpoints — outranks it. On the same feed cadence
+ * as the plan-derived gate above, each due target's skips are re-judged against the
+ * freshest gathered reading for its model: headroom lifts the skip, a full reading
+ * leaves it standing, and a provider the snapshot does not carry is left alone.
+ * Nothing here spends an attempt to learn the answer; the reading is the evidence. */
+const refreshQuotaSkips = (targets: readonly Model.Ref[], now: number, location?: string) =>
+  Effect.sync(() => {
+    const due = targets.filter((target) => ModelRoute.shouldFeedQuota(now, location, target.providerID))
+    if (due.length === 0) return
+    const readings = QuotaCurrent.readSnapshot(Global.Path.state)
+    if (readings.length === 0) return
+    for (const target of due) ModelRoute.releaseQuotaSkipsForCurrent(target, readings, now, location)
+  })
+
 /** Resolves catalog selections into runtime models for the current Location. */
 export const layer = Layer.effect(
   Service,
@@ -679,6 +697,7 @@ export const layer = Layer.effect(
           }
         }
         yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
+        yield* refreshQuotaSkips(definition.targets, now, locationDirectory)
         // The credential a target's eligibility is judged by at `at`: the active one
         // when it can serve, else the first stored sibling that can (not credential-
         // cooling beyond a due probe, not quota-blocked). `activate` is set only in
@@ -798,21 +817,6 @@ export const layer = Layer.effect(
           const indexes = definition.targets.flatMap((_, index) => (triedTargets.has(index) ? [] : [index]))
           const unavailable = new Map<number, string>()
           const overLimit = new Set<number>()
-          // Pool-shaped pull-out (#1014 PR3): a leaf whose nested group (pool) has had two
-          // distinct quota evidence sources answer quota in turn is out with its pool, derived from the
-          // leaves' live quota benches/gates at this moment.
-          const poolExhausted = new Map<number, boolean>()
-          for (const index of indexes)
-            poolExhausted.set(
-              index,
-              ModelRoute.poolQuotaExhausted(
-                definition,
-                index,
-                now,
-                (leaf) => effectiveCredential(definition.targets[leaf], now)?.id,
-                locationDirectory,
-              ),
-            )
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
             const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
@@ -820,8 +824,11 @@ export const layer = Layer.effect(
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
             const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
             // A user's "avoid" holds on every route; learned skips and budgets are rules the route opted into.
-            const isSkipped =
-              ModelRoute.userSkipped(target, now, scope) || (rules && ModelRoute.skipped(target, now, scope))
+            // The two are reported distinctly (#1976): "user-skip" is only the operator's own
+            // override; a learned reactive quota skip is "quota-skip" — the shared label sent
+            // one diagnosis hunting for an operator record that never existed.
+            const isUserSkipped = ModelRoute.userSkipped(target, now, scope)
+            const isSkipped = isUserSkipped || (rules && ModelRoute.skipped(target, now, scope))
             const isOverBudget = rules && ModelRoute.overBudget(target, definition.budgets?.[index], now, scope)
             // A target whose ceiling the request does not fit is skipped at every level, like a
             // cooldown or a provider hold rather than a soft budget: the request cannot be served
@@ -836,6 +843,7 @@ export const layer = Layer.effect(
               limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
             const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
+            const providerBlock = ModelRoute.providerQuotaBlocked(target, now, locationDirectory)
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
@@ -843,22 +851,21 @@ export const layer = Layer.effect(
             const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
             const credentialProbe =
               credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
-            const isPoolExhausted = poolExhausted.get(index) ?? false
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
-            else if (isPoolExhausted)
-              unavailable.set(index, `pool-quota-exhausted:${ModelRoute.poolIDOf(definition, index) ?? "pool"}`)
+            else if (providerBlock)
+              unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
-            else if (isSkipped) unavailable.set(index, "user-skip")
+            else if (isSkipped) unavailable.set(index, isUserSkipped ? "user-skip" : "quota-skip")
             else if (isOverBudget) unavailable.set(index, "soft-budget")
             else if (isOverLimit) unavailable.set(index, "over-limit")
             return (
               (until <= now || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
-              !isPoolExhausted &&
+              providerBlock === undefined &&
               (limited <= now || kept) &&
               !isSkipped &&
               !isOverBudget &&
@@ -878,13 +885,11 @@ export const layer = Layer.effect(
             const credentialID = effectiveCredential(definition.targets[index], now)?.id
             return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
-          // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
-          // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
-          // route resolves nothing and the cascade looks elsewhere instead. When every
-          // usable target sits in an exhausted pool there is no last resort at all.
-          const nonPool = usable.filter((index) => !poolExhausted.get(index))
-          const nonPoolNonFull = nonPool.filter((index) => nonFull.includes(index))
-          const lastResort = nonPool.length === 0 ? [] : nonPoolNonFull.length > 0 ? nonPoolNonFull : nonPool
+          // No pool-level hard exclusion (Drew, 2026-11-07): a pool cannot run out —
+          // only a leaf's own model, credential, or provider can — so the last resort
+          // is the usable set itself, preferring targets whose credential is not
+          // known-full while any such target remains.
+          const lastResort = nonFull.length > 0 ? nonFull : usable
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
           const index = ModelRoute.nextTarget(
             definition,

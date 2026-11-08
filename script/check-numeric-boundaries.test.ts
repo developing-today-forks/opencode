@@ -121,6 +121,9 @@ describe("SCAN_ROOTS", () => {
       "packages/ui/script",
       "packages/util/script",
       "services/www/script",
+      "github/script",
+      "sdks/vscode/script",
+      "sdks/vscode/src",
     ])
   })
 })

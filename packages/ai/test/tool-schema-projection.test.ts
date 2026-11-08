@@ -273,6 +273,32 @@ describe("tool schema projections", () => {
     })
   })
 
+  test("moonshot passes structured enum/default/const values through verbatim (#1952)", () => {
+    expect(
+      ToolSchemaProjection.moonshot({
+        type: "object",
+        properties: {
+          enumItems: { enum: [{ items: ["a", "b"] }] },
+          enumRef: { enum: [{ $ref: "#/x", extra: 1 }] },
+          enumPrefix: { enum: [{ prefixItems: [{ type: "string" }], note: "keep" }] },
+          defaulted: { type: "object", default: { items: [1, 2, 3] } },
+          fixed: { const: { items: ["x"] } },
+          nested: { type: "array", items: { enum: [{ items: ["y"] }] } },
+        },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        enumItems: { type: "object", enum: [{ items: ["a", "b"] }] },
+        enumRef: { type: "object", enum: [{ $ref: "#/x", extra: 1 }] },
+        enumPrefix: { type: "object", enum: [{ prefixItems: [{ type: "string" }], note: "keep" }] },
+        defaulted: { type: "object", default: { items: [1, 2, 3] } },
+        fixed: { const: { items: ["x"] } },
+        nested: { type: "array", items: { type: "object", enum: [{ items: ["y"] }] } },
+      },
+    })
+  })
+
   it.effect("declares every tool schema root as an object", () =>
     Effect.gen(function* () {
       const route = OpenAIChat.route.with({

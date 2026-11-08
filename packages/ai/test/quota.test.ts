@@ -3,19 +3,45 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
+import { formatResetAfter, normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
-import { parseOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/codex.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
-import { provider as openrouterProvider } from "../src/quota/providers/openrouter.js"
+import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
-import { toClaudeUsage } from "../src/quota/providers/claude.js"
+import { provider as metaProvider } from "../src/quota/providers/meta.js"
+import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
+import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
+
+describe("bounded quota JSON reader", () => {
+  test("parses a streamed response body", async () => {
+    await expect(readQuotaJson(new Response('{"ok":true}'))).resolves.toEqual({ ok: true })
+  })
+
+  test("caps UTF-8 bytes before decoding rather than checking string length afterward", async () => {
+    const value = `"${"\u00e9".repeat(Math.floor(QUOTA_RESPONSE_MAX_BYTES / 2) + 1)}"`
+    let cancelled = false
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(value))
+        },
+        cancel() {
+          cancelled = true
+        },
+      }),
+    )
+
+    await expect(readQuotaJson(response)).rejects.toThrow(`Quota response exceeded ${QUOTA_RESPONSE_MAX_BYTES} bytes`)
+    expect(cancelled).toBe(true)
+  })
+})
 
 describe("mistral console budget mapping", () => {
   // The live billing.budget payload shape, captured 2026-11-05 from
@@ -128,6 +154,135 @@ describe("mistral budget label currency (#1805)", () => {
     const result = await fetchWith({ usage_percentage: 10, initial_budget: 200 })
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.api?.valueLabel).toBe("$20.00 / $200.00")
+  })
+})
+
+describe("meta key-endpoint subs_usage windows (#1907)", () => {
+  // Drive the real provider down its key-endpoint cross-check path:
+  // the portal read fails closed (unreachable CDP base), so the key
+  // endpoint answer is the result. Contract rule 4 (types.ts) /
+  // codex #1762 disposition: a window object with no usable
+  // used_percent publishes no window.
+  const fetchWith = (subsUsage: Record<string, unknown> | undefined, active?: boolean) =>
+    metaProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: {},
+      homeDir: "/nonexistent-home",
+      cdpBase: "http://127.0.0.1:9",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ...(active === undefined ? {} : { is_subs_active: active }),
+            subs_tier_name: "fixture-tier",
+            ...(subsUsage === undefined ? {} : { subs_usage: subsUsage }),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    } as never)
+
+  test("an empty rolling window object publishes no phantom window beside a real weekly window", async () => {
+    const result = await fetchWith({ window: {}, weekly: { used_percent: 25, resets_at: 1893456000 } }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["weekly"])
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(25)
+  })
+
+  test("an empty weekly window object publishes no phantom window beside a real rolling window", async () => {
+    const result = await fetchWith({ window: { used_percent: 10, resets_at: 1893456000 }, weekly: {} }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {})).toEqual(["rolling"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+  })
+
+  test("two figure-less windows with no active subscription reach the no-data disposition, not an all-null success", async () => {
+    const result = await fetchWith({ window: {}, weekly: {} })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("no quota data")
+  })
+
+  test("two figure-less windows on an active subscription keep the post-roll empty state", async () => {
+    const result = await fetchWith({ window: {}, weekly: {} }, true)
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBeNull()
+    expect(result.usage?.windows.weekly?.usedPercent).toBeNull()
+  })
+
+  test("windows carrying figures publish as before (control)", async () => {
+    const result = await fetchWith(
+      { window: { used_percent: 10, resets_at: 1893456000 }, weekly: { used_percent: 25, resets_at: 1893456000 } },
+      true,
+    )
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(25)
+  })
+
+  test("a weekly-length rolling window survives beside the weekly window (#1777)", async () => {
+    // 10080 minutes = 604800s, a weekly-length rolling window: its
+    // derived label would be "weekly" and used to overwrite the fixed
+    // weekly entry. It now publishes under its semantic role key.
+    const result = await fetchWith(
+      {
+        window: { used_percent: 10, window_duration_mins: 10080, resets_at: 1893456000 },
+        weekly: { used_percent: 90, resets_at: 1893456000 },
+      },
+      true,
+    )
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+    expect(result.usage?.windows.rolling?.windowSeconds).toBe(604800)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(90)
+  })
+})
+
+describe("meta rolling window key never collides with weekly (#1777)", () => {
+  // The #1794 window contract rule 1: identity is semantic — a derived
+  // label never erases a window. Filing probe (2026-11-05): a
+  // weekly-length rolling window (604800s) with the weekly entry
+  // present published only the weekly window at 90%; the rolling
+  // window vanished.
+  const quota = (patch: Record<string, unknown>) => ({
+    subscription_quota: {
+      tier: "Muse Code High Usage",
+      window_weighted_used: "10",
+      window_weighted_limit: "100",
+      weekly_weighted_used: "90",
+      weekly_weighted_limit: "100",
+      window_duration_secs: 604800,
+      window_resets_at: 1893456000,
+      weekly_resets_at: 1893456000,
+      ...patch,
+    },
+  })
+
+  test("a weekly-length rolling window survives beside the weekly window (filing probe)", () => {
+    const parsed = parseSubscriptionQuota(quota({}))
+    expect(Object.keys(parsed?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(parsed?.windows.rolling?.usedPercent).toBe(10)
+    expect(parsed?.windows.rolling?.windowSeconds).toBe(604800)
+    expect(parsed?.windows.weekly?.usedPercent).toBe(90)
+  })
+
+  test("controls: 18000s and 86400s rolling windows keep their derived labels", () => {
+    const fiveHour = parseSubscriptionQuota(quota({ window_duration_secs: 18000 }))
+    expect(Object.keys(fiveHour?.windows ?? {}).toSorted()).toEqual(["5h", "weekly"])
+    expect(fiveHour?.windows["5h"]?.usedPercent).toBe(10)
+    const daily = parseSubscriptionQuota(quota({ window_duration_secs: 86400 }))
+    expect(Object.keys(daily?.windows ?? {}).toSorted()).toEqual(["1d", "weekly"])
+    expect(daily?.windows["1d"]?.usedPercent).toBe(10)
+  })
+
+  test("a weekly-length rolling window with no weekly entry still publishes once", () => {
+    const parsed = parseSubscriptionQuota(quota({ weekly_weighted_limit: 0 }))
+    expect(Object.keys(parsed?.windows ?? {})).toEqual(["rolling"])
+    expect(parsed?.windows.rolling?.usedPercent).toBe(10)
   })
 })
 
@@ -366,6 +521,25 @@ describe("groq quota header parsing (#1793)", () => {
     expect(result.usage?.windows.requests_daily?.resetAt).toBeNull()
   })
 
+  test("remaining above the limit is clamped whole-window (#1897)", async () => {
+    const requests = await fetchWith({
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "150",
+    })
+    expect(requests.ok).toBe(true)
+    expect(requests.usage?.windows.requests_daily?.usedPercent).toBe(0)
+    expect(requests.usage?.windows.requests_daily?.remainingPercent).toBe(100)
+    expect(requests.usage?.windows.requests_daily?.valueLabel).toBe("100 / 100 requests remaining")
+    const tokens = await fetchWith({
+      "x-ratelimit-limit-tokens": "10000",
+      "x-ratelimit-remaining-tokens": "12000",
+    })
+    expect(tokens.ok).toBe(true)
+    expect(tokens.usage?.windows.tokens_minute?.usedPercent).toBe(0)
+    expect(tokens.usage?.windows.tokens_minute?.remainingPercent).toBe(100)
+    expect(tokens.usage?.windows.tokens_minute?.valueLabel).toBe("10000 / 10000 tokens remaining")
+  })
+
   test("plain counts and a well-formed reset still publish a window", async () => {
     const result = await fetchWith({
       "x-ratelimit-limit-requests": "100",
@@ -398,13 +572,17 @@ describe("toTimestamp non-positive handling (#1845)", () => {
     expect(toTimestamp("not-a-date")).toBeNull()
   })
 
-  test("opencode-go: a non-positive reset publishes no window (existing drop-on-null behaviour)", () => {
-    // Interaction with #1725, stated not decided: parseOpenCodeGoUsage
-    // already drops a window whose resetAt is null, so a bogus
-    // non-positive reset now follows that existing path instead of
-    // publishing a 1969 reset. #1725 keeps the broader rule-3 call.
-    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: -5000 } } })).toEqual({})
-    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: "1970-01-01T00:00:00.000Z" } } })).toEqual({})
+  test("opencode-go: a non-positive reset keeps the window with resetAt null (#1725 rule 3)", () => {
+    // #1725 adopted contract rule 3: a present window is kept with the
+    // missing field null, matching the deepseek/codex siblings, so a
+    // bogus non-positive reset publishes the window with resetAt null
+    // rather than dropping it (and never a 1969 reset).
+    const negative = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: -5000 } } })
+    expect(negative["5h"]?.usedPercent).toBe(50)
+    expect(negative["5h"]?.resetAt).toBeNull()
+    const epoch = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: "1970-01-01T00:00:00.000Z" } } })
+    expect(epoch["5h"]?.usedPercent).toBe(50)
+    expect(epoch["5h"]?.resetAt).toBeNull()
     const control = parseOpenCodeGoUsage({ usage: { rolling: { percent: 50, resetsAt: 1893456000 } } })
     expect(control["5h"]?.resetAt).toBe(1893456000000)
   })
@@ -418,6 +596,41 @@ describe("toTimestamp non-positive handling (#1845)", () => {
     expect(window).toBeDefined()
     expect(window?.resetAt).toBeNull()
     expect(window?.windowSeconds).toBeNull()
+  })
+})
+
+describe("resetAfterFormatted derives from resetAfterSeconds (#2103)", () => {
+  test("formatResetAfter renders compact human durations", () => {
+    expect(formatResetAfter(3600)).toBe("1h")
+    expect(formatResetAfter(5400)).toBe("1h 30m")
+    expect(formatResetAfter(90061)).toBe("1d 1h 1m 1s")
+    expect(formatResetAfter(45)).toBe("45s")
+    expect(formatResetAfter(0)).toBe("0s")
+    expect(formatResetAfter(null)).toBeNull()
+    expect(formatResetAfter(undefined)).toBeNull()
+  })
+
+  test("a future reset formats the relative wait, not the absolute time", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: Date.now() + 3_600_000 })
+    expect(window.resetAfterSeconds).toBeGreaterThan(3500)
+    expect(window.resetAfterSeconds).toBeLessThanOrEqual(3600)
+    expect(window.resetAfterFormatted).toMatch(/^(1h|59m \d+s)$/)
+    expect(window.resetAtFormatted).not.toBeNull()
+    expect(window.resetAfterFormatted).not.toBe(window.resetAtFormatted)
+  })
+
+  test("a past reset pins resetAfterSeconds 0 and resetAfterFormatted 0s", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: Date.now() - 60_000 })
+    expect(window.resetAfterSeconds).toBe(0)
+    expect(window.resetAfterFormatted).toBe("0s")
+    expect(window.resetAtFormatted).not.toBeNull()
+  })
+
+  test("a null reset keeps every formatted reset field null", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: null })
+    expect(window.resetAfterSeconds).toBeNull()
+    expect(window.resetAtFormatted).toBeNull()
+    expect(window.resetAfterFormatted).toBeNull()
   })
 })
 
@@ -438,6 +651,31 @@ describe("toNumber blank-string handling (#1741)", () => {
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: " " } })).toEqual({})
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
   })
+
+
+  test("an empty percent field mints no 0%-used opencode-go window", () => {
+    // Rule 4: an entry with no usable percent publishes no window (a
+    // percent-bearing entry would keep its window with a null reset —
+    // rule 3, the #1725 conformance change pinned below).
+    const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
+    expect(parseOpenCodeGoUsage(payload)).toEqual({})
+  })
+
+  test("an empty weighted-used field fails meta parseSubscriptionQuota null gate", () => {
+    const payload = {
+      subscription_quota: {
+        window_weighted_used: "",
+        window_weighted_limit: "100",
+        weekly_weighted_used: "10",
+        weekly_weighted_limit: "100",
+        window_resets_at: "1893456000",
+        weekly_resets_at: "1893456000",
+        window_duration_secs: "18000",
+      },
+    }
+    expect(parseSubscriptionQuota(payload)).toBeNull()
+  })
+})
 
 describe("command-code monthly over-included credits (#1744)", () => {
   test("remaining above the included amount publishes a 0%-used monthly window", () => {
@@ -500,27 +738,6 @@ describe("command-code windowLimits clamp-both disposition (#1821)", () => {
   })
 })
 
-  test("an empty percent field mints no 0%-used opencode-go window", () => {
-    const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
-    expect(parseOpenCodeGoUsage(payload)).toEqual({})
-  })
-
-  test("an empty weighted-used field fails meta parseSubscriptionQuota null gate", () => {
-    const payload = {
-      subscription_quota: {
-        window_weighted_used: "",
-        window_weighted_limit: "100",
-        weekly_weighted_used: "10",
-        weekly_weighted_limit: "100",
-        window_resets_at: "1893456000",
-        weekly_resets_at: "1893456000",
-        window_duration_secs: "18000",
-      },
-    }
-    expect(parseSubscriptionQuota(payload)).toBeNull()
-  })
-})
-
 describe("meta billing banner (#1750)", () => {
   test("numeric and numeric-string minor units both convert to dollars", () => {
     expect(parseBillingBanner({ remaining_minor_units: 12345, currency: "USD" })).toBe(123.45)
@@ -572,6 +789,172 @@ describe("claude usage transform (#1750)", () => {
     expect(legacy.windows["7d"]).toBeUndefined()
     expect(toClaudeUsage({})).toEqual({ windows: {}, models: {} })
     expect(toClaudeUsage(null)).toEqual({ windows: {}, models: {} })
+  })
+})
+
+describe("turso disabled listing (#1923)", () => {
+  const ctxWith = (disabledProviders: Set<string>) => ({
+    credentials: [],
+    disabledProviders,
+    instances: new Map(),
+    providerConfig: {},
+  })
+
+  test("the built-in turso fetcher honours disabled_providers like every other provider", async () => {
+    await expect(listConfiguredQuotaProviders(ctxWith(new Set()))).resolves.toContain("turso")
+    await expect(listConfiguredQuotaProviders(ctxWith(new Set(["turso"])))).resolves.not.toContain("turso")
+  })
+
+  test("includeDisabled brings the disabled turso row back", async () => {
+    await expect(
+      listConfiguredQuotaProviders(ctxWith(new Set(["turso"])), { includeDisabled: true }),
+    ).resolves.toContain("turso")
+  })
+})
+
+describe("claude spend exponent range (#1920)", () => {
+  const spendWith = (exponent: unknown) =>
+    toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, exponent, currency: "USD" },
+        limit: { amount_minor: 1000, exponent },
+      },
+    })
+
+  test("an over-range exponent reads the money object as absent; the percent still publishes", () => {
+    const { windows } = spendWith(999)
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("a negative exponent reads the money object as absent", () => {
+    const { windows } = spendWith(-2)
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("in-range exponents and the absent-exponent default are unchanged (controls)", () => {
+    expect(spendWith(2).windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+    expect(spendWith(0).windows["extra_usage"]?.valueLabel).toBe("$500.00 / $1000.00")
+    expect(spendWith(3).windows["extra_usage"]?.valueLabel).toBe("$0.50 / $1.00")
+    const absent = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, currency: "USD" },
+        limit: { amount_minor: 1000 },
+      },
+    })
+    expect(absent.windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+  })
+})
+
+describe("claude spend negative amounts (#1919)", () => {
+  test("a negative used amount reads as absent; the percent still publishes", () => {
+    const { windows } = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: -500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(windows["extra_usage"]?.usedPercent).toBe(50)
+    expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+  })
+
+  test("a negative limit reads as absent; the used amount still labels", () => {
+    const { windows } = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: -1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(windows["extra_usage"]?.valueLabel).toBe("$5.00")
+  })
+
+  test("a negative-only spend payload publishes no extra_usage window", () => {
+    const { windows } = toClaudeUsage({
+      spend: { enabled: true, used: { amount_minor: -500, exponent: 2, currency: "USD" } },
+    })
+    expect(windows["extra_usage"]).toBeUndefined()
+  })
+
+  test("positive, zero, and percent-only controls are unchanged", () => {
+    const positive = toClaudeUsage({
+      spend: {
+        enabled: true,
+        used: { amount_minor: 500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(positive.windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+    const zero = toClaudeUsage({
+      spend: {
+        enabled: true,
+        used: { amount_minor: 0, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2, currency: "USD" },
+      },
+    })
+    expect(zero.windows["extra_usage"]?.valueLabel).toBe("$0.00 / $10.00")
+    const percentOnly = toClaudeUsage({ spend: { enabled: true, percent: 50 } })
+    expect(percentOnly.windows["extra_usage"]?.usedPercent).toBe(50)
+  })
+
+  test("a negative-only spend payload reaches the no-data contract through fetchQuota", async () => {
+    const result = await claudeProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            spend: { enabled: true, used: { amount_minor: -500, exponent: 2, currency: "USD" } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-test-home",
+    } as never)
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+  })
+})
+
+describe("claude quota no-data contract (#1915)", () => {
+  // Drive the real provider against a stubbed usage response, with the
+  // env credential as the only source (homeDir names no credentials file).
+  const fetchWith = (payload: unknown) =>
+    claudeProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-test-home",
+    } as never)
+
+  test("a 200 payload with no usable quota data is the no-data contract, not ok:true with empty windows", async () => {
+    for (const payload of [{}, { limits: [] }, { limits: [{ kind: "session", resets_at: "2026-12-01T00:00:00Z" }] }]) {
+      const result = await fetchWith(payload)
+      expect(result.ok).toBe(false)
+      expect(result.configured).toBe(true)
+      expect(result.error).toBe("No quota data in response")
+      expect(result.usage).toBeNull()
+    }
+  })
+
+  test("a real figure still publishes its window (control)", async () => {
+    const result = await fetchWith({ five_hour: { utilization: 10, resets_at: "2026-12-01T00:00:00Z" } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows["5h"]?.usedPercent).toBe(10)
   })
 })
 
@@ -766,6 +1149,59 @@ describe("codex quota window mapping (#1762)", () => {
     const result = await fetchWith({ rate_limit: {}, credits: { balance: 12.5, unlimited: false } })
     expect(result.ok).toBe(true)
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("12.5")
+  })
+
+  test("spend-control window: percent and label derive from one clamped used figure (#1882)", async () => {
+    const control = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 40, limit: 100, used_percent: 40 } },
+    })
+    expect(control.ok).toBe(true)
+    expect(control.usage?.windows.credits?.usedPercent).toBe(40)
+    expect(control.usage?.windows.credits?.valueLabel).toBe("40 / 100 used")
+
+    const negative = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: -5, limit: 100, used_percent: -5 } },
+    })
+    expect(negative.usage?.windows.credits?.usedPercent).toBe(0)
+    expect(negative.usage?.windows.credits?.valueLabel).toBe("0 / 100 used")
+
+    // Over-limit disposition (#1882, #1821 rule 5): clamped label at
+    // 100% — never "150 / 100 used" beside a clamped percent.
+    const overLimit = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 150, limit: 100, used_percent: 150 } },
+    })
+    expect(overLimit.usage?.windows.credits?.usedPercent).toBe(100)
+    expect(overLimit.usage?.windows.credits?.valueLabel).toBe("100 / 100 used")
+
+    // Label-only payload (no used_percent): the percent is derived
+    // from the same clamped figures, so the label is never the only
+    // — and never a contradictory — figure published.
+    const labelOnly = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 150, limit: 100 } },
+    })
+    expect(labelOnly.usage?.windows.credits?.usedPercent).toBe(100)
+    expect(labelOnly.usage?.windows.credits?.valueLabel).toBe("100 / 100 used")
+  })
+
+  test("spend-control window: a non-positive limit never renders as a denominator (#1882)", async () => {
+    const zeroLimit = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 5, limit: 0, used_percent: 25 } },
+    })
+    expect(zeroLimit.ok).toBe(true)
+    expect(zeroLimit.usage?.windows.credits?.usedPercent).toBe(25)
+    expect(zeroLimit.usage?.windows.credits?.valueLabel).toBeUndefined()
+
+    const zeroLimitNoPercent = await fetchWith({
+      rate_limit: {},
+      spend_control: { individual_limit: { used: 5, limit: 0 } },
+    })
+    expect(zeroLimitNoPercent.ok).toBe(false)
+    expect(zeroLimitNoPercent.error).toBe("No quota data in response")
   })
 })
 
@@ -984,6 +1420,20 @@ describe("openrouter quota mapping (#1799)", () => {
     expect(result.usage?.windows.monthly?.valueLabel).toBe("$12.50 spent")
   })
 
+  test("a negative spend on the unlimited path is read as absent — the no-data contract (#1913)", async () => {
+    const result = await fetchWith({ data: { limit: null, limit_remaining: null, usage_monthly: -5 } })
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
+  test("a zero spend on the unlimited path still publishes (control, #1913)", async () => {
+    const result = await fetchWith({ data: { limit: null, limit_remaining: null, usage_monthly: 0 } })
+    expect(result.ok).toBe(true)
+    expect(result.usage?.windows.monthly?.valueLabel).toBe("$0.00 spent")
+  })
+
   test("normal and over-limit controls keep their probed shapes", async () => {
     const over = await fetchWith({
       data: { limit: 100, limit_remaining: -20, usage_monthly: 120, limit_reset: "monthly" },
@@ -1004,17 +1454,20 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // ORACLE: the window contract stated in src/quota/types.ts ("Parse
   // the window you were sent, or none", rules 1-7). The fixtures are
   // payload shapes; the model is the contract itself, not any one
-  // provider's current behaviour. Each test names its rule. Only the
-  // already-conforming parsers are asserted here — opendesign
-  // parseCodingPlanWindows, cline-pass (via provider.fetchQuota),
-  // codex (via provider.fetchQuota), command-code
-  // parseCommandCodeCredits, and meta parseBillingBanner /
-  // parseSubscriptionQuota's conforming cases. Known-lossy parsers
-  // are NOT asserted as conforming: antigravity (#1768), meta's
-  // collision sites (#1777), claude duplicates (#1781), mistral field
-  // consistency (#1785), and opencode-go + openrouter (#1725) live in
-  // the types.ts inventory as known-lossy until their own issues land
-  // and flip their rows. If a conforming parser's disposition changes
+  // provider's current behaviour. Each test names its rule. The matrix
+  // asserts specific conforming paths, not whole providers: opendesign's
+  // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
+  // rate-limit windows, command-code, and meta's conforming cases.
+  // Known-lossy paths remain marked in types.ts: codex credits_balance
+  // (#1924) and deepseek balance (#1928).
+  // opencode-go and openrouter reset math left the known-lossy set when
+  // #1725 landed: opencode-go conforms to rules 3/4 and resolveResetAt
+  // is pinned by its dedicated describe. meta left it when #1777 landed:
+  // a weekly-length rolling window no longer overwrites the weekly entry.
+  // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
+  // dedicated describes; mistral #1785 is likewise pinned by its
+  // dedicated describe. If a
+  // conforming parser's disposition changes
   // without the contract changing, a case here must fail.
 
   const reset = 1893456000
@@ -1071,11 +1524,11 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     const indexSource = readFileSync(new URL("../src/quota/index.ts", import.meta.url), "utf8")
     const registryBody = indexSource.match(/export const quotaProviders[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? ""
     const variableToId: Record<string, string> = {
-      antigravity: "antigravity",
-      claude: "claude",
+      antigravity: "_antigravity",
+      claude: "_claude",
       clinePass: "cline-pass",
       codex: "codex",
-      commandCode: "command-code",
+      commandCode: "_commandcode",
       deepseek: "deepseek",
       groq: "groq",
       meta: "meta",
@@ -1091,11 +1544,11 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       .filter(Boolean)
       .map((variable) => variableToId[variable])
     expect(ids).toEqual([
-      "antigravity",
-      "claude",
+      "_antigravity",
+      "_claude",
       "cline-pass",
       "codex",
-      "command-code",
+      "_commandcode",
       "deepseek",
       "groq",
       "meta",
@@ -1196,7 +1649,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
 
   test("rule 4 (no figure, no window): openrouter zero-limit payload is the no-data contract (#1799)", async () => {
     // Only the zero-limit rule-4 case is asserted for openrouter here;
-    // its #1725 resolveResetAt row stays known-lossy in the inventory.
+    // its resolveResetAt arithmetic is pinned by the OpenRouter
+    // calendar reset calculation describe (#1725).
     const result = await openrouterFetchWith({
       data: { limit: 0, limit_remaining: 0, usage_monthly: 0, limit_reset: "monthly" },
     })
@@ -1222,12 +1676,22 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     expect(windows.monthly?.valueLabel).toContain("25")
   })
 
-  test("rule 5 (fields agree, out-of-range): opendesign over-remaining clamps the percent and keeps the real figures in the label", () => {
-    const windows = parseCodingPlanWindows({
+  test("rule 5 (fields agree, out-of-range): opendesign clamps remaining once for percent and label (#1879)", () => {
+    const over = parseCodingPlanWindows({
       windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
     })
-    expect(windows?.["5h"]?.usedPercent).toBe(0)
-    expect(windows?.["5h"]?.valueLabel).toBe("150 / 100 credits")
+    expect(over?.["5h"]?.usedPercent).toBe(0)
+    expect(over?.["5h"]?.valueLabel).toBe("100 / 100 credits")
+    const under = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }],
+    })
+    expect(under?.["5h"]?.usedPercent).toBe(100)
+    expect(under?.["5h"]?.valueLabel).toBe("0 / 100 credits")
+    const inRange = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 25 }],
+    })
+    expect(inRange?.["5h"]?.usedPercent).toBe(75)
+    expect(inRange?.["5h"]?.valueLabel).toBe("25 / 100 credits")
   })
 
   test("rule 5 (fields agree, out-of-range): meta over-limit weekly clamps to 100 and the window does not vanish", () => {
@@ -1391,13 +1855,11 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     expect(groups[0].bucketWeekly?.remainingFraction).toBe(0.25)
   })
 
-  test("a missing remainingFraction propagates as unknown, not as fully remaining", () => {
-    const parsed = parseBucket({ window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" } as never)
-    expect(parsed?.remainingFraction).toBeNull()
-    expect(parsed?.window.usedPercent).toBeNull()
+  test("a missing remainingFraction publishes no bucket, not an all-null-percent window (#1917)", () => {
+    expect(parseBucket({ window: "WEEKLY", resetTime: "2026-11-12T00:00:00Z" } as never)).toBeNull()
   })
 
-  test("weekly-constrained ordering requires both fractions present", () => {
+  test("a figure-less weekly bucket never reaches a matched model (#1917)", () => {
     const groups = transformSummary(
       summaryWith([
         { window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" },
@@ -1405,8 +1867,9 @@ describe("antigravity quota bucket labelling (#1768)", () => {
       ]) as never,
     )
     const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
-    // Unknown weekly fraction never constrains: default order is 5h first.
-    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["5h", "weekly"])
+    // The figure-less weekly bucket is dropped at parse time, so it can
+    // neither publish a window nor constrain the ordering.
+    expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["5h"])
   })
 
   test("a known near-exhausted weekly fraction still puts weekly first (control)", () => {
@@ -1418,6 +1881,90 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     )
     const models = transformModels({ models: { "gemini-fixture": {} } } as never, groups)
     expect(Object.keys(models["gemini-fixture"].windows)).toEqual(["weekly", "5h"])
+  })
+})
+
+describe("antigravity quota summary figure check (#1917)", () => {
+  // No figure, no window (window contract rule 4): a recognized bucket
+  // with no usable remainingFraction publishes no window on the summary
+  // path. Disposition: parseBucket returns null, matching its
+  // unrecognized-kind case (codex #1762 / meta #1907 precedent).
+  const summaryWith = (buckets: unknown[]) => ({ groups: [{ displayName: "Gemini", buckets }] })
+
+  test("a reset-only bucket parses to null", () => {
+    expect(parseBucket({ window: "5h", resetTime: "2026-12-01T00:00:00Z" } as never)).toBeNull()
+  })
+
+  test("a summary group built only from figure-less buckets carries no windows", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
+    )
+    expect(groups[0].windows).toEqual({})
+    expect(groups[0].bucket5h).toBeNull()
+  })
+
+  test("a matched model inherits no window from a figure-less group", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
+    )
+    const models = transformModels({ models: { "gemini-x": {} } } as never, groups)
+    expect(models["gemini-x"]?.windows ?? {}).toEqual({})
+  })
+
+  test("a present remainingFraction still publishes its window (control)", () => {
+    const parsed = parseBucket(
+      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
+    )
+    expect(parsed?.window.usedPercent).toBe(50)
+    expect(parsed?.window.remainingPercent).toBe(50)
+  })
+})
+
+describe("antigravity quota transformModels fallback figure check (#1912)", () => {
+  // No figure, no window (window contract rule 4): the per-model
+  // fallback branch must not publish a window when quotaInfo carries
+  // no usable remainingFraction. Disposition: the model entry is
+  // omitted (codex #1762 / meta #1907 drop-the-window precedent).
+  test("a model with no quotaInfo publishes no entry", () => {
+    expect(transformModels({ models: { "gemini-x": {} } } as never, [])).toEqual({})
+  })
+
+  test("a model with an empty quotaInfo publishes no entry", () => {
+    expect(transformModels({ models: { "gemini-x": { quotaInfo: {} } } } as never, [])).toEqual({})
+  })
+
+  test("a reset-only quotaInfo publishes no entry — no label is derived from a reset alone", () => {
+    expect(
+      transformModels(
+        { models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never,
+        [],
+      ),
+    ).toEqual({})
+  })
+
+  test("a present remainingFraction still publishes its window (control)", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const models = transformModels(
+      { models: { "gemini-x": { quotaInfo: { remainingFraction: 0.5, resetTime } } } } as never,
+      [],
+    )
+    expect(models["gemini-x"]?.windows["5h"]?.usedPercent).toBe(50)
+    expect(models["gemini-x"]?.windows["5h"]?.remainingPercent).toBe(50)
+  })
+
+  test("figure-less models are omitted while figured models remain", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const models = transformModels(
+      {
+        models: {
+          "gemini-x": {},
+          "gemini-y": { quotaInfo: { remainingFraction: 0.25, resetTime } },
+        },
+      } as never,
+      [],
+    )
+    expect(Object.keys(models)).toEqual(["gemini-y"])
+    expect(models["gemini-y"]?.windows["5h"]?.usedPercent).toBe(75)
   })
 })
 
@@ -1479,5 +2026,251 @@ describe("toUsageWindow remainingPercent derivation (#1904)", () => {
     expect(toUsageWindow({ usedPercent: 50 }).remainingPercent).toBe(50)
     expect(toUsageWindow({ usedPercent: 100 }).remainingPercent).toBe(0)
     expect(toUsageWindow({ usedPercent: null }).remainingPercent).toBeNull()
+  })
+})
+
+describe("listing probe failure is a result, never absence (#1729)", () => {
+  // A credential row whose value cannot even be decoded: every
+  // projectAuth-based isConfigured probe throws when it touches it.
+  // Oracle: the listing contract from task 10000 - a probe failure
+  // produces an error row; the provider never silently vanishes, and
+  // the listing resolution then agrees with a named ask.
+  const throwingCtx = () => {
+    const row: Record<string, unknown> = { id: "throwing-1", integrationID: "deepseek", active: true }
+    Object.defineProperty(row, "value", {
+      enumerable: true,
+      get() {
+        throw new Error("credential store decode boom")
+      },
+    })
+    return {
+      credentials: [row],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+    } as never
+  }
+
+  test("configuredProviderProbeFailureProducesErrorRow", async () => {
+    const listing = await listConfiguredQuotaProvidersDetailed(throwingCtx())
+    const failure = listing.probeFailures.find((entry) => entry.providerId === "deepseek")
+    expect(failure).toBeDefined()
+    expect(failure?.error).toContain("credential store decode boom")
+    expect(listing.providerIds).not.toContain("deepseek")
+    const row = quotaProbeFailureResult(failure!)
+    expect(row.ok).toBe(false)
+    expect(row.configured).toBe(true)
+    expect(row.providerId).toBe("deepseek")
+    expect(row.error).toContain("probe failed")
+    expect(row.error).toContain("credential store decode boom")
+  })
+
+  test("fullListingEmitsEveryConfiguredProviderAndCredential", async () => {
+    const groups = await fetchAllQuota(throwingCtx())
+    const deepseek = groups.find((group) => group.providerId === "deepseek")
+    expect(deepseek).toBeDefined()
+    expect(deepseek?.results).toHaveLength(1)
+    expect(deepseek?.results[0]?.ok).toBe(false)
+    expect(deepseek?.results[0]?.error).toContain("probe failed")
+    // No provider group is duplicated: exactly one deepseek group.
+    expect(groups.filter((group) => group.providerId === "deepseek")).toHaveLength(1)
+  })
+
+  test("named-vs-listing parity: a provider resolvable by name appears in the listing as an error row", async () => {
+    const { resolveQuotaProviderName } = await import("../src/quota/index.js")
+    const ctx = throwingCtx()
+    // The named ask resolves deepseek (catalogue resolution never probes).
+    expect(resolveQuotaProviderName(ctx, "deepseek")).toBe("deepseek")
+    const groups = await fetchAllQuota(ctx)
+    expect(groups.some((group) => group.providerId === "deepseek")).toBe(true)
+  })
+})
+
+describe("claude duplicate limits keep-first (#1781)", () => {
+  // Oracle: window contract rule 2 (duplicates keep the first), the
+  // #1750/#1769 convention. Payload shapes mirror the issue's probe:
+  // repeated limits entries carrying real figures.
+  const resetA = 1798761600 // 2026-12-01T00:00:00Z in epoch seconds
+  const resetB = 1798848000 // 2026-12-02T00:00:00Z
+
+  test("duplicate session entries publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resetA },
+        { kind: "session", percent: 80, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["5h"]?.usedPercent).toBe(20)
+    expect(usage.windows["5h"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("duplicate weekly_all entries publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_all", percent: 30, resets_at: resetA },
+        { kind: "weekly_all", percent: 70, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.windows["7d"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("duplicate weekly_scoped entries for one model publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resetA, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 60, resets_at: resetB, scope: { model: { display_name: "Claude Sonnet" } } },
+      ],
+    })
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("two different models' scoped entries both survive", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resetA, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 60, resets_at: resetB, scope: { model: { display_name: "Claude Opus" } } },
+      ],
+    })
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.models["Claude Opus"]?.windows["7d"]?.usedPercent).toBe(60)
+  })
+
+  test("null-percent duplicate control: the first entry survives, and a figure-less first entry does not claim the window", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resetA },
+        { kind: "session", percent: null, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["5h"]?.usedPercent).toBe(20)
+    const claimed = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: null, resets_at: resetA },
+        { kind: "session", percent: 80, resets_at: resetB },
+      ],
+    })
+    expect(claimed.windows["5h"]?.usedPercent).toBe(80)
+  })
+})
+
+describe("OpenCode Go API-key usage mapping", () => {
+  test("maps rolling, weekly, and monthly usage payloads to quota windows", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 37.5, resetsAt: "2026-11-05T12:00:00Z" },
+        weekly: { percent: 62, resetsAt: "2026-11-09T00:00:00Z" },
+        monthly: { percent: 105, resetsAt: "2026-12-01T00:00:00Z" },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(37.5)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBe(62)
+    expect(mapped.weekly?.resetAt).toBe(Date.parse("2026-11-09T00:00:00Z"))
+    expect(mapped.monthly?.usedPercent).toBe(100)
+  })
+
+  test("keeps a percent-bearing window with resetAt null, and drops a percent-less entry", () => {
+    const mapped = parseOpenCodeGoUsage({
+      usage: {
+        rolling: { percent: 20 },
+        weekly: { resetsAt: "2026-11-09T00:00:00Z" },
+      },
+    })
+
+    // Rule 3 (#1725): a percent-bearing window keeps its window and
+    // nulls the absent reset instead of dropping it.
+    expect(mapped["5h"]?.usedPercent).toBe(20)
+    expect(mapped["5h"]?.resetAt).toBeNull()
+    // Rule 4: an entry with no usable percent publishes no window.
+    expect(mapped.weekly).toBeUndefined()
+    expect(parseOpenCodeGoUsage({})).toEqual({})
+  })
+
+  test("an all-dropped usage payload throws the unparseable-usage error", async () => {
+    const payload = { usage: { rolling: {}, weekly: {} } }
+    const ctx = {
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+    }
+    await expect(fetchOpenCodeGoUsage(ctx as never, "sk-fixture")).rejects.toThrow(
+      "OpenCode Go usage data could not be parsed",
+    )
+  })
+})
+
+describe("OpenCode Console Go usage mapping", () => {
+  test("derives quota percentages from Console meter payloads", () => {
+    const mapped = parseConsoleGoUsage({
+      product: "go-plus",
+      access: {
+        meters: {
+          fiveHour: {
+            limitMicroCents: 50_000_000,
+            usedMicroCents: 12_500_000,
+            resetsAt: "2026-11-05T12:00:00Z",
+          },
+          week: {
+            limitMicroCents: 150_000_000,
+            usedMicroCents: 100_000_000,
+            resetsAt: "2026-11-09T00:00:00Z",
+          },
+          month: {
+            limitMicroCents: 100_000_000,
+            usedMicroCents: 0,
+            resetsAt: "2026-12-01T00:00:00Z",
+          },
+        },
+      },
+    })
+
+    expect(mapped["5h"]?.usedPercent).toBe(25)
+    expect(mapped["5h"]?.resetAt).toBe(Date.parse("2026-11-05T12:00:00Z"))
+    expect(mapped.weekly?.usedPercent).toBeCloseTo((100_000_000 / 150_000_000) * 100, 6)
+    expect(mapped.monthly?.usedPercent).toBe(0)
+  })
+
+  test("returns no windows for missing or incomplete meter payloads", () => {
+    expect(parseConsoleGoUsage({})).toEqual({})
+    expect(
+      parseConsoleGoUsage({
+        access: { meters: { fiveHour: { limitMicroCents: 100_000_000, usedMicroCents: 20_000_000 } } },
+      }),
+    ).toEqual({})
+  })
+})
+
+describe("OpenCode Console billing balance mapping", () => {
+  test("converts available micro-cents to dollars", () => {
+    expect(parseConsoleBillingBalance({ availableMicroCents: 123_456_789 })).toBe(1.23456789)
+  })
+
+  test("maps missing and negative balances to null", () => {
+    expect(parseConsoleBillingBalance({})).toBeNull()
+    expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
+    expect(parseConsoleBillingBalance(null)).toBeNull()
+  })
+})
+
+describe("OpenRouter calendar reset calculation", () => {
+  test("daily reset is the next UTC midnight across the year boundary", () => {
+    expect(resolveResetAt("daily", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("weekly reset is the next Monday UTC, including across week and year boundaries", () => {
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 27, 23, 59, 59))).toBe(Date.UTC(2026, 11, 28))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 4))
+    expect(resolveResetAt("weekly", Date.UTC(2026, 11, 28))).toBe(Date.UTC(2027, 0, 4))
+  })
+
+  test("monthly reset is the first UTC day of the next month and year", () => {
+    expect(resolveResetAt("monthly", Date.UTC(2026, 10, 30, 23, 59, 59))).toBe(Date.UTC(2026, 11, 1))
+    expect(resolveResetAt("monthly", Date.UTC(2026, 11, 31, 23, 59, 59))).toBe(Date.UTC(2027, 0, 1))
+  })
+
+  test("unknown reset periods have no calendar reset", () => {
+    expect(resolveResetAt("quarterly", Date.UTC(2026, 11, 31))).toBeNull()
   })
 })

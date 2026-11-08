@@ -482,6 +482,7 @@ export const Plugin = {
         description: [
           "Run TypeScript against every MCP server at once via mcpx. Tools are bound as await tools.<namespace>.<tool>({...}) and only what you print comes back, saving context tokens. Top-level await is supported.",
           "Before any code runs, mcpx checks every server the script uses. A missing secret is waited for; if it is not provided, the call fails and nothing runs.",
+          "Cross-session messaging is built in, not an MCP server: the comms namespace provides tools.comms.msg (message other sessions, topics or the user; read, await and search messages), tools.comms.topics, and tools.comms.sessions. Run mcpx_discover with namespace \"comms\" for the entry points.",
           CodeModeRules.canonical,
         ].join(" "),
         input: ExecInput,
@@ -543,6 +544,7 @@ export const Plugin = {
         options: { codemode: false },
         description: [
           "List the MCP servers mcpx knows about, the tools scripts can call, and the tools that can be projected. Pass a namespace to show its TypeScript signatures. Call with no arguments first: the answer is small and tells you what else is worth asking for.",
+          "One namespace is built in and never comes from a server: comms, the cross-session messaging tools (msg, topics, sessions). The no-argument listing always names it, and passing namespace \"comms\" describes its entry points.",
           CodeModeRules.canonical,
         ].join(" "),
         input: DiscoverInput,
@@ -552,6 +554,22 @@ export const Plugin = {
         execute: (input) =>
           Effect.gen(function* () {
             const namespace = input.namespace
+            // comms is built into this process (the messaging plugin), not served by the mcpx daemon:
+            // asking the daemon or the CLI for its types fails, so answer locally and reliably.
+            if (namespace === "comms") {
+              return {
+                output: {
+                  output: [
+                    "comms is a built-in namespace (no MCP server): inter-session communication. You act as your own session.",
+                    "Call its tools in an mcpx_exec script as tools.comms.<tool>({...}):",
+                    "- tools.comms.msg: message other sessions, topics or the user; read, await, search, inspect, hide or restore messages. Examples: tools.comms.msg({ to: 'parent', text }) direct message (wakes the recipient); tools.comms.msg({ mode: 'unread', wait: 60 }) wait for new messages; tools.comms.msg({ query: 'deploy failure' }) search by meaning.",
+                    "- tools.comms.topics: list, inspect and configure topics; subscribe or unsubscribe; list presets and template variables.",
+                    "- tools.comms.sessions: see your session chain (parent, root, children) and read any session's log.",
+                    "The full TypeScript signatures live in this session's Code Mode catalog, where the comms namespace is pinned.",
+                  ].join("\n"),
+                },
+              }
+            }
             const output = namespace
               ? yield* Effect.tryPromise(() => callDaemon(`/v1/types?namespace=${encodeURIComponent(namespace)}`)).pipe(
                   Effect.map((res: any) => (typeof res === "string" ? res : JSON.stringify(res, null, 2))),
@@ -570,7 +588,12 @@ export const Plugin = {
                   }),
                   Effect.catch(() => cliOutput(["ls"])),
                 )
-            return { output: { output } }
+            // The daemon listing only covers MCP servers; always name the built-in comms namespace too.
+            const listing =
+              namespace || /(^|\n)comms\b/.test(output)
+                ? output
+                : `${output}\ncomms  (built-in, 3 tools)  Inter-session communication: msg, topics, sessions. Pass namespace "comms" to mcpx_discover for the entry points.`
+            return { output: { output: listing } }
           }),
       })
 

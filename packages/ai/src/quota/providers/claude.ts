@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaResult, QuotaCredentialSource, JsonValue } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -43,7 +43,7 @@ import {
  * opencode-auth → "opencode", env → "environment".
  */
 
-export const providerId = "claude"
+export const providerId = "_claude"
 export const providerName = "Claude"
 export const aliases = ["anthropic", "claude", "claude-code"]
 
@@ -56,13 +56,6 @@ interface ClaudeCredential {
   expiresAt: number | null
   planLabel: string | null
   source: "keychain" | "credentials-file" | "opencode-auth" | "env"
-}
-
-const SOURCE_MAP: Record<ClaudeCredential["source"], QuotaCredentialSource> = {
-  keychain: "claude-code",
-  "credentials-file": "claude-code",
-  "opencode-auth": "opencode",
-  env: "environment",
 }
 
 const claudeConfigDirectory = (ctx: QuotaContext): string => {
@@ -120,7 +113,8 @@ const withMetadata = (result: QuotaResult, credential: ClaudeCredential): QuotaR
   ...(credential.expiresAt !== null
     ? { credentialExpiresAt: new Date(credential.expiresAt).toISOString() }
     : {}),
-  credentialSource: SOURCE_MAP[credential.source],
+  credentialSource:
+    credential.source === "opencode-auth" ? "opencode" : credential.source === "env" ? "environment" : "claude-code",
 })
 
 // ---- usage payload transforms (providers/claude/transforms.js) ----
@@ -135,7 +129,21 @@ const toAmount = (value: JsonValue | undefined): number | null => {
   const money = asObject(value)
   const minor = toNumber(money?.amount_minor)
   if (minor === null) return null
+  // A negative amount is a figure that cannot exist (billing glitch or
+  // refund spelled as spend): read it as absent, consistent with this
+  // module's sibling dispositions (meta parseBillingBanner, turso
+  // numNonNegative, opencode-go toMicroCents). Without this, a negative
+  // spend publishes as a negative money label, and a negative-only
+  // payload mints an extra_usage window that defeats the #1915
+  // no-data contract (#1919).
+  if (minor < 0) return null
   const exponent = toNumber(money?.exponent) ?? 2
+  // Valid exponents are the ISO 4217 currency exponents: integers 0-3.
+  // A wire exponent outside that range would silently rescale a real
+  // amount into a false one (999 erases it to $0.00, -2 inflates it
+  // 100x), so an out-of-range exponent reads the money object as
+  // absent, consistent with this module's other boundary dispositions.
+  if (!Number.isInteger(exponent) || exponent < 0 || exponent > 3) return null
   return minor / 10 ** exponent
 }
 
@@ -155,6 +163,12 @@ const addWindow = (
   input: { percent: number | null; resetAt: number | null; valueLabel?: string | null; windowSeconds?: number | null },
 ) => {
   if (input.percent === null && !input.valueLabel) return
+  // Duplicates keep the first (window contract rule 2, #1781): a
+  // repeated limits entry for an already-published window is a
+  // payload anomaly, not an update - the #1750/#1769 convention the
+  // sibling providers already follow. The null-figure early return
+  // above runs first, so a figure-less entry never claims the key.
+  if (key in target) return
   target[key] = toUsageWindow({
     usedPercent: input.percent,
     windowSeconds: input.windowSeconds ?? null,
@@ -180,7 +194,11 @@ export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; mode
     } else if (limit.kind === "weekly_all") {
       addWindow(windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
     } else if (limit.kind === "weekly_scoped" && modelName) {
-      const modelWindows: WindowMap = {}
+      // Reuse the model's existing map so duplicate scoped entries
+      // for one model meet addWindow's keep-first rule instead of
+      // replacing the whole entry (#1781); distinct models keep
+      // their own maps and both survive.
+      const modelWindows = models[modelName]?.windows ?? {}
       addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
       if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
     }
@@ -232,6 +250,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
+  // #1823 rename: the quota id now equals the config provider id, so the
+  // disable key is pinned to the pre-rename quota id — config
+  // disabled_providers must not hide this row (module rule, kept).
+  disabledBy: ["claude"],
   isConfigured: (ctx) => Boolean(findClaudeCredential(ctx)),
   fetchQuota: async (ctx) => {
     const credential = findClaudeCredential(ctx)
@@ -273,6 +295,13 @@ export const provider: QuotaProvider = {
     }
 
     const { windows, models } = toClaudeUsage(payload)
+    // No usable quota data at all: the sibling providers' no-data
+    // contract (codex #1762 names ClinePass/DeepSeek/OpenRouter), not
+    // ok:true with empty windows — an empty-but-successful row reads
+    // downstream as a healthy account with no limits (#1915).
+    if (Object.keys(windows).length === 0 && Object.keys(models).length === 0) {
+      return withMetadata(failure("No quota data in response"), credential)
+    }
     const usage = Object.keys(models).length > 0 ? { windows, models } : { windows }
     return withMetadata(
       buildResult({

@@ -43,7 +43,7 @@ import type { RouteDefaultsInput } from "../route/client.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { ClaudeCodeAuth, type CredentialSources } from "./claude-code-auth.js"
 
-export const id = ProviderID.make("claude-code")
+export const id = ProviderID.make("_claude")
 
 export type ProviderOptionsInput = ClaudeCodeMessages.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput

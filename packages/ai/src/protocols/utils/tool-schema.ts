@@ -19,6 +19,11 @@ const enumType = (values: ReadonlyArray<unknown>) => {
   return undefined
 }
 
+// Value keys carry literal data, not schemas: their contents pass through
+// verbatim, as in the gemini and antigravity walkers (#1952). Recursing into
+// them rewrites structured enum/default/const values as if they were schemas.
+const VALUE_KEYS = new Set(["const", "default", "enum", "examples"])
+
 const moonshotNode = (schema: unknown): unknown => {
   if (Array.isArray(schema)) return schema.map(moonshotNode)
   if (!isRecord(schema)) return schema
@@ -32,6 +37,7 @@ const moonshotNode = (schema: unknown): unknown => {
   return Object.fromEntries([
     ...(type === undefined ? [] : [["type", type]]),
     ...Object.entries(schema).flatMap(([key, value]) => {
+      if (VALUE_KEYS.has(key)) return [[key, value]]
       if (key === "items" && Array.isArray(value)) return [[key, tupleItemsSchema(value)]]
       if (key === "items" && prefixItems) return [[key, tupleItemsSchema([...prefixItems, value])]]
       if (key === "prefixItems") {

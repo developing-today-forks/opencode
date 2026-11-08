@@ -47,7 +47,7 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
         identifier: "completions.embeddings",
         summary: "Create embeddings (OpenAI-compatible)",
         description:
-          "Embed text with a registered embedding model. The model is a catalog ref (local-embed/snowflake-arctic-embed-m-v2.0, the first registered backend — a local Snowflake Arctic Embed server) or a bare embedding model id, resolved in-process against the embedding catalog; each registered model carries its own dimension and supported dimensions values, and an unsupported dimensions request is rejected. Input arrays pass through faithfully (varied lengths, no truncation at this layer). Answers in the OpenAI embeddings wire format; every call records a route_attempt row with session_id NULL like the other doors.",
+          "Embed text with a registered embedding model. The model is a catalog ref (local-embed/snowflake-arctic-embed-m-v2.0, the first registered backend — a local Snowflake Arctic Embed model run in-process by the native ONNX backend) or a bare embedding model id, resolved in-process against the embedding catalog; each registered model carries its own dimension and supported dimensions values, and an unsupported dimensions request is rejected. Input arrays pass through faithfully (varied lengths, no truncation at this layer). Answers in the OpenAI embeddings wire format; every call records a route_attempt row with session_id NULL like the other doors.",
       }),
     ),
   )

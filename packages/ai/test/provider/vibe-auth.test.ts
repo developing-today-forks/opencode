@@ -7,6 +7,7 @@ import {
   KEYRING_SERVICE,
   LEGACY_KEYRING_SERVICE,
   NOT_SIGNED_IN_MESSAGE,
+  invalidate,
   parseDotEnv,
   resolveApiKey,
   vibeAuth,
@@ -44,6 +45,15 @@ describe("parseDotEnv", () => {
       SPACED: "spaced-key",
       TRAILING: "trail-key",
     })
+  })
+
+  test("strips trailing comments after quoted values without stripping quoted hashes", () => {
+    expect(parseDotEnv('MISTRAL_API_KEY="abc123" # rotated').MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv("MISTRAL_API_KEY='abc123' # note").MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv('MISTRAL_API_KEY="abc #123"').MISTRAL_API_KEY).toBe("abc #123")
+    expect(parseDotEnv("MISTRAL_API_KEY=abc123 # note").MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv('MISTRAL_API_KEY="abc123" # note "comment" with quotes').MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv("MISTRAL_API_KEY='abc123' # don't fail").MISTRAL_API_KEY).toBe("abc123")
   })
 
   test("handles CRLF and empty values", () => {
@@ -212,5 +222,51 @@ describe("resolveApiKey — shadow diagnostic (#1809)", () => {
     }
     await expect(resolveApiKey(sources)).resolves.toBe("env-key")
     expect(seen).toEqual([])
+  })
+})
+
+describe("vibeAuth - process cache and invalidate (#1900)", () => {
+  const apply = (auth: ReturnType<typeof vibeAuth>) =>
+    Effect.runPromise(
+      auth.apply({
+        request: {},
+        method: "POST",
+        url: "https://api.mistral.ai/v1/chat/completions",
+        body: "{}",
+        headers: Headers.fromInput({}),
+      }),
+    )
+
+  test("no-source calls serve the cache until invalidate(), then re-resolve the rotated key", async () => {
+    const original = process.env[API_KEY_ENV_VAR]
+    invalidate()
+    try {
+      process.env[API_KEY_ENV_VAR] = "key-A"
+      const first = await apply(vibeAuth({}))
+      expect(first.authorization).toBe("Bearer " + "key-A")
+      // Rotation alone does not take effect: the cache is process-global.
+      process.env[API_KEY_ENV_VAR] = "key-B"
+      const stale = await apply(vibeAuth({}))
+      expect(stale.authorization).toBe("Bearer " + "key-A")
+      // The trigger the transport fires on a 401: after invalidate() the
+      // rotated key is resolved and the pre-rotation key is not sent again.
+      invalidate()
+      const recovered = await apply(vibeAuth({}))
+      expect(recovered.authorization).toBe("Bearer " + "key-B")
+    } finally {
+      if (original === undefined) delete process.env[API_KEY_ENV_VAR]
+      else process.env[API_KEY_ENV_VAR] = original
+      invalidate()
+    }
+  })
+
+  test("explicit-source calls bypass the process cache, as before", async () => {
+    const env: Record<string, string | undefined> = { [API_KEY_ENV_VAR]: "source-A" }
+    const sources: CredentialSources = { env, readFile: noFile, keyringLookup: async () => undefined }
+    const first = await apply(vibeAuth({ sources }))
+    expect(first.authorization).toBe("Bearer " + "source-A")
+    env[API_KEY_ENV_VAR] = "source-B"
+    const second = await apply(vibeAuth({ sources }))
+    expect(second.authorization).toBe("Bearer " + "source-B")
   })
 })

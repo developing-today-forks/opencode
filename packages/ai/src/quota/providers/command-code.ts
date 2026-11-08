@@ -22,9 +22,9 @@ import {
  * `command-code`.
  */
 
-export const providerId = "command-code"
+export const providerId = "_commandcode"
 export const providerName = "Command Code"
-export const aliases = ["command-code", "commandcode", "command_code", "command code"]
+export const aliases = ["_commandcode", "command-code", "commandcode", "command_code", "command code"]
 
 const API_BASE_URL = "https://api.commandcode.ai"
 
@@ -138,6 +138,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
+  // #1823 rename: the quota id now equals the config provider id, so the
+  // disable key is pinned to the pre-rename quota id — config
+  // disabled_providers must not hide this row (module rule, kept).
+  disabledBy: ["command-code"],
   credentialAliases: ["command-code", "commandcode"],
   isConfigured: (ctx) => Boolean(getApiKey(ctx)),
   fetchQuota: async (ctx) => fetchForKey(ctx, getApiKey(ctx)),

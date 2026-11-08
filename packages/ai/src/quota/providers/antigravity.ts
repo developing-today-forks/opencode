@@ -37,9 +37,9 @@ import {
  * store's `google` OAuth login written by the antigravity auth method.
  */
 
-export const providerId = "antigravity"
+export const providerId = "_antigravity"
 export const providerName = "Antigravity"
-export const aliases = ["antigravity", "antigravity-direct"]
+export const aliases = ["_antigravity", "antigravity", "antigravity-direct"]
 
 const DEFAULT_PROJECT_ID = "rising-fact-p41fc"
 const ANTIGRAVITY_ENDPOINTS = [
@@ -196,10 +196,9 @@ const resolveCandidates = async (ctx: QuotaContext): Promise<AntigravityAuth[]> 
 // ---- wire ----
 
 const antigravityHeaders = (): Record<string, string> => {
-  const osNames: Record<string, string> = { win32: "windows", darwin: "darwin", linux: "linux" }
-  const archNames: Record<string, string> = { x64: "amd64", arm64: "arm64" }
-  const os = osNames[process.platform]
-  const platformPart = os ? `${os}/${archNames[process.arch] ?? "amd64"}` : "windows/amd64"
+  const os = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : undefined
+  const arch = process.arch === "arm64" ? "arm64" : "amd64"
+  const platformPart = os ? `${os}/${arch}` : "windows/amd64"
   return {
     "User-Agent": `antigravity/${ANTIGRAVITY_CLIENT_VERSION} ${platformPart}`,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
@@ -267,11 +266,15 @@ interface ParsedBucket {
 // A bucket is published only when its window string is recognized
 // (#1768): an unrecognized string (e.g. MONTHLY) must not fabricate a
 // "5h" window that overwrites the real one — honest absence instead.
-// A missing remainingFraction likewise propagates as unknown (null),
-// never as an invented "fully remaining" 1.
+// A bucket whose remainingFraction carries no usable figure likewise
+// publishes nothing (#1917, window-contract rule 4: no figure, no
+// window) — the parseBucket-returns-null disposition, matching the
+// unrecognized-kind case; a missing fraction is never propagated as
+// an all-null-percent window and never invented as "fully remaining" 1.
 export const parseBucket = (bucket: JsonValue): ParsedBucket | null => {
   const record = asObject(bucket)
   const remainingFraction = toNumber(record?.remainingFraction)
+  if (remainingFraction === null) return null
   const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
   const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
   const resetAt = toTimestamp(record?.resetTime)
@@ -378,6 +381,15 @@ export const transformModels = (
     } else {
       const quotaInfo = asObject(modelData?.quotaInfo)
       const remainingFraction = toNumber(quotaInfo?.remainingFraction)
+      // No figure, no window (window contract rule 4, #1912): a
+      // fallback quotaInfo with no usable remainingFraction carries
+      // no quota figure, so the model publishes no window at all —
+      // the entry is omitted, not published as an all-null window
+      // with a label fabricated from its reset time (or the 5h
+      // default). Same disposition as codex #1762 and meta #1907.
+      // Omitting the entry also keeps an all-figureless models
+      // payload from reading as a successful quota read.
+      if (remainingFraction === null) continue
       const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
       const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
       const resetAt = toTimestamp(quotaInfo?.resetTime)
@@ -451,6 +463,10 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
+  // #1823 rename: the quota id now equals the config provider id, so the
+  // disable key is pinned to the pre-rename quota id — config
+  // disabled_providers must not hide this row (module rule, kept).
+  disabledBy: ["antigravity"],
   credentialAliases: ["google"],
   isConfigured: async (ctx) => (await resolveCandidates(ctx)).length > 0,
   fetchQuota: async (ctx) => fetchWithCandidates(ctx, await resolveCandidates(ctx)),

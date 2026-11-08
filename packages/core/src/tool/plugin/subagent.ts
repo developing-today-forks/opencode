@@ -75,6 +75,11 @@ export const description = [
   "Use background only for independent work that can run while you continue elsewhere.",
   "Background launches accept stopPolicy: independent (default) keeps running when the parent is interrupted, cascade stops with the parent, detached survives plain and cascade stops until force-stopped.",
   "Subagents may background their own subagents; a background child notifies its direct parent when it finishes.",
+  "Children inherit your working directory: a child runs in the same directory as the session that launched it.",
+  "Children inherit your model and route when you pass no model argument, unless the chosen agent definition configures its own model, which then wins; pass model to override either. The child result confirms only the sessionID, so rely on this inheritance rule, not on the result, for the directory and model a child actually got.",
+  "Nesting depth is capped by experimental.subagent_depth (default 5): a top-level session is depth 0 and can nest 5 levels deep, and a max_depth on an agent definition can lower the cap for its subtree. The section appended below states your current depth and how many nesting levels remain from your session.",
+  "Background completion is delivered, not polled: when a background child finishes, its result is delivered to its direct parent unprompted as a synthetic turn, and a background child that errors reports that error the same way, verbatim as its result.",
+  "Warning: a child that calls the question tool blocks until an external actor answers. A foreground subagent call waits on that answer, and in a detached or background context nobody may ever answer, stalling the child and its caller. Tell children in their prompt to record open questions and keep working with a documented default instead of calling question.",
 ].join("\n")
 
 export const Plugin = {
@@ -348,6 +353,21 @@ export const Plugin = {
           )
           .toSorted((a, b) => a.id.localeCompare(b.id))
         if (available.length === 0) return
+        const depthLine = yield* Effect.gen(function* () {
+          const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 5
+          let current = yield* sessions.get(event.sessionID)
+          let depth = 0
+          const seen = new Set([current.id])
+          let parentID = current.parentID ?? current.fork?.sessionID
+          while (parentID) {
+            if (seen.has(parentID)) break
+            seen.add(parentID)
+            depth++
+            current = yield* sessions.get(parentID)
+            parentID = current.parentID ?? current.fork?.sessionID
+          }
+          return `Your session is at depth ${depth} of the subagent depth cap ${limit}: ${Math.max(0, limit - depth)} nesting level(s) remain from here (a max_depth on an agent definition may lower this).`
+        }).pipe(Effect.catch(() => Effect.succeed(undefined)))
         tool.description = [
           tool.description,
           "",
@@ -356,6 +376,7 @@ export const Plugin = {
             (agent) =>
               `- ${agent.id}: ${agent.description ?? "This subagent should only be called when explicitly requested."}`,
           ),
+          ...(depthLine === undefined ? [] : ["", depthLine]),
         ].join("\n")
       })
     yield* ctx.session.hook("context", hook)

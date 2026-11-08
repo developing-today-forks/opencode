@@ -23,11 +23,11 @@
  *      are not a mapping and never satisfy this. `write` is allowed only
  *      on `contents` (publishing and branch maintenance need it); every
  *      other existing write grant and every existing job-level
- *      `permissions:` block is a named exception below, not a pattern to
- *      copy — job-level blocks replace the top level wholesale on
- *      GitHub's side, so new code declares permissions once, at the top.
- *      Exceptions are ratcheted: one whose grant or job block has been
- *      removed is itself a violation, so the baseline only shrinks.
+ *      `permissions:` block is a named, scope-level exception below, not
+ *      a pattern to copy — job-level blocks replace the top level
+ *      wholesale on GitHub's side, so new code declares permissions once,
+ *      at the top. Exceptions are ratcheted: one whose grant or job block
+ *      has been removed is itself a violation, so the baseline only shrinks.
  *   5. Workflow `uses:` entries cannot load actions remotely from
  *      developing-today/code. Those actions must be checked out under
  *      `.pm-central` and referenced locally to avoid runner staging errors.
@@ -94,6 +94,10 @@ export const PERMISSION_SCOPES = new Set([
 
 export const PERMISSION_LEVELS = new Set(["read", "write", "none"])
 
+type PermissionLevel = "read" | "write" | "none"
+type JobPermissionBaseline = Readonly<Record<string, PermissionLevel>>
+type JobPermissionExceptions = Readonly<Record<string, Readonly<Record<string, JobPermissionBaseline>>>>
+
 const REMOTE_CODE_ACTION_PREFIX = "developing-today/code/.github/actions/"
 
 /** The one scope any workflow may hold at `write` without an exception. */
@@ -118,24 +122,30 @@ export const PERMISSION_WRITE_EXCEPTIONS: Record<string, ReadonlySet<string>> = 
 }
 
 /**
- * Existing job-level `permissions:` blocks, by workflow file basename
- * and job name (#1503 baseline): the sync and gate jobs that predate
- * the top-level posture. New jobs inherit the top level instead.
+ * Existing job-level `permissions:` blocks, by workflow file basename,
+ * job name, and maximum scope level (#1503 baseline): the sync and gate
+ * jobs that predate the top-level posture. New jobs inherit the top level
+ * instead, and existing blocks may only shrink within these grants.
  */
-export const JOB_PERMISSION_EXCEPTIONS: Record<string, ReadonlySet<string>> = {
-  "agents.yml": new Set(["scheduled"]),
-  "docs-locale-sync.yml": new Set(["sync-locales"]),
-  "docs-update.yml": new Set(["update-docs"]),
-  "jules-daily-upstream-sync.yml": new Set(["daily-upstream-sync"]),
-  "main-broken.yml": new Set(["watch"]),
-  "opencode.yml": new Set(["opencode"]),
-  "pr-standards.yml": new Set(["check-compliance", "check-standards"]),
-  "publish-github-action.yml": new Set(["main-gate"]),
-  "publish-vscode.yml": new Set(["main-gate"]),
-  "publish.yml": new Set(["main-gate"]),
-  "review.yml": new Set(["check-guidelines"]),
-  "stats.yml": new Set(["stats"]),
-  "test.yml": new Set(["ci-fix"]),
+export const JOB_PERMISSION_EXCEPTIONS: JobPermissionExceptions = {
+  "agents.yml": { scheduled: { "id-token": "write", contents: "read" } },
+  "docs-locale-sync.yml": { "sync-locales": { contents: "write" } },
+  "docs-update.yml": { "update-docs": { "id-token": "write", contents: "write", "pull-requests": "write" } },
+  "jules-daily-upstream-sync.yml": {
+    "daily-upstream-sync": { "id-token": "write", contents: "write", "pull-requests": "write", issues: "write" },
+  },
+  "main-broken.yml": { watch: { "id-token": "write", contents: "read", actions: "read", issues: "write" } },
+  "opencode.yml": { opencode: { "id-token": "write", contents: "read", "pull-requests": "read", issues: "read" } },
+  "pr-standards.yml": {
+    "check-compliance": { contents: "read", "pull-requests": "write" },
+    "check-standards": { contents: "read", "pull-requests": "write" },
+  },
+  "publish-github-action.yml": { "main-gate": { actions: "read", contents: "read" } },
+  "publish-vscode.yml": { "main-gate": { actions: "read", contents: "read" } },
+  "publish.yml": { "main-gate": { actions: "read", contents: "read" } },
+  "review.yml": { "check-guidelines": { contents: "read", "pull-requests": "write" } },
+  "stats.yml": { stats: { contents: "write" } },
+  "test.yml": { "ci-fix": { "id-token": "write", issues: "read", contents: "read" } },
 }
 
 export interface Violation {
@@ -147,7 +157,8 @@ export interface Violation {
 
 type Parsed = Record<string, unknown>
 
-const isRecord = (value: unknown): value is Parsed => typeof value === "object" && value !== null && !Array.isArray(value)
+const isRecord = (value: unknown): value is Parsed =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
 
 /** Parse one workflow file's YAML source. */
 export function parseWorkflow(source: string): Parsed {
@@ -215,40 +226,11 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
       detail:
         "does not declare top-level permissions; the GITHUB_TOKEN would receive the permissive default grant (#1503)",
     })
-  else if (!isRecord(permissions))
-    violations.push({
-      file,
-      rule: "permissions-mapping-form",
-      detail: `declares permissions as ${JSON.stringify(permissions)}; the scalar shorthand grants every scope at once and never satisfies the least-privilege posture (#1503)`,
-    })
-  else
-    for (const [scope, level] of Object.entries(permissions)) {
-      if (!PERMISSION_SCOPES.has(scope)) {
-        violations.push({
-          file,
-          rule: "permissions-scope",
-          detail: `declares unknown permission scope ${scope}; keys must be GitHub's documented set (#1503)`,
-        })
-        continue
-      }
-      if (typeof level !== "string" || !PERMISSION_LEVELS.has(level)) {
-        violations.push({
-          file,
-          rule: "permissions-level",
-          detail: `declares permission ${scope}: ${JSON.stringify(level)}; levels are read, write, or none (#1503)`,
-        })
-        continue
-      }
-      if (level === "write") {
-        grantedWrite.add(scope)
-        if (!WRITE_PERMITTED_SCOPES.has(scope) && !writeExceptions.has(scope))
-          violations.push({
-            file,
-            rule: "permissions-write-scope",
-            detail: `grants ${scope}: write at the top level; write is permitted only on contents — other scopes need a policy change, not a new grant (#1503)`,
-          })
-      }
-    }
+  else {
+    const result = validatePermissions(file, permissions, writeExceptions)
+    violations.push(...result.violations)
+    for (const scope of result.grantedWrite) grantedWrite.add(scope)
+  }
   for (const scope of writeExceptions)
     if (!grantedWrite.has(scope))
       violations.push({
@@ -256,14 +238,48 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
         rule: "stale-permission-exception",
         detail: `the ${scope}: write exception for this workflow is no longer used; remove it from PERMISSION_WRITE_EXCEPTIONS so the baseline only shrinks (#1503)`,
       })
-  const jobExceptions = JOB_PERMISSION_EXCEPTIONS[base] ?? new Set<string>()
+  const jobExceptions = JOB_PERMISSION_EXCEPTIONS[base] ?? {}
   const jobsWithPermissions = new Set<string>()
   if (isRecord(workflow["jobs"])) {
     for (const [name, job] of Object.entries(workflow["jobs"])) {
       if (!isRecord(job)) continue
-      // Caller jobs are exempt from the job-level rule below, but their
-      // permissions block still counts as using a baseline exception.
-      if ("permissions" in job) jobsWithPermissions.add(name)
+      if ("permissions" in job) {
+        jobsWithPermissions.add(name)
+        const baseline = jobExceptions[name]
+        if (!baseline)
+          violations.push({
+            file,
+            rule: "no-job-level-permissions",
+            job: name,
+            detail: `job ${name} declares its own permissions without a named baseline; a job-level block replaces the workflow's top-level grant wholesale (#1503)`,
+          })
+        const jobWriteExceptions = new Set(
+          Object.entries(baseline ?? {})
+            .filter(([scope, level]) => level === "write" && !WRITE_PERMITTED_SCOPES.has(scope))
+            .map(([scope]) => scope),
+        )
+        const result = validatePermissions(file, job.permissions, jobWriteExceptions, name)
+        violations.push(...result.violations)
+        if (baseline && isRecord(job.permissions))
+          for (const [scope, level] of Object.entries(job.permissions)) {
+            if (!PERMISSION_SCOPES.has(scope) || typeof level !== "string" || !PERMISSION_LEVELS.has(level)) continue
+            const allowed = baseline?.[scope]
+            if (
+              allowed === undefined ||
+              (level === "write" && allowed !== "write") ||
+              (level === "read" && allowed === "none")
+            )
+              violations.push({
+                file,
+                rule: "job-permissions-baseline",
+                job: name,
+                detail:
+                  allowed === undefined
+                    ? `job ${name} declares ${scope}: ${level}, which is not in its ${base} job-level permissions baseline (#1503)`
+                    : `job ${name} declares ${scope}: ${level}, exceeding its ${base} job-level permissions baseline of ${allowed} (#1503)`,
+              })
+          }
+      }
       if ("uses" in job) {
         for (const key of Object.keys(job)) {
           if (REUSABLE_WORKFLOW_CALLER_KEYS.has(key)) continue
@@ -276,15 +292,6 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
         }
         continue
       }
-      if ("permissions" in job) {
-        if (!jobExceptions.has(name))
-          violations.push({
-            file,
-            rule: "no-job-level-permissions",
-            job: name,
-            detail: `job ${name} declares its own permissions; a job-level block replaces the workflow's top-level grant wholesale, so permissions are declared once at the top level (#1503)`,
-          })
-      }
       if (!("timeout-minutes" in job))
         violations.push({
           file,
@@ -294,7 +301,7 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
         })
     }
   }
-  for (const name of jobExceptions)
+  for (const name of Object.keys(jobExceptions))
     if (!jobsWithPermissions.has(name))
       violations.push({
         file,
@@ -303,6 +310,58 @@ export function workflowViolations(file: string, workflow: Parsed): Violation[] 
         detail: `the job-level permissions exception for job ${name} is no longer used; remove it from JOB_PERMISSION_EXCEPTIONS so the baseline only shrinks (#1503)`,
       })
   return violations
+}
+
+function validatePermissions(
+  file: string,
+  permissions: unknown,
+  writeExceptions: ReadonlySet<string>,
+  job?: string,
+): { violations: Violation[]; grantedWrite: Set<string> } {
+  const violations: Violation[] = []
+  const grantedWrite = new Set<string>()
+  const subject = job ? `job ${job} ` : ""
+  if (!isRecord(permissions)) {
+    violations.push({
+      file,
+      rule: "permissions-mapping-form",
+      ...(job ? { job } : {}),
+      detail: `${subject}declares permissions as ${JSON.stringify(permissions)}; the scalar shorthand grants every scope at once and never satisfies the least-privilege posture (#1503)`,
+    })
+    return { violations, grantedWrite }
+  }
+  for (const [scope, level] of Object.entries(permissions)) {
+    if (!PERMISSION_SCOPES.has(scope)) {
+      violations.push({
+        file,
+        rule: "permissions-scope",
+        ...(job ? { job } : {}),
+        detail: `${subject}declares unknown permission scope ${scope}; keys must be GitHub's documented set (#1503)`,
+      })
+      continue
+    }
+    if (typeof level !== "string" || !PERMISSION_LEVELS.has(level)) {
+      violations.push({
+        file,
+        rule: "permissions-level",
+        ...(job ? { job } : {}),
+        detail: `${subject}declares permission ${scope}: ${JSON.stringify(level)}; levels are read, write, or none (#1503)`,
+      })
+      continue
+    }
+    if (level !== "write") continue
+    grantedWrite.add(scope)
+    if (WRITE_PERMITTED_SCOPES.has(scope) || writeExceptions.has(scope)) continue
+    violations.push({
+      file,
+      rule: "permissions-write-scope",
+      ...(job ? { job } : {}),
+      detail: job
+        ? `job ${job} grants ${scope}: write without that scope in its named job-level baseline (#1503)`
+        : `grants ${scope}: write at the top level; write is permitted only on contents — other scopes need a policy change, not a new grant (#1503)`,
+    })
+  }
+  return { violations, grantedWrite }
 }
 
 /** Every policy violation in one workflow file's YAML source. */
@@ -339,7 +398,7 @@ export function absentFileExceptions(files: string[]): Violation[] {
       violations.push({
         file: `${WORKFLOWS_DIR}/${base}`,
         rule: "stale-permission-exception",
-        detail: `the job-level permissions exception(s) for job(s) ${[...jobs].join(", ")} match no file in ${WORKFLOWS_DIR}; remove them from JOB_PERMISSION_EXCEPTIONS so the baseline only shrinks (#1503)`,
+        detail: `the job-level permissions exception(s) for job(s) ${Object.keys(jobs).join(", ")} match no file in ${WORKFLOWS_DIR}; remove them from JOB_PERMISSION_EXCEPTIONS so the baseline only shrinks (#1503)`,
       })
   return violations
 }
@@ -362,7 +421,9 @@ function main() {
       )
     process.exit(1)
   }
-  console.log(`All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers, top-level least-privilege permissions mapping, no remote developing-today/code actions).`)
+  console.log(
+    `All ${files.length} workflows in ${WORKFLOWS_DIR} follow the workflow policies (no PR triggers, ${REQUIRED_TRIGGER} declared, timeout-minutes on every non-reusable job, allowlisted reusable-workflow callers, top-level permissions mapping, baselined job-level permissions, no remote developing-today/code actions).`,
+  )
 }
 
 if (import.meta.main) main()

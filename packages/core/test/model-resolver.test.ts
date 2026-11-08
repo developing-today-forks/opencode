@@ -2306,6 +2306,55 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.live("lets a due half-open probe recover a quota-exhausted pool, then restores the pool exclusion (#1390)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const outside = leaf("pc")
+    const route = routed([a, b, outside], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b, outside], (resolver) =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const resetAt = now + 250
+        ModelRoute.failed(targetA, ModelRoute.policy(), now, { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), now, { quota: true })
+        for (const [target, providerID] of [[targetA, "pa"], [targetB, "pb"]] as const)
+          ModelRoute.observeProviderQuota(
+            target,
+            {
+              planID: "plan",
+              window: "five-hours",
+              providerID,
+              percent: 100,
+              remaining: 0,
+              resetAt: providerID === "pa" ? resetAt : resetAt + 30_000,
+              observedAt: now + 1,
+              stale: false,
+            },
+            now + 1,
+          )
+
+        // Before pa's reset, neither bench is probe-eligible and the pool stays pulled.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pc")
+        yield* Effect.sleep("400 millis")
+
+        // pa's reset has passed: the pool no longer counts that due probe as exhaustion,
+        // so it is selected even though the other pool member remains quota-benched.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        // Once pa's probe is claimed, its bench counts again alongside pb's not-yet-due
+        // bench, restoring the hard pool exclusion while the probe is outstanding.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pc")
+      }),
+    )
+  })
+
   it.effect("passes over a target whose provider reports a spent rate-limit window", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
@@ -2831,12 +2880,21 @@ describe("ModelResolver routes", () => {
           allProviders.map(leaf),
           (resolver) =>
             Effect.gen(function* () {
-              yield* resolver.resolveModel(routeA)
-              expect(ModelRoute.poolQuotaExhausted(definitionA, 0)).toBe(true)
-              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(false)
+              // No pool verdict exists to consult (Drew, 2026-11-07): the feed's
+              // effect is per provider \u2014 route A's providers are gated by their
+              // own snapshots, route B's are not fed yet, and resolution lands on
+              // A's individually-clear fallback leaf.
+              const resolvedA = yield* resolver.resolveModel(routeA)
+              expect(targetOf(resolvedA)).toBe("quota-a-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[1])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeUndefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeUndefined()
 
-              yield* resolver.resolveModel(routeB)
-              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(true)
+              const resolvedB = yield* resolver.resolveModel(routeB)
+              expect(targetOf(resolvedB)).toBe("quota-b-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeDefined()
             }),
           undefined,
           path,

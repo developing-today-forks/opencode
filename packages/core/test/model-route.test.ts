@@ -2275,33 +2275,25 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 60_001, "/loc/a")).toEqual({ until: null })
 
       // Timed provider skips: two providers whose threshold holds B admits each
-      // gain a timed attempt-reported skip; the pool then counts as out under B.
+      // gain a timed attempt-reported skip; the exclusion lands on each
+      // provider's own records \u2014 there is no pool verdict to count them together.
       ModelRoute.resetHealth()
       ModelRoute.setAdjustments([])
       const leaf1 = ModelRoute.ref({ providerID: "prov-t1", model: "m" })
       const leaf2 = ModelRoute.ref({ providerID: "prov-t2", model: "m" })
       ModelRoute.observeProviderQuota(leaf1, { ...balance, providerID: "prov-t1" }, now, "/loc/a")
       ModelRoute.observeProviderQuota(leaf2, { ...balance, providerID: "prov-t2" }, now, "/loc/a")
-      const definition = {
-        id: "timed-pool-route",
-        targets: [leaf1, leaf2],
-        targetVariants: [],
-        health: ModelRoute.policy(),
-        nodes: [
-          { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
-          {
-            routeID: "timed-pool",
-            selection: "ordered" as const,
-            weights: [1, 1],
-            children: [{ leaf: 0 }, { leaf: 1 }],
-          },
-        ],
-      } as unknown as ModelRoute.Definition
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leaf2, now, "/loc/b")).toBeUndefined()
       ModelRoute.observeQuotaFailure(leaf1, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
       ModelRoute.observeQuotaFailure(leaf2, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
       expect(ModelRoute.skipped(leaf1, now + 1, { location: "/loc/b" })).toBe(true)
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now + 1, undefined, "/loc/b")).toBe(true)
+      // The timed exclusion is carried by each provider's own skip record
+      // (skipped above); the in-memory gate still shows only the threshold
+      // hold, which blocks A and admits B.
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now + 1, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leaf1, now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.providerQuotaBlocked(leaf2, now + 1, "/loc/a")).toEqual({ until: null })
     } finally {
       ModelRoute.setAdjustments([])
       offA()
@@ -2310,14 +2302,13 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
-  test("threshold-derived provider holds are judged under the requesting Location in skipped and pool pull-out (#1461)", () => {
+  test("threshold-derived provider holds are judged under the requesting Location in skipped (#1461)", () => {
     const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
     const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
     try {
       ModelRoute.resetHealth()
       const now = Date.now()
       const leafA = ModelRoute.ref({ providerID: "prov-hold", model: "m1" })
-      const leafB = ModelRoute.ref({ providerID: "prov-hold", model: "m2" })
       const balance = {
         planID: "credits-plan",
         window: "credits",
@@ -2332,36 +2323,21 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       ModelRoute.observeProviderQuota(leafA, balance, now, "/loc/a")
       expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
       expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
-      const definition = {
-        id: "prov-hold-route",
-        targets: [leafA, leafB],
-        targetVariants: [],
-        health: ModelRoute.policy(),
-        nodes: [
-          { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
-          {
-            routeID: "prov-hold-pool",
-            selection: "ordered" as const,
-            weights: [1, 1],
-            children: [{ leaf: 0 }, { leaf: 1 }],
-          },
-        ],
-      } as unknown as ModelRoute.Definition
-      // Both leaves share one provider gate, which counts as a single quota
-      // evidence source under main's #1389 dedup, so that gate alone does not
-      // pull the pool under either Location; the per-Location judgement is
-      // carried by skipped() above (and by distinct-provider pools in the
-      // timed-skip test below).
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(false)
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      // The provider's own gate carries the same per-Location judgement: the
+      // hold blocks its leaf under A and admits it under B. There is no
+      // pool-level fact to consult \u2014 a pool cannot run out (Drew, 2026-11-07).
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/b")).toBeUndefined()
       const durable = ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:prov-hold")
       expect(durable?.balanceHoldOrigin).toBe("threshold")
       ModelRoute.resetHealth()
       ModelRoute.setAdjustments(durable ? [durable] : [])
       expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
       expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(false)
-      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      // After a restart the durable record alone carries the judgement through
+      // skipped(); no in-memory provider gate exists until the next fed snapshot.
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/a")).toBeUndefined()
+      expect(ModelRoute.providerQuotaBlocked(leafA, now, "/loc/b")).toBeUndefined()
     } finally {
       ModelRoute.setAdjustments([])
       offA()
@@ -2682,103 +2658,349 @@ describe("ModelRoute provider-route groups with no ready members", () => {
     })
   })
 })
-
-describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
+describe("ModelRoute per-leg quota state (pool verdict abolished)", () => {
   const policy = ModelRoute.policy({ cooldownMs: 5_000, quotaCooldownMs: 60_000 })
   const leaves = [0, 1, 2].map((index) => ModelRoute.ref({ providerID: `pool-p${index}`, model: `m${index}` }))
   const outside = ModelRoute.ref({ providerID: "pool-outside", model: "solo" })
-  // Root: the pool group (leaves 0-2, one nested route) plus one leaf that belongs to no pool.
-  const definition = {
-    id: "pool-route",
-    targets: [...leaves, outside],
-    targetVariants: [],
-    health: policy,
-    nodes: [
-      { selection: "ordered" as const, weights: [1, 1], children: [{ node: 1 }, { leaf: 3 }] },
-      { routeID: "pool-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
-    ],
-  } as unknown as ModelRoute.Definition
 
-  test("two distinct leaves answering quota in turn pull the whole pool; expiry re-admits it", () => {
+  test("quota benches on two leaves of one group never exclude a third, individually-clear leaf", () => {
     ModelRoute.resetHealth()
     const now = Date.now()
-    expect(ModelRoute.poolIDOf(definition, 2)).toBe("pool-plan")
-    expect(ModelRoute.poolIDOf(definition, 3)).toBeUndefined()
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
-
-    // One leaf's quota answer is leaf-shaped: the pool still serves through its other leaves.
     ModelRoute.failed(leaves[0], policy, now, { quota: true })
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
-
-    // A second distinct leaf answering quota is the pool-shaped signal: the remaining leaf
-    // is pulled with its pool instead of being spent next.
     ModelRoute.failed(leaves[1], policy, now, { quota: true })
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
-    expect(ModelRoute.poolQuotaExhausted(definition, 0, now)).toBe(true)
-    // A leaf outside the pool is never pulled by the pool's exhaustion.
-    expect(ModelRoute.poolQuotaExhausted(definition, 3, now)).toBe(false)
-
-    // Restoration is automatic: once the quota benches expire the pool re-enters rotation.
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now + 60_001)).toBe(false)
-    ModelRoute.resetHealth()
+    // Each benched leaf is out on its own bench...
+    expect(ModelRoute.cooldownUntil(leaves[0], now)).toBeGreaterThan(now)
+    expect(ModelRoute.cooldownUntil(leaves[1], now)).toBeGreaterThan(now)
+    // ...and the third leaf of the same group carries no exclusion of any kind:
+    // no bench and no provider gate. A pool cannot run out (Drew, 2026-11-07) \u2014
+    // only its leaves' own models, credentials, and providers can.
+    expect(ModelRoute.cooldownUntil(leaves[2], now)).toBe(0)
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], now)).toBeUndefined()
+    expect(ModelRoute.cooldownUntil(outside, now)).toBe(0)
+    // Expiry re-admits each benched leaf on its own clock.
+    expect(ModelRoute.cooldownUntil(leaves[0], now + 60_001)).toBe(0)
+    expect(ModelRoute.cooldownUntil(leaves[1], now + 60_001)).toBe(0)
   })
 
-  test("reactive quota gates on two leaves' providers exhaust the pool until the stated reset", () => {
+  test("a provider's own quota state blocks every leaf it serves and no other provider's leaf", () => {
     ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([])
     const now = Date.now()
-    const resetAt = now + 30 * 60_000
-    ModelRoute.observeQuotaFailure(leaves[0], undefined, resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(false)
-    ModelRoute.observeQuotaFailure(leaves[1], undefined, resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
-    // The pull-out holds until the reset the providers stated, then lifts by itself.
-    expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 1)).toBe(false)
-    ModelRoute.resetHealth()
-  })
-
-  test("one shared credential or provider gate counts once, so a healthy leaf keeps the pool open (#1389)", () => {
+    const resetAt = now + 3_600_000
+    // Two leaves share one provider; a third leaf sits on its own provider in
+    // the same route group. Quota state is the provider's, so it covers
+    // exactly the leaves that provider serves.
     const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
-    const healthy = ModelRoute.ref({ providerID: "pool-healthy", model: "m2" })
-    const sharedDefinition = {
-      id: "pool-shared-route",
-      targets: [...shared, healthy],
-      targetVariants: [],
-      health: policy,
-      nodes: [
-        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
-        { routeID: "pool-shared-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
-      ],
-    } as unknown as ModelRoute.Definition
-    const now = Date.now()
-    const resetAt = now + 30 * 60_000
-
-    // Two leaves behind one gated credential are one quota signal, not two.
-    ModelRoute.resetHealth()
-    const sharedCredential = (index: number) =>
-      sharedDefinition.targets[index].providerID === "pool-shared" ? "cred-shared" : undefined
-    ModelRoute.observeQuotaFailure(shared[0], "cred-shared", resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 0, now, sharedCredential)).toBe(false)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 1, now, sharedCredential)).toBe(false)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(false)
-    // A second, genuinely distinct gate on the healthy leaf's provider still exhausts the pool.
-    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(true)
-
-    // Two credential-less leaves behind one gated provider are one quota signal, not two.
-    ModelRoute.resetHealth()
+    // Attempt-reported exhaustion from ONE model family lands model-scoped
+    // (#1976): only the answering leaf is skipped — a sibling family on the
+    // same provider keeps serving until its own answer corroborates.
     ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(false)
-    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(true)
+    expect(ModelRoute.skipped(shared[0], now)).toBe(true)
+    expect(ModelRoute.skipped(shared[1], now)).toBe(false)
+    expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
+    // The second family answering quota corroborates the hold to provider
+    // scope: now the provider's own skip record blocks every leaf it serves.
+    ModelRoute.observeQuotaFailure(shared[1], undefined, resetAt, now)
+    expect(ModelRoute.skipped(shared[1], now)).toBe(true)
+    expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(shared[0], now)).toBeUndefined()
+    // A fed known-full snapshot gates the provider in memory, for both leaves.
+    ModelRoute.observeProviderQuota(
+      shared[0],
+      { planID: "plan", window: "weekly", providerID: "pool-shared", percent: 100, remaining: 0, resetAt, observedAt: now, stale: false },
+      now,
+    )
+    expect(ModelRoute.providerQuotaBlocked(shared[0], now)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(shared[1], now)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], now)).toBeUndefined()
+    // The gate lifts on the provider's own reset clock.
+    expect(ModelRoute.providerQuotaBlocked(shared[0], resetAt + 1)).toBeUndefined()
+    expect(ModelRoute.skipped(shared[0], resetAt + 1)).not.toBe(true)
+  })
 
-    // Two independent quota benches on distinct credentials still exhaust the pool.
+  test("a shared credential's gate blocks through the credential scope only, never a provider scope", () => {
     ModelRoute.resetHealth()
-    const distinctCredential = (index: number) =>
-      sharedDefinition.targets[index].providerID === "pool-shared" ? `cred-${index}` : undefined
-    ModelRoute.failed(shared[0], policy, now, { quota: true }, "cred-0")
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(false)
-    ModelRoute.failed(shared[1], policy, now, { quota: true }, "cred-1")
-    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(true)
+    const now = Date.now()
+    const resetAt = now + 3_600_000
+    ModelRoute.observeQuotaFailure(leaves[0], "cred-pool", resetAt, now)
+    expect(ModelRoute.credentialQuotaBlocked("cred-pool", now)).toEqual({ until: resetAt })
+    // The credential gate says nothing about any provider gate: a leaf keeps
+    // whatever its own provider state says (here, nothing).
+    expect(ModelRoute.providerQuotaBlocked(leaves[0], now)).toBeUndefined()
+    expect(ModelRoute.credentialQuotaBlocked("cred-pool", resetAt + 1)).toBeUndefined()
+  })
+
+  test("a due probe does not outrank the leaf's own independent provider gate (#1390, #1473)", () => {
     ModelRoute.resetHealth()
+    const now = Date.now()
+    const resetAt = now + 5 * 3_600_000
+    const longPolicy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const knownFull = (at: number, observedAt: number) => ({
+      planID: "plan",
+      window: "five-hours",
+      providerID: "pool-p0",
+      percent: 100,
+      remaining: 0,
+      resetAt: at,
+      observedAt,
+      stale: false,
+    })
+    // Bench the leaf on the escalated ladder, which runs far past the window
+    // reset the provider feed then teaches it: a half-open probe comes due.
+    for (let index = 0; index < 8; index++) ModelRoute.failed(leaves[0], longPolicy, now + index, { quota: true })
+    ModelRoute.observeProviderQuota(leaves[0], knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.probeDue(leaves[0], undefined, resetAt)).toBe(true)
+    // A fresher independent gate on the same provider still blocks the leaf
+    // itself: gates beat probes, judged per leaf, never via a pool verdict.
+    ModelRoute.observeProviderQuota(leaves[0], knownFull(resetAt + 60_000, resetAt), resetAt)
+    expect(ModelRoute.providerQuotaBlocked(leaves[0], resetAt + 10)).toEqual({ until: resetAt + 60_000 })
+    expect(ModelRoute.providerQuotaBlocked(leaves[2], resetAt + 10)).toBeUndefined()
+  })
+})
+
+describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (#1974, #1976)", () => {
+  const hour = 3_600_000
+
+  const gatheredReading = (opts: {
+    providerID: string
+    modelID: string
+    percent: number
+    at: number
+    resetAt?: number | null
+    widePercent?: number
+  }) => [
+    {
+      providerID: opts.providerID,
+      measuredAt: opts.at,
+      windows:
+        opts.widePercent === undefined
+          ? []
+          : [{ name: "weekly", usedPercent: opts.widePercent, resetAt: opts.resetAt ?? null, measuredAt: opts.at }],
+      models: {
+        [opts.modelID]: [
+          { name: "weekly", usedPercent: opts.percent, resetAt: opts.resetAt ?? null, measuredAt: opts.at },
+        ],
+      },
+    },
+  ]
+
+  test("a credential-less quota answer skips only the answering target (#1976)", () => {
+    const now = 700_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    // The Claude family's wall: one credential-less quota answer.
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // The answering target is skipped, under its own model-scoped record...
+    expect(ModelRoute.skipped(claude, now + 1)).toBe(true)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some(
+        (item) => item.id === "quota-model:antigravity-direct:claude-sonnet-5-5",
+      ),
+    ).toBe(true)
+    // ...and the sibling family is untouched: no provider-wide record, no skip.
+    expect(ModelRoute.skipped(gemini, now + 1)).toBe(false)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+  })
+
+  test("a second family's quota answer corroborates the skip to provider scope (#1976)", () => {
+    const now = 710_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // A second, distinct target of the same provider answers quota while the first
+    // family's hold still stands: two sources, the pool-verdict standard.
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt, now + 1)
+    expect(
+      ModelRoute.activeAdjustments(now + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(true)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, now + 2)).toBe(true)
+    // Corroboration is judged against live holds: once the first family's stated hold
+    // has lapsed, a lone new answer scopes to its own target again.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt + 7_200_000, resetAt + 1)
+    expect(
+      ModelRoute.activeAdjustments(resetAt + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+    expect(ModelRoute.skipped(gemini, resetAt + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, resetAt + 2)).toBe(false)
+  })
+
+  test("a gathered reading with headroom lifts the skip, long before the stated reset (#1974)", () => {
+    const now = 720_000_000
+    // The OpenDesign shape: the error's stated reset is days out, far past the real
+    // window roll — and the window did roll, which the gatherer's fresh reading shows.
+    const statedReset = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, statedReset, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 4,
+        at: judgedAt,
+        resetAt: now + 7 * 86_400_000,
+      }),
+      judgedAt,
+    )
+    // The source's reset (a fresh window, days past the stated one) governs: the skip
+    // comes off on the reading's word, with no attempt spent to learn it.
+    expect(released).toEqual(["quota-model:opendesign:claude-haiku-5.5"])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(false)
+  })
+
+  test("a gathered reading that still shows the window full lifts nothing (#1974)", () => {
+    const now = 730_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 100,
+        at: judgedAt,
+        resetAt: now + 86_400_000,
+      }),
+      judgedAt,
+    )
+    expect(released).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    // A stale reading is no evidence either way: the skip stands, unjudged.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 4, at: judgedAt }),
+        judgedAt + 2 * hour,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 2 * hour)).toBe(true)
+  })
+
+  test("a provider the snapshot does not carry keeps its skip — no reading, no judgement (#1974)", () => {
+    const now = 740_000_000
+    const leaf = ModelRoute.ref({ providerID: "unmeasured", model: "m" })
+    const other = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    // Headroom readings exist — for another provider, and for this provider's other
+    // model. Neither is a reading of this leaf's window.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "unmeasured", modelID: "some-other-model", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    expect(ModelRoute.skipped(other, judgedAt + 1)).toBe(false)
+  })
+
+  test("a corroborated provider-wide skip lifts only on provider-wide headroom (#1974)", () => {
+    const now = 750_000_000
+    // Two families answered quota, so the standing skip is provider-wide. One family's
+    // headroom reading cannot lift it while that record stands — the leaf stays
+    // skipped until the provider's own windows read headroom too.
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, now + 3 * 86_400_000, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, now + 3 * 86_400_000, now + 1)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    // Gemini's window reads 4% used, but the provider-wide window still reads full:
+    // nothing lifts, and the leaf stays skipped under the provider record.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 100,
+        }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(gemini, judgedAt + 1)).toBe(true)
+    // The provider-wide windows read headroom as well: the corroborated record comes
+    // off, and the sibling family's own record — no reading for it here — stands.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 40,
+        }),
+        judgedAt,
+      ),
+    ).toEqual(["quota:antigravity-direct"])
+    expect(ModelRoute.skipped(gemini, judgedAt + 2)).toBe(false)
+    expect(ModelRoute.skipped(claude, judgedAt + 2)).toBe(true)
+  })
+
+  test("a fresher not-full snapshot releases a model-scoped reactive skip (#1974, #1976)", () => {
+    const now = 760_000_000
+    const resetAt = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, resetAt, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    ModelRoute.observeProviderQuota(
+      leaf,
+      {
+        planID: "plan",
+        window: "weekly",
+        providerID: "opendesign",
+        percent: 4,
+        remaining: 144_000,
+        resetAt: now + 7 * 86_400_000,
+        observedAt: now + 60_000,
+        stale: false,
+      },
+      now + 60_000,
+    )
+    expect(ModelRoute.skipped(leaf, now + 60_001)).toBe(false)
+  })
+
+  test("two families out promotes the hold to provider scope; one family stays model-scoped (#1976)", () => {
+    const now = 770_000_000
+    const resetAt = now + 3_600_000
+    const a = ModelRoute.ref({ providerID: "prov-a", model: "m-a" })
+    const b = ModelRoute.ref({ providerID: "prov-a", model: "m-b" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(a, undefined, resetAt, now)
+    // One family out: only the answering target is skipped; its sibling keeps serving.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(false)
+    ModelRoute.observeQuotaFailure(b, undefined, resetAt, now)
+    // Corroborated by a second distinct target: the hold is provider-wide now.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(true)
   })
 })

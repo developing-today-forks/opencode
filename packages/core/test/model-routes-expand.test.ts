@@ -102,6 +102,31 @@ describe("pool targets", () => {
     expect(live.leaves.map((leaf) => String(leaf.ref.id))).toEqual(["claude-opus-4-1", "gpt-6-luna"])
   })
 
+  test("a nested-route child is weighted by its bare route id, not a provider-prefixed key", () => {
+    const routes = new Map<string, ConfigModelRoutes.Route>([
+      [
+        "pool",
+        {
+          targets: [{ model: { providerID: "anthropic", model: "claude-opus-4-1" } }],
+        } as unknown as ConfigModelRoutes.Route,
+      ],
+      [
+        "r",
+        {
+          targets: [
+            { model: { providerID: "opencode-route", model: "pool" } },
+            { model: { providerID: "openai", model: "gpt-6-luna" } },
+          ],
+          selection: "round-robin",
+          autonomy: "rules",
+          weights: { pool: 3, "openai/gpt-6-luna": 2 },
+        } as unknown as ConfigModelRoutes.Route,
+      ],
+    ])
+    const { nodes } = expand("r", routes, definitions)
+    expect(nodes[0].weights).toEqual([3, 2])
+  })
+
   test("a glob that matches nothing contributes nothing and does not fail the route", () => {
     const { leaves } = expand("r", route(["anthropic/*mistral*", "openai/gpt-6-luna"]), definitions)
     expect(leaves.map((leaf) => String(leaf.ref.id))).toEqual(["gpt-6-luna"])

@@ -255,12 +255,19 @@ describe("ModelRoute quota-failure gate (#984)", () => {
     expect(ModelRoute.credentialQuotaBlocked("cred-ratelimit", 100_000)).toBeUndefined()
   })
 
-  test("a credential-less exhaustion skips the provider until the reset, then lapses", () => {
+  test("a credential-less exhaustion skips the answering target until the reset, then lapses (#1976)", () => {
     const plain = ModelRoute.ref({ providerID: "cline-pass", model: "claude-sonnet-5" })
     ModelRoute.observeQuotaFailure(plain, undefined, 100_000, 10_000)
     const active = ModelRoute.activeAdjustments(10_000)
     expect(active).toHaveLength(1)
-    expect(active[0]).toMatchObject({ id: "quota:cline-pass", match: "cline-pass/", action: "skip", until: 100_000 })
+    // #1976: one family's answer scopes the skip to that target; provider scope needs a
+    // second family's corroboration. The hold and its lapse are unchanged.
+    expect(active[0]).toMatchObject({
+      id: "quota-model:cline-pass:claude-sonnet-5",
+      match: "cline-pass/claude-sonnet-5",
+      action: "skip",
+      until: 100_000,
+    })
     expect(ModelRoute.activeAdjustments(100_000)).toHaveLength(0)
   })
 })

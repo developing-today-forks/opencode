@@ -48,6 +48,7 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "comms_sessions", input: MessagingTools.SessionsInput },
   { name: "opencode_session_rename", input: OpenCodeTools.RenameInput },
   { name: "opencode_session_move", input: OpenCodeTools.MoveInput },
+  { name: "opencode_session_switch_model", input: OpenCodeTools.SwitchModelInput },
   { name: "opencode_worktree_create", input: OpenCodeTools.WorktreeCreateInput },
   { name: "opencode_worktree_list", input: OpenCodeTools.WorktreeListInput },
   { name: "opencode_worktree_remove", input: OpenCodeTools.WorktreeRemoveInput },

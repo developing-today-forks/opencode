@@ -11,6 +11,7 @@ import { ModelRouteLog } from "./model-route-log.js"
 import { ModelRouteOverrides } from "./model-route-overrides.js"
 import { ModelRouteSchedule } from "./model-route-schedule.js"
 import { QuotaSnapshot } from "./quota-snapshot.js"
+import { QuotaCurrent } from "./quota-current.js"
 import { optional, PositiveInt } from "@opencode/schema/schema"
 
 export const PROVIDER_ID = Provider.ID.make("opencode-route")
@@ -668,6 +669,159 @@ export const releaseBenchProbe = (
   return true
 }
 
+/** The durable record id for one model target's reactive quota skip (#1976): keyed to the
+ * answering target, so one model family's exhaustion record names only that family. */
+const quotaModelSkipID = (target: Model.Ref) => `quota-model:${target.providerID}:${target.id}`
+
+/** Whether a persisted skip record is a reactive (attempt-reported) timed quota skip — the
+ * class `observeQuotaFailure` plants on a credential-less answer. Its provenance field
+ * names it; records written before the field existed are recognised by their note. Balance
+ * records are excluded: they re-admit only on a fresh increase (#1014). */
+const attemptQuotaSkip = (item: Adjustment): boolean =>
+  item.action === "skip" &&
+  item.balanceBaseline === undefined &&
+  (item.quotaSkipOrigin === "attempt" || (item.note?.includes("(attempt-reported)") ?? false))
+
+/** Quota answers per provider from distinct answering targets, keyed by target ref with
+ * the stated hold each answer planted (#1976): the corroboration ledger that decides when
+ * a model-scoped reactive skip promotes to provider scope. Process-local: after a restart
+ * the first answer plants a model-scoped skip and corroboration rebuilds from live
+ * answers, which is the conservative direction. */
+/** Distinct targets of one provider that must answer quota before a reactive skip is
+ * promoted to provider scope (#1976) — a single family's answer stays model-scoped. */
+const QUOTA_SKIP_CORROBORATION_SOURCES = 2
+
+const quotaFailureSources = new Map<string, Map<string, number>>()
+
+/** Re-judges this provider's attempt-reported quota skips against a fresher quota
+ * reading (#1974): when the reading is known and not full, the provider's own measured
+ * state says its window has capacity again, so the reactive skips come off — the
+ * model-scoped record and a corroborated provider-wide one alike — instead of holding
+ * until the reset date the original error happened to quote. The reading governs, not
+ * the error: a window that rolled early re-admits on the reading's word, and a reading
+ * that still shows the window full lifts nothing, however stale the skip's own date has
+ * grown — a further reading is the only thing that can lift it then. No attempt is ever
+ * spent to test the door: re-admission is a judgement over measured quota, never a
+ * probe.
+ *
+ * Guarded like the feed paths that call it: the reading must be known (a stale or
+ * percent-less reading is neither headroom nor a wall) and no older than the skip it
+ * lifts — a reading taken before the quota answer that planted the skip cannot
+ * contradict it. Balance records are not this path's business: they re-admit only on a
+ * fresh increase (#1014). Returns the records it removed. */
+export const releaseQuotaSkipsForSnapshot = (
+  target: Model.Ref,
+  snapshot: QuotaSnapshot.Snapshot,
+  now = Date.now(),
+  location?: string,
+): string[] => {
+  if (snapshot.providerID !== target.providerID) return []
+  if (!QuotaSnapshot.known(snapshot)) return []
+  if (QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) return []
+  const released: string[] = []
+  for (const item of [...adjustments]) {
+    if (!attemptQuotaSkip(item)) continue
+    if (!(item.id === `quota:${target.providerID}` || item.id === quotaModelSkipID(target))) continue
+    // Plant-time floor: the skip re-plants on each fresh quota answer with a strictly
+    // later expiry, so a standing skip's expiry is at least QUOTA_GATE_MAX_MS past the
+    // answer that planted it (and at most that far past it). A reading older than that
+    // floor predates the answer and cannot contradict it.
+    if (item.until !== undefined && snapshot.observedAt <= item.until - QUOTA_GATE_MAX_MS) continue
+    if (removeAdjustment(item.id)) released.push(item.id)
+  }
+  if (released.length > 0)
+    logHealth(target, "quota-readmitted", `fresher quota reading re-admitted ${released.join(", ")}`)
+  return released
+}
+
+/** The freshest measured reading of one model's quota window in the gatherer's
+ * snapshot (#1974): among the provider's entries, the latest reading that carries a
+ * window for this model (a model entry, or a window literally named for the model).
+ * Undefined when the snapshot carries nothing for the model — no reading is no
+ * evidence, in either direction. */
+const modelWindowReading = (
+  readings: readonly QuotaCurrent.ProviderReading[],
+  providerID: string,
+  modelID: string,
+): { readonly percent: number; readonly resetAt: number | null; readonly observedAt: number } | undefined => {
+  let best: { percent: number; resetAt: number | null; observedAt: number } | undefined
+  for (const reading of readings) {
+    if (reading.providerID !== providerID) continue
+    const candidates: QuotaCurrent.Window[] = [
+      ...(reading.models[modelID] ?? []),
+      ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
+    ]
+    for (const window of candidates) {
+      if (window.usedPercent === null) continue
+      if (!best || window.measuredAt >= best.observedAt)
+        best = { percent: window.usedPercent, resetAt: window.resetAt, observedAt: window.measuredAt }
+    }
+  }
+  return best
+}
+
+/** Re-judges this provider's attempt-reported quota skips against the fleet gatherer's
+ * measured quota snapshot (#1974): when the provider's freshest reading for this model
+ * shows its window below full, the skip that model family's exhaustion planted comes
+ * off — the source's word replaces the reset date the original error happened to
+ * quote, which is how a window that rolled early re-admits instead of waiting out an
+ * overstated hold. The provider's provider-wide windows corroborate rather than
+ * override: when they too read full, the model reading does not lift anything yet, and
+ * when a provider-wide record stands, provider-wide headroom is what lifts it. No
+ * attempt is ever spent to test the door: re-admission is a judgement over measured
+ * quota, never a probe. A provider the snapshot does not carry keeps its skips — no
+ * record is no judgement. Returns the records removed. */
+export const releaseQuotaSkipsForCurrent = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): string[] => {
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  if (entries.length === 0) return []
+  const own = modelWindowReading(entries, target.providerID, target.id as string)
+  if (!own) return []
+  const threshold = currentConstants(location).quotaGate.balanceDeadThreshold
+  const asSnapshot = (reading: { percent: number; resetAt: number | null; observedAt: number }) => ({
+    planID: "quota-current",
+    window: "gathered",
+    providerID: target.providerID,
+    percent: reading.percent,
+    remaining: null,
+    resetAt: reading.resetAt,
+    observedAt: reading.observedAt,
+    stale: now - reading.observedAt > QuotaSnapshot.DEFAULT_MAX_AGE_MS,
+  })
+  const ownSnapshot = asSnapshot(own)
+  if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
+  const modelSkipID = quotaModelSkipID(target)
+  const providerStanding = adjustments.some(
+    (item) => item.id === `quota:${target.providerID}` && attemptQuotaSkip(item),
+  )
+  // While a provider-wide record stands, this model's headroom alone lifts nothing —
+  // not even its own record beneath it: the leaf is out at provider scope, so only
+  // provider-wide headroom (below) re-admits anything.
+  const released = !providerStanding
+    ? releaseQuotaSkipsForSnapshot(target, ownSnapshot, now, location).filter((id) => id === modelSkipID)
+    : []
+  if (!providerStanding) return released
+  // A provider-wide record stands: it lifts only on provider-wide headroom — the
+  // freshest reading whose every provider window is below full.
+  let wide: { percent: number; resetAt: number | null; observedAt: number } | undefined
+  for (const entry of entries) {
+    if (entry.windows.length === 0 || entry.windows.some((window) => window.usedPercent === null)) continue
+    const percent = Math.max(...entry.windows.map((window) => window.usedPercent ?? 0))
+    const observedAt = Math.max(...entry.windows.map((window) => window.measuredAt))
+    if (!wide || observedAt >= wide.observedAt) wide = { percent, resetAt: null, observedAt }
+  }
+  if (!wide) return released
+  const wideSnapshot = asSnapshot(wide)
+  if (!QuotaSnapshot.known(wideSnapshot) || QuotaSnapshot.isKnownFull(wideSnapshot, now, threshold)) return released
+  // Provider-wide headroom re-admits the provider's records: the corroborated record,
+  // and the model records under it whose own readings corroborate the roll.
+  return [...releaseQuotaSkipsForSnapshot(target, wideSnapshot, now, location), ...released]
+}
+
 /** One bench in force, as route diagnostics report it (#1123). */
 export interface ActiveBench {
   readonly providerID: string
@@ -833,16 +987,6 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   )
 }
 
-/** How many distinct quota evidence sources of one pool must be out before the pool itself is pulled:
- * one leaf's quota answer can be leaf-specific, but a second distinct evidence source of the same pool
- * answering quota in turn is the pool-shaped signal (#1014 PR3). */
-const POOL_QUOTA_LEAVES = 2
-
-const quotaBench = (state: HealthState | undefined, now: number) =>
-  state !== undefined &&
-  state.cooldownUntil > now &&
-  (state.benchReason === "quota" || state.benchReason === "quota retry-after")
-
 /** Whether a balance is dead under a threshold, with the same floating-point tolerance
  * QuotaSnapshot.isKnownFull applies to live snapshots (#1461): a balance a hair above the
  * threshold from rounding (0.4 - 0.3 = 0.10000000000000003 against the 0.1 default) is
@@ -867,117 +1011,6 @@ const quotaSkipBlocks = (item: Adjustment, now: number, location?: string): bool
   const judged = item.balanceHoldBalance ?? item.balanceBaseline
   if (judged === null || judged === undefined) return true
   return deadBalance(judged, currentConstants(location).quotaGate.balanceDeadThreshold)
-}
-
-/** One leaf's quota-out evidence, or undefined when the leaf is not quota-out: a quota
- * bench on the leaf (or on the credential that serves it) counts per leaf, a quota gate
- * on the credential counts once per credential, and a quota gate on the provider (a
- * known-full snapshot, a balance hold, or the reactive attempt-reported skip) counts
- * once per provider. Bench evidence takes priority over a shared gate on the same
- * leaf, so two genuinely independent benches under one gate still count separately.
- * Balance holds count until a fresh balance increase releases them, so a pool held by
- * a balance gate stays out with no timer-based re-admission (#1014). */
-const quotaEvidence = (
-  target: Model.Ref,
-  credentialID: string | undefined,
-  now: number,
-  location?: string,
-): string | undefined => {
-  if (credentialID) {
-    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now))
-      return `bench:${credentialKey(target, credentialID)}`
-    if (credentialQuotaBlocked(credentialID, now, location) !== undefined) return `cred-gate:${credentialID}`
-    return undefined
-  }
-  if (quotaBench(health.get(key(target)), now)) return `bench:${key(target)}`
-  const provider = providerQuota.get(target.providerID)
-  // A threshold balance hold is judged under the judging Location (#1461), but its
-  // verdict is not final for the provider's other skips: a timed attempt-reported
-  // `quota:` skip installed while the hold stands must still count. The fallthrough
-  // is safe for the hold's own durable record because quotaSkipBlocks re-judges
-  // threshold records, so an admitted threshold hold does not re-block through it.
-  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
-    return `prov:${target.providerID}`
-  if (
-    provider &&
-    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
-  )
-    return `prov:${target.providerID}`
-  if (
-    activeAdjustments(now).some(
-      (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
-    )
-  )
-    return `prov:${target.providerID}`
-  return undefined
-}
-
-interface PoolMembership {
-  readonly id: string
-  readonly leaves: readonly number[]
-}
-
-/** The pool a leaf belongs to: the deepest nested group (a node other than the route root)
- * that contains it. A provider-route group is named by its provider route, a nested route by
- * its route id. A leaf sitting directly on the root belongs to no pool. When a leaf appears
- * under several groups the deepest one is its pool — that is the tightest shared fate. */
-const poolOf = (definition: Definition, index: number): PoolMembership | undefined => {
-  let best: { depth: number; nodeIndex: number; leaves: number[] } | undefined
-  const collect = (nodeIndex: number, into: number[]) => {
-    const node = definition.nodes[nodeIndex]
-    if (!node) return
-    for (const child of node.children) {
-      if (child.leaf !== undefined) into.push(child.leaf)
-      else if (child.node !== undefined) collect(child.node, into)
-    }
-  }
-  const visit = (nodeIndex: number, depth: number) => {
-    const node = definition.nodes[nodeIndex]
-    if (!node) return
-    if (nodeIndex !== 0) {
-      const leaves: number[] = []
-      collect(nodeIndex, leaves)
-      if (leaves.includes(index) && (best === undefined || depth > best.depth)) best = { depth, nodeIndex, leaves }
-    }
-    for (const child of node.children) if (child.node !== undefined) visit(child.node, depth + 1)
-  }
-  visit(0, 0)
-  if (best === undefined) return undefined
-  const found: { depth: number; nodeIndex: number; leaves: number[] } = best
-  const node = definition.nodes[found.nodeIndex]
-  return { id: node?.providerRoute ?? node?.routeID ?? `${definition.id}#${found.nodeIndex}`, leaves: found.leaves }
-}
-
-/** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
-export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
-
-/** Whether a leaf's pool is quota-exhausted: at least two distinct quota evidence
- * sources across the pool's leaves are currently out, so the pool is pulled as a whole
- * instead of spending attempts on its remaining leaves one by one (#1014 PR3 dynamic
- * pull-out). Evidence is deduplicated by identity — two leaves out only through one
- * shared credential or provider gate count as one signal, so a single provider's quota
- * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
- * leaf's own quota bench always counts per leaf. The verdict is derived from the
- * leaves' live quota state, so it lifts by itself when the benches reach their stated
- * reset, when a balance hold is released by a fresh increase, or when a benched leaf
- * recovers — a recovered pool re-enters rotation with no second producer. */
-export const poolQuotaExhausted = (
-  definition: Definition,
-  index: number,
-  now = Date.now(),
-  credentialOf?: (index: number) => string | undefined,
-  location?: string,
-): boolean => {
-  const pool = poolOf(definition, index)
-  if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
-  const evidence = new Set<string>()
-  for (const leaf of pool.leaves) {
-    const target = definition.targets[leaf]
-    if (!target) continue
-    const source = quotaEvidence(target, credentialOf?.(leaf), now, location)
-    if (source) evidence.add(source)
-  }
-  return evidence.size >= POOL_QUOTA_LEAVES
 }
 
 /** The half-open bench probe claim a routed pick spent (#1478, #1486): the token names the
@@ -1850,6 +1883,7 @@ export const observeProviderQuota = (
             ...(snapshot.expired !== undefined ? { balanceHoldExpired: snapshot.expired } : {}),
           }
         : {}),
+      quotaSkipOrigin: "proactive",
       note: "quota exhausted (proactive snapshot); held until the stated reset",
     })
     if (!previous?.gated)
@@ -1857,6 +1891,11 @@ export const observeProviderQuota = (
   }
   if (!full) {
     removeAdjustment(`quota:${target.providerID}`)
+    // The same fresher not-full reading re-judges this provider's attempt-reported
+    // reactive skips (#1974): the snapshot is the provider's measured word, and the
+    // documented rule is that a fresher below-limit snapshot replaces the reactive
+    // gate — for the model-scoped record shape (#1976) as for the provider one.
+    releaseQuotaSkipsForSnapshot(target, snapshot, now, location)
     if (previous?.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID}`)
     // Same measured-increase release as the credential path (#1828): this provider's
     // target-level quota benches end on a fresh known not-full reading.
@@ -1998,6 +2037,7 @@ export const observeQuotaFailure = (
       balanceHoldBalance: previous.snapshot.remaining,
       balanceGrant: grantIdentity(previous.snapshot),
       balanceHoldOrigin: "attempt",
+      quotaSkipOrigin: "attempt",
       ...(previous.snapshot.expired !== undefined ? { balanceHoldExpired: previous.snapshot.expired } : {}),
       note: "balance exhausted (attempt-reported); held until a fresh balance increase",
     })
@@ -2025,11 +2065,36 @@ export const observeQuotaFailure = (
     )
     return
   }
+  // #1976: a credential-less quota answer is one model family's evidence. The skip it
+  // plants names the answering target alone, so sibling families on the same provider
+  // (independent quota windows behind one door) keep serving. Only corroboration promotes
+  // the skip to provider scope: a second distinct target of the provider answering quota
+  // while the first family's hold still stands — a two-source standard.
+  // Corroboration is judged from this
+  // failure ledger, keyed by answering target; a family's entry counts while its own
+  // stated hold is still in force.
+  const sources = quotaFailureSources.get(target.providerID) ?? new Map<string, number>()
+  for (const [source, sourceUntil] of sources) if (sourceUntil <= now) sources.delete(source)
+  sources.set(key(target), until)
+  quotaFailureSources.set(target.providerID, sources)
+  if (sources.size >= QUOTA_SKIP_CORROBORATION_SOURCES) {
+    addAdjustment({
+      id: `quota:${target.providerID}`,
+      match: `${target.providerID}/`,
+      action: "skip",
+      until,
+      quotaSkipOrigin: "attempt",
+      note: "quota exhausted (attempt-reported, corroborated across model families); held until the stated reset",
+    })
+    return
+  }
+  const id = quotaModelSkipID(target)
   addAdjustment({
-    id: `quota:${target.providerID}`,
-    match: `${target.providerID}/`,
+    id,
+    match: `${target.providerID}/${target.id}`,
     action: "skip",
     until,
+    quotaSkipOrigin: "attempt",
     note: "quota exhausted (attempt-reported); held until the stated reset",
   })
 }
@@ -2081,6 +2146,40 @@ export const credentialQuotaBlocked = (
   if (state.gated) {
     state.gated = false
     logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  }
+  return undefined
+}
+
+/** Whether a target's own provider quota gate currently blocks it: the provider-scope
+ * mirror of `credentialQuotaBlocked`, judged from the provider's own gate state alone.
+ * There is no pool-level verdict (Drew, 2026-11-07): a pool cannot run out — only
+ * models, credentials, and providers can — so a leaf is excluded by its own provider's
+ * gate or not at all, never by the state of other leaves in its route group. A restored
+ * provider balance record with no in-memory state yet is not judged here: its durable
+ * `quota:` skip excludes through `skipped` until the first fed snapshot re-arms the
+ * state, so the leaf stays out on its own provider's record either way. */
+export const providerQuotaBlocked = (
+  target: Model.Ref,
+  now = Date.now(),
+  location?: string,
+): { readonly until: number | null } | undefined => {
+  const state = providerQuota.get(target.providerID)
+  if (!state) return undefined
+  // Judged exactly as the credential scope is (#1461): a threshold-derived hold blocks
+  // only a Location whose own threshold still judges the retained snapshot known-full;
+  // a retained reactive timed gate blocks every Location until its reset.
+  if (state.balanceHold) {
+    if (holdBlocks(state.balanceHold, state.snapshot, now, location)) return { until: null }
+    if (state.timedGateUntil !== undefined && state.timedGateUntil > now) return { until: state.timedGateUntil }
+    return undefined
+  }
+  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
+    state.gated = true
+    return { until: state.snapshot.resetAt }
+  }
+  if (state.gated) {
+    state.gated = false
+    logHealth(state.target, "quota-readmitted", `provider:${target.providerID}`)
   }
   return undefined
 }
@@ -2170,6 +2269,7 @@ export const resetHealth = () => {
   providerQuota.clear()
   quotaEvents.clear()
   restoredDemotionAttempts.clear()
+  quotaFailureSources.clear()
   continuity.clear()
   recentFailures.length = 0
   lastQuotaFeedAtByProvider.clear()
@@ -2540,6 +2640,11 @@ export interface Adjustment {
    * `origin`. A restored threshold-derived hold is judged under the judging Location's
    * balanceDeadThreshold; an attempt-reported one keeps its unconditional force. */
   readonly balanceHoldOrigin?: "threshold" | "attempt"
+  /** Set on a quota skip record: how the skip was planted (#1974/#1976). "attempt" marks a
+   * reactive skip from observeQuotaFailure — the class eligible for half-open probe
+   * re-admission; "proactive" marks a snapshot-derived skip, whose re-admission path is a
+   * fresher snapshot. Unset on records written before provenance was tracked. */
+  readonly quotaSkipOrigin?: "attempt" | "proactive"
   /** Whether a restored threshold-derived hold was armed by an expired grant, which is
    * known-full regardless of the Location's balanceDeadThreshold. */
   readonly balanceHoldExpired?: boolean

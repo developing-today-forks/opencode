@@ -76,7 +76,7 @@ type Effort = (typeof EFFORTS)[number]
 //     just not part of the model id.
 // The list is the non-internal subset of the probed catalog (the
 // chat_*/tab_* completion keys are not chat models and stay unlisted).
-const WIRE_COMPLETE_MODELS = new Set([
+export const WIRE_COMPLETE_MODEL_IDS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-2.5-flash-thinking",
@@ -86,7 +86,8 @@ const WIRE_COMPLETE_MODELS = new Set([
   "gemini-3.1-flash-lite",
   "gemini-3.5-flash-lite",
   "gemini-3.8-flash-tiered",
-])
+] as const
+const WIRE_COMPLETE_MODELS = new Set<string>(WIRE_COMPLETE_MODEL_IDS)
 
 export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: string) => {
   let model = String(requestedModel ?? "").trim()
@@ -243,8 +244,7 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       // A multi-valued type union cannot ride the proto's single `type`
       // enum, so emit one branch per concrete member (#1556) through the
       // same branch machinery #1550 uses for anyOf: anyOf for Gemini
-      // targets, oneOf for Anthropic, merged with any branches the node's
-      // own anyOf handling already emitted on that side. The node's other
+      // targets, oneOf for Anthropic. The node's other
       // keywords stay on this node and keep applying to every branch —
       // prefixItems included: the outer node is its carrier, exactly as
       // in the non-union tuple shape, so no branch needs its own copy.
@@ -260,8 +260,24 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
         }
         return branch
       })
-      if (anthropic) out.oneOf = [...(Array.isArray(out.oneOf) ? out.oneOf : []), ...branches]
-      else out.anyOf = [...(Array.isArray(out.anyOf) ? out.anyOf : []), ...branches]
+      // Conjunction (#1926): a node's `type` and its own anyOf/oneOf are
+      // conjunctive in JSON Schema — an instance must satisfy both. If the
+      // node's own composition already emitted branches on this node,
+      // appending the type branches into that same array would flatten the
+      // conjunction into one disjunction: Gemini would admit bare
+      // type-branch matches the source rejects, and Anthropic's
+      // exactly-one would count a type match plus an own-branch match as
+      // two and reject valid instances. Keep the sets separate instead:
+      // the type branches ride in an allOf wrapper beside the node's own
+      // composition (oneOf inside the wrapper for Anthropic, which rejects
+      // anyOf in any position, #1550). With no node-owned composition the
+      // branches keep the flat #1556 shape; a node-owned allOf needs no
+      // wrapper either, since allOf siblings are already conjunctive.
+      if (out.anyOf !== undefined || out.oneOf !== undefined) {
+        const wrapper = anthropic ? { oneOf: branches } : { anyOf: branches }
+        out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), wrapper]
+      } else if (anthropic) out.oneOf = branches
+      else out.anyOf = branches
     }
   } else if (typeof node.type === "string") {
     out.type = node.type.toUpperCase()
@@ -295,13 +311,33 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
   // allOf/not-only root (#1667): allOf composes its branches (a string
   // branch plus a forced OBJECT is unsatisfiable), and `not` negates its
   // subschema against every type, so OBJECT would narrow "not a string"
-  // to objects only.
+  // to objects only. The same holds for an enum-only root (#1901): the
+  // enum enumerates the allowed values verbatim, so a forced OBJECT makes
+  // a non-object enum unsatisfiable (an object enum is already fully
+  // enumerated, so it needs no OBJECT either). An items/prefixItems-only
+  // root (#1901) describes an array: its element keywords constrain
+  // arrays only, so a forced OBJECT strands them on a root they can
+  // never reach. The same holds for a constraint-only root (#1950):
+  // minItems/maxItems constrain arrays only, minLength/maxLength/pattern
+  // constrain strings only, and minimum/maximum constrain numbers only,
+  // so a root carrying only such a keyword describes that one type —
+  // a forced OBJECT both narrows it to objects and strands the keyword.
   if (
     converted.type === undefined &&
     converted.anyOf === undefined &&
     converted.oneOf === undefined &&
     converted.allOf === undefined &&
-    converted.not === undefined
+    converted.not === undefined &&
+    converted.enum === undefined &&
+    converted.items === undefined &&
+    converted.prefixItems === undefined &&
+    converted.minItems === undefined &&
+    converted.maxItems === undefined &&
+    converted.minLength === undefined &&
+    converted.maxLength === undefined &&
+    converted.pattern === undefined &&
+    converted.minimum === undefined &&
+    converted.maximum === undefined
   )
     converted.type = "OBJECT"
   return converted
@@ -924,8 +960,8 @@ export const protocol = Protocol.make({
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "antigravity",
-  providerMetadataKey: "antigravity",
+  provider: "_antigravity",
+  providerMetadataKey: "_antigravity",
   protocol,
   endpoint: Endpoint.path("/v1internal:streamGenerateContent?alt=sse", { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,

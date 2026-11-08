@@ -22,6 +22,10 @@ const clientID = "b1a6c5158156caac821fd1b30253ca8acb52454a48fa744420e41889cb589f
 const authorizeEndpoint = "https://cloud.digitalocean.com/v1/oauth/authorize"
 const routersEndpoint = "https://api.digitalocean.com/v2/gen-ai/models/routers"
 const callbackPort = 1456
+/** Byte cap on the token POST body the callback page sends to the loopback
+ * server (#1954): the legitimate body is a few hundred bytes of JSON; this
+ * matches the callback page error-excerpt cap (oauth/page.ts). */
+export const MAX_CALLBACK_BODY_BYTES = 64 * 1024
 const callbackPath = "/auth/callback"
 const tokenPath = "/auth/token"
 const RoutersResponse = Schema.Struct({
@@ -84,9 +88,28 @@ const oauth = {
           return
         }
         if (request.method === "POST" && url.pathname === tokenPath) {
+          // Bounded read (#1954): the bootstrap page POSTs a few hundred bytes of
+          // JSON built from the URL hash, so cap the accumulated body as chunks
+          // arrive (the callback page excerpt cap, page.ts) instead of
+          // buffering an unbounded body into Buffer.concat.
           const chunks: Buffer[] = []
-          request.on("data", (chunk: Buffer) => chunks.push(chunk))
+          let size = 0
+          let oversized = false
+          request.on("data", (chunk: Buffer) => {
+            if (oversized) return
+            size += chunk.byteLength
+            if (size > MAX_CALLBACK_BODY_BYTES) {
+              oversized = true
+              const message = "OAuth callback body too large"
+              Effect.runFork(Deferred.fail(token, new Error(message)))
+              response.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }))
+              request.destroy()
+              return
+            }
+            chunks.push(chunk)
+          })
           request.on("end", () => {
+            if (oversized) return
             const body = Option.getOrUndefined(decodeCallback(Buffer.concat(chunks).toString("utf8")))
             const error = body?.error_description || body?.error
             const access = body?.access_token

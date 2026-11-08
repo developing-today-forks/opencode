@@ -69,6 +69,9 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
+  // Escaped src tree (#1758): vscode extension package outside
+  // packages//services.
+  "sdks/vscode/src",
 ]
 /** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
 export const SCAN_ROOT = "packages/core/src"
