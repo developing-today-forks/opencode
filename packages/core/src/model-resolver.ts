@@ -19,6 +19,7 @@ import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ModelPlan } from "./model-plan.js"
+import { QuotaCurrent } from "./quota-current.js"
 import { ModelUsage } from "./model-usage.js"
 import { QuotaSnapshot } from "./quota-snapshot.js"
 import { Global } from "@opencode/util/global"
@@ -543,6 +544,23 @@ const refreshQuotaGate = (
     ).pipe(Effect.orDie)
   })
 
+/** The attempt-reported half of the quota gate's re-judgement (#1974): a reactive
+ * quota skip is a judgement from one attempt's error, and the fleet's measured quota
+ * snapshot — the gatherer's `quota-current.json` (code#1151), rewritten every ~15
+ * minutes from the providers' own endpoints — outranks it. On the same feed cadence
+ * as the plan-derived gate above, each due target's skips are re-judged against the
+ * freshest gathered reading for its model: headroom lifts the skip, a full reading
+ * leaves it standing, and a provider the snapshot does not carry is left alone.
+ * Nothing here spends an attempt to learn the answer; the reading is the evidence. */
+const refreshQuotaSkips = (targets: readonly Model.Ref[], now: number, location?: string) =>
+  Effect.sync(() => {
+    const due = targets.filter((target) => ModelRoute.shouldFeedQuota(now, location, target.providerID))
+    if (due.length === 0) return
+    const readings = QuotaCurrent.readSnapshot(Global.Path.state)
+    if (readings.length === 0) return
+    for (const target of due) ModelRoute.releaseQuotaSkipsForCurrent(target, readings, now, location)
+  })
+
 /** Resolves catalog selections into runtime models for the current Location. */
 export const layer = Layer.effect(
   Service,
@@ -679,6 +697,7 @@ export const layer = Layer.effect(
           }
         }
         yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
+        yield* refreshQuotaSkips(definition.targets, now, locationDirectory)
         // The credential a target's eligibility is judged by at `at`: the active one
         // when it can serve, else the first stored sibling that can (not credential-
         // cooling beyond a due probe, not quota-blocked). `activate` is set only in
@@ -805,8 +824,11 @@ export const layer = Layer.effect(
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
             const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
             // A user's "avoid" holds on every route; learned skips and budgets are rules the route opted into.
-            const isSkipped =
-              ModelRoute.userSkipped(target, now, scope) || (rules && ModelRoute.skipped(target, now, scope))
+            // The two are reported distinctly (#1976): "user-skip" is only the operator's own
+            // override; a learned reactive quota skip is "quota-skip" — the shared label sent
+            // one diagnosis hunting for an operator record that never existed.
+            const isUserSkipped = ModelRoute.userSkipped(target, now, scope)
+            const isSkipped = isUserSkipped || (rules && ModelRoute.skipped(target, now, scope))
             const isOverBudget = rules && ModelRoute.overBudget(target, definition.budgets?.[index], now, scope)
             // A target whose ceiling the request does not fit is skipped at every level, like a
             // cooldown or a provider hold rather than a soft budget: the request cannot be served
@@ -836,7 +858,7 @@ export const layer = Layer.effect(
             else if (providerBlock)
               unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
-            else if (isSkipped) unavailable.set(index, "user-skip")
+            else if (isSkipped) unavailable.set(index, isUserSkipped ? "user-skip" : "quota-skip")
             else if (isOverBudget) unavailable.set(index, "soft-budget")
             else if (isOverLimit) unavailable.set(index, "over-limit")
             return (
