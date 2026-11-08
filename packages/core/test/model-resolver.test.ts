@@ -2880,12 +2880,21 @@ describe("ModelResolver routes", () => {
           allProviders.map(leaf),
           (resolver) =>
             Effect.gen(function* () {
-              yield* resolver.resolveModel(routeA)
-              expect(ModelRoute.poolQuotaExhausted(definitionA, 0)).toBe(true)
-              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(false)
+              // No pool verdict exists to consult (Drew, 2026-11-07): the feed's
+              // effect is per provider \u2014 route A's providers are gated by their
+              // own snapshots, route B's are not fed yet, and resolution lands on
+              // A's individually-clear fallback leaf.
+              const resolvedA = yield* resolver.resolveModel(routeA)
+              expect(targetOf(resolvedA)).toBe("quota-a-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[1])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeUndefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeUndefined()
 
-              yield* resolver.resolveModel(routeB)
-              expect(ModelRoute.poolQuotaExhausted(definitionB, 0)).toBe(true)
+              const resolvedB = yield* resolver.resolveModel(routeB)
+              expect(targetOf(resolvedB)).toBe("quota-b-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeDefined()
             }),
           undefined,
           path,

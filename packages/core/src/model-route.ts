@@ -833,16 +833,6 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   )
 }
 
-/** How many distinct quota evidence sources of one pool must be out before the pool itself is pulled:
- * one leaf's quota answer can be leaf-specific, but a second distinct evidence source of the same pool
- * answering quota in turn is the pool-shaped signal (#1014 PR3). */
-const POOL_QUOTA_LEAVES = 2
-
-const quotaBench = (state: HealthState | undefined, now: number) =>
-  state !== undefined &&
-  state.cooldownUntil > now &&
-  (state.benchReason === "quota" || state.benchReason === "quota retry-after")
-
 /** Whether a balance is dead under a threshold, with the same floating-point tolerance
  * QuotaSnapshot.isKnownFull applies to live snapshots (#1461): a balance a hair above the
  * threshold from rounding (0.4 - 0.3 = 0.10000000000000003 against the 0.1 default) is
@@ -867,155 +857,6 @@ const quotaSkipBlocks = (item: Adjustment, now: number, location?: string): bool
   const judged = item.balanceHoldBalance ?? item.balanceBaseline
   if (judged === null || judged === undefined) return true
   return deadBalance(judged, currentConstants(location).quotaGate.balanceDeadThreshold)
-}
-
-/** One leaf's quota-out evidence, or undefined when the leaf is not quota-out: a quota
- * bench on the leaf (or on the credential that serves it) counts per leaf, a quota gate
- * on the credential counts once per credential, and a quota gate on the provider (a
- * known-full snapshot, a balance hold, or the reactive attempt-reported skip) counts
- * once per provider. Bench evidence takes priority over a shared gate on the same
- * leaf, so two genuinely independent benches under one gate still count separately.
- * Balance holds count until a fresh balance increase releases them, so a pool held by
- * a balance gate stays out with no timer-based re-admission (#1014). A bench whose
- * half-open probe is due still produces evidence here; `poolQuotaExhausted` carves
- * due probes back out so the pool verdict does not defeat the recovery path (#1390). */
-const quotaEvidence = (
-  target: Model.Ref,
-  credentialID: string | undefined,
-  now: number,
-  location?: string,
-): string | undefined => {
-  if (credentialID) {
-    if (quotaBench(credentialHealth.get(credentialKey(target, credentialID)), now))
-      return `bench:${credentialKey(target, credentialID)}`
-    if (credentialQuotaBlocked(credentialID, now, location) !== undefined) return `cred-gate:${credentialID}`
-    return undefined
-  }
-  if (quotaBench(health.get(key(target)), now)) return `bench:${key(target)}`
-  const provider = providerQuota.get(target.providerID)
-  // A threshold balance hold is judged under the judging Location (#1461), but its
-  // verdict is not final for the provider's other skips: a timed attempt-reported
-  // `quota:` skip installed while the hold stands must still count. The fallthrough
-  // is safe for the hold's own durable record because quotaSkipBlocks re-judges
-  // threshold records, so an admitted threshold hold does not re-block through it.
-  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
-    return `prov:${target.providerID}`
-  if (
-    provider &&
-    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
-  )
-    return `prov:${target.providerID}`
-  if (
-    activeAdjustments(now).some(
-      (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
-    )
-  )
-    return `prov:${target.providerID}`
-  return undefined
-}
-
-interface PoolMembership {
-  readonly id: string
-  readonly leaves: readonly number[]
-}
-
-/** The pool a leaf belongs to: the deepest nested group (a node other than the route root)
- * that contains it. A provider-route group is named by its provider route, a nested route by
- * its route id. A leaf sitting directly on the root belongs to no pool. When a leaf appears
- * under several groups the deepest one is its pool — that is the tightest shared fate. */
-const poolOf = (definition: Definition, index: number): PoolMembership | undefined => {
-  let best: { depth: number; nodeIndex: number; leaves: number[] } | undefined
-  const collect = (nodeIndex: number, into: number[]) => {
-    const node = definition.nodes[nodeIndex]
-    if (!node) return
-    for (const child of node.children) {
-      if (child.leaf !== undefined) into.push(child.leaf)
-      else if (child.node !== undefined) collect(child.node, into)
-    }
-  }
-  const visit = (nodeIndex: number, depth: number) => {
-    const node = definition.nodes[nodeIndex]
-    if (!node) return
-    if (nodeIndex !== 0) {
-      const leaves: number[] = []
-      collect(nodeIndex, leaves)
-      if (leaves.includes(index) && (best === undefined || depth > best.depth)) best = { depth, nodeIndex, leaves }
-    }
-    for (const child of node.children) if (child.node !== undefined) visit(child.node, depth + 1)
-  }
-  visit(0, 0)
-  if (best === undefined) return undefined
-  const found: { depth: number; nodeIndex: number; leaves: number[] } = best
-  const node = definition.nodes[found.nodeIndex]
-  return { id: node?.providerRoute ?? node?.routeID ?? `${definition.id}#${found.nodeIndex}`, leaves: found.leaves }
-}
-
-/** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
-export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
-
-/** Whether an independent quota gate currently blocks a leaf, apart from any bench:
- * a quota gate on its credential, or one on its provider (a known-full snapshot, a
- * balance hold, or the reactive attempt-reported skip). A due bench probe never
- * bypasses these gates (see `probeDue`), so a gated leaf cannot recover through its
- * probe until the gate's own reset passes. */
-const independentQuotaGate = (
-  target: Model.Ref,
-  credentialID: string | undefined,
-  now: number,
-  location?: string,
-): boolean => {
-  if (credentialID && credentialQuotaBlocked(credentialID, now, location) !== undefined) return true
-  const provider = providerQuota.get(target.providerID)
-  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
-    return true
-  if (
-    provider &&
-    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
-  )
-    return true
-  return activeAdjustments(now).some(
-    (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
-  )
-}
-
-/** Whether a leaf's pool is quota-exhausted: at least two distinct quota evidence
- * sources across the pool's leaves are currently out, so the pool is pulled as a whole
- * instead of spending attempts on its remaining leaves one by one (#1014 PR3 dynamic
- * pull-out). Evidence is deduplicated by identity — two leaves out only through one
- * shared credential or provider gate count as one signal, so a single provider's quota
- * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
- * leaf's own quota bench always counts per leaf. A leaf whose bench probe is due
- * contributes no evidence — unless an independent quota gate (on its credential or
- * its provider) still blocks it: a probe never bypasses a gate whose own reset is
- * still ahead, so a gated leaf's due probe cannot recover it yet and the leaf keeps
- * counting (Codex review, PR #1473). An ungated due probe's bench still excludes
- * ordinary candidacy, but the pool verdict must not defeat the half-open recovery
- * the probe exists for (#1390). A claimed or not-yet-due bench keeps counting,
- * because `probeDue` is false while a probe is outstanding and before its reset
- * passes. The verdict is derived from the
- * leaves' live quota state, so it lifts by itself when the benches reach their stated
- * reset, when a balance hold is released by a fresh increase, or when a benched leaf
- * recovers — a recovered pool re-enters rotation with no second producer. */
-export const poolQuotaExhausted = (
-  definition: Definition,
-  index: number,
-  now = Date.now(),
-  credentialOf?: (index: number) => string | undefined,
-  location?: string,
-): boolean => {
-  const pool = poolOf(definition, index)
-  if (!pool || pool.leaves.length < POOL_QUOTA_LEAVES) return false
-  const evidence = new Set<string>()
-  for (const leaf of pool.leaves) {
-    const target = definition.targets[leaf]
-    if (!target) continue
-    const credentialID = credentialOf?.(leaf)
-    const source = quotaEvidence(target, credentialID, now, location)
-    if (!source) continue
-    if (probeDue(target, credentialID, now) && !independentQuotaGate(target, credentialID, now, location)) continue
-    evidence.add(source)
-  }
-  return evidence.size >= POOL_QUOTA_LEAVES
 }
 
 /** The half-open bench probe claim a routed pick spent (#1478, #1486): the token names the
@@ -2119,6 +1960,40 @@ export const credentialQuotaBlocked = (
   if (state.gated) {
     state.gated = false
     logHealth(state.target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  }
+  return undefined
+}
+
+/** Whether a target's own provider quota gate currently blocks it: the provider-scope
+ * mirror of `credentialQuotaBlocked`, judged from the provider's own gate state alone.
+ * There is no pool-level verdict (Drew, 2026-11-07): a pool cannot run out — only
+ * models, credentials, and providers can — so a leaf is excluded by its own provider's
+ * gate or not at all, never by the state of other leaves in its route group. A restored
+ * provider balance record with no in-memory state yet is not judged here: its durable
+ * `quota:` skip excludes through `skipped` until the first fed snapshot re-arms the
+ * state, so the leaf stays out on its own provider's record either way. */
+export const providerQuotaBlocked = (
+  target: Model.Ref,
+  now = Date.now(),
+  location?: string,
+): { readonly until: number | null } | undefined => {
+  const state = providerQuota.get(target.providerID)
+  if (!state) return undefined
+  // Judged exactly as the credential scope is (#1461): a threshold-derived hold blocks
+  // only a Location whose own threshold still judges the retained snapshot known-full;
+  // a retained reactive timed gate blocks every Location until its reset.
+  if (state.balanceHold) {
+    if (holdBlocks(state.balanceHold, state.snapshot, now, location)) return { until: null }
+    if (state.timedGateUntil !== undefined && state.timedGateUntil > now) return { until: state.timedGateUntil }
+    return undefined
+  }
+  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
+    state.gated = true
+    return { until: state.snapshot.resetAt }
+  }
+  if (state.gated) {
+    state.gated = false
+    logHealth(state.target, "quota-readmitted", `provider:${target.providerID}`)
   }
   return undefined
 }
