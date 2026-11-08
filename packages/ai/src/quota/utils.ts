@@ -110,6 +110,36 @@ export const calculateResetAfterSeconds = (resetAt: number | null | undefined): 
   return delta < 0 ? 0 : delta
 }
 
+/**
+ * Human duration for a window's relative reset wait (#2103): the
+ * formatted sibling of resetAfterSeconds, derived from that numeric
+ * value (never from the absolute resetAt) in the compact unit style
+ * resolveWindowLabel uses — e.g. 3600 -> "1h", 5400 -> "1h 30m",
+ * 90061 -> "1d 1h 1m 1s". A past reset (0 seconds) is "0s"; a null
+ * or non-finite wait has no duration and stays null.
+ */
+export const formatResetAfter = (seconds: number | null | undefined): string | null => {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null
+  const total = Math.floor(seconds)
+  if (total === 0) return "0s"
+  const parts: string[] = []
+  const units: Array<[number, string]> = [
+    [86400, "d"],
+    [3600, "h"],
+    [60, "m"],
+    [1, "s"],
+  ]
+  let rest = total
+  for (const [size, label] of units) {
+    const value = Math.floor(rest / size)
+    if (value > 0) {
+      parts.push(`${value}${label}`)
+      rest -= value * size
+    }
+  }
+  return parts.join(" ")
+}
+
 export const toUsageWindow = (input: {
   usedPercent: number | null
   windowSeconds?: number | null
@@ -118,6 +148,7 @@ export const toUsageWindow = (input: {
 }): QuotaWindow => {
   const resetAt = input.resetAt ?? null
   const resetFormatted = hasResetTimestamp(resetAt) ? formatResetTime(resetAt) : null
+  const resetAfterSeconds = calculateResetAfterSeconds(resetAt)
   const usedPercent = input.usedPercent
   const hasFiniteUsedPercent = typeof usedPercent === "number" && Number.isFinite(usedPercent)
   return {
@@ -129,10 +160,12 @@ export const toUsageWindow = (input: {
     // usedPercent itself is published unchanged.
     remainingPercent: hasFiniteUsedPercent ? Math.min(100, Math.max(0, 100 - usedPercent)) : null,
     windowSeconds: input.windowSeconds ?? null,
-    resetAfterSeconds: calculateResetAfterSeconds(resetAt),
+    resetAfterSeconds,
     resetAt,
     resetAtFormatted: resetFormatted,
-    resetAfterFormatted: resetFormatted,
+    // Derived from resetAfterSeconds, not the absolute time (#2103):
+    // resetAtFormatted answers "when", this answers "how long".
+    resetAfterFormatted: formatResetAfter(resetAfterSeconds),
     ...(input.valueLabel ? { valueLabel: input.valueLabel } : {}),
   }
 }

@@ -3,7 +3,7 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
+import { formatResetAfter, normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -596,6 +596,41 @@ describe("toTimestamp non-positive handling (#1845)", () => {
     expect(window).toBeDefined()
     expect(window?.resetAt).toBeNull()
     expect(window?.windowSeconds).toBeNull()
+  })
+})
+
+describe("resetAfterFormatted derives from resetAfterSeconds (#2103)", () => {
+  test("formatResetAfter renders compact human durations", () => {
+    expect(formatResetAfter(3600)).toBe("1h")
+    expect(formatResetAfter(5400)).toBe("1h 30m")
+    expect(formatResetAfter(90061)).toBe("1d 1h 1m 1s")
+    expect(formatResetAfter(45)).toBe("45s")
+    expect(formatResetAfter(0)).toBe("0s")
+    expect(formatResetAfter(null)).toBeNull()
+    expect(formatResetAfter(undefined)).toBeNull()
+  })
+
+  test("a future reset formats the relative wait, not the absolute time", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: Date.now() + 3_600_000 })
+    expect(window.resetAfterSeconds).toBeGreaterThan(3500)
+    expect(window.resetAfterSeconds).toBeLessThanOrEqual(3600)
+    expect(window.resetAfterFormatted).toMatch(/^(1h|59m \d+s)$/)
+    expect(window.resetAtFormatted).not.toBeNull()
+    expect(window.resetAfterFormatted).not.toBe(window.resetAtFormatted)
+  })
+
+  test("a past reset pins resetAfterSeconds 0 and resetAfterFormatted 0s", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: Date.now() - 60_000 })
+    expect(window.resetAfterSeconds).toBe(0)
+    expect(window.resetAfterFormatted).toBe("0s")
+    expect(window.resetAtFormatted).not.toBeNull()
+  })
+
+  test("a null reset keeps every formatted reset field null", () => {
+    const window = toUsageWindow({ usedPercent: 50, resetAt: null })
+    expect(window.resetAfterSeconds).toBeNull()
+    expect(window.resetAtFormatted).toBeNull()
+    expect(window.resetAfterFormatted).toBeNull()
   })
 })
 
