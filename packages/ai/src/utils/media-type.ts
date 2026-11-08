@@ -49,6 +49,10 @@ export const detectMediaType = (bytes: Uint8Array): string | undefined => {
   }
   if (startsWith(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm"
   if (startsWith(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"
+  // UTF-16 text opens with a BOM whose bytes mimic an MPEG frame sync (FF FE: sync bits set, layer bits 11), so
+  // a UTF-16LE text file would otherwise sniff as audio/mpeg and override its extension (#2151). BOM-prefixed
+  // content is text, never framed audio: exclude both BOMs before the frame-sync test.
+  if (startsWith(bytes, [0xff, 0xfe]) || startsWith(bytes, [0xfe, 0xff])) return undefined
   // An 11-bit frame sync; layer bits `00` mark AAC ADTS, any other layer is MPEG audio.
   if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
     return (bytes[1] & 0x06) === 0 ? "audio/aac" : "audio/mpeg"
