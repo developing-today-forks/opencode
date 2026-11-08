@@ -169,6 +169,9 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     reason.message?.startsWith("No response output within ")
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
+  const quotaResetAtMs = quota
+    ? ModelRouteLimits.resetAtFromMessage(reason.message ?? reason.body, Date.now())
+    : undefined
   return {
     retryAfterMs:
       reason.retryAfterMs ??
@@ -179,9 +182,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     quota,
     // Optional hint fields are omitted when unset, never present-but-undefined — the
     // same convention the route policy follows.
-    ...(quota
-      ? { quotaResetAtMs: ModelRouteLimits.resetAtFromMessage(reason.message ?? reason.body, Date.now()) }
-      : {}),
+    ...(quotaResetAtMs !== undefined ? { quotaResetAtMs } : {}),
     ...(reason._tag === "Transport" &&
     reason.http === undefined &&
     !clientTimeoutMessage &&
