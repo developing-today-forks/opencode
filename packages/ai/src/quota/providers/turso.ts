@@ -120,16 +120,19 @@ const positiveOrNull = (value: JsonValue | undefined): number | null => {
  * unknown plan gets Starter (TURSO_LIMITS, the previous behaviour).
  */
 export const resolveTursoLimits = (planLabel?: string, plansDoc?: JsonValue | null): TursoLimits => {
-  const fallback: TursoLimits =
-    (planLabel ? TURSO_PLAN_LIMITS[planLabel.toLowerCase()] : undefined) ?? { ...TURSO_LIMITS }
-  if (plansDoc == null || typeof planLabel !== "string" || planLabel === "") return fallback
+  // Plan labels are display strings from the subscription read; match
+  // them trimmed and lowercased on both sides so a padded label (or a
+  // padded /plans name) cannot silently miss its plan and regress to
+  // Starter denominators (#2154).
+  const wanted = typeof planLabel === "string" ? planLabel.trim().toLowerCase() : ""
+  const fallback: TursoLimits = (wanted ? TURSO_PLAN_LIMITS[wanted] : undefined) ?? { ...TURSO_LIMITS }
+  if (plansDoc == null || wanted === "") return fallback
   const plansRoot = asObject(plansDoc)
   const plans = plansRoot?.plans
   if (!Array.isArray(plans)) return fallback
-  const wanted = planLabel.toLowerCase()
   for (const entry of plans) {
     const plan = asObject(entry)
-    if (typeof plan?.name !== "string" || plan.name.toLowerCase() !== wanted) continue
+    if (typeof plan?.name !== "string" || plan.name.trim().toLowerCase() !== wanted) continue
     const quotas = asObject(plan.quotas)
     if (!quotas) return fallback
     return {
@@ -154,7 +157,7 @@ export const tursoWindows = (
   const subRoot = asObject(subscriptionDoc)
   const sub = asObject(subRoot?.subscription) ?? subRoot
   const planRaw = sub?.plan ?? sub?.name
-  const planLabel = typeof planRaw === "string" && planRaw !== "" ? planRaw : undefined
+  const planLabel = asNonEmptyString(planRaw)
   const limits = resolveTursoLimits(planLabel, plansDoc ?? null)
 
   const periodEnd = sub?.current_billing_period_end ?? sub?.current_period_end ?? sub?.period_end ?? sub?.ends_at
