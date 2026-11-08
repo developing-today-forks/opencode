@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { GITHUB_TOKEN_REQUIRED_MESSAGE, resolveGitHubToken } from "./token"
+
 const repo = process.env.GITHUB_REPOSITORY ?? "developing-today-forks/opencode"
 const days = 60
 const msg = `To stay organized issues are automatically closed after ${days} days of no activity. If the issue is still relevant please open a new one.`
@@ -84,8 +86,12 @@ export async function closeIssue(num: number, input: RequestOptions) {
 }
 
 async function main() {
-  const token = process.env.GITHUB_TOKEN
-  if (!token) throw new Error("GITHUB_TOKEN environment variable is required")
+  // One shared convention (#1972): the sweeper supplies GH_TOKEN.
+  // A missing token is a hard failure by design - the step (and job)
+  // fails loudly rather than degrading to a green sweep in which the
+  // daily close silently never happens (recorded on #1972).
+  const token = resolveGitHubToken()
+  if (!token) throw new Error(GITHUB_TOKEN_REQUIRED_MESSAGE)
   const requestOptions = { repo, headers: { ...headers, Authorization: `Bearer ${token}` } }
 
   let page = 1
