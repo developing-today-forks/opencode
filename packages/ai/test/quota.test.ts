@@ -1355,8 +1355,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // rate-limit windows, command-code, and meta's conforming cases.
   // Known-lossy paths remain marked in types.ts: opendesign's
   // over-remaining label (#1879; probed below), codex credits_balance
-  // (#1924), deepseek balance (#1928), meta collisions (#1777), claude
-  // duplicates (#1781), and opencode-go/openrouter reset math (#1725).
+  // (#1924), deepseek balance (#1928), meta collisions (#1777), and
+  // opencode-go/openrouter reset math (#1725).
   // The #1879 test below records current behavior, not conformance.
   // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
   // dedicated describes; mistral #1785 is likewise pinned by its
@@ -1966,5 +1966,74 @@ describe("listing probe failure is a result, never absence (#1729)", () => {
     expect(resolveQuotaProviderName(ctx, "deepseek")).toBe("deepseek")
     const groups = await fetchAllQuota(ctx)
     expect(groups.some((group) => group.providerId === "deepseek")).toBe(true)
+  })
+})
+
+describe("claude duplicate limits keep-first (#1781)", () => {
+  // Oracle: window contract rule 2 (duplicates keep the first), the
+  // #1750/#1769 convention. Payload shapes mirror the issue's probe:
+  // repeated limits entries carrying real figures.
+  const resetA = 1798761600 // 2026-12-01T00:00:00Z in epoch seconds
+  const resetB = 1798848000 // 2026-12-02T00:00:00Z
+
+  test("duplicate session entries publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resetA },
+        { kind: "session", percent: 80, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["5h"]?.usedPercent).toBe(20)
+    expect(usage.windows["5h"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("duplicate weekly_all entries publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_all", percent: 30, resets_at: resetA },
+        { kind: "weekly_all", percent: 70, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.windows["7d"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("duplicate weekly_scoped entries for one model publish the first", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resetA, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 60, resets_at: resetB, scope: { model: { display_name: "Claude Sonnet" } } },
+      ],
+    })
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.resetAt).toBe(resetA * 1000)
+  })
+
+  test("two different models' scoped entries both survive", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "weekly_scoped", percent: 30, resets_at: resetA, scope: { model: { display_name: "Claude Sonnet" } } },
+        { kind: "weekly_scoped", percent: 60, resets_at: resetB, scope: { model: { display_name: "Claude Opus" } } },
+      ],
+    })
+    expect(usage.models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
+    expect(usage.models["Claude Opus"]?.windows["7d"]?.usedPercent).toBe(60)
+  })
+
+  test("null-percent duplicate control: the first entry survives, and a figure-less first entry does not claim the window", () => {
+    const usage = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: 20, resets_at: resetA },
+        { kind: "session", percent: null, resets_at: resetB },
+      ],
+    })
+    expect(usage.windows["5h"]?.usedPercent).toBe(20)
+    const claimed = toClaudeUsage({
+      limits: [
+        { kind: "session", percent: null, resets_at: resetA },
+        { kind: "session", percent: 80, resets_at: resetB },
+      ],
+    })
+    expect(claimed.windows["5h"]?.usedPercent).toBe(80)
   })
 })

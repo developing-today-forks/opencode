@@ -68,9 +68,10 @@
  *     as are fallback models without a usable figure (#1912/#1937).
  *   claude — toClaudeUsage (exported pure transform);
  *     findClaudeCredential (credential lookup, not a window parser).
- *     KNOWN-LOSSY: #1781 (unconditional addWindow overwrites
- *     duplicates instead of keeping the first). Spend defects #1919
- *     and #1920 were fixed by #1957 and #1949, respectively.
+ *     Conforming (addWindow keeps the first duplicate per window,
+ *     and scoped model windows reuse the model's map, #1781).
+ *     Spend defects #1919 and #1920 were fixed by #1957 and
+ *     #1949, respectively.
  *   cline-pass — fetch-only: limit parsing is inline in the fetch
  *     path; no exported pure parser. Conforming (keep-first, #1769).
  *   codex — fetch-only: window mapping is inline in the fetch path;
