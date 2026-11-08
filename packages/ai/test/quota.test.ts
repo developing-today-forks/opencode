@@ -437,12 +437,12 @@ describe("turso org usage mapping", () => {
         },
       },
       {
-        plan: "scaler",
+        plan: "starter",
         current_billing_period_start: "2026-11-01T00:00:00Z",
         current_billing_period_end: "2026-12-01T00:00:00Z",
       },
     )
-    expect(mapped?.planLabel).toBe("scaler")
+    expect(mapped?.planLabel).toBe("starter")
     expect(mapped?.windows.databases?.usedPercent).toBe(44)
     expect(mapped?.windows.databases?.valueLabel).toBe("44 / 100")
     expect(mapped?.windows.storage?.usedPercent).toBe(50)
@@ -485,6 +485,63 @@ describe("turso org usage mapping", () => {
     expect(mapped?.windows["rows-read"]?.usedPercent).toBe(164.287)
     expect(mapped?.windows.databases?.usedPercent).toBe(44)
     expect(mapped?.windows.sync?.usedPercent).toBe(0)
+  })
+
+  test("dynamic limits: a /plans doc matched by plan name supplies the denominators (code#5468)", () => {
+    // The 2026-11-08 live shape: org on Scaler since 2026-11-04, but
+    // Starter denominators made rows-read read ~235%. /plans is the
+    // source of truth; matching is by plan name, case-insensitively.
+    const plans = {
+      plans: [
+        { name: "starter", quotas: { rowsRead: 500_000_000, rowsWritten: 10_000_000, databases: 100, storage: 5_000_000_000, bytesSynced: 3_000_000_000 } },
+        { name: "Scaler", quotas: { rowsRead: 100_000_000_000, rowsWritten: 100_000_000, databases: 1_000_000_000, storage: 24_000_000_000, bytesSynced: 24_000_000_000 } },
+      ],
+    }
+    const usage = {
+      organization: {
+        usage: {
+          rows_read: 1_180_000_000,
+          rows_written: 4_000_000,
+          storage_bytes: 10_800_000_000,
+          bytes_synced: 1_200_000_000,
+          databases: 40,
+        },
+      },
+    }
+    const sub = { plan: "scaler", current_billing_period_start: "2026-11-01T00:00:00Z", current_billing_period_end: "2026-12-01T00:00:00Z" }
+    const mapped = tursoWindows(usage, sub, plans)
+    expect(mapped?.planLabel).toBe("scaler")
+    expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
+    expect(mapped?.windows["rows-read"]?.valueLabel).toBe("1,180,000,000 / 100,000,000,000")
+    expect(mapped?.windows.storage?.usedPercent).toBe(45)
+    expect(mapped?.windows.storage?.valueLabel).toBe("10.8 GB / 24 GB")
+    expect(mapped?.windows["rows-written"]?.usedPercent).toBe(4)
+    expect(mapped?.windows.sync?.usedPercent).toBe(5)
+    expect(mapped?.windows.sync?.valueLabel).toBe("1.2 GB / 24 GB")
+    expect(mapped?.windows.databases?.valueLabel).toBe("40 / 1000000000")
+  })
+
+  test("plans doc absent: the static per-plan fallback applies, so Scaler never regresses to Starter", () => {
+    const usage = { organization: { usage: { rows_read: 1_180_000_000, storage_bytes: 10_800_000_000 } } }
+    const mapped = tursoWindows(usage, { plan: "scaler" })
+    expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
+    expect(mapped?.windows.storage?.usedPercent).toBe(45)
+    expect(mapped?.windows.storage?.valueLabel).toBe("10.8 GB / 24 GB")
+    // Plans doc present but not matching the plan name: same fallback.
+    const unmatched = tursoWindows(usage, { plan: "scaler" }, { plans: [{ name: "starter", quotas: { rowsRead: 500_000_000 } }] })
+    expect(unmatched?.windows["rows-read"]?.usedPercent).toBe(1.18)
+  })
+
+  test("starter plan and unknown plans keep the old Starter numbers unchanged", () => {
+    const usage = { organization: { usage: { rows_read: 250_000_000, storage_bytes: 2_500_000_000, databases: 44 } } }
+    const starter = tursoWindows(usage, { plan: "starter" })
+    expect(starter?.windows["rows-read"]?.usedPercent).toBe(50)
+    expect(starter?.windows["rows-read"]?.valueLabel).toBe("250,000,000 / 500,000,000")
+    expect(starter?.windows.storage?.valueLabel).toBe("2.5 GB / 5 GB")
+    expect(starter?.windows.databases?.valueLabel).toBe("44 / 100")
+    const unknown = tursoWindows(usage, { plan: "enterprise-unknown" })
+    expect(unknown?.windows["rows-read"]?.usedPercent).toBe(50)
+    expect(unknown?.windows.storage?.valueLabel).toBe("2.5 GB / 5 GB")
   })
 })
 
