@@ -137,6 +137,13 @@ export const SCAN_ROOTS: string[] = [
   // input — its token-exchange, attachment-download and token-revoke
   // fetches escaped the net precisely because this root was missing.
   "github",
+  // Escaped trees (#1758): the vscode extension package lives outside
+  // packages//services. Its script files are shell (no scanned extension),
+  // and github/script is already walked via the github root above; both
+  // are listed explicitly so the tree check records them as scanned.
+  "github/script",
+  "sdks/vscode/script",
+  "sdks/vscode/src",
 ]
 
 export const ALLOWLIST_PATH = "script/check-bounded-http.allowlist.txt"
