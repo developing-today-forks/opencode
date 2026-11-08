@@ -25,9 +25,18 @@ import {
  * Secrets Manager by name (`turso.platform-api-token-muse-cli`) the
  * way the gatherer resolved it — the value moves through the process
  * environment of the `bws` child only and is never logged or stored.
- * Mapping follows the gatherer's entryFromTurso: Starter Free limits,
- * counts in their own units (storage + sync in GB), the subscription
- * period end as the windows' reset.
+ * Mapping follows the gatherer's entryFromTurso: counts in their own
+ * units (storage + sync in GB), the subscription period end as the
+ * windows' reset. Plan limits are DYNAMIC: they are resolved from the
+ * org's /plans document (GET /v1/organizations/{slug}/plans), matched
+ * by the subscription's plan name — the subscription read itself
+ * carries only the plan NAME, no quotas. A static per-plan table
+ * (TURSO_PLAN_LIMITS, values as published by /plans) is only a
+ * FALLBACK for when /plans is unavailable or unmatched, so a non-
+ * Starter org can never silently regress to Starter denominators
+ * (the 2026-11-08 false over-limit alarms on code#5468: the org has
+ * been on Scaler since 2026-11-04, but Starter caps made rows-read
+ * read ~235% and storage ~213%).
  */
 
 export const providerId = "turso"
@@ -36,6 +45,16 @@ export const aliases = ["turso"]
 
 export const TURSO_SECRET_NAME = "turso.platform-api-token-muse-cli"
 
+export interface TursoLimits {
+  databases: number
+  storageBytes: number
+  rowsRead: number
+  rowsWritten: number
+  bytesSynced: number
+}
+
+/** Starter limits — the pre-/plans behaviour, now only the fallback
+ * for an unknown/unreadable plan (see TURSO_PLAN_LIMITS). */
 export const TURSO_LIMITS = {
   databases: 100,
   storageBytes: 5_000_000_000,
@@ -44,15 +63,90 @@ export const TURSO_LIMITS = {
   bytesSynced: 3_000_000_000,
 } as const
 
+/**
+ * FALLBACK ONLY — static per-plan limits, keyed by plan name, with the
+ * values the /plans endpoint published on 2026-11-08. The source of
+ * truth is the live /plans document (resolveTursoLimits prefers it);
+ * this table exists so that when /plans cannot be read, a Scaler (or
+ * Developer/Pro) org still divides by its own plan's limits instead of
+ * silently regressing to Starter denominators. An unknown plan falls
+ * back to TURSO_LIMITS (Starter, the previous behaviour). The /plans
+ * document carries no `databases` quota for pro; the fallback uses
+ * the same 1e9 ceiling the other paid plans publish.
+ */
+export const TURSO_PLAN_LIMITS: Record<string, TursoLimits> = {
+  starter: { ...TURSO_LIMITS },
+  developer: {
+    databases: 1_000_000_000,
+    storageBytes: 9_000_000_000,
+    rowsRead: 2_500_000_000,
+    rowsWritten: 25_000_000,
+    bytesSynced: 10_000_000_000,
+  },
+  scaler: {
+    databases: 1_000_000_000,
+    storageBytes: 24_000_000_000,
+    rowsRead: 100_000_000_000,
+    rowsWritten: 100_000_000,
+    bytesSynced: 24_000_000_000,
+  },
+  pro: {
+    databases: 1_000_000_000,
+    storageBytes: 50_000_000_000,
+    rowsRead: 250_000_000_000,
+    rowsWritten: 250_000_000,
+    bytesSynced: 100_000_000_000,
+  },
+}
+
 const gb = (bytes: number): number => Math.round((bytes / 1e9) * 1e6) / 1e6
 const pct3 = (used: number, limit: number): number => Math.round((used / limit) * 100 * 1000) / 1000
 
 const numNonNegative = (value: JsonValue | undefined): number | null =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
 
+const positiveOrNull = (value: JsonValue | undefined): number | null => {
+  const n = numNonNegative(value)
+  return n !== null && n > 0 ? n : null
+}
+
+/**
+ * Resolve the limits a Turso org's usage divides by. Dynamic first:
+ * the /plans document's entry whose name matches the subscription
+ * plan name (case-insensitive) supplies quotas {rowsRead, rowsWritten,
+ * databases, storage, bytesSynced}; any quota the matched plan omits
+ * falls back per-field to the static plan table. Without a plans doc
+ * (or a match), the static table keyed by plan name applies; an
+ * unknown plan gets Starter (TURSO_LIMITS, the previous behaviour).
+ */
+export const resolveTursoLimits = (planLabel?: string, plansDoc?: JsonValue | null): TursoLimits => {
+  const fallback: TursoLimits =
+    (planLabel ? TURSO_PLAN_LIMITS[planLabel.toLowerCase()] : undefined) ?? { ...TURSO_LIMITS }
+  if (plansDoc == null || typeof planLabel !== "string" || planLabel === "") return fallback
+  const plansRoot = asObject(plansDoc)
+  const plans = plansRoot?.plans
+  if (!Array.isArray(plans)) return fallback
+  const wanted = planLabel.toLowerCase()
+  for (const entry of plans) {
+    const plan = asObject(entry)
+    if (typeof plan?.name !== "string" || plan.name.toLowerCase() !== wanted) continue
+    const quotas = asObject(plan.quotas)
+    if (!quotas) return fallback
+    return {
+      databases: positiveOrNull(quotas.databases) ?? fallback.databases,
+      storageBytes: positiveOrNull(quotas.storage) ?? fallback.storageBytes,
+      rowsRead: positiveOrNull(quotas.rowsRead) ?? fallback.rowsRead,
+      rowsWritten: positiveOrNull(quotas.rowsWritten) ?? fallback.rowsWritten,
+      bytesSynced: positiveOrNull(quotas.bytesSynced) ?? fallback.bytesSynced,
+    }
+  }
+  return fallback
+}
+
 export const tursoWindows = (
   usageDoc: JsonValue,
   subscriptionDoc: JsonValue,
+  plansDoc?: JsonValue | null,
 ): { windows: Record<string, QuotaWindow>; planLabel?: string } | null => {
   const usageRoot = asObject(usageDoc)
   const usage = asObject(asObject(usageRoot?.organization)?.usage) ?? asObject(usageRoot?.usage)
@@ -61,6 +155,7 @@ export const tursoWindows = (
   const sub = asObject(subRoot?.subscription) ?? subRoot
   const planRaw = sub?.plan ?? sub?.name
   const planLabel = typeof planRaw === "string" && planRaw !== "" ? planRaw : undefined
+  const limits = resolveTursoLimits(planLabel, plansDoc ?? null)
 
   const periodEnd = sub?.current_billing_period_end ?? sub?.current_period_end ?? sub?.period_end ?? sub?.ends_at
   const periodStart = sub?.current_billing_period_start ?? sub?.current_period_start ?? sub?.period_start ?? sub?.starts_at
@@ -90,30 +185,30 @@ export const tursoWindows = (
   }
 
   const databases = numNonNegative(usage.databases)
-  push("databases", databases, TURSO_LIMITS.databases, `${databases} / ${TURSO_LIMITS.databases}`)
+  push("databases", databases, limits.databases, `${databases} / ${limits.databases}`)
   const storageBytes = numNonNegative(usage.storage_bytes)
   push(
     "storage",
     storageBytes,
-    TURSO_LIMITS.storageBytes,
-    `${storageBytes === null ? "?" : gb(storageBytes)} GB / 5 GB`,
+    limits.storageBytes,
+    `${storageBytes === null ? "?" : gb(storageBytes)} GB / ${gb(limits.storageBytes)} GB`,
   )
   const rowsRead = numNonNegative(usage.rows_read)
   push(
     "rows-read",
     rowsRead,
-    TURSO_LIMITS.rowsRead,
-    `${rowsRead?.toLocaleString("en-US")} / ${TURSO_LIMITS.rowsRead.toLocaleString("en-US")}`,
+    limits.rowsRead,
+    `${rowsRead?.toLocaleString("en-US")} / ${limits.rowsRead.toLocaleString("en-US")}`,
   )
   const rowsWritten = numNonNegative(usage.rows_written)
   push(
     "rows-written",
     rowsWritten,
-    TURSO_LIMITS.rowsWritten,
-    `${rowsWritten?.toLocaleString("en-US")} / ${TURSO_LIMITS.rowsWritten.toLocaleString("en-US")}`,
+    limits.rowsWritten,
+    `${rowsWritten?.toLocaleString("en-US")} / ${limits.rowsWritten.toLocaleString("en-US")}`,
   )
   const bytesSynced = numNonNegative(usage.bytes_synced)
-  push("sync", bytesSynced, TURSO_LIMITS.bytesSynced, `${bytesSynced === null ? "?" : gb(bytesSynced)} GB / 3 GB`)
+  push("sync", bytesSynced, limits.bytesSynced, `${bytesSynced === null ? "?" : gb(bytesSynced)} GB / ${gb(limits.bytesSynced)} GB`)
 
   return { windows, planLabel }
 }
@@ -209,7 +304,17 @@ export const fetchTursoQuota = async (ctx: QuotaContext): Promise<QuotaResult> =
     }
     const usage = await get("/usage")
     const subscription = await get("/subscription")
-    const mapped = tursoWindows(usage, subscription)
+    // Dynamic plan limits: /plans is fetched alongside, but a failed
+    // plans read must not fail the whole quota read — tursoWindows
+    // falls back to the static per-plan table (keyed by the
+    // subscription's plan name) when the doc is absent.
+    let plans: JsonValue | null = null
+    try {
+      plans = await get("/plans")
+    } catch {
+      plans = null
+    }
+    const mapped = tursoWindows(usage, subscription, plans)
     if (!mapped || Object.keys(mapped.windows).length === 0) {
       return buildResult({
         providerId,
