@@ -198,9 +198,21 @@ export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; mode
       // for one model meet addWindow's keep-first rule instead of
       // replacing the whole entry (#1781); distinct models keep
       // their own maps and both survive.
-      const modelWindows = models[modelName]?.windows ?? {}
+      // Own-property discipline (#2110): modelName is payload wire
+      // data, so a model named __proto__ must not read through the
+      // prototype chain or be written via the prototype setter
+      // (plain assignment would drop it and mutate the result
+      // object prototype). hasOwn + defineProperty keep it an
+      // own, enumerable entry with the prototype untouched.
+      const modelWindows = (Object.hasOwn(models, modelName) ? models[modelName]?.windows : undefined) ?? {}
       addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
-      if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
+      if (Object.keys(modelWindows).length > 0)
+        Object.defineProperty(models, modelName, {
+          value: { windows: modelWindows },
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        })
     }
   }
 

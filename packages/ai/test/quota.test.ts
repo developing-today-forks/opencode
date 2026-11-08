@@ -819,6 +819,24 @@ describe("claude usage transform (#1750)", () => {
     expect(models["Claude Sonnet"]?.windows["7d"]?.usedPercent).toBe(30)
   })
 
+  test("a scoped model named __proto__ survives as an own entry, prototype untouched (#2110)", () => {
+    // Payload built via JSON.parse so the name arrives as wire data does.
+    const payload = JSON.parse(
+      JSON.stringify({
+        limits: [
+          { kind: "weekly_scoped", percent: 42, resets_at: resets, scope: { model: { display_name: "__proto__" } } },
+          { kind: "weekly_scoped", percent: 11, resets_at: resets, scope: { model: { display_name: "constructor" } } },
+        ],
+      }),
+    )
+    const { models } = toClaudeUsage(payload)
+    expect(Object.keys(models)).toEqual(["__proto__", "constructor"])
+    expect(models["__proto__"]?.windows["7d"]?.usedPercent).toBe(42)
+    expect(models["constructor"]?.windows["7d"]?.usedPercent).toBe(11)
+    expect(Object.getPrototypeOf(models)).toBe(Object.prototype)
+    expect((models as Record<string, unknown>)["windows"]).toBeUndefined()
+  })
+
   test("legacy-only and empty payloads keep their shapes", () => {
     const legacy = toClaudeUsage({ five_hour: { utilization: 10, resets_at: resets } })
     expect(legacy.windows["5h"]?.usedPercent).toBe(10)
@@ -2253,6 +2271,39 @@ describe("antigravity quota transformModels fallback figure check (#1912)", () =
     )
     expect(Object.keys(models)).toEqual(["gemini-y"])
     expect(models["gemini-y"]?.windows["5h"]?.usedPercent).toBe(75)
+  })
+})
+
+describe("antigravity quota __proto__ model names (#2110)", () => {
+  const summaryWith = (buckets: unknown[]) => ({ groups: [{ displayName: "Gemini", buckets }] })
+
+  test("transformModels fallback branch keeps a model named __proto__ as an own entry", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const payload = JSON.parse(
+      '{"models":{"__proto__":{"quotaInfo":{"remainingFraction":0.5,"resetTime":"' +
+        resetTime +
+        '"}},"gemini-3":{"quotaInfo":{"remainingFraction":0.25,"resetTime":"' +
+        resetTime +
+        '"}}}}',
+    )
+    const models = transformModels(payload as never, [])
+    expect(Object.keys(models)).toEqual(["__proto__", "gemini-3"])
+    expect(models["__proto__"]?.windows["5h"]?.usedPercent).toBe(50)
+    expect(models["gemini-3"]?.windows["5h"]?.usedPercent).toBe(75)
+    expect(Object.getPrototypeOf(models)).toBe(Object.prototype)
+    expect((models as Record<string, unknown>)["windows"]).toBeUndefined()
+  })
+
+  test("transformModels matched-group branch keeps a model named __proto__ as an own entry", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "FIVE_HOUR", remainingFraction: 0.5, resetTime: "2026-11-06T00:00:00Z" }]) as never,
+    )
+    const payload = JSON.parse('{"models":{"__proto__":{},"gemini-3":{}}}')
+    const models = transformModels(payload as never, groups)
+    expect(Object.keys(models)).toEqual(["__proto__", "gemini-3"])
+    expect(models["__proto__"]?.windows["5h"]?.usedPercent).toBe(50)
+    expect(Object.getPrototypeOf(models)).toBe(Object.prototype)
+    expect((models as Record<string, unknown>)["windows"]).toBeUndefined()
   })
 })
 
