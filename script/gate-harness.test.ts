@@ -10,6 +10,8 @@ import {
   staleEntries,
   treesOnDisk,
   unlistedHits,
+  unscannedScriptTrees,
+  unscannedSrcTrees,
   type GateDefinition,
   type Hit,
 } from "./gate-harness"
@@ -100,6 +102,30 @@ describe("treesOnDisk (shared inventory, #1425/#1494 shape)", () => {
       tree("packages/plugins/figma/skills/example/src", false)
       expect(treesOnDisk(root, ["src"])).toEqual(["packages/ai/src", "packages/console/app/src"])
       expect(treesOnDisk(root, ["script", "scripts"])).toEqual(["packages/ai/script"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("finds planted trees outside packages//services, including a depth-2 tree (#1758)", () => {
+    const root = mkdtempSync(join(tmpdir(), "gate-harness-planted-"))
+    try {
+      const tree = (rel: string, pkg: boolean) => {
+        mkdirSync(join(root, rel), { recursive: true })
+        if (pkg) writeFileSync(join(root, rel, "..", "package.json"), "{}\n")
+      }
+      tree("sdks/vscode/src", true)
+      tree("sdks/vscode/script", true)
+      // Depth 2: the package root is the top-level github/ directory.
+      tree("github/script", true)
+      // Not a package tree: no package.json at either level.
+      tree("tools/thing/src", false)
+      expect(treesOnDisk(root, ["src"])).toEqual(["sdks/vscode/src"])
+      expect(treesOnDisk(root, ["script", "scripts"])).toEqual(["github/script", "sdks/vscode/script"])
+      expect(unscannedSrcTrees(root, [])).toEqual(["sdks/vscode/src"])
+      expect(unscannedScriptTrees(root, ["github/script"])).toEqual(["sdks/vscode/script"])
+      expect(unscannedSrcTrees(root, ["sdks/vscode/src"])).toEqual([])
+      expect(unscannedScriptTrees(root, ["github/script", "sdks/vscode/script"])).toEqual([])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

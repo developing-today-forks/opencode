@@ -216,19 +216,23 @@ describe("src trees (#1494)", () => {
       tree("packages/console/app/src", "parent")
       tree("packages/stats/core/src", "parent")
       tree("services/www/src", "parent")
-      // Not package src trees: a src folder with no package.json at either
-      // level (asset content), and a depth-2 src above the package level.
+      // Not a package src tree: a src folder with no package.json at
+      // either level (asset content).
       tree("packages/plugins/figma/skills/example/src", "none")
+      // A depth-2 src whose parent carries package.json IS a package tree
+      // since #1758 (the github/script shape, here at packages/src).
       mkdirSync(join(root, "packages/src"), { recursive: true })
       writeFileSync(join(root, "packages/package.json"), "{}\n")
       expect(srcTreesOnDisk(root)).toEqual([
         "packages/ai/src",
         "packages/console/app/src",
+        "packages/src",
         "packages/stats/core/src",
         "services/www/src",
       ])
       expect(unscannedSrcTrees(root, ["packages/ai/src"])).toEqual([
         "packages/console/app/src",
+        "packages/src",
         "packages/stats/core/src",
         "services/www/src",
       ])
@@ -245,6 +249,12 @@ describe("src trees (#1494)", () => {
 describe("GitHub Action scan root (#1436)", () => {
   test("SCAN_ROOTS includes the published GitHub Action", () => {
     expect(SCAN_ROOTS).toContain("github")
+  })
+
+  test("SCAN_ROOTS includes the #1758 escaped trees", () => {
+    expect(SCAN_ROOTS).toContain("github/script")
+    expect(SCAN_ROOTS).toContain("sdks/vscode/script")
+    expect(SCAN_ROOTS).toContain("sdks/vscode/src")
   })
 
   test("collect walks the GitHub Action tree on disk", () => {
