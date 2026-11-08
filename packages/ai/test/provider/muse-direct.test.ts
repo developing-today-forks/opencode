@@ -123,6 +123,45 @@ it.effect("exchanges the account token once and sends the minted key as a bare B
   }),
 )
 
+it.effect("keeps minted keys scoped to their credential source objects", () =>
+  Effect.gen(function* () {
+    MuseDirectAuth.invalidate()
+    const exchangeA = fakeExchange(() => parseJson('{"api_key":"LLM|account-a-key"}'))
+    const exchangeB = fakeExchange(() => parseJson('{"api_key":"LLM|account-b-key"}'))
+    const directA = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: {
+        readFile: () => authFile('{"access_token":"dca:account-a"}'),
+        fetchFn: exchangeA.fetchFn,
+      },
+    })
+    const directB = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: {
+        readFile: () => authFile('{"access_token":"dca:account-b"}'),
+        fetchFn: exchangeB.fetchFn,
+      },
+    })
+    const calls: Array<Call> = []
+    const handler = (input: HandlerInput) =>
+      observe(calls, input).pipe(
+        Effect.map(() => input.respond(textStream("Hello"), { headers: { "content-type": "text/event-stream" } })),
+      )
+
+    yield* generate(directA.model("muse-spark-1.3-contributor"), { prompt: "Hello" }, handler)
+    yield* generate(directB.model("muse-spark-1.3-contributor"), { prompt: "Hello again" }, handler)
+
+    expect(exchangeA.calls).toHaveLength(1)
+    expect(exchangeA.calls[0]!.headers.authorization).toBe("Bearer dca:account-a")
+    expect(exchangeB.calls).toHaveLength(1)
+    expect(exchangeB.calls[0]!.headers.authorization).toBe("Bearer dca:account-b")
+    expect(calls.map((call) => call.headers.get("authorization"))).toEqual([
+      "Bearer LLM|account-a-key",
+      "Bearer LLM|account-b-key",
+    ])
+  }),
+)
+
 it.effect("aliases shell/bash outbound and unaliases the tool call inbound", () =>
   Effect.gen(function* () {
     const direct = MuseDirect.configure({ ...keySettings(MINTED_KEY), baseURL: "https://meta.test/v1" })

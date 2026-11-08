@@ -177,26 +177,39 @@ interface KeyState {
   readonly cachedAt: number
 }
 
-let cached: KeyState | undefined
-let inflight: Promise<string> | undefined
+interface SourceState {
+  readonly generation: number
+  cached?: KeyState
+  inflight?: Promise<string>
+}
+
+// Each injected credential source object owns its own cache. The default
+// machine source keeps one shared cache, while generations let a 401
+// invalidate every source without retaining retired source objects.
+const defaultSources: CredentialSources = {}
+const cacheBySources = new WeakMap<CredentialSources, SourceState>()
+let cacheGeneration = 0
 
 /** Drop the in-memory minted key (upstream 401: re-exchange on next use). */
 export const invalidate = () => {
-  cached = undefined
+  cacheGeneration++
 }
 
 const now = (sources: CredentialSources) => (sources.now ?? Date.now)()
 
-const loadKey = (sources: CredentialSources): Promise<string> => {
-  if (cached && now(sources) - cached.cachedAt < MINTED_KEY_TTL_MS) return Promise.resolve(cached.key)
-  if (inflight) return inflight
-  inflight = (async () => {
+const loadKey = (sources: CredentialSources = defaultSources): Promise<string> => {
+  const previous = cacheBySources.get(sources)
+  const state = previous?.generation === cacheGeneration ? previous : { generation: cacheGeneration }
+  if (state !== previous) cacheBySources.set(sources, state)
+  if (state.cached && now(sources) - state.cached.cachedAt < MINTED_KEY_TTL_MS) return Promise.resolve(state.cached.key)
+  if (state.inflight) return state.inflight
+  const inflight = (async () => {
     try {
       const credential = await readCredential(sources)
       if (!credential) throw new Error(NOT_SIGNED_IN_MESSAGE)
       if (credential.accountToken) {
         const key = await exchangeMintedKey(credential.accountToken, sources)
-        cached = { key, cachedAt: now(sources) }
+        state.cached = { key, cachedAt: now(sources) }
         return key
       }
       // api_key-only file: the stored key IS the inference credential;
@@ -204,13 +217,14 @@ const loadKey = (sources: CredentialSources): Promise<string> => {
       // externally refreshed file takes effect immediately.
       return credential.inferenceKey!
     } finally {
-      inflight = undefined
+      state.inflight = undefined
     }
   })()
+  state.inflight = inflight
   return inflight
 }
 
-const loadKeyEffect = (sources: CredentialSources) =>
+const loadKeyEffect = (sources?: CredentialSources) =>
   Effect.tryPromise({
     try: () => loadKey(sources),
     catch: (cause: unknown) =>
@@ -236,7 +250,7 @@ export const museDirectAuth = (input: {
 }) => {
   if (input.auth) return input.auth
   if (input.apiKey !== undefined) return Auth.bearer(input.apiKey)
-  const sources = input.sources ?? {}
+  const sources = input.sources
   return Auth.custom((authInput) =>
     loadKeyEffect(sources).pipe(Effect.map((key) => Headers.set(authInput.headers, "authorization", `Bearer ${key}`))),
   )
