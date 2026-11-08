@@ -106,10 +106,12 @@
  *     — rule 5, #1785; pinned by the mistral console budget mapping
  *     describe in quota.test.ts).
  *   opencode-go — parseOpenCodeGoUsage, parseConsoleGoUsage,
- *     parseConsoleBillingBalance (all exported). KNOWN-LOSSY:
- *     #1725 (unpinned remainder; a window is dropped when resetAt
- *     is null instead of nulling the field — rule 3 decision is
- *     that issue's, per design #1794 phase 3).
+ *     parseConsoleBillingBalance (all exported). Conforming: a
+ *     percent-bearing entry keeps its window with an absent reset as
+ *     an honest null resetAt (rule 3, #1725), and an entry with no
+ *     usable percent publishes no window (rule 4) — matching codex's
+ *     percent-less case. Pinned by the OpenCode Go API-key usage
+ *     mapping describe in quota.test.ts.
  *   opendesign — parseCodingPlanWindows (exported);
  *     normalizeOpenDesignCredential (credential normalization, not a
  *     window parser). Conforming: remaining is clamped to [0, limit]
@@ -119,8 +121,9 @@
  *     unknown-duration cases remain conforming (#1750).
  *   openrouter — resolveResetAt (exported from the provider module;
  *     the remaining parsing is inline in the fetch path).
- *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).
- *     Conforming: zero-limit publishes no window (#1799, rule 4).
+ *     Conforming: zero-limit publishes no window (#1799, rule 4);
+ *     resolveResetAt's UTC daily/weekly (next Monday, +7d on Monday)
+ *     and monthly arithmetic is pinned (#1725).
  *   turso — tursoWindows (exported pure window builder over the
  *     org-usage figures and TURSO_LIMITS). Conforming: only finite,
  *     nonnegative counts publish; each percent and value label derive

@@ -53,9 +53,13 @@ export const parseOpenCodeGoUsage = (payload: JsonValue): WindowMap => {
     const entry = asObject(usage[field])
     if (!entry) continue
     const usedPercent = toNumber(entry.percent)
-    const resetAt = toTimestamp(entry.resetsAt)
-    if (usedPercent === null || resetAt === null) continue
-    windows[key] = toUsageWindow({ usedPercent: clampPercent(usedPercent), resetAt, windowSeconds: null })
+    // Window contract: no figure, no window (rule 4) — an entry with no
+    // usable percent publishes nothing, matching codex's percent-less
+    // window; but a percent-bearing entry keeps its window with the
+    // absent reset as an honest null (rule 3, the #1725 conformance
+    // change), never dropping the window the payload did send (#1725).
+    if (usedPercent === null) continue
+    windows[key] = toUsageWindow({ usedPercent: clampPercent(usedPercent), resetAt: toTimestamp(entry.resetsAt), windowSeconds: null })
   }
   return windows
 }
