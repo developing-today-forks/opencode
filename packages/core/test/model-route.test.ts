@@ -2691,10 +2691,16 @@ describe("ModelRoute per-leg quota state (pool verdict abolished)", () => {
     // the same route group. Quota state is the provider's, so it covers
     // exactly the leaves that provider serves.
     const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
-    // Attempt-reported exhaustion lands on the provider's own skip record,
-    // judged per leaf by skipped() \u2014 no in-memory gate, no pool fact.
+    // Attempt-reported exhaustion from ONE model family lands model-scoped
+    // (#1976): only the answering leaf is skipped — a sibling family on the
+    // same provider keeps serving until its own answer corroborates.
     ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
     expect(ModelRoute.skipped(shared[0], now)).toBe(true)
+    expect(ModelRoute.skipped(shared[1], now)).toBe(false)
+    expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
+    // The second family answering quota corroborates the hold to provider
+    // scope: now the provider's own skip record blocks every leaf it serves.
+    ModelRoute.observeQuotaFailure(shared[1], undefined, resetAt, now)
     expect(ModelRoute.skipped(shared[1], now)).toBe(true)
     expect(ModelRoute.skipped(leaves[2], now)).not.toBe(true)
     expect(ModelRoute.providerQuotaBlocked(shared[0], now)).toBeUndefined()
@@ -2749,5 +2755,252 @@ describe("ModelRoute per-leg quota state (pool verdict abolished)", () => {
     ModelRoute.observeProviderQuota(leaves[0], knownFull(resetAt + 60_000, resetAt), resetAt)
     expect(ModelRoute.providerQuotaBlocked(leaves[0], resetAt + 10)).toEqual({ until: resetAt + 60_000 })
     expect(ModelRoute.providerQuotaBlocked(leaves[2], resetAt + 10)).toBeUndefined()
+  })
+})
+
+describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (#1974, #1976)", () => {
+  const hour = 3_600_000
+
+  const gatheredReading = (opts: {
+    providerID: string
+    modelID: string
+    percent: number
+    at: number
+    resetAt?: number | null
+    widePercent?: number
+  }) => [
+    {
+      providerID: opts.providerID,
+      measuredAt: opts.at,
+      windows:
+        opts.widePercent === undefined
+          ? []
+          : [{ name: "weekly", usedPercent: opts.widePercent, resetAt: opts.resetAt ?? null, measuredAt: opts.at }],
+      models: {
+        [opts.modelID]: [
+          { name: "weekly", usedPercent: opts.percent, resetAt: opts.resetAt ?? null, measuredAt: opts.at },
+        ],
+      },
+    },
+  ]
+
+  test("a credential-less quota answer skips only the answering target (#1976)", () => {
+    const now = 700_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    // The Claude family's wall: one credential-less quota answer.
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // The answering target is skipped, under its own model-scoped record...
+    expect(ModelRoute.skipped(claude, now + 1)).toBe(true)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some(
+        (item) => item.id === "quota-model:antigravity-direct:claude-sonnet-5-5",
+      ),
+    ).toBe(true)
+    // ...and the sibling family is untouched: no provider-wide record, no skip.
+    expect(ModelRoute.skipped(gemini, now + 1)).toBe(false)
+    expect(
+      ModelRoute.activeAdjustments(now + 1).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+  })
+
+  test("a second family's quota answer corroborates the skip to provider scope (#1976)", () => {
+    const now = 710_000_000
+    const resetAt = now + 3_600_000
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    // A second, distinct target of the same provider answers quota while the first
+    // family's hold still stands: two sources, the pool-verdict standard.
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt, now + 1)
+    expect(
+      ModelRoute.activeAdjustments(now + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(true)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, now + 2)).toBe(true)
+    // Corroboration is judged against live holds: once the first family's stated hold
+    // has lapsed, a lone new answer scopes to its own target again.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, resetAt, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, resetAt + 7_200_000, resetAt + 1)
+    expect(
+      ModelRoute.activeAdjustments(resetAt + 2).some((item) => item.id === "quota:antigravity-direct"),
+    ).toBe(false)
+    expect(ModelRoute.skipped(gemini, resetAt + 2)).toBe(true)
+    expect(ModelRoute.skipped(claude, resetAt + 2)).toBe(false)
+  })
+
+  test("a gathered reading with headroom lifts the skip, long before the stated reset (#1974)", () => {
+    const now = 720_000_000
+    // The OpenDesign shape: the error's stated reset is days out, far past the real
+    // window roll — and the window did roll, which the gatherer's fresh reading shows.
+    const statedReset = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, statedReset, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 4,
+        at: judgedAt,
+        resetAt: now + 7 * 86_400_000,
+      }),
+      judgedAt,
+    )
+    // The source's reset (a fresh window, days past the stated one) governs: the skip
+    // comes off on the reading's word, with no attempt spent to learn it.
+    expect(released).toEqual(["quota-model:opendesign:claude-haiku-5.5"])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(false)
+  })
+
+  test("a gathered reading that still shows the window full lifts nothing (#1974)", () => {
+    const now = 730_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    const released = ModelRoute.releaseQuotaSkipsForCurrent(
+      leaf,
+      gatheredReading({
+        providerID: "opendesign",
+        modelID: "claude-haiku-5.5",
+        percent: 100,
+        at: judgedAt,
+        resetAt: now + 86_400_000,
+      }),
+      judgedAt,
+    )
+    expect(released).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    // A stale reading is no evidence either way: the skip stands, unjudged.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 4, at: judgedAt }),
+        judgedAt + 2 * hour,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 2 * hour)).toBe(true)
+  })
+
+  test("a provider the snapshot does not carry keeps its skip — no reading, no judgement (#1974)", () => {
+    const now = 740_000_000
+    const leaf = ModelRoute.ref({ providerID: "unmeasured", model: "m" })
+    const other = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    // Headroom readings exist — for another provider, and for this provider's other
+    // model. Neither is a reading of this leaf's window.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "opendesign", modelID: "claude-haiku-5.5", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gatheredReading({ providerID: "unmeasured", modelID: "some-other-model", percent: 0, at: judgedAt }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    expect(ModelRoute.skipped(other, judgedAt + 1)).toBe(false)
+  })
+
+  test("a corroborated provider-wide skip lifts only on provider-wide headroom (#1974)", () => {
+    const now = 750_000_000
+    // Two families answered quota, so the standing skip is provider-wide. One family's
+    // headroom reading cannot lift it while that record stands — the leaf stays
+    // skipped until the provider's own windows read headroom too.
+    const gemini = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    const claude = ModelRoute.ref({ providerID: "antigravity-direct", model: "claude-sonnet-5-5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(claude, undefined, now + 3 * 86_400_000, now)
+    ModelRoute.observeQuotaFailure(gemini, undefined, now + 3 * 86_400_000, now + 1)
+    expect(ModelRoute.skipped(gemini, now + 2)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    // Gemini's window reads 4% used, but the provider-wide window still reads full:
+    // nothing lifts, and the leaf stays skipped under the provider record.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 100,
+        }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(gemini, judgedAt + 1)).toBe(true)
+    // The provider-wide windows read headroom as well: the corroborated record comes
+    // off, and the sibling family's own record — no reading for it here — stands.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        gemini,
+        gatheredReading({
+          providerID: "antigravity-direct",
+          modelID: "gemini-3.8-flash",
+          percent: 4,
+          at: judgedAt,
+          widePercent: 40,
+        }),
+        judgedAt,
+      ),
+    ).toEqual(["quota:antigravity-direct"])
+    expect(ModelRoute.skipped(gemini, judgedAt + 2)).toBe(false)
+    expect(ModelRoute.skipped(claude, judgedAt + 2)).toBe(true)
+  })
+
+  test("a fresher not-full snapshot releases a model-scoped reactive skip (#1974, #1976)", () => {
+    const now = 760_000_000
+    const resetAt = now + 3 * 86_400_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, resetAt, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    ModelRoute.observeProviderQuota(
+      leaf,
+      {
+        planID: "plan",
+        window: "weekly",
+        providerID: "opendesign",
+        percent: 4,
+        remaining: 144_000,
+        resetAt: now + 7 * 86_400_000,
+        observedAt: now + 60_000,
+        stale: false,
+      },
+      now + 60_000,
+    )
+    expect(ModelRoute.skipped(leaf, now + 60_001)).toBe(false)
+  })
+
+  test("two families out promotes the hold to provider scope; one family stays model-scoped (#1976)", () => {
+    const now = 770_000_000
+    const resetAt = now + 3_600_000
+    const a = ModelRoute.ref({ providerID: "prov-a", model: "m-a" })
+    const b = ModelRoute.ref({ providerID: "prov-a", model: "m-b" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(a, undefined, resetAt, now)
+    // One family out: only the answering target is skipped; its sibling keeps serving.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(false)
+    ModelRoute.observeQuotaFailure(b, undefined, resetAt, now)
+    // Corroborated by a second distinct target: the hold is provider-wide now.
+    expect(ModelRoute.skipped(a, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(b, now + 1)).toBe(true)
   })
 })
