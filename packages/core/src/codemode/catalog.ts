@@ -1,6 +1,7 @@
 export * as CodeModeCatalog from "./catalog.js"
 
 import { Schema } from "effect"
+import { Text } from "../util/text.js"
 
 export const Tool = Schema.Struct({
   type: Schema.Literal("tool"),
@@ -66,7 +67,7 @@ export function summarize(inventory: Inventory, options: Options = {}): Summary 
         .map((entry) => {
           const firstLine = entry.description.split("\n", 1)[0]?.trim() ?? ""
           const description =
-            firstLine.length > DESCRIPTION_LIMIT ? firstLine.slice(0, DESCRIPTION_LIMIT - 3) + "..." : firstLine
+            firstLine.length > DESCRIPTION_LIMIT ? Text.truncate(firstLine, DESCRIPTION_LIMIT - 3) + "..." : firstLine
           const suffix = description.length === 0 ? "" : ` // ${description}`
           return { path: entry.path, line: `  - ${entry.signature}${suffix}` }
         })

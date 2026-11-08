@@ -1518,3 +1518,12 @@ describe("demotion restore (#1151)", () => {
     }),
   )
 })
+
+describe("ModelRouteLog.failureFields surrogate-pair guard (#1973)", () => {
+  test("a pair straddling the error_body cut is dropped whole", () => {
+    const body = "a".repeat(1_999) + "\u{1F600}" + "b".repeat(10)
+    const fields = ModelRouteLog.failureFields({ _tag: "RateLimit", message: "x", body }, { captureBody: true })
+    expect(fields.error_body).toBe("a".repeat(1_999))
+    expect(fields.error_body?.isWellFormed()).toBe(true)
+  })
+})

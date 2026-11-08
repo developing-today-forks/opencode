@@ -18,6 +18,7 @@ import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { Global } from "@opencode/util/global"
 import { collectBoundedResponseBody } from "../tool/http-body.js"
 import { which } from "../util/which.js"
+import { Text } from "../util/text.js"
 
 export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Messaging.EmbeddingUnavailableError", {
   message: Schema.String,
@@ -1019,7 +1020,7 @@ const layer = (options: Options) =>
         if (!current) return yield* new UnavailableError({ message: describe() })
         const prefix = kind === "query" ? (current.query ?? "") : ""
         const inputs = texts.map((text) => {
-          const clipped = text.slice(0, current.limit)
+          const clipped = Text.truncate(text, current.limit)
           return prefix + (clipped.trim() === "" ? " " : clipped)
         })
         const batches = Array.from({ length: Math.ceil(inputs.length / BATCH) }, (_, index) =>

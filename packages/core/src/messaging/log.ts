@@ -1,6 +1,7 @@
 export * as MessagingLog from "./log.js"
 
 import { DateTime } from "effect"
+import { Text } from "../util/text.js"
 import type { Messaging } from "@opencode/schema/messaging"
 import type { SessionMessage } from "../session/message.js"
 
@@ -168,17 +169,12 @@ export function unescapeBody(value: string) {
  * house rule is to never split a pair (messaging/search.ts, session
  * compaction), so a straddling pair is dropped whole instead.
  *
- * Exported so every truncation in the messaging door shares this one rule
+ * The definition now lives in util/text.ts (#1973) so truncations outside
+ * messaging share the same rule; re-exported here for existing callers.
  * (#1970): the delivered body, preview, toast, firstLine and rerank text all
  * cut at raw code-unit offsets.
  */
-export const splitsPair = (text: string, index: number) =>
-  index > 0 &&
-  index < text.length &&
-  text.charCodeAt(index - 1) >= 0xd800 &&
-  text.charCodeAt(index - 1) <= 0xdbff &&
-  text.charCodeAt(index) >= 0xdc00 &&
-  text.charCodeAt(index) <= 0xdfff
+export const splitsPair = Text.splitsPair
 
 /** Shortens long entries to a head and tail around an omission marker. */
 export function clip(text: string, chars: number) {

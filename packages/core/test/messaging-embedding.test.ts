@@ -667,3 +667,20 @@ describe("MessagingEmbedding.Service", () => {
     }),
   )
 })
+
+describe("MessagingEmbedding surrogate-pair guard (#1973)", () => {
+  it.live("a pair straddling the embedding clip limit is dropped whole before the request", () =>
+    Effect.gen(function* () {
+      const fake = yield* Effect.acquireRelease(Effect.sync(fakeOpenAI), (fixture) =>
+        Effect.promise(() => fixture.server.stop(true)),
+      )
+      const embedding = yield* service()
+      yield* embedding.configure({ tier: "off", remote: { url: fake.url, model: "m" } })
+      const input = "a".repeat(7_999) + "\u{1F600}" + "b".repeat(10)
+      yield* embedding.embed([input], "document")
+      const sent = fake.requests[0]?.body.input[0] ?? ""
+      expect(sent).toBe("a".repeat(7_999))
+      expect(sent.isWellFormed()).toBe(true)
+    }),
+  )
+})

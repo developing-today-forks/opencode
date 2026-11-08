@@ -258,3 +258,14 @@ describe("CodeModeInstructions.update", () => {
     expect(text).not.toContain("## Available tools")
   })
 })
+
+describe("CodeModeCatalog surrogate-pair guard (#1973)", () => {
+  test("a pair straddling the description cut is dropped whole", () => {
+    const description = "a".repeat(116) + "\u{1F600}" + "b".repeat(10)
+    const catalog = CodeModeCatalog.summarize({ tools: [entry("alpha.tool", description)] })
+    const line = catalog.namespaces[0]?.entries[0]?.line ?? ""
+    expect(line.isWellFormed()).toBe(true)
+    expect(line).toContain("a".repeat(116) + "...")
+    expect(line).not.toContain("\u{1F600}")
+  })
+})

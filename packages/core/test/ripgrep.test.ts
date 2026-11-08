@@ -196,3 +196,24 @@ describeRipgrep("Ripgrep", () => {
     ),
   )
 })
+
+describeRipgrep("Ripgrep surrogate-pair guard (#1973)", () => {
+  it.live("a pair straddling the match text cut is dropped whole", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, "src")))
+          const line = "needle" + "a".repeat(1_993) + "\u{1F600}" + "b".repeat(10)
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "src", "match.ts"), line + "\n"))
+          const ripgrep = yield* Ripgrep.Service
+          const result = yield* ripgrep.grep({ cwd: tmp.path, pattern: "needle", include: "*.ts", limit: 10 })
+          expect(result).toHaveLength(1)
+          const text = result[0]?.text ?? ""
+          expect(text.isWellFormed()).toBe(true)
+          expect(text).toBe("needle" + "a".repeat(1_993) + "...")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+})
