@@ -304,11 +304,21 @@ describe("ModelRouteTuning.parseQuotaReset", () => {
       ["quota resets in 1 hour 30 minutes", 5_400_000],
       ["quota resets in 1h30m", 5_400_000],
       ["quota resets in 30ms", 30],
+      ["quota resets in 1 week", 7 * 86_400_000],
+      ["quota resets in 2 weeks", 14 * 86_400_000],
+      ["quota resets in 1 wk", 7 * 86_400_000],
+      ["quota resets in 1 week 2 days", 9 * 86_400_000],
+      ["quota resets in 2 days and 1 week", 9 * 86_400_000],
     ] as const) {
       expect(ModelRouteLimits.resetAtFromMessage(message, at)).toBe(at + wait)
       expect(ModelRouteTuning.parseQuotaReset(message, at)).toBe(at + wait)
     }
-    for (const message of ["quota, come back in 5 deals", "quota, come back in 2 homes", "quota, come back in 5 marks"])
+    for (const message of [
+      "quota, come back in 5 deals",
+      "quota, come back in 2 homes",
+      "quota, come back in 5 marks",
+      "quota, come back in 5 windows",
+    ])
       expect(ModelRouteTuning.parseQuotaReset(message, at)).toBeUndefined()
   })
 

@@ -261,6 +261,21 @@ describe("ModelRouteLimits.retryHintFromMessage", () => {
     expect(ModelRouteLimits.resetAtFromMessage("come back in 5 marks", at)).toBeUndefined()
   })
 
+  test("reads week units, single and compound (#2096)", () => {
+    const week = 7 * 86_400_000
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 1 week", at)).toBe(at + week)
+    expect(ModelRouteLimits.retryHintFromMessage("resets in 1 week", at)).toBe(week)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 2 weeks", at)).toBe(at + 2 * week)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 1 wk", at)).toBe(at + week)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 2 wks", at)).toBe(at + 2 * week)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 1 w", at)).toBe(at + week)
+    // Compounds sum the week instead of silently dropping it, in either order.
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 1 week 2 days", at)).toBe(at + 9 * 86_400_000)
+    expect(ModelRouteLimits.resetAtFromMessage("resets in 2 days and 1 week", at)).toBe(at + 9 * 86_400_000)
+    // The compact "w" unit must not eat the head of a word.
+    expect(ModelRouteLimits.resetAtFromMessage("come back in 5 windows", at)).toBeUndefined()
+  })
+
   test("reads compact minute units and adjacent compact compounds (#996)", () => {
     expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30m", at)).toBe(at + 1_800_000)
     expect(ModelRouteLimits.resetAtFromMessage("quota resets in 30min", at)).toBe(at + 1_800_000)
