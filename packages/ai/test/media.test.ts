@@ -68,6 +68,14 @@ describe("Media", () => {
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xfb, 0x90, 0x64]))).toBe("audio/mpeg")
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xf3, 0x90, 0x64]))).toBe("audio/mpeg")
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xf1, 0x50, 0x80]))).toBe("audio/aac")
+      // UTF-16 BOMs are text, not frame sync (#2151): the LE BOM FF FE passes the two-byte sync test, so both
+      // BOM prefixes are excluded and fileMediaType falls back to the text extension.
+      const utf16le = Uint8Array.from([0xff, 0xfe, 0x48, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f, 0x00])
+      const utf16be = Uint8Array.from([0xfe, 0xff, 0x00, 0x48, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f])
+      expect(Media.detectMediaType(utf16le)).toBeUndefined()
+      expect(Media.detectMediaType(utf16be)).toBeUndefined()
+      expect(fileMediaType(utf16le, "notes.txt")).toBe("text/plain")
+      expect(fileMediaType(utf16be, "notes.txt")).toBe("text/plain")
       expect(Media.detectMediaType(new TextEncoder().encode("RIFF\0\0\0\0WAVEfmt "))).toBe("audio/wav")
       expect(Media.detectMediaType(new TextEncoder().encode("OggS\0\x02"))).toBe("audio/ogg")
       expect(Media.detectMediaType(new TextEncoder().encode("fLaC\0\0\0\x22"))).toBe("audio/flac")

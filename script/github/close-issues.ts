@@ -20,6 +20,7 @@ type Issue = {
   updated_at: string
   author_association: string
   user: { login: string } | null
+  pull_request?: { url: string }
 }
 
 const headers = {
@@ -96,6 +97,10 @@ export async function collectStaleIssueNumbers(input: RequestOptions & { cutoffD
     let fresh = false
     for (const i of all) {
       if (new Date(i.updated_at) < cutoffDate) {
+        if (i.pull_request) {
+          console.log(`Skipping stale pull request #${i.number}; handled by close-prs.ts`)
+          continue
+        }
         if (shouldSkip(i)) {
           console.log(`Skipping stale issue #${i.number}; author ${i.user?.login ?? "unknown"} is exempt`)
           continue

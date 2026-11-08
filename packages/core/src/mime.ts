@@ -14,8 +14,8 @@ const FTYP_BRANDS: Readonly<Record<string, string>> = {
 export function detect(bytes: Uint8Array) {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png"
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg"
-  if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif"
-  if (startsWith(bytes, [0x42, 0x4d])) return "image/bmp"
+  if (isGif(bytes)) return "image/gif"
+  if (isBmp(bytes)) return "image/bmp"
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50]))
     return "image/webp"
@@ -24,6 +24,43 @@ export function detect(bytes: Uint8Array) {
     if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand]
   }
   return isText(bytes) ? "text/plain" : "application/octet-stream"
+}
+
+const u16le = (bytes: Uint8Array, offset: number) => bytes[offset] | (bytes[offset + 1] << 8)
+const u32le = (bytes: Uint8Array, offset: number) =>
+  (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0
+
+const DIB_SIZES = new Set([12, 40, 52, 56, 108, 124])
+
+// A bare "BM" prefix is prose ("BM25 is a ranking function..."), not a bitmap (#2149). A real BMP carries a
+// structurally plausible header: reserved fields zero, a known DIB header size, a pixel-data offset inside the
+// file at or past the headers, and a file-size field that is unset or exact.
+function isBmp(bytes: Uint8Array) {
+  if (!startsWith(bytes, [0x42, 0x4d])) return false
+  if (bytes.length < 26) return false
+  if (u16le(bytes, 6) !== 0 || u16le(bytes, 8) !== 0) return false
+  const dib = u32le(bytes, 14)
+  if (!DIB_SIZES.has(dib)) return false
+  const pixelOffset = u32le(bytes, 10)
+  if (pixelOffset < 14 + dib || pixelOffset > bytes.length) return false
+  const fileSize = u32le(bytes, 2)
+  return fileSize === 0 || fileSize === bytes.length
+}
+
+// A bare "GIF8" prefix is prose too (#2149). A real GIF carries the full 6-byte version header, a complete
+// logical screen descriptor with non-zero dimensions, room for the global color table when one is flagged, and
+// binary image data — text that passes isText() is prose describing GIFs, never a GIF.
+function isGif(bytes: Uint8Array) {
+  if (!startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]) && !startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]))
+    return false
+  if (bytes.length < 13) return false
+  if (u16le(bytes, 6) === 0 || u16le(bytes, 8) === 0) return false
+  const packed = bytes[10]
+  if (packed & 0x80) {
+    const tableBytes = 3 * 2 ** ((packed & 0x07) + 1)
+    if (bytes.length < 13 + tableBytes) return false
+  }
+  return !isText(bytes)
 }
 
 function startsWith(bytes: Uint8Array, prefix: number[]) {

@@ -125,7 +125,17 @@ describe("ReadToolFileSystem", () => {
         { name: "m4b", bytes: ftyp("M4B "), mime: "audio/mp4", label: "Audio read successfully" },
         {
           name: "bmp",
-          bytes: Buffer.from([0x42, 0x4d, 0, 0, 0, 0]),
+          // A structurally plausible BMP header (#2149): bare "BM" bytes are prose, not a bitmap.
+          bytes: (() => {
+            const bytes = Buffer.alloc(58)
+            bytes.set([0x42, 0x4d], 0)
+            bytes.writeUInt32LE(bytes.length, 2)
+            bytes.writeUInt32LE(54, 10)
+            bytes.writeUInt32LE(40, 14)
+            bytes.writeInt32LE(1, 18)
+            bytes.writeInt32LE(1, 22)
+            return bytes
+          })(),
           mime: "image/bmp",
           label: "Image read successfully",
         },
