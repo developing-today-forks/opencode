@@ -2109,6 +2109,16 @@ describe("antigravity quota bucket labelling (#1768)", () => {
     expect(groups[0].bucketWeekly?.remainingFraction).toBe(0.25)
   })
 
+  test("DAILY window spelling and daily bucketId publish the daily window (#2111)", () => {
+    const groups = transformSummary(
+      summaryWith([{ window: "DAILY", remainingFraction: 0.4, resetTime: "2026-11-07T00:00:00Z" }]) as never,
+    )
+    expect(groups[0].windows.daily?.usedPercent).toBe(60)
+    const byBucketId = parseBucket({ bucketId: "daily", remainingFraction: 0.4 } as never)
+    expect(byBucketId?.label).toBe("daily")
+    expect(byBucketId?.seconds).toBe(86400)
+  })
+
   test("an unrecognized window string is skipped, never published as a fabricated 5h window", () => {
     const groups = transformSummary(
       summaryWith([

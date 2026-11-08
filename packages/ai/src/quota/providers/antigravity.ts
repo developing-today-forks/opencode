@@ -287,7 +287,7 @@ export const parseBucket = (bucket: JsonValue): ParsedBucket | null => {
   if (windowStr.includes("week") || windowStr.includes("7d")) {
     label = "weekly"
     seconds = WEEKLY_WINDOW_SECONDS
-  } else if (windowStr.includes("day")) {
+  } else if (windowStr.includes("day") || windowStr.includes("daily")) {
     label = "daily"
     seconds = DAILY_WINDOW_SECONDS
   } else if (windowStr.includes("five") || windowStr.includes("5h") || windowStr.includes("hour")) {
