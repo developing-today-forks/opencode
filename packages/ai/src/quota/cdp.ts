@@ -329,5 +329,12 @@ export const cdpPageFetch = async (
 }
 
 /** Whether an HTTP outcome from a console read is the session-expired class. */
-export const isSessionExpiredStatus = (result: CdpFetchResult): boolean =>
-  result.status === 401 || result.status === 403 || result.url.includes("auth") || result.url.includes("login")
+export const isSessionExpiredStatus = (result: CdpFetchResult): boolean => {
+  if (result.status === 401 || result.status === 403) return true
+  if (!result.url) return false
+  // Redirects to login pages land on an exact auth/login path segment.
+  // Resource names (for example, `login-history`) and query values are not pages.
+  return new URL(result.url).pathname
+    .split("/")
+    .some((segment) => segment.toLowerCase() === "auth" || segment.toLowerCase() === "login")
+}
