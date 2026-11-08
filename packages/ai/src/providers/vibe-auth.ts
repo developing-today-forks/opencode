@@ -21,14 +21,10 @@
 //   4. OS keyring, legacy service "vibe", same username (the binary
 //      migrates legacy entries to the new service; read-only here)
 //
-// The keyring is read IN PLACE via `secret-tool lookup` (the
-// antigravity-auth pattern: SECRET_TOOL_PATH -> PATH -> /nix/store scan
-// for libsecret). Python's keyring library is not an option from this
-// runtime, and on amd-6 it is broken besides: kwalletd6 owns
-// org.freedesktop.secrets without the DH session python-secretstorage
-// mandates, and gnome-keyring runs pkcs11-only. The credential is never
-// copied into the fork's credential store, never written back, and never
-// logged. The vibe CLI remains the owner of the stored credential.
+// The keyring is read in place through the native Secret Service binding;
+// no helper process is spawned. The credential is never copied into the
+// fork's credential store, written back, or logged. The vibe CLI remains
+// the owner of the stored credential.
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { AIError, AuthenticationError } from "../schema/index.js"
@@ -87,58 +83,15 @@ export const parseDotEnv = (contents: string): Readonly<Record<string, string>> 
   return values
 }
 
-const findSecretTool = async (): Promise<string> => {
-  const { accessSync, constants, readdirSync } = await import("node:fs")
-  const { join } = await import("node:path")
-  const candidates: string[] = []
-  if (process.env.SECRET_TOOL_PATH) candidates.push(process.env.SECRET_TOOL_PATH)
-  for (const dir of (process.env.PATH ?? "").split(":")) if (dir) candidates.push(join(dir, "secret-tool"))
-  try {
-    for (const store of readdirSync("/nix/store")
-      .filter((entry) => entry.includes("libsecret"))
-      .sort())
-      candidates.push(join("/nix/store", store, "bin", "secret-tool"))
-  } catch {}
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, constants.X_OK)
-      return candidate
-    } catch {}
-  }
-  throw new Error("secret-tool not found (set SECRET_TOOL_PATH)")
-}
-
 /**
- * One keyring read. Any failure (no secret-tool, no Secret Service, entry
- * absent, timeout) resolves to undefined — the binary treats keyring
+ * One keyring read. Any failure (no Secret Service, entry absent, timeout)
+ * resolves to undefined — the binary treats keyring
  * trouble as "no credential there" and falls through, and the resolver's
  * final absence error names every location checked.
  */
 const defaultKeyringLookup = async (service: string, username: string): Promise<string | undefined> => {
-  const { execFile } = await import("node:child_process")
-  const env = { ...process.env }
-  if (!env.DBUS_SESSION_BUS_ADDRESS) {
-    const uid = typeof process.getuid === "function" ? process.getuid() : 1000
-    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${uid}/bus`
-  }
-  let tool: string
-  try {
-    tool = await findSecretTool()
-  } catch {
-    return undefined
-  }
-  return new Promise<string | undefined>((resolve) => {
-    execFile(
-      tool,
-      ["lookup", "service", service, "username", username],
-      { env, timeout: 15_000, maxBuffer: 1 << 20 },
-      (error, out) => {
-        if (error) return resolve(undefined)
-        const value = out.trim()
-        resolve(value ? value : undefined)
-      },
-    )
-  })
+  const { lookupSecretService } = await import("./secret-service.js")
+  return lookupSecretService(service, username)
 }
 
 const defaultReadFile = async (path: string): Promise<string | undefined> => {
