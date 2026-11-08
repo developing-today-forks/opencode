@@ -12,6 +12,7 @@ import { discoverPluginRuntimeSpecifiers, pluginRuntimeLoaderCode } from "@openc
 import { buildAppArchive } from "./app-assets"
 import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
 import { resolveOpencodePty } from "./opencode-pty"
+import { BUN_DOWNLOAD_TIMEOUT_MS, verifyAndExtractBunArchive } from "./bun-archive"
 import { NativeArch } from "../../../script/native-arch"
 
 const dir = path.resolve(import.meta.dirname, "..")
@@ -139,6 +140,53 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       )
     },
   }
+  // sharp is statically imported by @huggingface/transformers but only
+  // CALLED for image inputs; its native binding cannot be located from
+  // inside a compiled binary (it resolves its .node relative to its
+  // package on disk), so loading the real package makes even TEXT
+  // embeddings fail in the packaged binary (#1727). Rewrite the one
+  // static import in transformers' dist bundle to a throwing stub, the
+  // same shape the Node bundle uses (vite.node.config.ts, #1615): text
+  // embeddings never reach it, and an image input throws this message
+  // instead of sharp's misleading install advice. A resolve-level stub
+  // is NOT equivalent here: it reshapes the split-chunk graph and
+  // breaks transformers' runtime requireFromHere("onnxruntime-node")
+  // (verified while fixing #1727). onnxruntime-node itself is NOT
+  // stubbed — it is the native-onnx backend; its shared library is
+  // shipped by the packaging (nix/opencode.nix) instead.
+  const sharpStubPlugin: BunPlugin = {
+    name: "sharp-stub",
+    setup(build) {
+      build.onLoad({ filter: /@huggingface[/\\]transformers[/\\]dist[/\\]transformers\.node\.mjs$/ }, async (args) => {
+        const source = await Bun.file(args.path).text()
+        const stub =
+          'const sharp = () => { throw new Error("sharp is unavailable in the compiled OpenCode binary; image inputs are unsupported there — text embeddings do not use sharp (#1727)") };'
+        // The dist bundle also loads onnxruntime-node through a runtime
+        // createRequire (requireFromHere), which cannot resolve the
+        // package from inside $bunfs and throws at module init. A plain
+        // static require is visible to the bundler and resolves to the
+        // same package embeddings-native imports. (The Node bundle
+        // rewrites this same call to a stub; the Bun build needs the
+        // real backend.)
+        // Each rewrite is asserted on its own (#1788): a combined
+        // transformed === source check only catches BOTH rewrites
+        // failing, so a respelled sharp import (a routine bundle
+        // formatting change) used to pass the guard with the real
+        // sharp import still in place — silently restoring the
+        // #1727 packaged-binary failure.
+        const withoutSharp = source.replace('import sharp from "sharp";', stub)
+        if (withoutSharp === source || withoutSharp.includes('from "sharp"'))
+          throw new Error("Failed to rewrite the transformers sharp loader")
+        const transformed = withoutSharp.replace(
+          'requireFromHere("onnxruntime-node")',
+          'require("onnxruntime-node")',
+        )
+        if (transformed === withoutSharp || transformed.includes('requireFromHere("onnxruntime-node")'))
+          throw new Error("Failed to rewrite the transformers onnxruntime-node loader")
+        return { contents: transformed, loader: "js" }
+      })
+    },
+  }
   const parcelWatcherPackage = `@parcel/watcher-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi ?? "glibc"}` : ""}`
   const parcelWatcherPlugin: BunPlugin = {
     name: "parcel-watcher-binding",
@@ -159,6 +207,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     plugins: [
       appAssetsPlugin,
       solidPlugin,
+      sharpStubPlugin,
       parcelWatcherPlugin,
       opencodePtyPlugin,
       pluginRuntimePlugin,
@@ -241,32 +290,41 @@ async function compileExecutable(item: (typeof allTargets)[number]) {
     .join("-")
   const cache = path.join(outdir, ".bun", release)
   const executable = path.join(cache, name, item.os === "win32" ? "bun.exe" : "bun")
-  if (await Bun.file(executable).exists()) return executable
+  const verified = path.join(cache, name, ".verified")
+  if ((await Bun.file(executable).exists()) && (await Bun.file(verified).exists())) return executable
 
   await mkdir(cache, { recursive: true })
   const archive = path.join(cache, `${name}.zip`)
   const assets = await compileReleaseAssets(release)
   const url = assets.get(`${name}.zip`)
   if (!url) throw new Error(`Bun release ${release} does not include ${name}.zip`)
+  const checksumsUrl = assets.get("SHASUMS256.txt")
+  if (!checksumsUrl) throw new Error(`Bun release ${release} does not include SHASUMS256.txt`)
   const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
-  const response = await fetch(url, {
-    headers: { Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-  })
+  const headers = { Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+  const [checksumsResponse, response] = await Promise.all([
+    fetch(checksumsUrl, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+    fetch(url, { headers, signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS) }),
+  ])
+  if (!checksumsResponse.ok)
+    throw new Error(`Failed to download Bun release checksums ${release}: ${checksumsResponse.status}`)
   if (!response.ok) throw new Error(`Failed to download ${name} from Bun release ${release}: ${response.status}`)
-  // Stream to disk instead of `Bun.write(archive, response)`: passing the Response object
-  // hangs forever if it gets GC'd mid-download (https://github.com/oven-sh/bun/issues/40278).
-  const sink = Bun.file(archive).writer()
-  for await (const chunk of response.body!) await sink.write(chunk)
-  await sink.end()
-  await $`unzip -oq ${archive} -d ${cache}`
+  const [data, checksums] = await Promise.all([response.arrayBuffer(), checksumsResponse.text()])
+  const expected = await verifyAndExtractBunArchive(new Uint8Array(data), checksums, `${name}.zip`, async () => {
+    await Bun.write(archive, data)
+    await $`unzip -oq ${archive} -d ${cache}`
+  })
   await rm(archive)
+  await Bun.write(verified, `${expected}\n`)
   return executable
 }
 
 function compileReleaseAssets(release: string) {
   const existing = releaseAssets.get(release)
   if (existing) return existing
-  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`)
+  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, {
+    signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS),
+  })
     .then(async (response) => {
       if (!response.ok) throw new Error(`Failed to resolve Bun release ${release}: ${response.status}`)
       const data: unknown = await response.json()

@@ -262,7 +262,9 @@ export const make = Effect.fn("PluginHost.make")(function* (
         }),
     },
     model: {
-      list: () => response(models.available()),
+      // Execution-time surface (#230): prompt hooks look the executing model up
+      // here, so it serves the catalog (enabled incl. hidden), not the picker list.
+      list: () => response(models.catalog()),
       default: () => response(models.default()),
       reload: models.reload,
       transform: (callback) =>
@@ -490,7 +492,7 @@ export const make = Effect.fn("PluginHost.make")(function* (
       write: (input) => messaging.send(input, { kind: input.kind }),
     },
     permission: {
-      hook: (name, callback) => hooks.register("permission", name, callback),
+      hook: (name, callback) => hooks.register("permission", name, callback, undefined, pluginID),
       list: (input) => permission.forSession(input.sessionID),
       get: (input) =>
         permission
@@ -555,13 +557,13 @@ export const make = Effect.fn("PluginHost.make")(function* (
     },
     storage: storage(kv, pluginID),
     shell: {
-      hook: (name, callback) => hooks.register("shell", name, callback),
+      hook: (name, callback) => hooks.register("shell", name, callback, undefined, pluginID),
     },
     tool: {
       transform: tools.transform,
       reload: tools.reload,
       list: tools.list,
-      hook: (name, callback) => hooks.register("tool", name, callback),
+      hook: (name, callback) => hooks.register("tool", name, callback, undefined, pluginID),
     },
     vcs: {
       get: () => response(vcs.info()),
@@ -623,7 +625,7 @@ export const make = Effect.fn("PluginHost.make")(function* (
         ),
     },
     session: {
-      hook: (name, callback, options) => hooks.register("session", name, callback, options),
+      hook: (name, callback, options) => hooks.register("session", name, callback, options, pluginID),
       list: Effect.fn("PluginHost.session.list")(function* (input) {
         const query: SessionListInput = input ?? {}
         // A cursor replaces the request filters, matching the HTTP handler: it already embeds them.

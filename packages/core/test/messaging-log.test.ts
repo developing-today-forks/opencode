@@ -195,4 +195,44 @@ describe("MessagingLog.entries", () => {
   test("clip truncates plainly when the omission marker alone exceeds the limit", () => {
     expect(MessagingLog.clip("a".repeat(100), 10)).toBe("a".repeat(10))
   })
+
+  // Oracle (#1966): the house no-split rule (messaging/search.ts trigrams,
+  // session compaction) — a cut that lands inside a surrogate pair drops the
+  // pair whole, so clipped text is always well-formed.
+  test("clip never splits a surrogate pair at the head cut", () => {
+    const astral = "\u{1D11E}"
+    for (const chars of [50, 60, 100]) {
+      const head = Math.ceil(chars * 0.7)
+      const clipped = MessagingLog.clip("a".repeat(head - 1) + astral + "b".repeat(200), chars)
+      expect(clipped.isWellFormed()).toBe(true)
+      expect(clipped).not.toContain(astral)
+      expect(clipped.length).toBeLessThanOrEqual(chars)
+    }
+  })
+
+  test("clip never splits a surrogate pair at the tail cut", () => {
+    const astral = "\u{1D11E}"
+    for (const chars of [70, 71, 72, 73]) {
+      const clipped = MessagingLog.clip("a".repeat(300) + astral, chars)
+      expect(clipped.isWellFormed()).toBe(true)
+      expect(clipped).not.toContain(astral)
+      expect(clipped.length).toBeLessThanOrEqual(chars)
+    }
+  })
+
+  test("clip never splits a surrogate pair in the plain-truncation fallback", () => {
+    const astral = "\u{1D11E}"
+    const clipped = MessagingLog.clip("a".repeat(9) + astral + "b".repeat(100), 10)
+    expect(clipped).toBe("a".repeat(9))
+    expect(clipped.isWellFormed()).toBe(true)
+  })
+
+  test("clip output is well-formed and within budget for astral text at every budget", () => {
+    const text = ("x\u{1F600}y".repeat(120) + "z".repeat(37)).repeat(3)
+    for (let chars = 1; chars <= 200; chars++) {
+      const clipped = MessagingLog.clip(text, chars)
+      expect(clipped.isWellFormed()).toBe(true)
+      expect(clipped.length).toBeLessThanOrEqual(chars)
+    }
+  })
 })

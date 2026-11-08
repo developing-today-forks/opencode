@@ -58,6 +58,92 @@ function runtimeRequirePlugin(): Plugin {
   }
 }
 
+/**
+ * The Node bundle must not inline native-binding packages whose loaders
+ * dynamically require a platform .node file: @rollup/plugin-commonjs cannot
+ * resolve those requires, so the bundle throws during initialisation and
+ * EVERY command dies before --version (#1615). onnxruntime-node arrives via
+ * @opencode/core's embeddings-native (a lazy `await import` that
+ * inlineDynamicImports flattens into the startup graph) and via
+ * @huggingface/transformers, which also statically imports sharp.
+ *
+ * The default embedding registration is native-onnx after the deliberate
+ * #1690 flip. Per #1792's triaged contract, native-onnx embeddings are
+ * explicitly unsupported in this Node bundle; core checks the build marker
+ * and rejects at the embeddings surface before reaching these bindings.
+ * Both specifiers still resolve to stubs here (the Bun build never sees
+ * this config), keeping startup safe and acting as a backstop for accidental
+ * direct use. The graph guard below fails the build if the real packages
+ * re-enter or the onnxruntime-node stub disappears.
+ */
+function nativeStubPlugin(): Plugin {
+  const message =
+    "native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)"
+  return {
+    name: "opencode:native-stub",
+    enforce: "pre",
+    resolveId(id) {
+      if (id === "onnxruntime-node") return "\0opencode:onnxruntime-node-stub"
+      if (id === "sharp") return "\0opencode:sharp-stub"
+    },
+    transform(code, id) {
+      // @huggingface/transformers loads onnxruntime-node through a runtime
+      // createRequire (src/backends/onnx-node.js), which resolveId cannot
+      // intercept: left alone it requires the real package from beside the
+      // bundle at startup and throws MODULE_NOT_FOUND. Rewrite that loader
+      // to the same stub, like runtimeRequirePlugin rewrites Turndown.
+      const normalized = id.replaceAll("\\", "/")
+      if (normalized.endsWith("/@huggingface/transformers/src/backends/onnx-node.js"))
+        return `const unavailable = () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") }
+class Tensor { constructor() { unavailable() } }
+const InferenceSession = { create: unavailable }
+export default { InferenceSession, Tensor, env: {} }`
+      // The published package resolves to its prebuilt dist bundle, where
+      // the same loader survives as a single requireFromHere call assigned
+      // to onnx_node_default: swap just that call for the stub object.
+      if (!normalized.endsWith("/@huggingface/transformers/dist/transformers.node.mjs")) return
+      const stub = `({ InferenceSession: { create: () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, Tensor: class { constructor() { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, env: {} })`
+      const transformed = code.replace('requireFromHere("onnxruntime-node")', stub)
+      if (transformed === code) this.error("Failed to rewrite the transformers onnxruntime-node loader")
+      return transformed
+    },
+    load(id) {
+      if (id === "\0opencode:onnxruntime-node-stub")
+        return `const unavailable = () => { throw new Error(${JSON.stringify(message)}) }
+class Tensor { constructor() { unavailable() } }
+const InferenceSession = { create: unavailable }
+const env = {}
+export { InferenceSession, Tensor, env }
+export default { InferenceSession, Tensor, env }`
+      if (id === "\0opencode:sharp-stub") return `export default () => { throw new Error(${JSON.stringify(message)}) }`
+    },
+  }
+}
+
+/** Build-time guard for the stub above (#1615): the real onnxruntime-node /
+ * sharp packages must never re-enter the Node bundle graph, and the stubs
+ * must be present — a regression fails here in seconds instead of inside
+ * the 60-140s serve-handover tests. */
+function nativeStubGraphPlugin(): Plugin {
+  return {
+    name: "opencode:native-stub-graph",
+    generateBundle() {
+      const ids = Array.from(this.getModuleIds(), (id) => id.replaceAll("\\", "/"))
+      const leaked = ids.filter(
+        (id) => id.includes("/node_modules/onnxruntime-node/") || id.includes("/node_modules/sharp/"),
+      )
+      if (leaked.length > 0)
+        this.error(
+          `Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`,
+        )
+      if (!ids.some((id) => id.includes("opencode:onnxruntime-node-stub")))
+        this.error(
+          "Node bundle graph is missing the onnxruntime-node stub (#1615): embeddings-native left the graph or the stub plugin stopped resolving",
+        )
+    },
+  }
+}
+
 function simulationGraphPlugin(): Plugin {
   return {
     name: "opencode:simulation-graph",
@@ -264,6 +350,8 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       rawTextPlugin(),
       runtimeRequirePlugin(),
       fffNodePlugin(),
+      nativeStubPlugin(),
+      nativeStubGraphPlugin(),
       simulationGraphPlugin(),
       solid({
         solid: {
@@ -281,6 +369,7 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       OPENCODE_ARTIFACT: JSON.stringify("cli-node"),
       ...(input.highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(input.highlights) } : {}),
       OPENCODE_LIBC: input.target.platform === "linux" ? JSON.stringify("glibc") : "undefined",
+      "process.env.OPENCODE_NODE_BUNDLE": JSON.stringify("1"),
       FFF_LIBC: input.target.platform === "linux" ? JSON.stringify("gnu") : "undefined",
       "process.env.WS_NO_BUFFER_UTIL": JSON.stringify("1"),
     },

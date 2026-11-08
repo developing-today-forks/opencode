@@ -134,6 +134,34 @@ test("custom theme precedence follows directory order", async () => {
   await expect(discoverThemes([global, project])).resolves.toEqual({ custom: { source: "project" } })
 })
 
+test("skips malformed custom themes without losing valid themes from any directory", async () => {
+  await using tmp = await tmpdir()
+  const global = path.join(tmp.path, "global")
+  const project = path.join(tmp.path, "project")
+  await mkdir(path.join(global, "themes"), { recursive: true })
+  await mkdir(path.join(project, "themes"), { recursive: true })
+  await writeFile(path.join(global, "themes", "good-a.json"), JSON.stringify({ source: "a" }))
+  await writeFile(path.join(global, "themes", "broken.json"), "{ not json")
+  await writeFile(path.join(project, "themes", "good-b.json"), JSON.stringify({ source: "b" }))
+
+  await expect(discoverThemes([global, project])).resolves.toEqual({
+    "good-a": { source: "a" },
+    "good-b": { source: "b" },
+  })
+})
+
+test("a malformed later theme does not shadow an earlier valid theme", async () => {
+  await using tmp = await tmpdir()
+  const global = path.join(tmp.path, "global")
+  const project = path.join(tmp.path, "project")
+  await mkdir(path.join(global, "themes"), { recursive: true })
+  await mkdir(path.join(project, "themes"), { recursive: true })
+  await writeFile(path.join(global, "themes", "custom.json"), JSON.stringify({ source: "global" }))
+  await writeFile(path.join(project, "themes", "custom.json"), "{ not json")
+
+  await expect(discoverThemes([global, project])).resolves.toEqual({ custom: { source: "global" } })
+})
+
 test("theme directories include global config before project directories", async () => {
   await using tmp = await tmpdir()
   const global = path.join(tmp.path, "global")

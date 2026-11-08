@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import {
+  DEFAULT_EMBEDDING_MODEL,
   EMBEDDING_MODELS,
   Embeddings,
   embeddingModelEntries,
@@ -12,6 +13,7 @@ import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { testEffect } from "./lib/effect"
+import { withEnv } from "./fixture/env"
 
 // ---------------------------------------------------------- registry + translation
 
@@ -134,6 +136,8 @@ const stubModel: EmbeddingModel = {
 
 const seen: Array<Record<string, unknown>> = []
 let stubDimension = 4
+let stubIndices: number[] | undefined
+let stubOmitLast = false
 const stub = Bun.serve({
   port: 0,
   fetch: async (request) => {
@@ -141,13 +145,17 @@ const stub = Bun.serve({
     seen.push(body)
     const inputs = body.input as string[]
     const dimensions = typeof body.dimensions === "number" ? body.dimensions : stubDimension
+    let data = inputs.map((text, index) => ({
+      object: "embedding",
+      index,
+      embedding: Array.from({ length: dimensions }, (_, axis) => (axis === 0 ? text.length : index)),
+    }))
+    const indices = stubIndices
+    if (indices) data = data.map((entry, position) => ({ ...entry, index: indices[position] ?? entry.index }))
+    if (stubOmitLast) data = data.slice(0, -1)
     return Response.json({
       object: "list",
-      data: inputs.map((text, index) => ({
-        object: "embedding",
-        index,
-        embedding: Array.from({ length: dimensions }, (_, axis) => (axis === 0 ? text.length : index)),
-      })),
+      data,
       usage: { prompt_tokens: 11, total_tokens: 11 },
     })
   },
@@ -161,6 +169,21 @@ ModelRouteLog.setSink((event) => {
 })
 
 const it = testEffect(Embeddings.layer.pipe(Layer.provide(FetchHttpClient.layer)))
+
+it.effect("rejects native-onnx embeddings at the surface in the Node bundle", () =>
+  withEnv({ OPENCODE_NODE_BUNDLE: "1" }, () =>
+    Effect.gen(function* () {
+      const embeddings = yield* Embeddings.Service
+      const result = yield* Effect.result(embeddings.embed({ model: DEFAULT_EMBEDDING_MODEL, inputs: ["hello"] }))
+      expect(result._tag).toBe("Failure")
+      if (result._tag === "Failure") {
+        expect(result.failure.message).toBe(
+          "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
+        )
+      }
+    }),
+  ),
+)
 
 it.effect("embeds through the door against a stub backend and records a route_attempt row", () =>
   Effect.gen(function* () {
@@ -187,6 +210,39 @@ it.effect("passes a supported dimensions request to the backend and accepts its 
     const result = yield* embeddings.embed({ model, inputs: ["hi"], dimensions: 2 })
     expect(result.vectors[0]).toHaveLength(2)
     expect(seen.at(-1)).toMatchObject({ dimensions: 2 })
+  }),
+)
+
+it.effect("fails loudly when the backend returns a duplicated index", () =>
+  Effect.gen(function* () {
+    stubIndices = [0, 0, 1]
+    const embeddings = yield* Embeddings.Service
+    const result = yield* Effect.result(embeddings.embed({ model, inputs: ["a", "bb", "ccc"] }))
+    stubIndices = undefined
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(result.failure.message).toContain("invalid index set")
+  }),
+)
+
+it.effect("fails loudly when the backend returns an out-of-range index", () =>
+  Effect.gen(function* () {
+    stubIndices = [0, 1, 99]
+    const embeddings = yield* Embeddings.Service
+    const result = yield* Effect.result(embeddings.embed({ model, inputs: ["a", "bb", "ccc"] }))
+    stubIndices = undefined
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(result.failure.message).toContain("invalid index set")
+  }),
+)
+
+it.effect("fails loudly when the backend returns fewer embeddings than inputs", () =>
+  Effect.gen(function* () {
+    stubOmitLast = true
+    const embeddings = yield* Embeddings.Service
+    const result = yield* Effect.result(embeddings.embed({ model, inputs: ["a", "bb"] }))
+    stubOmitLast = false
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(result.failure.message).toContain("expected 2 embeddings")
   }),
 )
 

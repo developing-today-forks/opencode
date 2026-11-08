@@ -85,6 +85,43 @@ describe("ModelRouteLog", () => {
       expect(yield* ModelRouteLog.recentFailures(db, 0)).toHaveLength(1)
     }),
   )
+
+  it.live("counts content-policy rejections separately from failures", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRouteLog.record({ kind: "attempt", row: attempt({}) })
+      for (let i = 0; i < 3; i++)
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ContentPolicy", message: "blocked by policy" }),
+          }),
+        })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          outcome: "failure",
+          output_started: false,
+          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "You exceeded your current quota" }),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
+      expect(stats).toHaveLength(1)
+      expect(stats[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      const hourly = yield* ModelRouteLog.hourlyStats(db, 0)
+      expect(hourly).toHaveLength(1)
+      expect(hourly[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      // The per-tag breakdown still sees the policy class by its own tag.
+      const breakdown = yield* ModelRouteLog.errorBreakdown(db, 0)
+      expect(breakdown.find((row) => row.tag === "ContentPolicy")?.count).toBe(3)
+    }),
+  )
 })
 
 describe("per-pool history", () => {
@@ -1320,6 +1357,164 @@ describe("hedge accuracy", () => {
         { providerID: "anthropic", modelID: "m", hedges: 1, wins: 1 },
         { providerID: "openai", modelID: "m", hedges: 1, wins: 0 },
       ])
+    }),
+  )
+})
+
+describe("demotion restore (#1151)", () => {
+  const quotaAttempt = (provider_id: string, at: number, credential_id?: string) =>
+    ModelRouteLog.record({
+      kind: "attempt",
+      row: attempt({
+        provider_id,
+        model_id: "m",
+        time_started: at - 100,
+        time_ended: at,
+        outcome: "failure",
+        output_started: false,
+        ...(credential_id ? { credential_id } : {}),
+        ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "out of quota" }),
+      }),
+    })
+
+  it.live("demotion counts survive a restart: the ledger rehydrates the hot cache", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-restart", at)
+      // Only two quota errors: below the threshold of three, even after a restore.
+      for (const at of [now - 2_000, now - 1_000]) quotaAttempt("demote-few", at)
+      // Non-quota failures are not demotion evidence, however many the ledger holds.
+      for (const at of [now - 3_000, now - 2_000, now - 1_000])
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            provider_id: "demote-other",
+            model_id: "m",
+            time_started: at - 100,
+            time_ended: at,
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ProviderInternal", message: "upstream said no" }),
+          }),
+        })
+      yield* Effect.sleep("100 millis")
+
+      // The simulated restart: the in-process cache is wiped, the ledger is all that remains.
+      ModelRoute.resetHealth()
+      const target = (providerID: string) => ModelRoute.ref({ providerID, model: "m" })
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(false)
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-other"), now)).toBe(false)
+      // A repeated restore over the same ledger must not count an attempt twice:
+      // demote-few would cross the threshold if its two rows were replayed again.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+    }),
+  )
+
+  it.live("restored counts still expire with the demotion window", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const fiveHoursAgo = now - 5 * 3_600_000
+      for (const at of [fiveHoursAgo, fiveHoursAgo + 1_000, fiveHoursAgo + 2_000]) quotaAttempt("demote-old", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-old", model: "m" })
+      // The rows are restored (they demote when judged inside their window) but the
+      // default four-hour window has passed by now, so the target is not demoted.
+      expect(ModelRoute.demoted(target, fiveHoursAgo + 3_000)).toBe(true)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+
+  it.live("a credential's quota rows restore onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-cred", at, "cred-a")
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-cred", model: "m" })
+      expect(ModelRoute.demoted(target, now, "cred-a")).toBe(true)
+      expect(ModelRoute.demoted(target, now, "cred-b")).toBe(false)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+
+  it.live("distinct attempts that share a millisecond each count toward demotion", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // Three distinct ledger rows, one time_ended: live recordQuota would count all
+      // three, so the restore must too — deduplication is by row id, not timestamp.
+      for (let i = 0; i < 3; i++) quotaAttempt("demote-same-ms", now - 1_000)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-same-ms", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(true)
+    }),
+  )
+
+  it.live("restored history survives when the judging window registers after the restore", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // One failure inside the default retention, two far outside it: replaying
+      // through the default four-hour retention would keep only the latest.
+      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000]) quotaAttempt("demote-late-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // No demotion config is registered yet, so retention at restore time is
+      // the default; the seven-day policy only arrives afterwards.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-late-window", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
+    }),
+  )
+
+  it.live("rows older than a day restore when the configured window reaches them", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const twoDaysAgo = now - 2 * 86_400_000
+      for (const at of [twoDaysAgo, twoDaysAgo + 1_000, twoDaysAgo + 2_000]) quotaAttempt("demote-long-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // A seven-day demotion window (the schema admits up to ninety days): rows from
+      // two days ago still count, so the restore must reach back past one day.
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        yield* ModelRouteLog.restoreDemotionFrom(db)
+        const target = ModelRoute.ref({ providerID: "demote-long-window", model: "m" })
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
     }),
   )
 })

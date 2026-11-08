@@ -22,10 +22,13 @@ on:
       - "nix/scripts/**"
       - "patches/**"
       - ".github/workflows/nix-hashes.yml"
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a restamp run (#1580): with cancel-in-progress: true each new
+  # merge killed the previous run before it could restamp, so the FOD hash
+  # rotted silently. Queue runs instead; a failed run is visible in Actions
+  # and a changed hash lands as the update-hashes commit below.
+  cancel-in-progress: false
 
 jobs:
   # Native runners required: bun install cross-compilation flags (--os/--cpu)

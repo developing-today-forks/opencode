@@ -344,6 +344,12 @@ export const onRestoreLimits = (next: typeof restoreLimits) => {
   restoreLimits = next
 }
 
+type DemotionRow = { id: number; time: number; providerID: string; modelID: string; credentialID?: string }
+let restoreDemotion: ((rows: readonly DemotionRow[]) => void) | undefined
+export const onRestoreDemotion = (next: typeof restoreDemotion) => {
+  restoreDemotion = next
+}
+
 /** Cooldowns still in force, rebuilt from the health history so a restart does not send traffic
  * straight back to a target that was just failing. */
 export const restoreCooldownsFrom = (db: Database.Interface["db"]) =>
@@ -485,6 +491,53 @@ export const restoreUsageFrom = (db: Database.Interface["db"]) =>
     )
   })
 
+/** The widest demotion window either config surface admits: both
+ * `experimental.model_route_demotion.window_ms` and `routes.settings.demotion.windowMs`
+ * cap at 7,776,000,000 ms (90 days) in the schema, so the demotion restore below reads
+ * that far back. Seeding retains the whole horizon (a judging Location may only
+ * register after the restore), while judging (`demoted`) applies the actually
+ * configured window over what is retained, so a shorter window never counts
+ * the older rows. */
+export const MAX_DEMOTION_WINDOW_MS = 7_776_000_000
+
+/** Quota-error attempts inside the widest demotion window, so demotion counts survive
+ * a restart (#1151). A quota error is the attempt whose `error_tag` is `QuotaExceeded`:
+ * that is the same failure class `ModelRoute.failed` counts live (its `hint.quota`),
+ * and `failureFields` records it on the attempt row for session and facade traffic
+ * alike, so both traffic classes rehydrate the one shared demotion count. Each row
+ * keeps its ledger id: restored attempts are deduplicated by that identity, never by
+ * timestamp (distinct attempts can share a millisecond). */
+export const restoreDemotionFrom = (db: Database.Interface["db"]) =>
+  Effect.gen(function* () {
+    const rows = yield* db
+      .select({
+        id: RouteAttemptTable.id,
+        time: RouteAttemptTable.time_ended,
+        providerID: RouteAttemptTable.provider_id,
+        modelID: RouteAttemptTable.model_id,
+        credentialID: RouteAttemptTable.credential_id,
+      })
+      .from(RouteAttemptTable)
+      .where(
+        and(
+          gte(RouteAttemptTable.time_ended, Date.now() - MAX_DEMOTION_WINDOW_MS),
+          eq(RouteAttemptTable.error_tag, "QuotaExceeded"),
+        ),
+      )
+      .orderBy(asc(RouteAttemptTable.time_ended))
+      .all()
+      .pipe(Effect.orElseSucceed(() => []))
+    restoreDemotion?.(
+      rows.map((row) => ({
+        id: row.id,
+        time: row.time,
+        providerID: row.providerID,
+        modelID: row.modelID,
+        ...(row.credentialID ? { credentialID: row.credentialID } : {}),
+      })),
+    )
+  })
+
 /** Hands still-active stored notes to the routing module. Runs when the node starts. */
 export const restoreNotes = (db: Database.Interface["db"]) =>
   Effect.gen(function* () {
@@ -512,6 +565,7 @@ const layer = Layer.effectDiscard(
     yield* restoreNotes(db)
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db)
+    yield* restoreDemotionFrom(db)
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
@@ -535,6 +589,8 @@ export interface TargetStats {
   readonly modelID: string
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections, counted separately and never part of `failures` (#1084). */
+  readonly policyRejections: number
   readonly timeouts: number
   readonly avgFirstTokenMs: number | null
   readonly avgResponseMs: number | null
@@ -548,7 +604,10 @@ export const targetStats = (db: Database.Interface["db"], since: number, routeID
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      // Content-policy rejections are refusals of a request, not target failures: they are
+      // counted separately (policyRejections) and never enter failure/health rates (#1084).
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
       timeouts: sql<number>`sum(case when ${RouteAttemptTable.outcome} = 'timeout' then 1 else 0 end)`,
       avgFirstTokenMs: sql<number | null>`avg(${RouteAttemptTable.first_token_ms})`,
       avgResponseMs: sql<number | null>`avg(${RouteAttemptTable.response_ms})`,
@@ -602,6 +661,8 @@ export interface HourlyStat {
   readonly hour: number
   readonly attempts: number
   readonly failures: number
+  /** Content-policy rejections in the hour, kept out of `failures` (#1084). */
+  readonly policyRejections: number
 }
 
 /** Failure counts by hour of day, so a target that only fails at certain times can be told apart
@@ -613,7 +674,8 @@ export const hourlyStats = (db: Database.Interface["db"], since: number) =>
       modelID: RouteAttemptTable.model_id,
       hour: sql<number>`cast(strftime('%H', ${RouteAttemptTable.time_started} / 1000, 'unixepoch') as integer)`,
       attempts: count(),
-      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end)`,
+      failures: sql<number>`sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end)`,
+      policyRejections: sql<number>`sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end)`,
     })
     .from(RouteAttemptTable)
     .where(gte(RouteAttemptTable.time_started, since))
@@ -731,6 +793,30 @@ export const turnAttempts = (db: Database.Interface["db"], since: number, sessio
     .limit(ROW_LIMIT)
     .all()
 
+/** One session's own attempts, newest first, with the serving leaf and failover of each step (#1891).
+ * This is the per-session readout behind "which leaf served my last step": route_attempt already
+ * records provider/model/variant per attempt plus `failed_over_to`; nothing else surfaces it back
+ * to the session itself. Session-local by construction — it only ever returns the named session's rows. */
+export const sessionAttempts = (db: Database.Interface["db"], sessionID: string, limit = 50) =>
+  db
+    .select({
+      routeID: RouteAttemptTable.route_id,
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      variant: RouteAttemptTable.variant,
+      assistantMessageID: RouteAttemptTable.assistant_message_id,
+      outcome: RouteAttemptTable.outcome,
+      failedOverTo: RouteAttemptTable.failed_over_to,
+      hedged: RouteAttemptTable.hedged,
+      timeStarted: RouteAttemptTable.time_started,
+      timeEnded: RouteAttemptTable.time_ended,
+    })
+    .from(RouteAttemptTable)
+    .where(eq(RouteAttemptTable.session_id, sessionID))
+    .orderBy(desc(RouteAttemptTable.time_started))
+    .limit(limit)
+    .all()
+
 /** Selections in the window, newest first: who was eligible, the weights and exclusions behind each, and who was chosen. */
 export const decisionRows = (db: Database.Interface["db"], since: number, routeID?: string) =>
   db
@@ -752,7 +838,7 @@ export const decisionRows = (db: Database.Interface["db"], since: number, routeI
 /** The usage columns every rollup below shares: request and failure counts, tokens by kind, and cost. */
 const usageColumns = {
   requests: count(),
-  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') then 1 else 0 end), 0)`,
+  failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
   input: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
   output: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
   reasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,

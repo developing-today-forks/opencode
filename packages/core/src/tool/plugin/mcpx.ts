@@ -21,7 +21,13 @@ import {
   stepTurnTtl,
 } from "./mcpx-projection.js"
 export * as McpxProjection from "./mcpx-projection.js"
-import { DaemonHTTPError, DaemonTimeoutError, DaemonUnreachableError, ensureScriptReady, failureOf } from "./mcpx-secrets.js"
+import {
+  DaemonHTTPError,
+  DaemonTimeoutError,
+  DaemonUnreachableError,
+  ensureScriptReady,
+  failureOf,
+} from "./mcpx-secrets.js"
 export * as McpxSecrets from "./mcpx-secrets.js"
 import { CodeModeRules } from "../../codemode/rules.js"
 import { readBoundedResponseText } from "../http-body.js"
@@ -30,9 +36,11 @@ export const name = "mcpx"
 
 const defaultSocketPath = (): string => {
   if (process.env.MCPX_SOCKET) return process.env.MCPX_SOCKET
-  const stateDir = process.env.MCPX_STATE_DIR ||
-    (process.env.XDG_STATE_HOME ? join(process.env.XDG_STATE_HOME!, "mcpx") :
-    join(homedir(), ".local", "state", "mcpx"))
+  const stateDir =
+    process.env.MCPX_STATE_DIR ||
+    (process.env.XDG_STATE_HOME
+      ? join(process.env.XDG_STATE_HOME!, "mcpx")
+      : join(homedir(), ".local", "state", "mcpx"))
   return join(stateDir, "daemon.sock")
 }
 
@@ -41,7 +49,8 @@ const findDaemonSocket = (): string | undefined => {
   if (existsSync(direct)) return direct
 
   // Check state directory for daemon info files
-  const stateDir = process.env.MCPX_STATE_DIR ||
+  const stateDir =
+    process.env.MCPX_STATE_DIR ||
     (process.env.XDG_STATE_HOME ? join(process.env.XDG_STATE_HOME, "mcpx") : join(homedir(), ".local", "state", "mcpx"))
   if (existsSync(stateDir)) {
     try {
@@ -245,7 +254,9 @@ const send = async (request: () => Promise<Response>, path: string, timeoutMs: n
     // The only abort source on these fetches is the timeout signal, whose
     // rejection is named TimeoutError (AbortError in older runtimes).
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
-      throw new DaemonTimeoutError(`mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`)
+      throw new DaemonTimeoutError(
+        `mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`,
+      )
     throw new DaemonUnreachableError(error instanceof Error ? error.message : String(error))
   }
   if (!res.ok) {
@@ -262,7 +273,9 @@ const send = async (request: () => Promise<Response>, path: string, timeoutMs: n
     () => new Error(`mcpx daemon response for ${path} exceeded ${daemonResponseMaxBytes} bytes`),
   ).catch((error) => {
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
-      throw new DaemonTimeoutError(`mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`)
+      throw new DaemonTimeoutError(
+        `mcpx daemon did not answer ${path} within ${timeoutMs}ms; the request may already be executing`,
+      )
     throw error
   })
   return JSON.parse(text)
@@ -373,6 +386,50 @@ export const ensureDaemon = async (): Promise<void> => {
   daemonEnsured = true
 }
 
+export const ExecInput = Schema.Struct({
+  source: Schema.String.annotate({ description: "TypeScript code to execute against tools.<server>.<method>()" }),
+})
+
+export const DiscoverInput = Schema.Struct({
+  namespace: Schema.optionalKey(
+    Schema.String.annotate({ description: "Namespace to show TypeScript signatures for; omit to list all" }),
+  ),
+})
+
+export const ObserveInput = Schema.Struct({
+  what: Schema.Literals(["log", "calls", "errors", "servers", "slowest"]).annotate({
+    description: "log for records, the rest are aggregate stats",
+  }),
+  since: Schema.optionalKey(
+    Schema.String.annotate({ description: "Duration or time cutoff (e.g. 15m, 2h, or RFC3339 timestamp)" }),
+  ),
+})
+
+export const ProjectInput = Schema.Struct({
+  namespaces: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description: "Namespaces to project tools from (e.g. ['neon', 'chrome_devtools'])",
+    }),
+  ),
+  tools: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description: "Specific tool names to project (e.g. ['click', 'take_screenshot'])",
+    }),
+  ),
+  ttl: Schema.optionalKey(
+    Schema.Number.annotate({
+      description:
+        "Optional number of turns this projection should remain active before auto-retracting (default: persistent until retracted)",
+    }),
+  ),
+})
+
+export const RetractInput = Schema.Struct({
+  targets: Schema.Array(Schema.String).annotate({
+    description: "Tool names or namespaces to retract (e.g. ['chrome_devtools', 'neon_describe_table_schema'])",
+  }),
+})
+
 export const Plugin = {
   id: "opencode.tools.mcpx",
   effect: Effect.fn("McpxTool.Plugin")(function* (ctx: Context) {
@@ -425,11 +482,10 @@ export const Plugin = {
         description: [
           "Run TypeScript against every MCP server at once via mcpx. Tools are bound as await tools.<namespace>.<tool>({...}) and only what you print comes back, saving context tokens. Top-level await is supported.",
           "Before any code runs, mcpx checks every server the script uses. A missing secret is waited for; if it is not provided, the call fails and nothing runs.",
+          "Cross-session messaging is built in, not an MCP server: the comms namespace provides tools.comms.msg (message other sessions, topics or the user; read, await and search messages), tools.comms.topics, and tools.comms.sessions. Run mcpx_discover with namespace \"comms\" for the entry points.",
           CodeModeRules.canonical,
         ].join(" "),
-        input: Schema.Struct({
-          source: Schema.String.annotate({ description: "TypeScript code to execute against tools.<server>.<method>()" }),
-        }),
+        input: ExecInput,
         output: Schema.Struct({
           output: Schema.String,
         }),
@@ -488,17 +544,32 @@ export const Plugin = {
         options: { codemode: false },
         description: [
           "List the MCP servers mcpx knows about, the tools scripts can call, and the tools that can be projected. Pass a namespace to show its TypeScript signatures. Call with no arguments first: the answer is small and tells you what else is worth asking for.",
+          "One namespace is built in and never comes from a server: comms, the cross-session messaging tools (msg, topics, sessions). The no-argument listing always names it, and passing namespace \"comms\" describes its entry points.",
           CodeModeRules.canonical,
         ].join(" "),
-        input: Schema.Struct({
-          namespace: Schema.optionalKey(Schema.String.annotate({ description: "Namespace to show TypeScript signatures for; omit to list all" })),
-        }),
+        input: DiscoverInput,
         output: Schema.Struct({
           output: Schema.String,
         }),
         execute: (input) =>
           Effect.gen(function* () {
             const namespace = input.namespace
+            // comms is built into this process (the messaging plugin), not served by the mcpx daemon:
+            // asking the daemon or the CLI for its types fails, so answer locally and reliably.
+            if (namespace === "comms") {
+              return {
+                output: {
+                  output: [
+                    "comms is a built-in namespace (no MCP server): inter-session communication. You act as your own session.",
+                    "Call its tools in an mcpx_exec script as tools.comms.<tool>({...}):",
+                    "- tools.comms.msg: message other sessions, topics or the user; read, await, search, inspect, hide or restore messages. Examples: tools.comms.msg({ to: 'parent', text }) direct message (wakes the recipient); tools.comms.msg({ mode: 'unread', wait: 60 }) wait for new messages; tools.comms.msg({ query: 'deploy failure' }) search by meaning.",
+                    "- tools.comms.topics: list, inspect and configure topics; subscribe or unsubscribe; list presets and template variables.",
+                    "- tools.comms.sessions: see your session chain (parent, root, children) and read any session's log.",
+                    "The full TypeScript signatures live in this session's Code Mode catalog, where the comms namespace is pinned.",
+                  ].join("\n"),
+                },
+              }
+            }
             const output = namespace
               ? yield* Effect.tryPromise(() => callDaemon(`/v1/types?namespace=${encodeURIComponent(namespace)}`)).pipe(
                   Effect.map((res: any) => (typeof res === "string" ? res : JSON.stringify(res, null, 2))),
@@ -508,13 +579,21 @@ export const Plugin = {
                   Effect.map((res: any) => {
                     const namespaces = Array.isArray(res) ? res : (res.namespaces ?? [])
                     const text = namespaces
-                      .map((n: any) => `${n.namespace}  (${n.tools ?? 0} tools)${n.description ? "  " + n.description : ""}`)
+                      .map(
+                        (n: any) =>
+                          `${n.namespace}  (${n.tools ?? 0} tools)${n.description ? "  " + n.description : ""}`,
+                      )
                       .join("\n")
                     return text || "No MCP namespaces active."
                   }),
                   Effect.catch(() => cliOutput(["ls"])),
                 )
-            return { output: { output } }
+            // The daemon listing only covers MCP servers; always name the built-in comms namespace too.
+            const listing =
+              namespace || /(^|\n)comms\b/.test(output)
+                ? output
+                : `${output}\ncomms  (built-in, 3 tools)  Inter-session communication: msg, topics, sessions. Pass namespace "comms" to mcpx_discover for the entry points.`
+            return { output: { output: listing } }
           }),
       })
 
@@ -526,12 +605,7 @@ export const Plugin = {
           "Query what mcpx has been doing: the durable log, or aggregate statistics. Use it when a call failed and you want to know why without running it again.",
           CodeModeRules.canonical,
         ].join(" "),
-        input: Schema.Struct({
-          what: Schema.Literals(["log", "calls", "errors", "servers", "slowest"]).annotate({
-            description: "log for records, the rest are aggregate stats",
-          }),
-          since: Schema.optionalKey(Schema.String.annotate({ description: "Duration or time cutoff (e.g. 15m, 2h, or RFC3339 timestamp)" })),
-        }),
+        input: ObserveInput,
         output: Schema.Struct({
           output: Schema.String,
         }),
@@ -561,11 +635,7 @@ export const Plugin = {
           "Project tools from mcpx namespaces for this session. A projected tool becomes a native tool named <namespace>_<tool> right away, and scripts can also call it as tools.<namespace>.<tool>(args). Projected tools stay until they are retracted or their ttl runs out.",
           CodeModeRules.canonical,
         ].join(" "),
-        input: Schema.Struct({
-          namespaces: Schema.optionalKey(Schema.Array(Schema.String).annotate({ description: "Namespaces to project tools from (e.g. ['neon', 'chrome_devtools'])" })),
-          tools: Schema.optionalKey(Schema.Array(Schema.String).annotate({ description: "Specific tool names to project (e.g. ['click', 'take_screenshot'])" })),
-          ttl: Schema.optionalKey(Schema.Number.annotate({ description: "Optional number of turns this projection should remain active before auto-retracting (default: persistent until retracted)" })),
-        }),
+        input: ProjectInput,
         output: Schema.Struct({
           output: Schema.String,
           projected: Schema.Array(Schema.String),
@@ -602,9 +672,7 @@ export const Plugin = {
           "Retract previously projected MCP tools from the native tool list and the Code Mode catalog, to reduce schema context bloat.",
           CodeModeRules.canonical,
         ].join(" "),
-        input: Schema.Struct({
-          targets: Schema.Array(Schema.String).annotate({ description: "Tool names or namespaces to retract (e.g. ['chrome_devtools', 'neon_describe_table_schema'])" }),
-        }),
+        input: RetractInput,
         output: Schema.Struct({
           output: Schema.String,
           retracted: Schema.Array(Schema.String),

@@ -47,6 +47,24 @@ function outputCursor(value: number | undefined) {
   return Math.floor(value)
 }
 
+/** The house timeout bound (#972): no single timer is armed past 2^31-1 ms. */
+export const MAX_TIMEOUT_MS = 2_147_483_647
+
+/**
+ * Timeout durations at the service boundary (#999). Callers reach the service directly
+ * (in-process, plugin hooks mutating the invocation), so a duration may arrive
+ * unvalidated even though the schemas restrict it to NonNegativeInt: a negative or NaN
+ * duration would complete Effect.sleep immediately and kill a just-started command as
+ * "timed out" at ~0 ms, and an infinite one would silently disable a timeout the caller
+ * believes is set. Policy: non-finite or negative durations take the documented
+ * disabled sentinel (0); a finite oversized duration clamps to MAX_TIMEOUT_MS so a set
+ * timeout stays set. Valid durations (0, positive, fractional) pass through untouched.
+ */
+function timeoutDuration(value: number) {
+  if (!Number.isFinite(value) || value < 0) return 0
+  return Math.min(value, MAX_TIMEOUT_MS)
+}
+
 function outputLimit(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value) || value < 0) return DEFAULT_OUTPUT_LIMIT
   return Math.max(Math.floor(value), 1)
@@ -410,8 +428,11 @@ const layer = () =>
                   if (timeoutFiber) yield* Fiber.interrupt(timeoutFiber)
                 })
 
-              command.timeout = (duration) =>
+              command.timeout = (input) =>
                 Effect.gen(function* () {
+                  // The one funnel both doors (create's post-hook invocation and
+                  // Shell.timeout) pass through: normalise here (#999).
+                  const duration = timeoutDuration(input)
                   if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
                   command.timeoutFiber = undefined
                   if (duration === 0 || command.info.status !== "running") return

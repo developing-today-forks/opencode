@@ -3,6 +3,8 @@ import * as path from "node:path"
 
 const RECORDINGS_DIR = path.resolve(import.meta.dir, "..", "test", "fixtures", "recordings")
 const MODELS_DEV_URL = "https://models.opencode.ai/api.json"
+const MODELS_DEV_FETCH_TIMEOUT_MS = 30_000
+const MODELS_DEV_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 type JsonRecord = Record<string, unknown>
 
@@ -216,7 +218,24 @@ const rowFor = (models: JsonRecord, file: string, cassette: unknown): Row | unde
 const money = (value: number) => (value === 0 ? "$0.000000" : `$${value.toFixed(6)}`)
 const tokens = (value: number) => value.toLocaleString("en-US")
 
-const models = (await (await fetch(MODELS_DEV_URL)).json()) as JsonRecord
+const fetchModels = async () => {
+  const response = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(MODELS_DEV_FETCH_TIMEOUT_MS) })
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error("models.dev response had no readable body")
+  const chunks: Array<Uint8Array> = []
+  let size = 0
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    size += chunk.value.byteLength
+    if (size > MODELS_DEV_MAX_RESPONSE_BYTES)
+      throw new Error(`models.dev response exceeded ${MODELS_DEV_MAX_RESPONSE_BYTES} bytes`)
+    chunks.push(chunk.value)
+  }
+  return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks))) as JsonRecord
+}
+
+const models = await fetchModels()
 const rows = (
   await Promise.all(
     (await walk(RECORDINGS_DIR))

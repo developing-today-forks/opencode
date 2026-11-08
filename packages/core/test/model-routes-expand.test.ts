@@ -783,6 +783,25 @@ describe("door-set targets (#637)", () => {
     expect(refs(leaves)).toEqual(["anthropic/deepseek-v4-flash"])
   })
 
+  test("a hidden catalog model still expands on its door (#230)", () => {
+    const withHidden = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>([
+      [anthropic, models(["deepseek-v4-flash"])],
+      [
+        go,
+        new Map([
+          [
+            "deepseek-v4-flash",
+            { ...Model.Info.default(go, Model.ID.make("deepseek-v4-flash")), hidden: true },
+          ] as const,
+        ]),
+      ],
+    ])
+    const { leaves } = expand("r", doorRoute([{ model: { providerID: "*", model: "deepseek-v4-flash" } }]), withHidden)
+    // Only `disabled` excludes a leaf from expansion; `hidden` is a picker-only
+    // state, so the hidden model remains a full pool member.
+    expect(refs(leaves)).toEqual(["anthropic/deepseek-v4-flash", "opencode-go/deepseek-v4-flash"])
+  })
+
   test("an enumerated target reached again by a door set appears once", () => {
     const { leaves } = expand(
       "r",
@@ -1107,13 +1126,71 @@ describe("configuredProviderRoutes", () => {
       )
     })
     expect([...(parsed?.keys() ?? [])]).toEqual(["openai-plan"])
-    // Members resolve concrete-first too: openai-plan keeps its "openai" member even though a
-    // rejected provider route claimed that id.
-    expect(parsed?.get("openai-plan")?.providers).toEqual(["openai.alternate", "openai"])
-    expect(messages).toHaveLength(3)
+    // Members naming another declared provider route drop regardless of the known set
+    // (#1420): openai-plan loses its "openai" member because a provider route claimed that
+    // id, even though "openai" is also a known concrete provider.
+    expect(parsed?.get("openai-plan")?.providers).toEqual(["openai.alternate"])
+    expect(messages).toHaveLength(4)
     expect(messages[0]).toContain('"openai"')
     expect(messages[1]).toContain('"opencode-route"')
     expect(messages[2]).toContain('"terra-plan"')
+    expect(messages[3]).toContain('"openai"')
+  })
+
+  test("a '*' member is dropped with a warning and never expands beyond the declared members (#1420)", () => {
+    let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+    const messages = warnings(() => {
+      parsed = configuredProviderRoutes(
+        entriesWith({ "openai-plan": { providers: ["openai", "*"] } }),
+        known,
+        noRoutes,
+      )
+    })
+    expect(parsed?.get("openai-plan")?.providers).toEqual(["openai"])
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('"*"')
+    const expanded = expand("r", route(["openai-plan/gpt-6-luna"]), definitions, new Map(), parsed)
+    expect(expanded.leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}`)).toEqual(["openai/gpt-6-luna"])
+  })
+
+  test("an 'opencode-route' member is dropped whether or not the known set includes it (#1420)", () => {
+    // The two call paths pass different known sets: the provider transform passes definition
+    // ids (no routes provider), the model transform passes models.provider.list(), which by
+    // then includes "opencode-route". Both must validate the same config identically.
+    for (const knownSet of [known, new Set([...known, "opencode-route"])]) {
+      let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+      const messages = warnings(() => {
+        parsed = configuredProviderRoutes(
+          entriesWith({ combo: { providers: ["opencode-route", "openai"] } }),
+          knownSet,
+          noRoutes,
+        )
+      })
+      expect(parsed?.get("combo")?.providers).toEqual(["openai"])
+      expect(messages).toHaveLength(1)
+      expect(messages[0]).toContain('"opencode-route"')
+    }
+  })
+
+  test("a member naming another declared provider route is dropped even when the known set includes it (#1420)", () => {
+    let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
+    const messages = warnings(() => {
+      parsed = configuredProviderRoutes(
+        entriesWith({
+          "openai-plan": { providers: ["openai"] },
+          combo: { providers: ["openai-plan", "openai"] },
+        }),
+        new Set([...known, "openai-plan"]),
+        noRoutes,
+      )
+    })
+    expect(parsed?.get("combo")?.providers).toEqual(["openai"])
+    // Two warnings: the "openai-plan" route id itself is dropped (it names a known provider,
+    // pre-existing rule), and combo's "openai-plan" member drops as a nesting attempt (#1420).
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toContain('"openai-plan"')
+    expect(messages[1]).toContain('"openai-plan"')
+    expect(messages[1]).toContain('the member is dropped')
   })
 
   test("a member naming another provider route or the routes provider drops, duplicates drop, an unknown member stays with a warning", () => {

@@ -200,6 +200,7 @@ export type SessionStatsOutput = {
 export type SessionStatsOperation<E = never> = (input?: SessionStatsInput) => Effect.Effect<SessionStatsOutput, E>
 
 export type SessionCreateInput = {
+  readonly directory?: AbsolutePath | undefined
   readonly id?: Session.ID | undefined
   readonly parentID?: Session.ID | undefined
   readonly title?: string | undefined

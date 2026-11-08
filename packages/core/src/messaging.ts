@@ -5,7 +5,7 @@ import path from "path"
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm"
 import { Context, Duration, Effect, Layer, PubSub, Schema, Scope } from "effect"
 import type { ConfigMessaging } from "@opencode/schema/config/messaging"
-import { Messaging as Contract } from "@opencode/schema/messaging"
+import { Messaging } from "@opencode/schema/messaging"
 import { TuiEvent } from "@opencode/schema/tui-event"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "./bus.js"
@@ -67,23 +67,23 @@ export interface KindDefinition {
 }
 
 export interface Interface {
-  readonly send: (input: Contract.SendInput, options?: Options) => Effect.Effect<Contract.SendResult, Error>
-  readonly user: (input: Contract.UserInput, options?: Options) => Effect.Effect<Contract.SendResult, Error>
-  readonly query: (input: Contract.Query, options?: Options) => Effect.Effect<Contract.QueryResult, Error>
-  readonly inspect: (input: Contract.InspectInput, options?: Options) => Effect.Effect<Contract.Message, Error>
+  readonly send: (input: Messaging.SendInput, options?: Options) => Effect.Effect<Messaging.SendResult, Error>
+  readonly user: (input: Messaging.UserInput, options?: Options) => Effect.Effect<Messaging.SendResult, Error>
+  readonly query: (input: Messaging.Query, options?: Options) => Effect.Effect<Messaging.QueryResult, Error>
+  readonly inspect: (input: Messaging.InspectInput, options?: Options) => Effect.Effect<Messaging.Message, Error>
   readonly visibility: (
-    input: Contract.VisibilityInput,
+    input: Messaging.VisibilityInput,
     options?: Options,
-  ) => Effect.Effect<Contract.VisibilityResult, Error>
-  readonly settings: (input: Contract.SettingsInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly subscribe: (input: Contract.SubscribeInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly topic: (input: Contract.TopicInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly topics: (input: Contract.TopicsInput, options?: Options) => Effect.Effect<Contract.TopicList, Error>
-  readonly chain: (input: Contract.ChainInput) => Effect.Effect<Contract.Chain, Error>
-  readonly sessions: (input: Contract.SessionsInput) => Effect.Effect<Contract.SessionList, Error>
-  readonly log: (input: Contract.LogInput, options?: Options) => Effect.Effect<Contract.Log, Error>
-  readonly vars: (input: Contract.VarsInput, options?: Options) => Effect.Effect<Contract.Vars, Error>
-  readonly setVar: (input: Contract.SetVarInput, options?: Options) => Effect.Effect<void, Error>
+  ) => Effect.Effect<Messaging.VisibilityResult, Error>
+  readonly settings: (input: Messaging.SettingsInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly subscribe: (input: Messaging.SubscribeInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly topic: (input: Messaging.TopicInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly topics: (input: Messaging.TopicsInput, options?: Options) => Effect.Effect<Messaging.TopicList, Error>
+  readonly chain: (input: Messaging.ChainInput) => Effect.Effect<Messaging.Chain, Error>
+  readonly sessions: (input: Messaging.SessionsInput) => Effect.Effect<Messaging.SessionList, Error>
+  readonly log: (input: Messaging.LogInput, options?: Options) => Effect.Effect<Messaging.Log, Error>
+  readonly vars: (input: Messaging.VarsInput, options?: Options) => Effect.Effect<Messaging.Vars, Error>
+  readonly setVar: (input: Messaging.SetVarInput, options?: Options) => Effect.Effect<void, Error>
   readonly kinds: {
     readonly register: (definition: KindDefinition) => Effect.Effect<void, InvalidError, Scope.Scope>
     readonly list: () => Effect.Effect<ReadonlyArray<KindDefinition>>
@@ -372,7 +372,7 @@ const layer = Layer.effect(
         .pipe(Effect.orDie)
     })
 
-    const subscribeRow = (topicID: number, session: string, delivery: Contract.Delivery, by: string) =>
+    const subscribeRow = (topicID: number, session: string, delivery: Messaging.Delivery, by: string) =>
       db
         .insert(MessagingSubscriptionTable)
         .values({ topic_id: topicID, session_id: session, delivery, by, time_created: Date.now() })
@@ -385,7 +385,7 @@ const layer = Layer.effect(
       topic: TopicRow,
       writer: string,
       seq: number,
-      override: Contract.Delivery | undefined,
+      override: Messaging.Delivery | undefined,
       config: ConfigMessaging.Info | undefined,
       to?: string,
     ) {
@@ -395,7 +395,7 @@ const layer = Layer.effect(
         .where(eq(MessagingSubscriptionTable.topic_id, topic.id))
         .all()
         .pipe(Effect.orDie)
-      const result = new Map<string, Contract.Delivery>(subscribed.map((row) => [row.session_id, row.delivery]))
+      const result = new Map<string, Messaging.Delivery>(subscribed.map((row) => [row.session_id, row.delivery]))
       const classified = MessagingTemplate.classify(topic.name, config)
       if (classified.kind === "root" && classified.owner && !result.has(classified.owner))
         result.set(classified.owner, config?.delivery?.root ?? "wake")
@@ -456,7 +456,7 @@ const layer = Layer.effect(
       topic: TopicRow,
       message: { readonly seq: number; readonly time: number },
       input: { readonly writer: string; readonly type: string; readonly data: string },
-      targets: ReadonlyArray<{ readonly session: string; readonly delivery: Contract.Delivery }>,
+      targets: ReadonlyArray<{ readonly session: string; readonly delivery: Messaging.Delivery }>,
     ) {
       if (targets.length === 0) return []
       const title = (yield* titles([input.writer])).get(input.writer)
@@ -550,7 +550,7 @@ const layer = Layer.effect(
     ) {
       yield* PubSub.publish(written, { topicID: topic.id, seq: message.seq })
       yield* bus.publish(
-        Contract.Event.Created,
+        Messaging.Event.Created,
         {
           topic: topic.name,
           seq: message.seq,
@@ -739,7 +739,7 @@ const layer = Layer.effect(
       return { ids: rows.map((row) => row.id), missing: names.filter((name) => !rows.some((row) => row.name === name)) }
     })
 
-    const read = Effect.fnUntraced(function* (input: Contract.Query, options: Options | undefined) {
+    const read = Effect.fnUntraced(function* (input: Messaging.Query, options: Options | undefined) {
       const viewer = input.as ?? "user"
       const now = Date.now()
       const limit = pageLimit(input.limit, DEFAULT_LIMIT)
@@ -808,7 +808,7 @@ const layer = Layer.effect(
 
     /** SQL conditions for every non-text filter, including effective visibility for the viewer. */
     const filters = Effect.fnUntraced(function* (
-      input: Contract.Query,
+      input: Messaging.Query,
       viewer: string,
       now: number,
       topicIDs: ReadonlyArray<number> | undefined,
@@ -861,7 +861,7 @@ const layer = Layer.effect(
         .map((kind) => kind.name)
 
     /** Filters which hidden messages are re-included: hidden by, written by, and when they were hidden. */
-    const hiddenMatch = Effect.fnUntraced(function* (input: Contract.Query, viewer: string, now: number) {
+    const hiddenMatch = Effect.fnUntraced(function* (input: Messaging.Query, viewer: string, now: number) {
       const m = MessagingMessageTable
       const parts: SQL[] = []
       if (input.hiddenFrom && input.hiddenFrom.length > 0) {
@@ -900,7 +900,7 @@ const layer = Layer.effect(
 
     const chronological = Effect.fnUntraced(function* (
       conditions: ReadonlyArray<SQL>,
-      input: Contract.Query,
+      input: Messaging.Query,
       limit: number,
     ) {
       const m = MessagingMessageTable
@@ -936,7 +936,7 @@ const layer = Layer.effect(
 
     const search = Effect.fnUntraced(function* (
       text: string,
-      match: Contract.MatchMode,
+      match: Messaging.MatchMode,
       conditions: ReadonlyArray<SQL>,
       limit: number,
       options: Options | undefined,
@@ -985,7 +985,7 @@ const layer = Layer.effect(
      */
     const rank = <A>(
       text: string,
-      match: Contract.MatchMode,
+      match: Messaging.MatchMode,
       sources: {
         readonly exact: () => Effect.Effect<ReadonlyArray<A>>
         readonly fuzzy: () => Effect.Effect<ReadonlyArray<A>>
@@ -1001,7 +1001,7 @@ const layer = Layer.effect(
         const notes: string[] = []
         const take = (
           ordered: ReadonlyArray<{ readonly row: A; readonly score: number }>,
-          used: Contract.MatchMode,
+          used: Messaging.MatchMode,
         ) => ({
           rows: ordered.slice(0, limit).map((item) => item.row),
           scores: new Map(ordered.slice(0, limit).map((item) => [keyOf(item.row), item.score])),
@@ -1234,7 +1234,7 @@ const layer = Layer.effect(
         .orderBy(asc(MessagingMessageTable.seq))
         .all()
         .pipe(Effect.orDie)
-      return rows.flatMap((row): Contract.Op[] => {
+      return rows.flatMap((row): Messaging.Op[] => {
         const meta = opMeta(row.meta)
         if (seq !== undefined && !meta.default && !meta.targets.includes(seq)) return []
         return [
@@ -1378,7 +1378,7 @@ const layer = Layer.effect(
       const windows = row && expand && expand > 0 ? yield* participantWindows(row, expand) : undefined
       const owner = row?.owner ?? classified.owner
       const preset = row?.preset ?? classified.preset
-      const topic: Contract.Topic = {
+      const topic: Messaging.Topic = {
         name,
         exists: row !== undefined,
         kind: row?.kind ?? classified.kind,
@@ -1415,7 +1415,7 @@ const layer = Layer.effect(
         items: ReadonlyArray<typeof p.$inferSelect>,
         first: (item: typeof p.$inferSelect) => number | null,
         last: (item: typeof p.$inferSelect) => number | null,
-      ): Contract.Window => ({
+      ): Messaging.Window => ({
         total: items.length,
         first: items
           .toSorted((left, right) => (first(left) ?? 0) - (first(right) ?? 0))
@@ -1658,7 +1658,7 @@ const layer = Layer.effect(
       expand: number | undefined,
       active: ReadonlySet<string>,
     ) {
-      const base: Contract.SessionNode = {
+      const base: Messaging.SessionNode = {
         id: row.id,
         ...(row.title ? { title: row.title } : {}),
         ...(row.parent_id ? { parentID: row.parent_id } : {}),
@@ -1716,7 +1716,7 @@ const layer = Layer.effect(
 
     const childWindow = Effect.fnUntraced(function* (id: string, size: number, active: ReadonlySet<string>) {
       const all = yield* MessagingGraph.children(db, id)
-      const brief = (row: MessagingGraph.Row): Contract.SessionBrief => ({
+      const brief = (row: MessagingGraph.Row): Messaging.SessionBrief => ({
         id: row.id,
         ...(row.title ? { title: row.title } : {}),
         ...(row.agent ? { agent: row.agent } : {}),
@@ -1892,7 +1892,7 @@ const layer = Layer.effect(
         entries: ReadonlyArray<MessagingLog.Entry & { readonly match?: boolean; readonly score?: number }>,
       ) =>
         entries.map(
-          (entry): Contract.LogEntry => ({
+          (entry): Messaging.LogEntry => ({
             session: entry.session,
             message: entry.message,
             index: entry.index,
@@ -2179,8 +2179,8 @@ function opMeta(meta: Record<string, unknown> | null) {
 function toMessage(
   row: MessageRow,
   topic: string,
-  extra: { readonly hidden?: boolean; readonly score?: number; readonly ops?: ReadonlyArray<Contract.Op> },
-): Contract.Message {
+  extra: { readonly hidden?: boolean; readonly score?: number; readonly ops?: ReadonlyArray<Messaging.Op> },
+): Messaging.Message {
   return {
     id: row.id,
     topic,
@@ -2202,11 +2202,11 @@ function jsonRecord(value: Record<string, unknown>): Record<string, Schema.Json>
   return Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(value)
 }
 
-function describeWriter(entry: Contract.Writer) {
+function describeWriter(entry: Messaging.Writer) {
   return `${entry.session}${entry.children ? "+children" : ""}${entry.ancestors ? "+ancestors" : ""}`
 }
 
-function defaultMode(policy: MessagingTemplate.Policy): Contract.WriteMode {
+function defaultMode(policy: MessagingTemplate.Policy): Messaging.WriteMode {
   if (policy === "open") return "open"
   if (policy === "owner") return "readonly"
   return "limited"

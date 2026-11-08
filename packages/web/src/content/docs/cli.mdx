@@ -466,6 +466,29 @@ opencode stats
 
 ---
 
+### quota
+
+Show quota usage for configured providers. With no provider argument, OpenCode checks configured providers with available credentials and skips providers disabled in the config. Use `--all` to include disabled providers. When you name a provider, it is fetched even if disabled.
+
+```bash
+opencode quota
+opencode quota mistral codex
+opencode quota --json
+```
+
+Pass one or more provider IDs, names, or aliases. If a running OpenCode server is available, the command reads its credential list; when the server is unavailable or has no credentials, it falls back to the local credential store in read-only mode. Human-readable output prints a provider heading such as `Mistral AI (mistral)`, followed by indented quota-window lines such as `api` and `vibe`. The exact windows and values depend on the provider. With `--json`, output is a JSON array of provider result objects, including per-provider usage or errors.
+
+#### Flags
+
+| Flag                                 | Description                              |
+| ------------------------------------ | ---------------------------------------- |
+| <nobr><code>{"--json"}</code></nobr> | Output quota results as JSON             |
+| <nobr><code>{"--all"}</code></nobr>  | Include providers disabled in the config |
+
+An unknown provider, or a requested provider with no successful result, makes the command exit with a non-zero status.
+
+---
+
 ### export
 
 Export session data as JSON.
@@ -677,22 +700,24 @@ The opencode CLI takes the following global flags.
 
 OpenCode can be configured using environment variables.
 
-| Variable                              | Type    | Description                                      |
-| ------------------------------------- | ------- | ------------------------------------------------ |
-| `OPENCODE_GIT_BASH_PATH`              | string  | Path to Git Bash executable on Windows           |
-| `OPENCODE_CONFIG`                     | string  | Path to config file                              |
-| `OPENCODE_CONFIG_DIR`                 | string  | Path to config directory                         |
-| `OPENCODE_TMPDIR`                     | string  | Durable scratch directory (overrides OS temp)    |
-| `OPENCODE_CONFIG_CONTENT`             | string  | Inline json config content                       |
-| `OPENCODE_DISABLE_AUTOUPDATE`         | boolean | Disable automatic update checks                  |
-| `OPENCODE_DISABLE_CLAUDE_CODE`        | boolean | Disable reading from `.claude` (prompt + skills) |
-| `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` | boolean | Disable loading `.claude/skills`                 |
-| `OPENCODE_DISABLE_MODELS_FETCH`       | boolean | Disable fetching models from remote sources      |
-| `OPENCODE_CLIENT`                     | string  | Client identifier (defaults to `cli`)            |
-| `OPENCODE_SERVER_PASSWORD`            | string  | Enable basic auth for `serve`/`web`              |
-| `OPENCODE_MODELS_URL`                 | string  | Custom URL for fetching models configuration     |
-| `OPENCODE_MCPX_BIN`                   | string  | Path or name of the mcpx executable              |
-| `OPENCODE_MCPX_DAEMON`                | string  | `0`/`false`/`off` never spawns an mcpx daemon    |
-| `OPENCODE_MCPX_DAEMON_IDLE_EXIT`      | string  | Spawned daemon idle exit (`1h`; `0` = never)     |
+| Variable                              | Type    | Description                                                                                                                                     |
+| ------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCODE_GIT_BASH_PATH`              | string  | Path to Git Bash executable on Windows                                                                                                          |
+| `OPENCODE_CONFIG`                     | string  | Path to config file                                                                                                                             |
+| `OPENCODE_CONFIG_DIR`                 | string  | Path to config directory                                                                                                                        |
+| `OPENCODE_TMPDIR`                     | string  | Durable scratch directory (overrides OS temp)                                                                                                   |
+| `OPENCODE_CONFIG_CONTENT`             | string  | Inline json config content                                                                                                                      |
+| `OPENCODE_DISABLE_AUTOUPDATE`         | boolean | Disable automatic update checks                                                                                                                 |
+| `OPENCODE_DISABLE_CLAUDE_CODE`        | boolean | Disable reading from `.claude` (prompt + skills)                                                                                                |
+| `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` | boolean | Disable loading `.claude/skills`                                                                                                                |
+| `OPENCODE_DISABLE_MODELS_FETCH`       | boolean | Disable fetching models from remote sources                                                                                                     |
+| `OPENCODE_CLIENT`                     | string  | Client identifier (defaults to `cli`)                                                                                                           |
+| `OPENCODE_SERVER_PASSWORD`            | string  | Enable basic auth for `serve`/`web`                                                                                                             |
+| `OPENCODE_MODELS_URL`                 | string  | Custom URL for fetching models configuration                                                                                                    |
+| `OPENCODE_QUOTA_TIMEOUT_MS`           | integer | Per-provider quota fetch timeout in milliseconds (default `30000`; valid range `1`–`2147483647`)                                                |
+| `OPENCODE_QUOTA_CDP_URL`              | string  | Base URL of the Chrome DevTools Protocol bridge used to read quota from an already signed-in browser session (default `http://127.0.0.1:19222`) |
+| `OPENCODE_MCPX_BIN`                   | string  | Path or name of the mcpx executable                                                                                                             |
+| `OPENCODE_MCPX_DAEMON`                | string  | `0`/`false`/`off` never spawns an mcpx daemon                                                                                                   |
+| `OPENCODE_MCPX_DAEMON_IDLE_EXIT`      | string  | Spawned daemon idle exit (`1h`; `0` = never)                                                                                                    |
 
 If a test run or another short-lived process leaked an mcpx daemon — its home was a temp directory, so `mcpx daemons` cannot see it — run `bun run script/mcpx-cleanup.ts` from a source checkout to list leaked daemons, and `bun run script/mcpx-cleanup.ts --apply` to stop them (SIGTERM, then SIGKILL). The script only targets daemons whose home is under the OS temp directory or no longer exists; daemons running under a real home are never touched. It is not supported on native Windows (Windows provides no supported way to read another process's home directory); run it from WSL, macOS or Linux instead.

@@ -51,6 +51,7 @@ import os from "node:os"
 import path from "node:path"
 import { ModelRouteLog } from "./model-route-log.js"
 import { collectBoundedResponseBody } from "./tool/http-body.js"
+import { timeoutMs } from "./util/number.js"
 
 // ------------------------------------------------------------ translation
 
@@ -196,10 +197,17 @@ export const DEFAULT_GATEWAY_BASE = "https://gateway.ai.cloudflare.com/v1"
 /** The door's single deadline covering the upstream fetch AND the
  * response-body read (30s; the door's env override is honored under
  * its own name so a fleet-wide setting keeps working). */
-const dataPathTimeoutMs = () => {
-  const configured = Number(process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS)
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : 30_000
-}
+/** The named ceiling for the env override (#1477): the deadline covers one
+ * fetch plus its body read, so no legitimate setting runs to minutes, let
+ * alone the unbounded values the bare conversion used to accept (up to
+ * Number.MAX_SAFE_INTEGER, which silently removed the deadline). */
+export const MAX_DATA_PATH_TIMEOUT_MS = 300_000
+
+export const dataPathTimeoutMs = () =>
+  timeoutMs(Number(process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS), {
+    fallback: 30_000,
+    max: MAX_DATA_PATH_TIMEOUT_MS,
+  })
 
 const maxResponseBytes = 5 * 1024 * 1024
 

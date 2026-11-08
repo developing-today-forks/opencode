@@ -1,5 +1,8 @@
 export * as Observability from "./observability.js"
 
+// Deep import: keep the @effect/platform-node barrel (undici, ioredis, node:sqlite) out of
+// runtime-restricted module graphs, matching app-node-platform.ts.
+// ast-grep-ignore: no-star-import
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem"
 import { LayerNode } from "./effect/layer-node.js"
 import { Effect, Layer, Logger, References, Schema } from "effect"

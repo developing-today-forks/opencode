@@ -7,8 +7,10 @@
  * supplied key like "constructor" resolves to an inherited member instead
  * of missing, and a `?? fallback` never fires because inherited members are
  * not nullish. The blessed fix is `ownValue`/`ownOr` from
- * packages/core/src/util/record.ts. This gate scans packages/core/src with
- * the two sweep patterns pinned on #833 —
+ * packages/core/src/util/record.ts. This gate scans every package-owned
+ * src tree on disk (every packages src tree incl. the console and stats
+ * subtrees, plus the services src trees; #1369 completed the
+ * #912/#1361 per-tree extensions) with the sweep patterns pinned on #833 —
  *   P-A: an uppercase plain-object table read by a variable key
  *   P-C: a bracket read with a `??` fallback (the most dangerous shape)
  *   P-D: a bracket read whose key is a computed expression (contains a
@@ -25,100 +27,87 @@
  * Usage:
  *   bun run script/check-proto-reads.ts   # exit 1 listing unlisted/stale hits
  */
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative, sep } from "node:path"
+import { gateHarness, type Hit } from "./gate-harness"
+import { join } from "node:path"
 
+export const SCAN_ROOTS: string[] = [
+  "packages/ai/src",
+  "packages/app/src",
+  "packages/client/src",
+  "packages/cli/src",
+  "packages/codemode/src",
+  "packages/console/app/src",
+  "packages/console/function/src",
+  "packages/core/src",
+  "packages/desktop/src",
+  "packages/function/src",
+  "packages/gui-extensions/src",
+  "packages/http-recorder/src",
+  "packages/httpapi-codegen/src",
+  "packages/latex/src",
+  "packages/merman/src",
+  "packages/plugin/src",
+  "packages/plugin-browser/src",
+  "packages/plugin-github/src",
+  "packages/posts/src",
+  "packages/protocol/src",
+  "packages/schema/src",
+  "packages/script/src",
+  "packages/sdk/src",
+  "packages/server/src",
+  "packages/session-ui/src",
+  "packages/simulation/src",
+  "packages/stats/app/src",
+  "packages/stats/core/src",
+  "packages/stats/server/src",
+  "packages/theme/src",
+  "packages/tui/src",
+  "packages/ui/src",
+  "packages/util/src",
+  "packages/web/src",
+  "services/changelog/src",
+  "services/files/src",
+  "services/update/src",
+  "services/www/src",
+]
+/** @deprecated single-root name kept for compatibility; use SCAN_ROOTS. */
 export const SCAN_ROOT = "packages/core/src"
 export const ALLOWLIST_PATH = "script/check-proto-reads.allowlist.txt"
 
 export const PATTERNS: RegExp[] = [/\b[A-Z][A-Z_0-9]{2,}\[[a-zA-Z_]/, /\[[a-zA-Z_.]+\] \?\?/, /\[[^\]]*\([^\]]*\] \?\?/]
 
-export interface Hit {
-  readonly file: string
-  readonly line: number
-  readonly text: string
-}
+export const SCANNED_EXTENSIONS = [".ts"] as const
+export const GATE = {
+  name: "proto-reads",
+  scanRoots: SCAN_ROOTS,
+  scannedExtensions: SCANNED_EXTENSIONS,
+  allowlistPath: ALLOWLIST_PATH,
+  patterns: PATTERNS,
+  candidate: "prototype-chain read candidate",
+  remediation: "Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to",
+  summary: (count: number, rootCount: number, allowlist: string) =>
+    `All ${count} prototype-chain read candidates in ${rootCount} scan roots are dispositioned in ${allowlist}.`,
+  treeChecks: [{ kind: "src", gateFile: "script/check-proto-reads.ts" }],
+} as const
 
-export const hitKey = (file: string, text: string) => `${file} :: ${text}`
+export const ProtoReads = { GATE, PATTERNS } as const
 
-/** Every line of `source` matching a sweep pattern, as hits for `file`. */
-export function scanSource(file: string, source: string): Hit[] {
-  const hits: Hit[] = []
-  source.split("\n").forEach((raw, index) => {
-    const text = raw.trim()
-    if (text && PATTERNS.some((pattern) => pattern.test(text))) hits.push({ file, line: index + 1, text })
-  })
-  return hits
-}
-
-/**
- * Parse the allowlist: `file :: exact trimmed line :: disposition` per line.
- * Entries are occurrence-aware (#1086): the value is the list of dispositions
- * for the key, so N identical lines in a file need N entries — one entry no
- * longer silently covers a copy-pasted duplicate line.
- */
-export function parseAllowlist(source: string): Map<string, string[]> {
-  const entries = new Map<string, string[]>()
-  for (const raw of source.split("\n")) {
-    const line = raw.trim()
-    if (!line || line.startsWith("#")) continue
-    const parts = line.split(" :: ")
-    if (parts.length < 3) throw new Error(`Malformed allowlist line (want file :: line :: disposition): ${line}`)
-    const key = hitKey(parts[0], parts[1])
-    entries.set(key, [...(entries.get(key) ?? []), parts.slice(2).join(" :: ")])
-  }
-  return entries
-}
-
-export const unlistedHits = (hits: Hit[], allowlist: Map<string, string[]>) => {
-  const seen = new Map<string, number>()
-  return hits.filter((hit) => {
-    const key = hitKey(hit.file, hit.text)
-    const occurrence = (seen.get(key) ?? 0) + 1
-    seen.set(key, occurrence)
-    return occurrence > (allowlist.get(key)?.length ?? 0)
-  })
-}
-
-export const staleEntries = (hits: Hit[], allowlist: Map<string, string[]>) => {
-  const counts = new Map<string, number>()
-  for (const hit of hits) {
-    const key = hitKey(hit.file, hit.text)
-    counts.set(key, (counts.get(key) ?? 0) + 1)
-  }
-  const stale: string[] = []
-  for (const [key, dispositions] of allowlist) {
-    for (let excess = dispositions.length - (counts.get(key) ?? 0); excess > 0; excess--) stale.push(key)
-  }
-  return stale
-}
-
+export type { Hit }
+export const hitKey = gateHarness.hitKey
+export const parseAllowlist = gateHarness.parseAllowlist
+export const staleEntries = gateHarness.staleEntries
+export const unlistedHits = gateHarness.unlistedHits
+export const unscannedSrcTrees = gateHarness.unscannedSrcTrees
+export const scanSource = (file: string, source: string) => gateHarness.scanSource(file, source, PATTERNS)
+export const isScannedFile = (name: string) => gateHarness.isScannedFile(name, SCANNED_EXTENSIONS)
 export function collect(root: string, dir: string, hits: Hit[]) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) collect(root, path, hits)
-    else if (entry.name.endsWith(".ts"))
-      hits.push(...scanSource(relative(root, path).split(sep).join("/"), readFileSync(path, "utf8")))
-  }
+  return gateHarness.collect(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
 
 async function main() {
   const root = join(import.meta.dir, "..")
-  const hits: Hit[] = []
-  collect(root, join(root, SCAN_ROOT), hits)
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
-  const unlisted = unlistedHits(hits, allowlist)
-  const stale = staleEntries(hits, allowlist)
-  if (unlisted.length || stale.length) {
-    for (const hit of unlisted)
-      console.error(
-        `Unlisted prototype-chain read candidate at ${hit.file}:${hit.line}:\n  ${hit.text}\n  Guard it with ownValue/ownOr (packages/core/src/util/record.ts), or add its disposition to ${ALLOWLIST_PATH}.`,
-      )
-    for (const key of stale)
-      console.error(`Stale allowlist entry (the line no longer matches a sweep pattern): ${key}`)
-    process.exit(1)
-  }
-  console.log(`All ${hits.length} prototype-chain read candidates in ${SCAN_ROOT} are dispositioned in ${ALLOWLIST_PATH}.`)
+  gateHarness.runGate(GATE, root, allowlist)
 }
 
 if (import.meta.main) await main()

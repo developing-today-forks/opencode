@@ -978,7 +978,23 @@
       "post": {
         "tags": ["session"],
         "operationId": "session.create",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AbsolutePath"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          }
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -1029,7 +1045,7 @@
             }
           }
         },
-        "description": "Create a session at the requested location. A parentID creates a linked child session at its parent's location.",
+        "description": "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location.",
         "summary": "Create session",
         "requestBody": {
           "content": {
@@ -5777,9 +5793,29 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "The route models the completions door serves, in the OpenAI models-list wire format.",
+        "description": "The models the completions door serves, in the OpenAI models-list wire format: one entry per configured model route (derived from the Location's model_routes, #1413), the systemone family's Clef floor, and the registered embedding models.",
         "summary": "List completion models (OpenAI-compatible)"
       }
     },
@@ -5823,6 +5859,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
                 }
               }
             }
@@ -5880,6 +5936,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
                 }
               }
             }
@@ -15650,7 +15726,8 @@
               },
               "required": ["action", "resource", "effect"],
               "additionalProperties": false
-            }
+            },
+            "description": "Ordered policies controlling access to providers, tools, and integrations"
           },
           "agents": {
             "type": "object",
@@ -15768,17 +15845,20 @@
                   "startup": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
                   },
                   "catalog": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
                   },
                   "execution": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
-                    "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                    "maximum": 2147483647,
+                    "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
                   }
                 },
                 "additionalProperties": false
@@ -15826,7 +15906,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs to discover skills from"
           },
           "commands": {
             "type": "object",
@@ -15839,7 +15920,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Additional paths or URLs supplying ambient instructions"
           },
           "references": {
             "type": "object",
@@ -16066,7 +16148,8 @@
                   },
                   "required": ["action", "resource", "effect"],
                   "additionalProperties": false
-                }
+                },
+                "description": "Deprecated: use top-level policies. Ordered policies controlling access to configured resources"
               },
               "model_route_demotion": {
                 "type": "object",
@@ -16246,7 +16329,7 @@
                             "type": "integer",
                             "exclusiveMinimum": 0,
                             "maximum": 50,
-                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                            "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                           },
                           "outcomeWindow": {
                             "type": "integer",
@@ -16469,7 +16552,7 @@
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "maximum": 50,
-                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2."
+                        "description": "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2."
                       },
                       "outcomeWindow": {
                         "type": "integer",
@@ -16858,6 +16941,9 @@
             ]
           },
           "disabled": {
+            "type": "boolean"
+          },
+          "hidden": {
             "type": "boolean"
           },
           "limit": {
@@ -19491,17 +19577,20 @@
               "startup": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "catalog": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "execution": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
               }
             },
             "additionalProperties": false
@@ -19585,17 +19674,20 @@
               "startup": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to establish and initialize the MCP server."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "catalog": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected."
               },
               "execution": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution."
+                "maximum": 2147483647,
+                "description": "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected."
               }
             },
             "additionalProperties": false
@@ -21462,6 +21554,9 @@
             "enum": ["alpha", "beta", "deprecated", "active"]
           },
           "enabled": {
+            "type": "boolean"
+          },
+          "hidden": {
             "type": "boolean"
           },
           "limit": {

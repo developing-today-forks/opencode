@@ -553,9 +553,12 @@ function request<A>(url: string, init: RequestInit) {
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return JSON.parse(
-        await readBoundedResponseText(response, oauthMaxResponseBytes, () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`)),
-      ) as A
+      const text = await readBoundedResponseText(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`),
+      )
+      return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(text) as A
     },
     catch: (cause) => cause,
   })

@@ -11,8 +11,11 @@
  * site invents its own answer. The blessed direction is the #993
  * primitives (pageLimit and friends) or an explicit local disposition.
  * This gate scans every production `src` tree under packages/ and
- * services/, matching check-bounded-http's explicit root inventory,
- * with the sweep patterns —
+ * services/, and (since #1517) every script tree (root `script/`, each
+ * package script/scripts tree — including nested package trees such as
+ * `packages/console/app/script` and `packages/plugins/figma/script` —
+ * and `services/www/script`), matching check-bounded-http's explicit
+ * root inventory, with the sweep patterns —
  *   P-A: a `Number(` call. The pattern is deliberately line-shaped and
  *        word-bounded: `Number.isFinite(` / `Number.isNaN(` are
  *        internal arithmetic predicates, not conversions, and do not
@@ -35,10 +38,18 @@
  * Comment-only lines are skipped: a comment mentioning `Number(` is
  * documentation, not a call site.
  *
+ * Scope note (#1517, mirroring bounded-http #1394): the script trees
+ * are in scope. They are operator-run local/CI tooling, but they run
+ * the release, publish, and CI paths, and bare conversions there
+ * escaped precisely because this gate did not scan them. This gate's
+ * own checker and tests self-match (pattern literals, fixtures);
+ * those hits are dispositioned in the allowlist as fixtures, not
+ * hidden.
+ *
  * Usage:
  *   bun run script/check-numeric-boundaries.ts   # exit 1 listing unlisted/stale hits
  */
-import { readdirSync, readFileSync } from "node:fs"
+import { gateHarness, type Hit } from "./gate-harness"
 import { join } from "node:path"
 
 export const SCAN_ROOTS: string[] = [
@@ -80,108 +91,88 @@ export const SCAN_ROOTS: string[] = [
   "services/files/src",
   "services/update/src",
   "services/www/src",
+  // Script trees (#1517, mirroring bounded-http #1394, nested trees
+  // #1425): root script/, every packages/*/script and
+  // packages/*/scripts — at any nesting depth (console/app,
+  // plugins/figma) — and services/*/script where present. main()
+  // fails when a package script tree exists on disk but is not
+  // listed here (scriptTreesOnDisk), so this list cannot drift again.
+  "script",
+  "packages/ai/script",
+  "packages/client/script",
+  "packages/cli/script",
+  "packages/codemode/script",
+  "packages/console/app/script",
+  "packages/containers/script",
+  "packages/core/script",
+  "packages/desktop/scripts",
+  "packages/http-recorder/script",
+  "packages/merman/script",
+  "packages/plugin/script",
+  "packages/plugin-browser/script",
+  "packages/plugin-github/script",
+  "packages/plugins/figma/script",
+  "packages/posts/script",
+  "packages/protocol/script",
+  "packages/schema/script",
+  "packages/sdk/script",
+  "packages/server/script",
+  "packages/session-ui/script",
+  "packages/simulation/script",
+  "packages/theme/script",
+  "packages/ui/script",
+  "packages/util/script",
+  "services/www/script",
 ]
 
 export const ALLOWLIST_PATH = "script/check-numeric-boundaries.allowlist.txt"
 
 export const PATTERNS: RegExp[] = [/\bNumber\s*\(/, /\bparseInt\s*\(/, /\bparseFloat\s*\(/]
 
-export interface Hit {
-  readonly file: string
-  readonly line: number
-  readonly text: string
-}
-
-export const hitKey = (file: string, text: string) => `${file} :: ${text}`
-
-const isCommentOnly = (text: string) => text.startsWith("//") || text.startsWith("*") || text.startsWith("/*")
-
-/** Every line of `source` matching a sweep pattern, as hits for `file`. */
-export function scanSource(file: string, source: string): Hit[] {
-  const hits: Hit[] = []
-  source.split("\n").forEach((raw, index) => {
-    const text = raw.trim()
-    if (text && !isCommentOnly(text) && PATTERNS.some((pattern) => pattern.test(text)))
-      hits.push({ file, line: index + 1, text })
-  })
-  return hits
-}
-
-/**
- * Parse the allowlist: `file :: exact trimmed line :: disposition` per line.
- * Entries are occurrence-aware (as in check-proto-reads, #1086): the value
- * is the list of dispositions for the key, so N identical lines in a file
- * need N entries — one entry no longer silently covers a copy-pasted
- * duplicate line.
- */
-export function parseAllowlist(source: string): Map<string, string[]> {
-  const entries = new Map<string, string[]>()
-  for (const raw of source.split("\n")) {
-    const line = raw.trim()
-    if (!line || line.startsWith("#")) continue
-    const parts = line.split(" :: ")
-    if (parts.length < 3) throw new Error(`Malformed allowlist line (want file :: line :: disposition): ${line}`)
-    const key = hitKey(parts[0], parts[1])
-    entries.set(key, [...(entries.get(key) ?? []), parts.slice(2).join(" :: ")])
-  }
-  return entries
-}
-
-export const unlistedHits = (hits: Hit[], allowlist: Map<string, string[]>) => {
-  const seen = new Map<string, number>()
-  return hits.filter((hit) => {
-    const key = hitKey(hit.file, hit.text)
-    const occurrence = (seen.get(key) ?? 0) + 1
-    seen.set(key, occurrence)
-    return occurrence > (allowlist.get(key)?.length ?? 0)
-  })
-}
-
-export const staleEntries = (hits: Hit[], allowlist: Map<string, string[]>) => {
-  const counts = new Map<string, number>()
-  for (const hit of hits) {
-    const key = hitKey(hit.file, hit.text)
-    counts.set(key, (counts.get(key) ?? 0) + 1)
-  }
-  const stale: string[] = []
-  for (const [key, dispositions] of allowlist) {
-    for (let excess = dispositions.length - (counts.get(key) ?? 0); excess > 0; excess--) stale.push(key)
-  }
-  return stale
-}
-
 /** Extensions whose files execute code in the scanned packages. */
 export const SCANNED_EXTENSIONS: string[] = [".ts", ".tsx"]
 
-export const isScannedFile = (name: string) => SCANNED_EXTENSIONS.some((ext) => name.endsWith(ext))
+export const isScannedFile = (name: string) => gateHarness.isScannedFile(name, SCANNED_EXTENSIONS)
 
-function collect(root: string, dir: string, hits: Hit[]) {
-  for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) collect(root, path, hits)
-    else if (isScannedFile(entry.name))
-      hits.push(...scanSource(path.slice(root.length + 1), readFileSync(path, "utf8")))
-  }
+export const GATE = {
+  name: "numeric-boundaries",
+  scanRoots: SCAN_ROOTS,
+  scannedExtensions: SCANNED_EXTENSIONS,
+  allowlistPath: ALLOWLIST_PATH,
+  patterns: PATTERNS,
+  candidate: "numeric-boundary candidate",
+  remediation: "Convert it through the shared primitives (packages/core/src/util/number.ts, #993), or add its disposition to",
+  summary: (count: number, rootCount: number, allowlist: string) =>
+    `All ${count} numeric-boundary candidates in ${rootCount} scan roots are dispositioned in ${allowlist}.`,
+  treeChecks: [
+    { kind: "script", gateFile: "script/check-numeric-boundaries.ts" },
+    { kind: "src", gateFile: "script/check-numeric-boundaries.ts" },
+  ],
+} as const
+
+export const NumericBoundaries = { GATE, PATTERNS } as const
+
+export type { Hit }
+export const hitKey = gateHarness.hitKey
+export const parseAllowlist = gateHarness.parseAllowlist
+export const staleEntries = gateHarness.staleEntries
+export const unlistedHits = gateHarness.unlistedHits
+export const scanSource = (file: string, source: string) => gateHarness.scanSource(file, source, PATTERNS)
+export function collect(root: string, dir: string, hits: Hit[]) {
+  return gateHarness.collect(root, dir, hits, PATTERNS, SCANNED_EXTENSIONS)
 }
+
+export const srcTreesOnDisk = gateHarness.srcTreesOnDisk
+export const unscannedSrcTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
+  gateHarness.unscannedSrcTrees(root, roots)
+export const scriptTreesOnDisk = gateHarness.scriptTreesOnDisk
+export const unscannedScriptTrees = (root: string, roots: readonly string[] = SCAN_ROOTS) =>
+  gateHarness.unscannedScriptTrees(root, roots)
 
 async function main() {
   const root = join(import.meta.dir, "..")
-  const hits: Hit[] = []
-  for (const scanRoot of SCAN_ROOTS) collect(root, join(root, scanRoot), hits)
   const allowlist = parseAllowlist(await Bun.file(join(root, ALLOWLIST_PATH)).text())
-  const unlisted = unlistedHits(hits, allowlist)
-  const stale = staleEntries(hits, allowlist)
-  if (unlisted.length || stale.length) {
-    for (const hit of unlisted)
-      console.error(
-        `Unlisted numeric-boundary candidate at ${hit.file}:${hit.line}:\n  ${hit.text}\n  Convert it through the shared primitives (packages/core/src/util/number.ts, #993), or add its disposition to ${ALLOWLIST_PATH}.`,
-      )
-    for (const key of stale) console.error(`Stale allowlist entry (the line no longer matches a sweep pattern): ${key}`)
-    process.exit(1)
-  }
-  console.log(
-    `All ${hits.length} numeric-boundary candidates in ${SCAN_ROOTS.length} scan roots are dispositioned in ${ALLOWLIST_PATH}.`,
-  )
+  gateHarness.runGate(GATE, root, allowlist)
 }
 
 if (import.meta.main) await main()

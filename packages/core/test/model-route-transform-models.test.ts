@@ -1,10 +1,20 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
-import { retargetDefinition, expand, routeVariants } from "@opencode/core/config/plugin/model-routes"
+import { Effect, Schema } from "effect"
+import {
+  ConfigModelRoutesPlugin,
+  createRouteModel,
+  retargetDefinition,
+  expand,
+  routeVariants,
+} from "@opencode/core/config/plugin/model-routes"
 import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
 import { ModelRouteExpansion } from "@opencode/core/model-route-expansion"
 import { Plugin } from "@opencode/core/plugin"
+import { PluginHost } from "@opencode/core/plugin/host"
+import { Config } from "@opencode/core/config"
+import { ConfigNormalize } from "@opencode/core/config/normalize"
+import { Document, Info } from "@opencode/schema/config"
 import { Provider } from "@opencode/core/provider"
 import { withCurrentModels } from "@opencode/core/session/governance-config"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
@@ -208,6 +218,40 @@ describe("retargetDefinition (#236)", () => {
   })
 })
 
+describe("createRouteModel (#1001)", () => {
+  test("a route whose targets are all transform-created is built from current models", () => {
+    const routeMap = routes(["azure/prod-mini"])
+    // Nothing was stored for this route: the provider transform's expansion was
+    // empty (prod-mini is not in the catalog), so there is no definition to retarget.
+    expect(expand("r", routeMap, new Map([[azure, catalog]])).leaves).toEqual([])
+    const created = createRouteModel("r", routeMap, editor)
+    expect(created).toBeDefined()
+    expect(created?.providerID).toEqual(ModelRoute.PROVIDER_ID)
+    expect(String(created?.id)).toEqual("r")
+    const definition = created ? ModelRoute.definition(created) : undefined
+    expect(definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/prod-mini"])
+    // Parallel arrays stay parallel with the created leaf.
+    expect(definition?.targetVariants).toHaveLength(1)
+    expect(definition?.budgets).toHaveLength(1)
+  })
+
+  test("a glob route whose matches are all transform-created is built", () => {
+    const created = createRouteModel("r", routes(["azure/prod-*"]), editor)
+    const definition = created ? ModelRoute.definition(created) : undefined
+    expect(definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/prod-mini"])
+  })
+
+  test("a route whose targets resolve to nothing even after transforms is not built", () => {
+    // The caller names this route in a warning; createRouteModel itself stays
+    // silent and simply produces no model.
+    expect(createRouteModel("r", routes(["azure/nope"]), editor)).toBeUndefined()
+  })
+
+  test("an unknown route id is not built", () => {
+    expect(createRouteModel("nope", routes(["azure/prod-mini"]), editor)).toBeUndefined()
+  })
+})
+
 describe("advertised variants after retargeting (#869)", () => {
   const variantInfo = (id: string, variants: string[]) =>
     Model.Info.make({
@@ -356,3 +400,67 @@ describe("retargetDefinition editor refresh (#985)", () => {
     ])
   })
 })
+
+it.effect("a route whose targets are all transform-created exists after the plugin pipeline (#1001)", () =>
+  Effect.gen(function* () {
+    const plugins = yield* Plugin.Service
+    const source: Plugin.Generation = {
+      id: "transform-route-source",
+      revision: "1",
+      effect: (ctx) =>
+        ctx.provider
+          .transform((editor) =>
+            editor.add({
+              info: { ...Provider.Info.empty(azure), activation: "enabled" },
+              models: [info("gpt-5-base")],
+            }),
+          )
+          .pipe(Effect.asVoid),
+    }
+    // The Azure shape (#236): the deployment exists only after a model transform.
+    const creator: Plugin.Generation = {
+      id: "transform-route-creator",
+      revision: "1",
+      effect: (ctx) =>
+        ctx.model.transform((editor) => editor.update(azure, Model.ID.make("prod-mini"), () => {})).pipe(Effect.asVoid),
+    }
+    yield* plugins.activate([source, creator])
+    const raw = {
+      providers: {
+        "opencode-route": {
+          models: {
+            created: { disabled: true, name: "Created Route" },
+          },
+        },
+      },
+      experimental: {
+        routes: {
+          models: {
+            created: { targets: [{ providerID: "azure", model: "prod-mini" }] },
+            ghost: { targets: [{ providerID: "azure", model: "nope" }] },
+          },
+        },
+      },
+    }
+    const normalized = ConfigNormalize.normalize(raw)
+    if (normalized.type !== "normalized") throw new Error("the test config must normalize")
+    const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins)).pipe(
+      Effect.provide(Config.testLayer(entries)),
+    )
+    const models = yield* Model.Service
+    const created = yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("created"))
+    expect(created).toBeDefined()
+    const definition = created ? ModelRoute.definition(created) : undefined
+    expect(definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/prod-mini"])
+    // The provider plugin's override transform ran before this route existed and
+    // skipped it, so the routes plugin applies the configured overrides itself:
+    // the disabled flag and the display name from provider config land on the
+    // created route exactly as they would on a built one.
+    expect(created?.enabled).toEqual(false)
+    expect(created?.name).toEqual("Created Route")
+    // A route whose targets never resolve is not built (and is named in a warning).
+    expect(yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("ghost"))).toBeUndefined()
+  }),
+)
+

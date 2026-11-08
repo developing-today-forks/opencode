@@ -1,18 +1,14 @@
-import { describe, expect, mock, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { inferenceStub } from "../../test/preload"
 
-// Mock the Resource module outright (the stats-proxy.test.ts pattern): the
-// INFERENCE binding is a service-binding fetch, stubbed per test below.
+// The INFERENCE binding is a service-binding fetch, stubbed per test below.
 let inferenceImpl: (request: Request, init?: RequestInit) => Promise<Response> = async () =>
   new Response(null, { status: 200 })
 
-mock.module("@opencode/console-resource", () => ({
-  Resource: {
-    ConsoleMigration: { inferenceUrl: "https://inference.example.test" },
-    INFERENCE: {
-      fetch: (request: Request, init?: RequestInit) => inferenceImpl(request, init),
-    },
-  },
-}))
+// @opencode/console-resource is provided by the shared preload fixture
+// (test/preload.ts, #1522); its INFERENCE binding delegates to the
+// per-test implementation above through this bridge.
+inferenceStub.impl = (request, init) => inferenceImpl(request, init)
 
 const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS, INFERENCE_GENERATION_HEADERS_TIMEOUT_MS } =
   await import("./inference-proxy")
@@ -20,6 +16,13 @@ const { proxyInference, INFERENCE_HEADERS_TIMEOUT_MS, INFERENCE_GENERATION_HEADE
 function request() {
   return new Request("https://opencode.ai/zen/v1/models", {
     headers: { authorization: "Bearer test-key" },
+  })
+}
+
+function abortableRequest(signal: AbortSignal) {
+  return new Request("https://opencode.ai/zen/v1/models", {
+    headers: { authorization: "Bearer test-key" },
+    signal,
   })
 }
 
@@ -83,6 +86,33 @@ describe("proxyInference headers deadline", () => {
     expect(response.status).toBe(503)
     expect(response.headers.get("cache-control")).toBe("no-store")
   })
+
+  test(
+    "aborts the upstream fetch when the incoming request aborts before headers",
+    async () => {
+      let seenSignal: AbortSignal | null | undefined
+      inferenceImpl = async (_request, init) => {
+        seenSignal = init?.signal
+        return new Promise<Response>((_resolve, reject) => {
+          const aborted = () => reject(new DOMException("aborted", "AbortError"))
+          if (init?.signal?.aborted) return aborted()
+          init?.signal?.addEventListener("abort", aborted)
+        })
+      }
+      const client = new AbortController()
+      const started = Date.now()
+      const pending = proxyInference(abortableRequest(client.signal))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      client.abort()
+      const response = await pending
+      expect(seenSignal).toBeInstanceOf(AbortSignal)
+      expect(seenSignal?.aborted).toBe(true)
+      expect(response.status).toBe(503)
+      // The incoming abort, not the 8s headers deadline, settled the fetch.
+      expect(Date.now() - started).toBeLessThan(INFERENCE_HEADERS_TIMEOUT_MS - 1_000)
+    },
+    INFERENCE_HEADERS_TIMEOUT_MS + 5_000,
+  )
 
   test("proxies a healthy upstream response unchanged", async () => {
     inferenceImpl = async () =>

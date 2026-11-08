@@ -535,6 +535,82 @@ describe("Session.prompt", () => {
     }),
   )
 
+  it.effect("materializes binary non-base64 data URL attachments byte-wise (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = "data:application/octet-stream,%FF%00%41"
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Inspect this",
+        files: [{ uri, name: "blob.bin" }],
+        resume: false,
+      })
+
+      // %FF%00%41 materializes as exactly those bytes (base64 /wBB), the
+      // same expectation as the migration mirror case in
+      // v1-migration.test.ts (#1529); before the fix the prompt was
+      // rejected as an invalid data URL.
+      expect(message.payload.files).toEqual([
+        {
+          data: "/wBB",
+          mime: "application/octet-stream",
+          source: { type: "inline" },
+          name: "blob.bin",
+        },
+      ])
+    }),
+  )
+
+  it.effect("keeps UTF-8 non-base64 data URL attachments byte-identical (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = "data:text/plain,caf%C3%A9 %E2%82%AC"
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Inspect this",
+        files: [{ uri, name: "note.txt" }],
+        resume: false,
+      })
+
+      expect(message.payload.files).toEqual([
+        {
+          data: Buffer.from("caf\u00e9 \u20ac", "utf8").toString("base64"),
+          mime: "text/plain",
+          source: { type: "inline" },
+          name: "note.txt",
+        },
+      ])
+    }),
+  )
+
+  it.effect("rejects malformed percent escapes in non-base64 data URLs (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+
+      for (const uri of ["data:application/octet-stream,%ZZ", "data:application/octet-stream,trailing%"]) {
+        const error = yield* session
+          .prompt({
+            sessionID,
+            text: "Inspect this",
+            files: [{ uri, name: "bad.bin" }],
+            resume: false,
+          })
+          .pipe(Effect.flip)
+
+        expect(error).toMatchObject({
+          _tag: "Session.AttachmentError",
+          uri: "bad.bin",
+          message: "Invalid attachment data URL: bad.bin",
+        })
+      }
+    }),
+  )
+
   it.effect("rejects oversized inline attachments without echoing their bytes", () =>
     Effect.gen(function* () {
       yield* setup

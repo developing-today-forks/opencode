@@ -57,7 +57,7 @@ function reconcile(input: {
       FIXTURE_DIR: dir,
       LOSER: String(input.loser),
       SURVIVOR: String(input.survivor),
-      REPO: "developing-today/opencode",
+      REPO: "developing-today-forks/opencode",
       BID: "test-breakage",
       RUN_URL: run(input.runID),
       NOW: "2026-11-01T00:00:00Z",
@@ -71,7 +71,7 @@ function reconcile(input: {
   }
 }
 
-const run = (id: number) => `https://github.com/developing-today/opencode/actions/runs/${id}`
+const run = (id: number) => `https://github.com/developing-today-forks/opencode/actions/runs/${id}`
 
 describe("main-broken race-loser reconcile run links (#1314)", () => {
   test("staged three-watcher reconcile forwards inherited run links", () => {
@@ -101,6 +101,17 @@ describe("main-broken race-loser reconcile run links (#1314)", () => {
   test("a plain loser with no comments forwards its body run link", () => {
     const comment = reconcile({ loser: 22, survivor: 21, body: `- Run: ${run(222)}\n`, comments: "", runID: 223 })
     expect(comment).toContain(run(222))
+  })
+
+  test("the closing status echo names the survivor the created loser's links were forwarded to (#1582)", () => {
+    // The echo sits after RUN-LINKS-END, outside the executed snippet
+    // above, which is how PR #1315 lost its $SURVIVOR interpolation
+    // without any test noticing. Pin the line itself: it must name
+    // both the created loser and the survivor it forwards to.
+    const line = workflow.split("\n").find((entry) => entry.includes("this run created loser"))
+    expect(line).toBeDefined()
+    expect(line).toContain("#$CREATED")
+    expect(line).toContain("forwarded to #$SURVIVOR above")
   })
 
   test("adjacent Markdown links are collected as separate run URLs", () => {

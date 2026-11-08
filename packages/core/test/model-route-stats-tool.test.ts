@@ -61,6 +61,24 @@ describe("route_stats configuration view", () => {
       { target: "openai/gpt-6-luna", configuredLimit: null },
     ])
   })
+  test("reports only the adjustments that apply to the source Location (#1461)", async () => {
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([
+      { id: "global-adj", match: "openai/gpt-6-luna", action: "skip" },
+      { id: "loc-a-adj", match: "openai/gpt-6-luna", action: "skip", location: "/loc/a" },
+      { id: "loc-b-adj", match: "openai/gpt-6-luna", action: "skip", location: "/loc/b" },
+    ])
+    try {
+      const report = await Effect.runPromise(
+        RouteStatsTool.collect({ hours: 24 }, { routes: new Map(), notes: [], location: "/loc/a" }),
+      )
+      expect(report.adjustments.map((item) => (item as { id?: string }).id)).toEqual(["global-adj", "loc-a-adj"])
+    } finally {
+      ModelRoute.setAdjustments([])
+      ModelRoute.resetHealth()
+    }
+  })
+
   test("surfaces active benches with reason and expiry, even for targets with no attempts", async () => {
     ModelRoute.resetHealth()
     const target = ModelRoute.ref({ providerID: "benched-provider", model: "quiet-model" })

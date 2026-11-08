@@ -1,8 +1,23 @@
 {
   description = "OpenCode development flake";
 
+  # The fleet's own binary cache (developing-today/nix-cache: Nix on
+  # Cloudflare R2 + Workers) as an ADDED substituter — cache.nixos.org
+  # stays in place; this only covers fleet-built paths the public cache
+  # does not have. Public read; pushes are signed with the nix-cache-1
+  # key, which is the key trusted here.
+  nixConfig = {
+    extra-substituters = [ "https://nix-cache.developing-today.workers.dev" ];
+    extra-trusted-public-keys = [ "nix-cache-1:x/kKZuzyQI3L0/twmOp3w2U68F2ZgM3WnH3ERYKrwf8=" ];
+  };
+
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # The fleet repo carries the canonical nixpkgs pin for all fleet
+    # repos (dezren39/fleet, flake.nix): one rev, aligned everywhere,
+    # pinned to a nixpkgs-unstable channel tip so Hydra has the tree
+    # fully built. To move the pin, move it in fleet and re-lock here.
+    fleet.url = "github:dezren39/fleet";
+    nixpkgs.follows = "fleet/nixpkgs";
     # mcpx source: developing-today/code is the canonical home of mcpx
     # (pkgs/mcpx). Used as a plain source tree (flake = false) so this
     # flake does not evaluate that repo's flake-parts graph; the pin in
@@ -23,6 +38,39 @@
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       rev = self.shortRev or self.dirtyShortRev or "dirty";
+
+      # The mcpx daemon modules originate in developing-today/code
+      # (pkgs/mcpx/modules, code#4801); this flake re-exports them
+      # (opencode#1502) with the package defaulted to THIS flake's
+      # mcpx build — the same derivation as packages.<system>.mcpx,
+      # and the one opencode bundles — so a consumer enabling the
+      # daemon through here runs the identical mcpx this opencode
+      # carries. The option set itself never forks: it is imported
+      # from the pinned mcpx source tree.
+      mcpxModule =
+        module:
+        { lib, pkgs, ... }:
+        {
+          imports = [ "${mcpx-src}/pkgs/mcpx/modules/${module}" ];
+          services.mcpx.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.mcpx;
+        };
+
+      # This flake's own service modules (opencode#1511): the
+      # standing server, authored here in nix/modules. Each imports
+      # the matching mcpx module above it in the cascade, so a
+      # consumer who imports only the opencode module gets the
+      # mcpx option set too — and services.opencode's own config
+      # enables the daemon by default (see nix/modules/common.nix).
+      opencodeModule =
+        module:
+        { lib, pkgs, ... }:
+        {
+          imports = [
+            (mcpxModule module)
+            ./nix/modules/${module}
+          ];
+          services.opencode.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.opencode;
+        };
     in
     {
       devShells = forEachSystem (pkgs: {
@@ -83,5 +131,13 @@
           };
         }
       );
+
+      nixosModules.mcpx = mcpxModule "nixos.nix";
+      homeManagerModules.mcpx = mcpxModule "home-manager.nix";
+      darwinModules.mcpx = mcpxModule "darwin.nix";
+
+      nixosModules.opencode = opencodeModule "nixos.nix";
+      homeManagerModules.opencode = opencodeModule "home-manager.nix";
+      darwinModules.opencode = opencodeModule "darwin.nix";
     };
 }

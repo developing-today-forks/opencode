@@ -27,6 +27,7 @@ import { SessionModelRequest } from "../model-request.js"
 import { SessionSchema } from "../schema.js"
 import { toSessionError } from "../to-session-error.js"
 import { SessionUsage } from "../usage.js"
+import { Location } from "../../location.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteAutonomy } from "../../model-route-autonomy.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
@@ -129,9 +130,27 @@ export const captureRateLimit = (target: ModelRoute.Target, credentialID?: strin
   return { capture, options: seen.options }
 }
 
+/** Text that states a quota window (or a credit balance) is spent, as opposed to a
+ * momentary rate limit: providers that report exhaustion without a quota tag (Antigravity's
+ * "Individual quota reached") must land in the same class as a `QuotaExceeded` tag, or the
+ * identical condition benches two different ways depending on the door (#1806). Deliberately
+ * narrower than `exhaustionText` below: that one only opens the quota-failure gate path,
+ * while this one decides the bench class, so plain rate-limit phrasing stays out. */
+const quotaText =
+  /individual quota|quota (?:exhausted|reached|exceeded)|insufficient credits|insufficient balance|insufficient funds|out of credits|usage limit (?:exceeded|reached)|reached your (?:usage|quota|plan) limit/i
+
+/** Transport OS codes that prove a request never reached a provider API: the name did not
+ * resolve, or nothing listened at the far end (a dead local service or proxy). Those are
+ * path failures — the fleet's DNS, a local proxy, the server itself — not provider health,
+ * so they take the infra hold instead of a bench (#1828). Ambiguous codes (resets, generic
+ * timeouts) stay on the ordinary network path: they can be the provider's own doing. */
+const INFRA_TRANSPORT_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"])
+
 /** Cooldown input from a provider error: a stated retry-after, an exhausted quota, or an
  * authentication refusal (the `Authentication` tag, an HTTP 401/403, or the org-disabled
- * refusal shape), which cannot heal by itself and so takes the long first bench. */
+ * refusal shape), which cannot heal by itself and so takes the long first bench. A quota
+ * stated only in the error text classifies as quota too, with the stated reset bound to the
+ * bench; a transport path failure classifies as infra. */
 export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
@@ -142,21 +161,39 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     message?: string
     body?: string
   }
+  // The client's own timeout text says how long we waited, not when the provider said to retry:
+  // it must not become a rate-limit hint (#1551). A provider-stated wait in any other shape survives.
+  const clientTimeoutMessage =
+    reason._tag === "Transport" &&
+    reason.code === "Timeout" &&
+    reason.message?.startsWith("No response output within ")
+  const text = `${reason.message ?? ""} ${reason.body ?? ""}`
+  const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
-      ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now()),
-    quota: reason._tag === "QuotaExceeded",
+      (clientTimeoutMessage
+        ? undefined
+        : ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now())),
+    quota,
+    // Optional hint fields are omitted when unset, never present-but-undefined — the
+    // same convention the route policy follows.
+    ...(quota
+      ? { quotaResetAtMs: ModelRouteLimits.resetAtFromMessage(reason.message ?? reason.body, Date.now()) }
+      : {}),
+    ...(reason._tag === "Transport" &&
+    reason.http === undefined &&
+    !clientTimeoutMessage &&
+    INFRA_TRANSPORT_CODES.has(reason.code ?? "")
+      ? { infra: true }
+      : {}),
     auth:
       reason._tag === "Authentication" ||
       reason.http?.status === 401 ||
       reason.http?.status === 403 ||
-      /organization has disabled/i.test(`${reason.message ?? ""} ${reason.body ?? ""}`),
-    network:
-      reason._tag === "Transport" &&
-      reason.http === undefined &&
-      !(reason.code === "Timeout" && reason.message?.startsWith("No response output within ")),
+      /organization has disabled/i.test(text),
+    network: reason._tag === "Transport" && reason.http === undefined && !clientTimeoutMessage,
   }
 }
 
@@ -200,6 +237,9 @@ const balanceExhaustionText =
 export const quotaFailureClassification = (
   failure: AIError,
 ): "balance-exhaustion" | "rate-limit" | undefined => {
+  // A content-policy rejection is not a quota event, however its text is worded: policy
+  // wording must never gate a pool through the broad exhaustion heuristics (#1084).
+  if (failure.reason._tag === "ContentPolicy") return undefined
   const reason = failure.reason as { _tag?: string; message?: string; body?: string }
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   if (!isQuotaFailure(failure) && !exhaustionText.test(text) && !balanceExhaustionText.test(text)) return undefined
@@ -216,6 +256,11 @@ export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
   const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
+  const location = yield* Effect.serviceOption(Location.Service)
+  const locationDirectory = Option.match(location, {
+    onNone: () => undefined,
+    onSome: (value) => value.directory as string,
+  })
   const toolOutput = yield* ToolOutput.Service
 
   const run = Effect.fn("SessionStep.run")(function* (
@@ -291,7 +336,16 @@ export const make = Effect.gen(function* () {
               providerFailure = event
               return
             }
-            if (!event.classification) ModelRoute.failed(input.model.routing.target, input.model.routing.policy)
+            if (!event.classification)
+              ModelRoute.failed(
+                input.model.routing.target,
+                input.model.routing.policy,
+                undefined,
+                undefined,
+                undefined,
+                locationDirectory,
+                input.model.routing.probeClaim,
+              )
           }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
@@ -464,6 +518,7 @@ export const make = Effect.gen(function* () {
             // Only a real exhaustion answer may install an increase-only balance hold; a
             // plain HTTP 429 rate limit keeps its stated timed recovery (#1014, #1380).
             quotaClassification,
+            locationDirectory,
           )
         }
         // A success that advertised no limit headers replaces the serving credential's hold:
@@ -477,6 +532,31 @@ export const make = Effect.gen(function* () {
           (SessionRunnerRetry.isRetryable(llmFailure) ||
             llmFailure.reason._tag === "Authentication" ||
             llmFailure.reason._tag === "QuotaExceeded")
+        // A content-policy rejection is the provider refusing this request, not the target
+        // failing: it never counts against route health, quota or cooldown state, it is
+        // never retried on the same target, but the request does fail over (#1084).
+        const policyFailure = llmFailure !== undefined && llmFailure.reason._tag === "ContentPolicy"
+        // #1806: a failure can indict the target without being retryable, an auth refusal,
+        // or a quota tag — a deterministic rejection naming the target's own configuration
+        // (a model the provider no longer serves arrives as an unclassified InvalidRequest),
+        // a target-side timeout, an operation this target does not support, a route that
+        // does not resolve. Those are availability classes the routeFailure test above does
+        // not admit, and they cascade like any other target failure: a session moves to the
+        // next candidate on ANY candidate error and errors only when every candidate is
+        // exhausted (Drew, 2026-11-06). Classified InvalidRequest failures (context
+        // overflow, payload too large) indict the request, not the target — size recovery
+        // owns them, and every candidate would reject the same request identically — so
+        // they stay out.
+        const cascadeFailure =
+          llmFailure !== undefined &&
+          (llmFailure.reason._tag === "Timeout" ||
+            llmFailure.reason._tag === "UnsupportedOperation" ||
+            llmFailure.reason._tag === "NoRoute" ||
+            (llmFailure.reason._tag === "InvalidRequest" && llmFailure.reason.classification === undefined))
+        // A content-filter finish is the same refusal delivered as a finish reason rather
+        // than an error: the attempt is recorded as a policy rejection (below), never as a
+        // success or a general failure (#1084).
+        const policyFinish = !failed && recorded.finish?.finish === "content-filter"
         // The failover decision: where this attempt moves to, if anywhere. It is computed
         // after the retry hook below, and the attempt row names its destination.
         let failover: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
@@ -501,8 +581,15 @@ export const make = Effect.gen(function* () {
               model_id: input.model.ref.id,
               variant: input.model.ref.variant,
               credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
-              outcome: streamInterrupted ? "interrupted" : timedOut ? "timeout" : failed ? "failure" : "success",
+              outcome: streamInterrupted
+                ? "interrupted"
+                : timedOut
+                  ? "timeout"
+                  : failed || policyFinish
+                    ? "failure"
+                    : "success",
               ...failureLog,
+              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : undefined),
               // A failed request's own details win; a successful one keeps what its response said.
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
@@ -553,11 +640,23 @@ export const make = Effect.gen(function* () {
           // A transient failure on a target with a good record gets another try; a rate limit or a
           // target that keeps failing moves the turn on immediately.
           !isRateLimited(llmFailure) &&
-          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID) &&
+          ModelRoute.steady(input.model.routing.target, input.model.routing.credentialID, locationDirectory) &&
           (failedAttempts.get(retryKey) ?? 0) + 1 < input.model.routing.attempts
         if (sameTargetRetry) {
           countFailedAttempt(retryKey)
         } else clearFailedAttempt(retryKey)
+        // A policy rejection bypasses the health accounting below, so it must also settle
+        // any half-open probe claim this attempt carried: failed()/completed() normally
+        // settle it, and an outstanding claim would strand the target's route recovery
+        // (probeDue stays false) until the bench expires (#1084). The same holds for the
+        // refusal delivered as a content-filter finish, which settles nothing either:
+        // completed() is gated on !providerFailed and failed() needs an llmFailure (#1620).
+        if ((policyFailure || policyFinish) && input.model.routing?.probeClaim) {
+          const claim = input.model.routing.probeClaim
+          ModelRoute.releaseBenchProbe(input.model.routing.target, undefined, claim.claimedAt, claim.token)
+          if (claim.credentialID)
+            ModelRoute.releaseBenchProbe(input.model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+        }
         // Health accounting is broader than current-request failover: a terminal non-retryable
         // error still makes the target unhealthy for later selections. Keep the routeFailure gate
         // below so this does not broaden which failures may move the current request elsewhere.
@@ -565,6 +664,7 @@ export const make = Effect.gen(function* () {
           input.model.routing &&
           llmFailure &&
           failureError &&
+          !policyFailure &&
           !isContextOverflowFailure(llmFailure) &&
           !sameTargetRetry &&
           (routeFailure || !retry?.retry || recorded.outputStarted)
@@ -575,6 +675,8 @@ export const make = Effect.gen(function* () {
             Date.now(),
             failureHint(llmFailure),
             input.model.routing.credentialID,
+            locationDirectory,
+            input.model.routing.probeClaim,
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
@@ -587,7 +689,7 @@ export const make = Effect.gen(function* () {
         // to it. That case cascades through the Continue outcome below when a retry is
         // authorized -- a new assistant message whose re-selection sees the target marked
         // failed above; a hook that declines any further request ends the turn, as instructed.
-        if (input.model.routing && llmFailure && failureError && routeFailure && !sameTargetRetry) {
+        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure || cascadeFailure) && !sameTargetRetry) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
@@ -698,9 +800,11 @@ export const make = Effect.gen(function* () {
             },
             Date.now(),
             input.model.routing.credentialID,
+            locationDirectory,
+            input.model.routing.probeClaim,
           )
           if (input.sessionID)
-            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
         }
         if (record.finish || record.failure) {
           const startSnapshot = yield* Fiber.join(pendingStartSnapshot)
@@ -764,7 +868,7 @@ export const make = Effect.gen(function* () {
     const escalate =
       routing !== undefined &&
       ModelRouteAutonomy.races(routing.autonomy) &&
-      ModelRoute.escalates(routing.target, routing.credentialID)
+      ModelRoute.escalates(routing.target, routing.credentialID, locationDirectory)
     // Once a turn has been hedged, its retries stay on one request rather than racing again.
     if (!routing || (!routing.hedgeAfterMs && !escalate) || !prepareFor || wasHedged(input.assistantMessageID))
       return yield* run(input)
@@ -781,6 +885,21 @@ export const make = Effect.gen(function* () {
           next === undefined
             ? Effect.succeed(Option.none())
             : prepareFor(next).pipe(
+                // A preparation that fails or is interrupted never starts the hedge, so
+                // the claim the fallback resolution spent is handed back here instead of
+                // stranding until the bench expires (#1486, review follow-up). A hedge
+                // that does start keeps its claim: the race settles it (the winner via
+                // run(), the loser via ModelRoute.slow).
+                Effect.onExit((exit) =>
+                  exit._tag === "Success" || !next.routing?.probeClaim
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        const claim = next.routing!.probeClaim!
+                        ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
+                        if (claim.credentialID)
+                          ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
+                      }),
+                ),
                 Effect.map((prepared) => {
                   const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
                   // A hedge has begun: both targets are named before either answers, so the race

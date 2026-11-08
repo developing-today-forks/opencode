@@ -8,6 +8,8 @@ import type { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Effect } from "effect"
 import { Config } from "../../config.js"
+import { ConfigProvider } from "@opencode/schema/config/provider"
+import { applyModelConfig } from "./provider.js"
 import { Model } from "../../model.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteExpansion } from "../../model-route-expansion.js"
@@ -54,8 +56,14 @@ export const Plugin = define({
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
 
-    // The route machinery's constants, from experimental.routes.settings.
-    ModelRoute.onSettingsConfig(() => settingsConfig(configuredSettings(loaded.entries)))
+    // The route machinery's constants, from experimental.routes.settings. Registered
+    // under this Location's directory (#1423) so another Location's activation cannot
+    // replace them, and removed again when this Location's graph closes.
+    const offSettingsConfig = ModelRoute.onSettingsConfig(
+      () => settingsConfig(configuredSettings(loaded.entries)),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offSettingsConfig))
 
     // Quota demotion policy (#1151), from experimental.model_route_demotion. Registered
     // under this Location's directory so another Location's activation cannot replace it,
@@ -70,6 +78,7 @@ export const Plugin = define({
     yield* ModelRouteTuning.schedule(
       () => configuredTuning(loaded.entries),
       () => Array.from(configuredRoutes(loaded.entries).values(), (route) => route.autonomy),
+      ctx.location.directory,
     ).pipe(Effect.forkScoped)
 
     yield* ctx.tool.transform((editor) => {
@@ -82,13 +91,16 @@ export const Plugin = define({
       RouteStatsTool.add(editor, permission, () => ({
         routes: configuredRoutes(loaded.entries),
         notes: configuredTuning(loaded.entries)?.notes ?? [],
+        location: ctx.location.directory,
       }))
     })
 
     yield* ctx.provider.transform((providers) => {
       if (providers.get(ModelRoute.PROVIDER_ID)) return
       const routes = configuredRoutes(loaded.entries)
-      if (routes.size === 0) return
+      // Provider routes are addressable directly (#1720), so a config declaring only
+      // provider routes still has work to do here.
+      if (routes.size === 0 && declaredProviderRouteIDs(loaded.entries).size === 0) return
       const windows = configuredWindows(loaded.entries)
       const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
       const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
@@ -98,94 +110,54 @@ export const Plugin = define({
       const models = Array.from(routes, ([id, route]) => {
         const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
-        const first = expanded[0].model
-        // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
-        const leafCeiling = (target: (typeof expanded)[number]) =>
-          Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
-        const leafContext = Math.min(...expanded.map(leafCeiling))
-        const health = ModelRoute.policy(route.health)
-        const targetCacheFormats = expanded.map((target) =>
-          target.cacheFormat ? { cacheFormat: target.cacheFormat } : {},
-        )
-        const info = Model.Info.make({
-          ...Model.Info.default(ModelRoute.PROVIDER_ID, Model.ID.make(id)),
-          name: route.name?.trim() || id,
-          settings: {
-            [ModelRoute.SETTING]: {
-              id: Model.ID.make(id),
-              ...(route.system ? { system: route.system } : {}),
-              targets: expanded.map((target) => target.ref),
-              targetVariants: expanded.map((target) => ({
-                ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
-                ...(target.variantMap ? { map: target.variantMap } : {}),
-              })),
-              // Routes that declare no cache format keep their stored settings unchanged.
-              ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
-              health,
-              nodes,
-              ...(route.attempts !== undefined ? { attempts: route.attempts } : {}),
-              ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
-              ...(route.autonomy ? { autonomy: route.autonomy } : {}),
-              ...(route.limit?.context !== undefined ? { limit: { context: route.limit.context } } : {}),
-              budgets: expanded.map((target) => target.budget ?? {}),
-              // Parallel to targets: each leaf's effective ceiling, so selection can skip a leaf
-              // whose ceiling a request does not fit. Stored effective (with the model's own limit
-              // folded in) so eligibility needs nothing beyond the definition and the request size.
-              ...(expanded.some((target) => target.contextLimit !== undefined)
-                ? {
-                    targetLimits: expanded.map((target) => ({
-                      context: Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                    })),
-                  }
-                : {}),
-              ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
-            },
-          },
-          capabilities: {
-            tools: expanded.every((target) => target.model.capabilities.tools),
-            input: intersect(expanded.map((target) => target.model.capabilities.input)),
-            output: intersect(expanded.map((target) => target.model.capabilities.output)),
-          },
-          variants: routeVariants(expanded),
-          cost: first.cost,
-          status: "active",
-          limit: {
-            context: route.limit?.context !== undefined ? Math.min(route.limit.context, leafContext) : leafContext,
-            output: Math.min(...expanded.map((target) => target.model.limit.output)),
-            ...(expanded.every((target) => target.model.limit.input !== undefined)
-              ? {
-                  // The context cap applies to the presented input limit too: compaction
-                  // prefers limit.input over limit.context (calculateCeiling), so an uncapped
-                  // input would silently bypass the cap whenever targets define one.
-                  input:
-                    route.limit?.context !== undefined
-                      ? Math.min(
-                          route.limit.context,
-                          ...expanded.map((target) =>
-                            Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                          ),
-                        )
-                      : Math.min(
-                          ...expanded.map((target) =>
-                            Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
-                          ),
-                        ),
-                }
-              : {}),
-          },
-        })
-        return info
+        return routeModel(id, route, expanded, nodes, globalSchedules, ctx.location.directory)
       }).filter((model): model is Model.Info => model !== undefined)
 
-      if (models.length === 0) return
-      providers.add({
-        info: {
-          ...Provider.Info.empty(ModelRoute.PROVIDER_ID),
-          name: "OpenCode routes",
-          activation: "enabled",
-        },
-        models,
-      })
+      // The routes provider is registered even when no route could be built from
+      // definitions alone: a route whose targets are all transform-created (#1001)
+      // has no model yet, and the model transform below can only create it if this
+      // provider exists in the model editor's candidate set.
+      if (routes.size > 0)
+        providers.add({
+          info: {
+            ...Provider.Info.empty(ModelRoute.PROVIDER_ID),
+            name: "OpenCode routes",
+            activation: "enabled",
+          },
+          models,
+        })
+
+      // Direct provider-route sessions (#1720): a session addressing `<route>/<model>`
+      // finds no catalog entry, because expansion only consumes a provider route when
+      // a model route seats it. Register each member-offered model under the route id
+      // itself, carrying the seat-identical group definition, so direct sessions
+      // resolve through the same selection, weights, health, and failover machinery.
+      // Built from the pre-synthetic definitions above, so the new records never
+      // shadow the provider route at expansion the way a same-named concrete
+      // provider would.
+      const directByRoute = new Map<string, Model.Info[]>()
+      for (const model of buildProviderRouteModels(
+        providerRoutes,
+        routes,
+        definitions,
+        windows,
+        globalSchedules,
+        ctx.location.directory,
+      )) {
+        const key = String(model.providerID)
+        const list = directByRoute.get(key) ?? []
+        list.push(model)
+        directByRoute.set(key, list)
+      }
+      for (const [routeID, routeModels] of directByRoute)
+        providers.add({
+          info: {
+            ...Provider.Info.empty(Provider.ID.make(routeID)),
+            name: routeID,
+            activation: "enabled",
+          },
+          models: routeModels,
+        })
     })
 
     // Pools are built by the provider transform above, which runs before any model
@@ -204,7 +176,7 @@ export const Plugin = define({
         if (!current) continue
         const providerRoutes = configuredProviderRoutes(
           loaded.entries,
-          new Set(models.provider.list().map((record) => record.provider.id)),
+          concreteProviderIDs(models, loaded.entries),
           routes,
         )
         const next = retargetDefinition(current, routes, models, windows, providerRoutes)
@@ -225,9 +197,226 @@ export const Plugin = define({
             }))
         })
       }
+      // Routes the loop above could not retarget because the provider transform
+      // never built them: every target was transform-created, so no route model
+      // existed when transforms began (#1001). Build each missing route now,
+      // against the same current-model definitions a retarget uses. A route
+      // whose targets still resolve to no model is named in a warning instead
+      // of vanishing silently.
+      const built = new Set(models.list(ModelRoute.PROVIDER_ID).map((model) => String(model.id)))
+      const missing = Array.from(routes.keys()).filter((id) => !built.has(id))
+      if (missing.length > 0) {
+        const providerRoutes = configuredProviderRoutes(
+          loaded.entries,
+          concreteProviderIDs(models, loaded.entries),
+          routes,
+        )
+        const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries), windows)
+        const routeProviderItems = configuredRouteProviderItems(loaded.entries)
+        const routeProviderBaseURL = routeProviderItems.some((item) => item.settings?.baseURL !== undefined)
+        for (const id of missing) {
+          const created = createRouteModel(
+            id,
+            routes,
+            models,
+            windows,
+            providerRoutes,
+            globalSchedules,
+            ctx.location.directory,
+          )
+          if (!created) {
+            console.warn(
+              `model route ${JSON.stringify(id)} names targets that resolve to no models after model transforms (experimental.routes.models); the route is not built`,
+            )
+            continue
+          }
+          models.update(ModelRoute.PROVIDER_ID, Model.ID.make(id), (draft) => {
+            Object.assign(draft, created)
+          })
+          // The provider plugin's model transform applies configured overrides
+          // (disabled, hidden, limits, variants) to route models, but it ran
+          // before this route existed and skipped it. Apply the same overrides
+          // here so a created route honors the same config as a built one.
+          for (const item of routeProviderItems) {
+            const config = item.models?.[id]
+            if (!config) continue
+            applyModelConfig(
+              models,
+              item,
+              {
+                providerID: String(ModelRoute.PROVIDER_ID),
+                baseURL: routeProviderBaseURL,
+                models: new Map([[id, { inherit: false }]]),
+              },
+              String(ModelRoute.PROVIDER_ID),
+              id,
+              config,
+            )
+          }
+        }
+      }
     })
   }),
 })
+
+/** The route model for one route, built from its expanded leaves: the provider
+ * transform builds it from definition-stage leaves, and the model transform
+ * builds it the same way for a route whose leaves only exist after model
+ * transforms (#1001), so both stages produce the identical model shape. */
+function routeModel(
+  id: string,
+  route: ConfigModelRoutes.Route,
+  expanded: readonly SourceModel[],
+  nodes: ModelRoute.Node[],
+  globalSchedules: readonly ModelRoute.WeightRule[],
+  directory?: string,
+  /** Direct-addressing identity (#1720): the provider the model is catalogued under and the
+   * route id its definition (decision records, health, usage) is keyed by. */
+  direct?: { readonly providerID: Provider.ID; readonly routeID: string },
+): Model.Info {
+  const first = expanded[0].model
+  // A leaf serves at most its own limit and the per-target ceilings on the path that reached it.
+  const leafCeiling = (target: (typeof expanded)[number]) =>
+    Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
+  const leafContext = Math.min(...expanded.map(leafCeiling))
+  const health = ModelRoute.policy(route.health, directory)
+  const targetCacheFormats = expanded.map((target) => (target.cacheFormat ? { cacheFormat: target.cacheFormat } : {}))
+  return Model.Info.make({
+    ...Model.Info.default(direct?.providerID ?? ModelRoute.PROVIDER_ID, Model.ID.make(id)),
+    name: route.name?.trim() || id,
+    settings: {
+      [ModelRoute.SETTING]: {
+        id: Model.ID.make(direct?.routeID ?? id),
+        ...(route.system ? { system: route.system } : {}),
+        targets: expanded.map((target) => target.ref),
+        targetVariants: expanded.map((target) => ({
+          ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
+          ...(target.variantMap ? { map: target.variantMap } : {}),
+        })),
+        // Routes that declare no cache format keep their stored settings unchanged.
+        ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
+        health,
+        nodes,
+        ...(route.attempts !== undefined ? { attempts: route.attempts } : {}),
+        ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
+        ...(route.autonomy ? { autonomy: route.autonomy } : {}),
+        ...(route.limit?.context !== undefined ? { limit: { context: route.limit.context } } : {}),
+        budgets: expanded.map((target) => target.budget ?? {}),
+        // Parallel to targets: each leaf's effective ceiling, so selection can skip a leaf
+        // whose ceiling a request does not fit. Stored effective (with the model's own limit
+        // folded in) so eligibility needs nothing beyond the definition and the request size.
+        ...(expanded.some((target) => target.contextLimit !== undefined)
+          ? {
+              targetLimits: expanded.map((target) => ({
+                context: Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY),
+              })),
+            }
+          : {}),
+        ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
+      },
+    },
+    capabilities: {
+      tools: expanded.every((target) => target.model.capabilities.tools),
+      input: intersect(expanded.map((target) => target.model.capabilities.input)),
+      output: intersect(expanded.map((target) => target.model.capabilities.output)),
+    },
+    variants: routeVariants(expanded),
+    cost: first.cost,
+    status: "active",
+    limit: {
+      context: route.limit?.context !== undefined ? Math.min(route.limit.context, leafContext) : leafContext,
+      output: Math.min(...expanded.map((target) => target.model.limit.output)),
+      ...(expanded.every((target) => target.model.limit.input !== undefined)
+        ? {
+            // The context cap applies to the presented input limit too: compaction
+            // prefers limit.input over limit.context (calculateCeiling), so an uncapped
+            // input would silently bypass the cap whenever targets define one.
+            input:
+              route.limit?.context !== undefined
+                ? Math.min(
+                    route.limit.context,
+                    ...expanded.map((target) =>
+                      Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
+                    ),
+                  )
+                : Math.min(
+                    ...expanded.map((target) =>
+                      Math.min(target.model.limit.input!, target.contextLimit ?? Number.POSITIVE_INFINITY),
+                    ),
+                  ),
+          }
+        : {}),
+    },
+  })
+}
+
+/** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
+ * Expansion only consumes a provider route when a model route seats it, so a session
+ * addressing the route provider directly finds no catalog entry and dies as
+ * provider.no-route. Each model the route's members offer gets a synthetic model under
+ * the route id carrying the same group definition a seat would expand to — selection,
+ * weights, windows, schedules, health, and failover included — so direct sessions
+ * resolve through the identical machinery. */
+export function buildProviderRouteModels(
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  globalSchedules: readonly ModelRoute.WeightRule[] = [],
+  directory?: string,
+): Model.Info[] {
+  const models: Model.Info[] = []
+  for (const [routeID, providerRoute] of providerRoutes) {
+    const offered = new Set<string>()
+    for (const member of providerRoute.providers)
+      for (const [modelID] of definitions.get(Provider.ID.make(member)) ?? []) offered.add(modelID)
+    for (const modelID of offered) {
+      const synthID = `${routeID}/${modelID}`
+      const synthRoutes = new Map(routes)
+      const synthRoute = {
+        targets: [{ model: { providerID: routeID, model: modelID } }],
+        selection: providerRoute.selection,
+        autonomy: "rules",
+      } as unknown as ConfigModelRoutes.Route
+      synthRoutes.set(synthID, synthRoute)
+      const { leaves: expanded, nodes } = expand(synthID, synthRoutes, definitions, windows, providerRoutes)
+      // No servable leaf (every member's copy disabled): leave the model unregistered so
+      // the miss branch can diagnose no-eligible-member instead of serving a dead entry.
+      if (expanded.length === 0) continue
+      models.push(
+        routeModel(modelID, synthRoute, expanded, nodes, globalSchedules, directory, {
+          providerID: Provider.ID.make(routeID),
+          routeID: synthID,
+        }),
+      )
+    }
+  }
+  return models
+}
+
+/** The provider ids that are concrete: every catalogued provider except the direct-addressing
+ * records a configured provider route registered under its own id (#1720), which would
+ * otherwise read as a concrete provider colliding with the route that created them. */
+function concreteProviderIDs(models: ModelCatalogEditor, entries: readonly Entry[]) {
+  const declared = declaredProviderRouteIDs(entries)
+  return new Set(
+    models.provider
+      .list()
+      .filter((record) => !isDirectRouteProvider(declared, record))
+      .map((record) => record.provider.id),
+  )
+}
+
+/** Whether a catalogued provider is the direct-addressing record a provider route registered
+ * under its own id (#1720): a route id whose models all carry a route definition. */
+function isDirectRouteProvider(
+  routeIDs: Iterable<string>,
+  record: { readonly provider: { readonly id: Provider.ID }; readonly models: ReadonlyMap<string, Model.Info> },
+) {
+  return (
+    new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
+  )
+}
 
 function configuredTuning(entries: readonly Entry[]) {
   return entries
@@ -308,7 +497,7 @@ function settingsConfig(
   }
 }
 
-function configuredRoutes(entries: readonly Entry[]) {
+export function configuredRoutes(entries: readonly Entry[]) {
   const routes = new Map<string, ConfigModelRoutes.Route>()
   entries
     .filter((entry): entry is Document => entry.type === "document")
@@ -316,6 +505,32 @@ function configuredRoutes(entries: readonly Entry[]) {
       Object.entries(entry.info.experimental?.routes?.models ?? {}).forEach(([id, route]) => routes.set(id, route))
     })
   return routes
+}
+
+/** The provider-route ids the config declares, before validation: the reference set for
+ * direct-addressing diagnostics (#1720). A declared id that validation drops (concrete
+ * provider collision, configured-route collision, no concrete members) is still a route
+ * the user meant, so the miss branch can name why it does not resolve instead of the
+ * generic unknown-provider error. */
+export function declaredProviderRouteIDs(entries: readonly Entry[]) {
+  const declared = new Set<string>()
+  entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .forEach((entry) => {
+      Object.keys(entry.info.experimental?.routes?.providers ?? {}).forEach((id) => declared.add(id))
+    })
+  return declared
+}
+
+/** The configured provider entries for the routes provider itself, in document
+ * order: their per-model entries are the overrides the provider plugin applies
+ * to built routes, replayed here for routes created after its transform ran. */
+function configuredRouteProviderItems(entries: readonly Entry[]) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .flatMap((file) => Object.entries(file.info.providers ?? {}))
+    .filter(([id]) => id === String(ModelRoute.PROVIDER_ID))
+    .map(([, item]) => item as ConfigProvider.Info)
 }
 
 function configuredSchedules(entries: readonly Entry[]) {
@@ -372,12 +587,13 @@ const warnDroppedProviderRoute = (id: string, reason: string) =>
  * routes that are configured, in the runtime's shape. An id that names a concrete provider, the
  * routes provider, or a configured route is dropped with a warning: the id shares the provider
  * namespace at a route's reference site, so a concrete provider always wins the reference, and
- * a route's name would make decision records ambiguous. Members resolve concrete-first, like
- * targets: a member that names a concrete provider is a member, and only a member naming no
- * concrete provider can be a nesting attempt - another provider route (or the routes
- * provider) named as a member is dropped with a warning, since provider routes do not
- * nest. A member that names no known provider is kept, with a warning: it contributes no
- * leaves, like a target naming an unknown provider. */
+ * a route's name would make decision records ambiguous. Members are validated independently
+ * of the caller's known-provider set (#1420): a member that is "*" (the door-set wildcard),
+ * the routes provider, or another declared provider route is dropped with a warning, since
+ * provider routes do not nest and a wildcard would dispatch outside the declared membership.
+ * A remaining member that names a concrete provider is a member. A member that names no
+ * known provider and cannot act as a pattern at expansion is kept, with a warning: it
+ * contributes no leaves, like a target naming an unknown provider. */
 export function configuredProviderRoutes(
   entries: readonly Entry[],
   knownProviders: ReadonlySet<string>,
@@ -403,12 +619,16 @@ export function configuredProviderRoutes(
     }
     const members: string[] = []
     for (const member of provider.providers) {
-      // A member resolves concrete-first, like a target: a known provider is a member even
-      // when a (rejected) provider route shares its id. Only a member that names no concrete
-      // provider can be a nesting attempt - another provider route, or the routes provider.
-      if (!knownProviders.has(member) && (member === ModelRoute.PROVIDER_ID || declared.has(member))) {
+      // Membership is validated before the known-provider test (#1420): "*", the routes
+      // provider, and another declared provider route are dropped regardless of which
+      // caller supplied the known set, so both call paths validate the same config.
+      if (member === "*" || member === ModelRoute.PROVIDER_ID || declared.has(member)) {
+        const reason =
+          member === "*"
+            ? "is a wildcard, not a concrete provider"
+            : "is not a concrete provider (provider routes do not nest)"
         console.warn(
-          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} is not a concrete provider (provider routes do not nest); the member is dropped`,
+          `provider route ${JSON.stringify(id)}: member ${JSON.stringify(member)} ${reason}; the member is dropped`,
         )
         continue
       }
@@ -815,35 +1035,35 @@ const sameVariants = (
   right: readonly { readonly id: Model.VariantID }[],
 ) => left.length === right.length && left.every((variant, index) => variant.id === right[index]?.id)
 
-/** Re-expands one route's stored definition against the models that exist after model
- * transforms have run: the union of provider-definition ids and current model ids
- * (#236). Transform-created models are resolved from the editor's current state;
- * their ids are enumerated with `ids()` so no catalog model is drafted just to list
- * it. Returns the replacement definition (undefined when the expanded target set is
- * unchanged) together with the variants the retargeted leaves can still produce, or
- * undefined when the expansion is still empty. A route the provider transform never
- * built — one whose targets were all transform-created — cannot be created here:
- * model edits cannot create a provider, so such a route still needs a
- * definition-visible target (a glob or a catalog sibling) to exist before it can be
- * retargeted. */
-export function retargetDefinition(
-  current: ModelRoute.Definition,
+/** The slice of the model editor that re-expansion reads: the immutable provider
+ * definitions plus the current, post-model-transform model state. */
+export type ModelCatalogEditor = {
+  readonly ids: (providerID: Provider.ID) => readonly string[]
+  readonly get: (providerID: Provider.ID, modelID: Model.ID) => Model.Info | undefined
+  readonly provider: {
+    readonly list: () => readonly {
+      readonly provider: { readonly id: Provider.ID }
+      readonly models: ReadonlyMap<string, Model.Info>
+    }[]
+  }
+}
+
+/** Provider definitions unioned with the models that exist after model transforms
+ * have run (#236): for every provider a route target names, the editor's current
+ * models are merged over the definition-stage catalog, so transform-created models
+ * resolve exactly as catalog models do. */
+function currentDefinitions(
+  editor: ModelCatalogEditor,
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
-  editor: {
-    readonly ids: (providerID: Provider.ID) => readonly string[]
-    readonly get: (providerID: Provider.ID, modelID: Model.ID) => Model.Info | undefined
-    readonly provider: {
-      readonly list: () => readonly {
-        readonly provider: { readonly id: Provider.ID }
-        readonly models: ReadonlyMap<string, Model.Info>
-      }[]
-    }
-  },
-  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
-  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
-): Retargeted | undefined {
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
+) {
+  // The direct-addressing records of a provider route (#1720) are not concrete providers: left in,
+  // they would shadow the provider route at expansion and collapse every seat onto themselves.
   const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
-    editor.provider.list().map((record) => [record.provider.id, record.models] as const),
+    editor.provider
+      .list()
+      .filter((record) => !isDirectRouteProvider(providerRoutes.keys(), record))
+      .map((record) => [record.provider.id, record.models] as const),
   )
   const targeted = new Set<Provider.ID>()
   for (const route of routes.values()) {
@@ -885,6 +1105,53 @@ export function retargetDefinition(
     }
     definitions.set(providerID, merged)
   }
+  return definitions
+}
+
+/** Builds the route model for a route the provider transform never built — one
+ * whose targets were all transform-created (#1001) — from the models that exist
+ * after model transforms have run. Returns undefined when the route is unknown
+ * or its expansion is still empty, so the caller can name the route in a
+ * diagnostic instead of letting it vanish silently. */
+export function createRouteModel(
+  id: string,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  editor: ModelCatalogEditor,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+  globalSchedules: readonly ModelRoute.WeightRule[] = [],
+  directory?: string,
+): Model.Info | undefined {
+  const route = routes.get(id)
+  if (!route) return undefined
+  const { leaves, nodes } = expand(
+    id,
+    routes,
+    currentDefinitions(editor, routes, providerRoutes),
+    windows,
+    providerRoutes,
+  )
+  if (leaves.length === 0) return undefined
+  return routeModel(id, route, leaves, nodes, globalSchedules, directory)
+}
+
+/** Re-expands one route's stored definition against the models that exist after model
+ * transforms have run: the union of provider-definition ids and current model ids
+ * (#236). Transform-created models are resolved from the editor's current state;
+ * their ids are enumerated with `ids()` so no catalog model is drafted just to list
+ * it. Returns the replacement definition (undefined when the expanded target set is
+ * unchanged) together with the variants the retargeted leaves can still produce, or
+ * undefined when the expansion is still empty. A route the provider transform never
+ * built — one whose targets were all transform-created — has no stored definition
+ * to retarget; creating it is createRouteModel's job (#1001). */
+export function retargetDefinition(
+  current: ModelRoute.Definition,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  editor: ModelCatalogEditor,
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+): Retargeted | undefined {
+  const definitions = currentDefinitions(editor, routes, providerRoutes)
   const { leaves, nodes } = expand(String(current.id), routes, definitions, windows, providerRoutes)
   if (leaves.length === 0) return undefined
   // The variants the route can still advertise, decided over the retargeted leaves by the

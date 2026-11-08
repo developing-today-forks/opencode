@@ -243,43 +243,35 @@ provider's deltas, never executed; a mid-stream provider failure terminates the
 stream with the façade's error event (`response.failed` / SSE `error`) — never a
 clean completion carrying partial output (the agy door's failure semantics, kept).
 
-### 6. Demotion policy becomes config
+### 6. Demotion policy as config (shipped; remainder: ledger-backed counts)
 
-Today the same policy lives in two places with the same numbers: the route proxy's
-hardcoded `DEMOTE_THRESHOLD = 3` / `DEMOTE_WINDOW_MS = 4h`, and the fork's in-process
-defaults (`ModelRoute.Settings.quota = { demoteAfter: 3, windowMs: 4 * 3_600_000 }`,
-`packages/core/src/model-route.ts`, settable only through `ModelRoute.configure(...)`,
-which config loading does not currently call).
+Demotion-as-config has shipped — in two places. The canonical machinery setting
+is `experimental.routes.settings.demotion { after, windowMs, factor }` (PR #1142,
+Location-scoped through `ModelRoute.onSettingsConfig`), and the flat
+`experimental.model_route_demotion { threshold, window_ms }` (this step's config
+landing, `packages/schema/src/config/experimental.ts`, Location-scoped through
+`ModelRoute.onDemotionConfig`) also exists. The effective policy is
+`ModelRoute.demotionPolicy`: the flat key over the machinery setting over the
+`ModelRoute.configure()` fallback, field by field. The single config source going
+forward is `routes.settings.demotion`; the route proxy's hardcoded
+`DEMOTE_THRESHOLD = 3` / `DEMOTE_WINDOW_MS = 4h` (lines 86–87) is the last
+unconfigured copy and retires with the proxy (§10).
 
-Design: one config surface, both consumers.
+Design remainder: one ledger, both consumers.
 
 ```jsonc
-// opencode.jsonc — under experimental.model_routes, beside the route definitions
+// opencode.jsonc — the single config source for demotion threshold/window
 "experimental": {
-  "model_routes": { "…": "…" },
-  "model_route_demotion": {
-    "threshold": 3,        // quota failures that demote a target
-    "window_ms": 14400000  // rolling window they must fall in (4h)
+  "routes": {
+    "settings": {
+      "demotion": {
+        "after": 3,          // quota failures that demote a target
+        "windowMs": 14400000 // rolling window they must fall in (4h)
+      }
+    }
   }
 }
 ```
-
-- Schema: a new optional `model_route_demotion` block in
-  `packages/schema/src/config/experimental.ts` (fields optional; defaults 3 and
-  14_400_000 — today's values, so an unconfigured fleet behaves exactly as now).
-- Wiring: the model-routes config plugin
-  (`packages/core/src/config/plugin/model-routes.ts`) passes the parsed values into
-  the demotion read path at load, alongside its existing `ModelRouteLog` wiring —
-  but **not** through today's `ModelRoute.configure`: that setter mutates a
-  module-global `settings` value (`packages/core/src/model-route.ts`) that every
-  `demoted` call reads, so on a server serving two project Locations with different
-  demotion settings, whichever Location loads last would silently rewrite the
-  other's policy. Model resolution is Location-scoped (root `AGENTS.md`), so this
-  step (#1151) makes the demotion policy Location-scoped too: the parsed values are
-  stored per Location and `demoted` resolves the policy for the target's Location,
-  falling back to the defaults when a Location configures none. The module-global
-  setter is removed, or reduced to the default fallback, in the same change; a
-  two-Location test with divergent thresholds is part of the step's acceptance.
 - Source of truth for counts: the `route_attempt` ledger (durable, shared), not the
   proxy's private SQL and not only the in-process map. Session traffic already lands
   there; façade traffic lands there (§7); the resolver's demotion read is backed by
@@ -340,6 +332,20 @@ The façade must preserve, or explicitly re-home, each behaviour callers depend 
    for route failover, never silently retried against the same target, and the
    façade must not strip the offending tools to make the call pass — callers
    configured those tools deliberately.
+   **Amendment (2026-11-02, #1443, Wave C):** Drew's sameness rule for door
+   retirement ("ensure merged proxy is same") overrides the verbatim rule for
+   the muse backend only. The façade now reproduces the door's aliasing scoped
+   to the resolved muse target (provider `meta`): `shell`/`bash` are presented
+   upstream as `run_command`/`terminal` (definitions, history calls,
+   tool_choice; pass-through raw bodies included, with the door's
+   collision guard) and returned calls are translated back, so a muse caller
+   gets the door's 200 with its own names. The verbatim rule above stands
+   unchanged for parsing and for every other provider. The one behaviour not
+   reproduced is the door's CLI fallback on a residual attestation 403 (the
+   fingerprint moving past the alias table): the façade surfaces it as a
+   distinct provider failure, and #1443 stays open on that leg — reproducing
+   the fallback would rebuild the CLI door inside the server, against §3 and
+   §9.2.
 2. **Warm conversation doors (agy, claude-code, commandcode, muse warm path).**
    These doors hold server-side conversation state: callers may send only the newest
    user turn and rely on the door's resident process for history (agy keys workers by
@@ -405,8 +411,7 @@ Filed from this design and linked from #1146 (one per step, in order):
 3. Responses façade: non-streaming + item store (cumulative snapshots; a chain
    loads only the referenced row, §4) + `previous_response_id`. — #1149
 4. Responses streaming grammar (§5). — #1150
-5. Demotion config: schema + Location-scoped demotion policy (replacing the
-   module-global `ModelRoute.configure`) + ledger-backed counts (§6). — #1151
+5. Demotion remainder: ledger-backed counts + façade sharing, reading the shipped `routes.settings.demotion` (§6). — #1151 (re-scoped per #1464; the config surface itself already shipped)
 6. Parity test-suite against the live doors (§10 step 1). — #1152
 7. Route-proxy retirement in developing-today/code (§10 step 2) — cross-repo,
    tracked from #1146 per the fleet's one-issue-per-set rule. — #1153

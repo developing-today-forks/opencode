@@ -116,25 +116,33 @@ export const ABSOLUTE_TIME =
 
 // A relative wait is one amount+unit part or a compound sequence of them ("in 1 hour 30
 // minutes"), and an amount may be decimal ("in 1.5 hours") — providers phrase resets both
-// ways, and some use compact units ("resets in 6d 13h"). The letter units are safe here:
-// every part must start with an amount and the (?![a-z]) guard keeps a unit from matching
-// the head of a following word ("in 5 deals" states no wait).
-const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|h|d|s)s?(?![a-z])`
-const RELATIVE_TIME = new RegExp(String.raw`in\s+(${RELATIVE_PART}(?:[\s,]+(?:and\s+)?${RELATIVE_PART})*)`)
-const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|h|d|s)s?(?![a-z])/g
+// ways, and some use compact units ("resets in 6d 13h", "in 30m", "in 1h30m": adjacent
+// compact parts sum). The letter units are safe here: every part must start with an
+// amount and the (?![a-z]) guard keeps a unit from matching the head of a following
+// word ("in 5 deals", "in 5 marks" state no wait). "ms" precedes "m" in the grammar so
+// "in 30ms" stays 30 milliseconds, not 30 minutes. This grammar is the one both
+// quota-reset parsers use (ModelRouteTuning.parseQuotaReset calls relativeMs below):
+// a message honoured by one door must be honoured by the other (#996).
+const RELATIVE_PART = String.raw`\d+(?:\.\d+)?\s*(?:second|minute|hour|day|sec|mins?|ms|h|d|m|s)s?(?![a-z])`
+const RELATIVE_TIME = new RegExp(String.raw`in\s+(${RELATIVE_PART}(?:[\s,]*(?:and\s+)?${RELATIVE_PART})*)`)
+const RELATIVE_PARTS = /(\d+(?:\.\d+)?)\s*(second|minute|hour|day|sec|min|ms|h|d|m|s)s?(?![a-z])/g
 const RELATIVE_UNITS = {
   second: 1_000,
   sec: 1_000,
   s: 1_000,
+  ms: 1,
   minute: 60_000,
+  min: 60_000,
+  m: 60_000,
   hour: 3_600_000,
   h: 3_600_000,
   day: 86_400_000,
   d: 86_400_000,
 } as Record<string, number>
 
-/** The total wait a relative phrase states, summed over its parts; undefined when it states none. */
-const relativeMs = (message: string): number | undefined => {
+/** The total wait a relative phrase states, summed over its parts; undefined when it states none.
+ * Shared with ModelRouteTuning.parseQuotaReset so the two parsers cannot drift apart (#996). */
+export const relativeMs = (message: string): number | undefined => {
   const sequence = RELATIVE_TIME.exec(message)?.[1]
   if (!sequence) return undefined
   let total = 0

@@ -77,6 +77,21 @@ describe("SessionStep.failureHint", () => {
       ),
     ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: false })
   })
+
+  test("a provider-stated wait on a transport timeout still yields a retry-after (#1551)", () => {
+    expect(
+      SessionStep.failureHint(
+        error(
+          new TransportError({
+            message: "provider asked us to wait in 5 seconds",
+            transport: "http",
+            operation: "request",
+            code: "Timeout",
+          }),
+        ),
+      ),
+    ).toMatchObject({ retryAfterMs: 5_000, network: true })
+  })
 })
 
 describe("SessionStep.quotaFailureClassification", () => {

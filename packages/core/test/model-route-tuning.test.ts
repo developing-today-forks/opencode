@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { ErrorBreakdown, TargetStats } from "@opencode/core/model-route-log"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLimits } from "@opencode/core/model-route-limits"
 import { ModelRouteTuning } from "@opencode/core/model-route-tuning"
 
 afterEach(() => {
@@ -12,6 +13,7 @@ const stats = (modelID: string, over: Partial<TargetStats> = {}): TargetStats =>
   modelID,
   attempts: 20,
   failures: 0,
+  policyRejections: 0,
   timeouts: 0,
   avgFirstTokenMs: 500,
   avgResponseMs: 4_000,
@@ -92,10 +94,10 @@ describe("ModelRouteTuning.suggest", () => {
 
 describe("ModelRouteTuning predictions", () => {
   const hourly = [
-    { providerID: "p", modelID: "m", hour: 3, attempts: 20, failures: 1 },
-    { providerID: "p", modelID: "m", hour: 14, attempts: 20, failures: 12 },
-    { providerID: "q", modelID: "n", hour: 3, attempts: 20, failures: 1 },
-    { providerID: "q", modelID: "n", hour: 14, attempts: 20, failures: 1 },
+    { providerID: "p", modelID: "m", hour: 3, attempts: 20, failures: 1, policyRejections: 0 },
+    { providerID: "p", modelID: "m", hour: 14, attempts: 20, failures: 12, policyRejections: 0 },
+    { providerID: "q", modelID: "n", hour: 3, attempts: 20, failures: 1, policyRejections: 0 },
+    { providerID: "q", modelID: "n", hour: 14, attempts: 20, failures: 1, policyRejections: 0 },
   ]
 
   test("flags a target that has been unreliable at this hour, not one that has not", () => {
@@ -111,7 +113,7 @@ describe("ModelRouteTuning predictions", () => {
   })
 
   test("says nothing without enough attempts in the hour", () => {
-    const sparse = [{ providerID: "p", modelID: "m", hour: 14, attempts: 2, failures: 2 }]
+    const sparse = [{ providerID: "p", modelID: "m", hour: 14, attempts: 2, failures: 2, policyRejections: 0 }]
     expect(ModelRouteTuning.predict({ hourly: sparse, errors: [], now: Date.UTC(2026, 0, 1, 14) })).toEqual([])
   })
 
@@ -199,6 +201,57 @@ describe("ModelRouteTuning predictions", () => {
     expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(ModelRoute.DEFAULT_CONSTANTS.quotaGate.maxMs)
     expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(30 * 86_400_000)
   })
+
+  test("two Locations with divergent quotaGate.maxMs each judge tuning ceilings by their own gate (#1461)", () => {
+    const at = Date.UTC(2026, 0, 1, 14)
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { maxMs: 7 * 86_400_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { maxMs: 2 * 86_400_000 } }), "/loc/b")
+    try {
+      expect(ModelRouteTuning.quotaResetCeilingMs(undefined, "/loc/a")).toBe(7 * 86_400_000)
+      expect(ModelRouteTuning.quotaResetCeilingMs(undefined, "/loc/b")).toBe(2 * 86_400_000)
+      // An unscoped read with two Locations registered falls back to the defaults
+      // rather than borrowing whichever Location registered last.
+      expect(ModelRouteTuning.quotaResetCeilingMs()).toBe(30 * 86_400_000)
+      expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 100000 days", at, undefined, "/loc/a")).toBe(
+        at + 7 * 86_400_000,
+      )
+      expect(ModelRouteTuning.parseQuotaReset("quota exceeded, back in 100000 days", at, undefined, "/loc/b")).toBe(
+        at + 2 * 86_400_000,
+      )
+      const errors = [
+        {
+          providerID: "q",
+          modelID: "n",
+          tag: "QuotaExceeded",
+          code: null,
+          status: 429,
+          count: 3,
+          lastTime: at,
+          lastMessage: "quota exceeded; try again in 100000 days",
+        },
+      ]
+      expect(ModelRouteTuning.predict({ hourly: [], errors, now: at, location: "/loc/a" })).toContainEqual({
+        target: "q/n",
+        state: "quota-reset",
+        detail: `provider message states a reset past the 7-day ceiling; predicting ${new Date(at + 7 * 86_400_000).toISOString()}`,
+        until: at + 7 * 86_400_000,
+      })
+      expect(ModelRouteTuning.predict({ hourly: [], errors, now: at, location: "/loc/b" })).toContainEqual({
+        target: "q/n",
+        state: "quota-reset",
+        detail: `provider message states a reset past the 2-day ceiling; predicting ${new Date(at + 2 * 86_400_000).toISOString()}`,
+        until: at + 2 * 86_400_000,
+      })
+      // Notes are bounded by the judging Location's ceiling too: a reset stated
+      // three days out is honoured under A's 7-day ceiling, capped under B's 2-day one.
+      const note = [{ match: "q", text: "quota reset at 2026-01-04T14:00:00Z" }]
+      expect(ModelRouteTuning.noteAdjustments(note, at, 60_000, undefined, "/loc/a")[0]?.until).toBe(at + 3 * 86_400_000)
+      expect(ModelRouteTuning.noteAdjustments(note, at, 60_000, undefined, "/loc/b")[0]?.until).toBe(at + 2 * 86_400_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
 })
 
 describe("ModelRouteTuning.parseQuotaReset", () => {
@@ -234,6 +287,29 @@ describe("ModelRouteTuning.parseQuotaReset", () => {
     expect(ModelRouteTuning.parseQuotaReset("available at 2026-01-02T00:00:00Z", at)).toBeUndefined()
     expect(ModelRouteTuning.parseQuotaReset("try in 5 minutes", at)).toBeUndefined()
     expect(ModelRouteTuning.parseQuotaReset(undefined, at)).toBeUndefined()
+  })
+
+  test("reads the same relative units as ModelRouteLimits over a shared case table (#996)", () => {
+    // Paired parity: both doors honour the same relative grammar — the tuning parser
+    // shares ModelRouteLimits.relativeMs, and this table pins the two entry points to
+    // identical results so a future grammar edit cannot drift them apart silently.
+    for (const [message, wait] of [
+      ["quota resets in 6d 13h", 6 * 86_400_000 + 13 * 3_600_000],
+      ["quota exhausted, resets in 3h", 3 * 3_600_000],
+      ["quota resets in 2d", 2 * 86_400_000],
+      ["quota resets in 30m", 1_800_000],
+      ["quota resets in 30min", 1_800_000],
+      ["quota resets in 30mins", 1_800_000],
+      ["quota resets in 45s", 45_000],
+      ["quota resets in 1 hour 30 minutes", 5_400_000],
+      ["quota resets in 1h30m", 5_400_000],
+      ["quota resets in 30ms", 30],
+    ] as const) {
+      expect(ModelRouteLimits.resetAtFromMessage(message, at)).toBe(at + wait)
+      expect(ModelRouteTuning.parseQuotaReset(message, at)).toBe(at + wait)
+    }
+    for (const message of ["quota, come back in 5 deals", "quota, come back in 2 homes", "quota, come back in 5 marks"])
+      expect(ModelRouteTuning.parseQuotaReset(message, at)).toBeUndefined()
   })
 
   test("scans past an unparseable first date to a later valid reset", () => {

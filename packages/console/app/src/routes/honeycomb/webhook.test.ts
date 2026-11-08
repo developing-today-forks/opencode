@@ -1,12 +1,7 @@
-import { describe, expect, mock, spyOn, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import type { APIEvent } from "@solidjs/start/server"
 
-mock.module("@opencode/console-resource", () => ({
-  Resource: {
-    DISCORD_INCIDENT_WEBHOOK_URL: { value: "https://discord.example.test/api/webhooks/1/token" },
-    HoneycombWebhookSecret: { value: "test-secret" },
-  },
-}))
+// @opencode/console-resource is provided by the shared preload fixture (test/preload.ts, #1522).
 
 const { POST, DISCORD_TIMEOUT_MS } = await import("./webhook")
 

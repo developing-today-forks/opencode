@@ -9,9 +9,11 @@ import {
   parseAllowlist,
   scanSource,
   scriptTreesOnDisk,
+  srcTreesOnDisk,
   staleEntries,
   unlistedHits,
   unscannedScriptTrees,
+  unscannedSrcTrees,
   type Hit,
 } from "./check-bounded-http"
 
@@ -198,6 +200,45 @@ describe("nested script trees (#1425)", () => {
 
   test("no script tree on disk in this repo is unscanned", () => {
     expect(unscannedScriptTrees(join(import.meta.dir, ".."))).toEqual([])
+  })
+})
+
+describe("src trees (#1494)", () => {
+  test("srcTreesOnDisk finds package src trees at any depth and ignores non-package folders", () => {
+    const root = mkdtempSync(join(tmpdir(), "bounded-http-src-trees-"))
+    try {
+      const tree = (rel: string, pkgAt: "parent" | "self" | "none") => {
+        mkdirSync(join(root, rel), { recursive: true })
+        if (pkgAt === "parent") writeFileSync(join(root, rel, "..", "package.json"), "{}\n")
+        if (pkgAt === "self") writeFileSync(join(root, rel, "package.json"), "{}\n")
+      }
+      tree("packages/ai/src", "parent")
+      tree("packages/console/app/src", "parent")
+      tree("packages/stats/core/src", "parent")
+      tree("services/www/src", "parent")
+      // Not package src trees: a src folder with no package.json at either
+      // level (asset content), and a depth-2 src above the package level.
+      tree("packages/plugins/figma/skills/example/src", "none")
+      mkdirSync(join(root, "packages/src"), { recursive: true })
+      writeFileSync(join(root, "packages/package.json"), "{}\n")
+      expect(srcTreesOnDisk(root)).toEqual([
+        "packages/ai/src",
+        "packages/console/app/src",
+        "packages/stats/core/src",
+        "services/www/src",
+      ])
+      expect(unscannedSrcTrees(root, ["packages/ai/src"])).toEqual([
+        "packages/console/app/src",
+        "packages/stats/core/src",
+        "services/www/src",
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("no src tree on disk in this repo is unscanned", () => {
+    expect(unscannedSrcTrees(join(import.meta.dir, ".."))).toEqual([])
   })
 })
 

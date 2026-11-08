@@ -346,7 +346,7 @@ function resolveV1(theme: ThemeV1Json, mode: "dark" | "light"): Theme {
       if (value === "transparent" || value === "none") return RGBA.fromInts(0, 0, 0, 0)
       if (value.startsWith("#")) return RGBA.fromHex(value)
       if (chain.includes(value)) throw new Error(`Circular color reference: ${[...chain, value].join(" -> ")}`)
-      const next = defs[value] ?? theme.theme[value as ThemeColor]
+      const next = (Object.hasOwn(defs, value) ? defs[value] : undefined) ?? (Object.hasOwn(theme.theme, value) ? theme.theme[value as ThemeColor] : undefined)
       if (next === undefined) throw new Error(`Color reference "${value}" not found in defs or theme`)
       return resolveColor(next, [...chain, value])
     }

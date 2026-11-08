@@ -4,15 +4,25 @@ import { Schema } from "effect"
 import { optional, PositiveInt } from "./schema.js"
 import { IntegrationID } from "./integration-id.js"
 
+/** The largest MCP timeout the SDK timer honours: a `setTimeout` delay past
+ * 2^31 - 1 ms (~24.8 days) overflows and fires in ~1 ms, so a larger configured
+ * timeout would time out every MCP call for the server instantly (#1077). */
+export const MAX_TIMEOUT_MS = 2_147_483_647
+
+const TimeoutMs = PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_TIMEOUT_MS))
+
 export class TimeoutConfig extends Schema.Class<TimeoutConfig>("Mcp.TimeoutConfig")({
-  startup: PositiveInt.annotate({
-    description: "Maximum time in milliseconds to establish and initialize the MCP server.",
+  startup: TimeoutMs.annotate({
+    description:
+      "Maximum time in milliseconds to establish and initialize the MCP server. At most 2147483647 (~24.8 days); a larger value is rejected.",
   }).pipe(optional),
-  catalog: PositiveInt.annotate({
-    description: "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list.",
+  catalog: TimeoutMs.annotate({
+    description:
+      "Maximum time in milliseconds to wait for MCP discovery requests such as tools/list and prompts/list. At most 2147483647 (~24.8 days); a larger value is rejected.",
   }).pipe(optional),
-  execution: PositiveInt.annotate({
-    description: "Maximum time in milliseconds to wait for MCP tool and prompt execution.",
+  execution: TimeoutMs.annotate({
+    description:
+      "Maximum time in milliseconds to wait for MCP tool and prompt execution. At most 2147483647 (~24.8 days); a larger value is rejected.",
   }).pipe(optional),
 }) {}
 

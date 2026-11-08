@@ -8,6 +8,16 @@ import type definition from "./index"
 
 const CHANGELOG_URL = "https://opencode.ai/changelog.json"
 
+/**
+ * Deadline for the changelog fetch, composed with the extension-setup
+ * teardown signal below: that signal alone is a lifecycle signal with
+ * no deadline, so a stalled changelog would pend for the life of the
+ * process and the failure path would never run (#1081). 5 seconds
+ * matches the theme loader's bound for the same 1 MiB-capped remote
+ * JSON (changelogMaxResponseBytes).
+ */
+const changelogFetchTimeoutMs = 5_000
+
 type Highlight = {
   title: string
   description: string
@@ -62,7 +72,10 @@ export function showWhatsNew(
 
   ctx.signal.addEventListener("abort", () => timers.forEach(clearTimeout))
 
-  fetch(CHANGELOG_URL, { signal: ctx.signal, headers: { Accept: "application/json" } })
+  fetch(CHANGELOG_URL, {
+    signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(changelogFetchTimeoutMs)]),
+    headers: { Accept: "application/json" },
+  })
     .then(async (response) => (response.ok ? JSON.parse(await readBoundedChangelogText(response)) : undefined))
     .then((json) => {
       if (!json) return

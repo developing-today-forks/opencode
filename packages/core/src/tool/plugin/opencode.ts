@@ -28,6 +28,16 @@ export const MoveInput = Schema.Struct({
 
 const MoveOutput = Schema.Struct({ sessionID: Session.ID, directory: AbsolutePath })
 
+export const SwitchModelInput = Schema.Struct({
+  sessionID: Schema.optionalKey(Session.ID).annotate({ description: "Omit to switch the current session's model." }),
+  model: Schema.String.check(Schema.isMinLength(1)).annotate({
+    description:
+      'The model to switch to, as a model ref ("providerID/modelID", or "providerID/modelID#variant" to include a variant). Do not guess the ID: look unfamiliar models up with the models tool.',
+  }),
+})
+
+const SwitchModelOutput = Schema.Struct({ sessionID: Session.ID, model: Model.Ref })
+
 export const WorktreeCreateInput = Schema.Struct({
   name: Schema.Trim.check(Schema.isNonEmpty()).annotate({ description: "Worktree name." }),
 })
@@ -40,6 +50,8 @@ export const WorktreeRemoveInput = Schema.Struct({
     description: "Discard modified and untracked files. Only set this when the user has confirmed forced removal.",
   }),
 })
+
+export const WorktreeListInput = Schema.Struct({})
 
 const WorktreeRemoveOutput = Schema.Struct({ directory: AbsolutePath, removed: Schema.Boolean })
 
@@ -153,6 +165,38 @@ export const Plugin = {
             ),
         })
         draft.add({
+          name: "session_switch_model",
+          description:
+            "Switch a session's model, or omit sessionID to switch the current session's model. The switch takes effect on the next turn and the prompt cache does not carry over to the new model, so switch rarely and deliberately. A child session may only switch to a model its subtree's governance allows; a denied switch names the allowed models.",
+          input: SwitchModelInput,
+          output: SwitchModelOutput,
+          options: { namespace: "opencode", codemode: true },
+          execute: (input, context) => {
+            const sessionID = input.sessionID ?? context.sessionID
+            return Effect.try(() => Model.Ref.parse(input.model)).pipe(
+              Effect.mapError(
+                (error) =>
+                  new ToolFailure({
+                    message: `Invalid model "${input.model}". Use "providerID/modelID" or "providerID/modelID#variant".`,
+                    error,
+                  }),
+              ),
+              Effect.flatMap((model) =>
+                ctx.session.switchModel({ sessionID, model }).pipe(
+                  Effect.as({
+                    output: { sessionID, model },
+                    content: `Switched session ${sessionID} to ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}. The new model takes effect on the next turn; the prompt cache does not carry over.`,
+                  }),
+                  Effect.mapError(
+                    (error) =>
+                      new ToolFailure({ message: `Unable to switch session ${sessionID} to ${input.model}`, error }),
+                  ),
+                ),
+              ),
+            )
+          },
+        })
+        draft.add({
           name: "worktree_create",
           description: "Create a named worktree. Returns its directory.",
           input: WorktreeCreateInput,
@@ -169,7 +213,7 @@ export const Plugin = {
         draft.add({
           name: "worktree_list",
           description: "List a repository's worktrees.",
-          input: Schema.Struct({}),
+          input: WorktreeListInput,
           output: Schema.Struct({ worktrees: Worktree.List }),
           options: { namespace: "opencode", codemode: true, pinned: true },
           execute: () =>

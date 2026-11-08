@@ -217,14 +217,44 @@ function decodeDataURL(uri: string, label: string) {
       if (comma === -1) throw new Error("Invalid data URL")
       const metadata = uri.slice(5, comma)
       const payload = uri.slice(comma + 1)
-      if (!metadata.split(";").some((part) => part.toLowerCase() === "base64"))
-        return Buffer.from(decodeURIComponent(payload))
+      if (!metadata.split(";").some((part) => part.toLowerCase() === "base64")) return decodePercentPayload(payload)
       const bytes = Buffer.from(payload, "base64")
       if (bytes.toString("base64") !== payload) throw new Error("Non-canonical base64")
       return bytes
     },
     catch: () => new AttachmentError({ uri: label, message: `Invalid attachment data URL: ${label}` }),
   })
+}
+
+// Decode as bytes, not as a URI string: decodeURIComponent decodes percent
+// escapes as UTF-8 and throws on valid binary octets such as %FF, which made
+// decodeDataURL reject the whole prompt for a valid binary attachment
+// (#1539). Each %HH escape becomes exactly one byte; unescaped literal text
+// is encoded as UTF-8; a malformed escape is invalid. This mirrors
+// decodeFilePayload in v1-migration.bun.ts, which fixed the same bug for
+// the migration path (#1529); that module is a Bun entry point, so the
+// algorithm is mirrored here rather than imported.
+function decodePercentPayload(payload: string) {
+  const bytes: number[] = []
+  let literal = ""
+  const flush = () => {
+    if (!literal) return
+    for (const byte of new TextEncoder().encode(literal)) bytes.push(byte)
+    literal = ""
+  }
+  for (let i = 0; i < payload.length; i++) {
+    if (payload[i] !== "%") {
+      literal += payload[i]
+      continue
+    }
+    const hex = payload.slice(i + 1, i + 3)
+    if (!/^[0-9a-fA-F]{2}$/.test(hex)) throw new Error("Invalid data URL")
+    flush()
+    bytes.push(parseInt(hex, 16))
+    i += 2
+  }
+  flush()
+  return Buffer.from(bytes)
 }
 
 function positiveInt(value: string | null) {

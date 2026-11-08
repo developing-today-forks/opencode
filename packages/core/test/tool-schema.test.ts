@@ -1,13 +1,73 @@
 import { expect, test } from "bun:test"
+import Ajv2020 from "ajv/dist/2020.js"
 import { Effect, Schema, SchemaGetter } from "effect"
 import { z } from "zod"
+import { convertSchema } from "@opencode/ai/protocols/antigravity"
 import { emptyInputJsonSchema } from "@opencode/ai/tool"
+import { EditTool } from "@opencode/core/tool/plugin/edit"
+import { GlobTool } from "@opencode/core/tool/plugin/glob"
+import { GrepTool } from "@opencode/core/tool/plugin/grep"
+import { McpResourceTools } from "@opencode/core/tool/plugin/mcp-resource"
+import { McpxTool } from "@opencode/core/tool/plugin/mcpx"
+import { MessagingTools } from "@opencode/core/tool/plugin/messaging"
+import { OpenCodeTools } from "@opencode/core/tool/plugin/opencode"
+import { PatchTool } from "@opencode/core/tool/plugin/patch"
+import { PlanInfoTool } from "@opencode/core/tool/plugin/plan-info"
+import { PtyTool } from "@opencode/core/tool/plugin/pty"
+import { QuestionTool } from "@opencode/core/tool/plugin/question"
+import { ReadTool } from "@opencode/core/tool/plugin/read"
+import { RouteAdjustTool } from "@opencode/core/tool/plugin/route-adjust"
+import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
+import { RouteUsageTool } from "@opencode/core/tool/plugin/route-usage"
+import { ShellTool } from "@opencode/core/tool/plugin/shell"
+import { SkillTool } from "@opencode/core/tool/plugin/skill"
+import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
+import { WebFetchTool } from "@opencode/core/tool/plugin/webfetch"
+import { WebSearchTool } from "@opencode/core/tool/plugin/websearch"
+import { WriteTool } from "@opencode/core/tool/plugin/write"
 import { Agent } from "@opencode/schema/agent"
 import { Session } from "@opencode/schema/session"
 import { SessionMessage } from "@opencode/schema/session-message"
 import type { Info } from "@opencode/schema/tool"
 import { Tool } from "../src/tool"
 import { definition, execute } from "../src/tool/runtime"
+
+const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
+  { name: "edit", input: EditTool.Input },
+  { name: "glob", input: GlobTool.Input },
+  { name: "grep", input: GrepTool.Input },
+  { name: "opencode_list_mcp_resources", input: McpResourceTools.ListInput },
+  { name: "opencode_read_mcp_resource", input: McpResourceTools.ReadInput },
+  { name: "mcpx_exec", input: McpxTool.ExecInput },
+  { name: "mcpx_discover", input: McpxTool.DiscoverInput },
+  { name: "opencode_mcpx_observe", input: McpxTool.ObserveInput },
+  { name: "mcpx_project", input: McpxTool.ProjectInput },
+  { name: "mcpx_retract", input: McpxTool.RetractInput },
+  { name: "comms_msg", input: MessagingTools.MsgInput },
+  { name: "comms_topics", input: MessagingTools.TopicsInput },
+  { name: "comms_sessions", input: MessagingTools.SessionsInput },
+  { name: "opencode_session_rename", input: OpenCodeTools.RenameInput },
+  { name: "opencode_session_move", input: OpenCodeTools.MoveInput },
+  { name: "opencode_session_switch_model", input: OpenCodeTools.SwitchModelInput },
+  { name: "opencode_worktree_create", input: OpenCodeTools.WorktreeCreateInput },
+  { name: "opencode_worktree_list", input: OpenCodeTools.WorktreeListInput },
+  { name: "opencode_worktree_remove", input: OpenCodeTools.WorktreeRemoveInput },
+  { name: "opencode_models", input: OpenCodeTools.ModelsInput },
+  { name: "patch", input: PatchTool.Input },
+  { name: PlanInfoTool.name, input: PlanInfoTool.Input },
+  { name: RouteAdjustTool.name, input: RouteAdjustTool.Input },
+  { name: RouteStatsTool.name, input: RouteStatsTool.Input },
+  { name: RouteUsageTool.name, input: RouteUsageTool.Input },
+  { name: "pty", input: PtyTool.Input },
+  { name: "question", input: QuestionTool.Input },
+  { name: "read", input: ReadTool.Input },
+  { name: "shell", input: ShellTool.Input },
+  { name: "skill", input: SkillTool.Input },
+  { name: "subagent", input: SubagentTool.Input },
+  { name: "webfetch", input: WebFetchTool.Input },
+  { name: "websearch", input: WebSearchTool.Input },
+  { name: "write", input: WriteTool.Input },
+]
 
 const context = {
   sessionID: Session.ID.make("ses_tool_schema"),
@@ -523,4 +583,23 @@ test("missing external input schemas fall back to an empty schema", () => {
     description: "External tool",
     inputSchema: {},
   })
+})
+
+test("built-in tool input schemas satisfy the official draft 2020-12 meta-schema", () => {
+  const validator = new Ajv2020({ allErrors: true, strict: false })
+
+  for (const { name, input } of builtinInputs) {
+    const schema = definition({
+      name,
+      description: name,
+      input,
+      execute: () => Effect.succeed({ content: "" }),
+    }).inputSchema
+
+    // Anthropic Messages sends this schema verbatim as input_schema. Antigravity
+    // turns it into the provider's protobuf Schema, so that result is not itself
+    // JSON Schema; still exercise the Anthropic-target conversion on each input.
+    convertSchema(schema, true)
+    expect(validator.validateSchema(schema), `${name}: ${validator.errorsText()}`).toBe(true)
+  }
 })

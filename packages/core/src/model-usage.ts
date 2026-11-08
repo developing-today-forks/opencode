@@ -416,3 +416,96 @@ export const windowReport = (plan: ModelPlan.Plan, window: ModelPlan.QuotaWindow
     resetRule: window.resetRule ?? null,
   }
 }
+
+/** One attempt row as the serving readout needs it: the leaf that was tried, its outcome, and where
+ * it failed over to. Mirrors the columns `ModelRouteLog.sessionAttempts` selects. */
+export interface ServingAttemptRow {
+  readonly routeID: string
+  readonly providerID: string
+  readonly modelID: string
+  readonly variant: string | null
+  readonly assistantMessageID: string | null
+  readonly outcome: string
+  readonly failedOverTo: string | null
+  readonly hedged: boolean | null
+  readonly timeStarted: number
+  readonly timeEnded: number
+}
+
+/** One step's serving leaf, as a session reads it back (#1891). */
+export interface ServingStep {
+  readonly leaf: string
+  readonly providerID: string
+  readonly modelID: string
+  readonly variant: string | null
+  readonly routeID: string
+  readonly outcome: string
+  readonly failedOverTo: string | null
+  readonly assistantMessageID: string | null
+  readonly timeStarted: number
+  readonly timeEnded: number
+}
+
+/** Per-step serving leaves from newest-first attempt rows, newest step first. The declared route ref
+ * on the session is deliberately not an input: this readout is only what actually served. */
+export const servingSteps = (rows: readonly ServingAttemptRow[]): ServingStep[] =>
+  rows.map((row) => ({
+    leaf: `${row.providerID}/${row.modelID}`,
+    providerID: row.providerID,
+    modelID: row.modelID,
+    variant: row.variant,
+    routeID: row.routeID,
+    outcome: row.outcome,
+    failedOverTo: row.failedOverTo,
+    assistantMessageID: row.assistantMessageID,
+    timeStarted: row.timeStarted,
+    timeEnded: row.timeEnded,
+  }))
+
+export interface LastServing {
+  /** The leaf that served the session's last step (the latest successful attempt of the last turn,
+   * or the latest attempt when none of that turn's attempts succeeded). */
+  readonly leaf: string
+  readonly providerID: string
+  readonly modelID: string
+  readonly variant: string | null
+  readonly routeID: string
+  readonly outcome: string
+  /** The first leaf tried for that turn, when it differs from the leaf that served it. */
+  readonly attemptedLeaf: string
+  /** True when the last turn was tried on one leaf and served by another, or any of its attempts
+   * recorded a `failed_over_to` destination. */
+  readonly failedOver: boolean
+  readonly failedOverTo: string | null
+  readonly timeStarted: number
+}
+
+/** The serving leaf of the last step, from newest-first attempt rows (#1891). A turn is the group of
+ * attempts sharing the newest attempt's assistant message id (attempts without one form a group of
+ * one). Failover is attempted leaf -> served leaf within that group, never inferred across turns. */
+export const lastServing = (rows: readonly ServingAttemptRow[]): LastServing | null => {
+  const newest = rows[0]
+  if (newest === undefined) return null
+  const group =
+    newest.assistantMessageID === null
+      ? [newest]
+      : rows.filter((row) => row.assistantMessageID === newest.assistantMessageID)
+  const chronological = [...group].sort((a, b) => a.timeStarted - b.timeStarted)
+  const attempted = chronological[0]!
+  const served = [...chronological].reverse().find((row) => row.outcome === "success") ?? chronological[chronological.length - 1]!
+  const attemptedLeaf = `${attempted.providerID}/${attempted.modelID}`
+  const leaf = `${served.providerID}/${served.modelID}`
+  const failedOverTo = chronological.find((row) => row.failedOverTo !== null)?.failedOverTo ?? null
+  return {
+    leaf,
+    providerID: served.providerID,
+    modelID: served.modelID,
+    variant: served.variant,
+    routeID: served.routeID,
+    outcome: served.outcome,
+    attemptedLeaf,
+    failedOver: attemptedLeaf !== leaf || failedOverTo !== null,
+    failedOverTo,
+    timeStarted: served.timeStarted,
+  }
+}

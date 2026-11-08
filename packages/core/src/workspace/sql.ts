@@ -8,4 +8,6 @@ export const WorkspaceTable = sqliteTable("workspace", {
   binding: text({ mode: "json" }).$type<WorkspaceDriver.Binding>(),
   created_at: integer().notNull(),
   last_used_at: integer().notNull(),
+  last_snapshot_at: integer(),
+  snapshot_retry_at: integer(),
 })

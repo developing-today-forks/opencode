@@ -57,9 +57,11 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   permissions: Permission.Ruleset.annotate({
     description: "Ordered tool permission rules applied to agent tool use",
   }).pipe(optional),
-  policies: ConfigPolicy.Info.pipe(Schema.Array, optional).annotate({
-    description: "Ordered policies controlling access to providers, tools, and integrations",
-  }),
+  policies: Schema.Array(ConfigPolicy.Info)
+    .annotate({
+      description: "Ordered policies controlling access to providers, tools, and integrations",
+    })
+    .pipe(optional),
   agents: Schema.Record(Schema.String, ConfigAgent.Info).annotate({
     description: "Named built-in agent overrides and custom agent definitions",
   }).pipe(optional),
@@ -87,15 +89,19 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   compaction: ConfigCompaction.Info.annotate({
     description: "Conversation compaction behavior",
   }).pipe(optional),
-  skills: Schema.String.pipe(Schema.Array, optional).annotate({
-    description: "Additional paths or URLs to discover skills from",
-  }),
+  skills: Schema.Array(Schema.String)
+    .annotate({
+      description: "Additional paths or URLs to discover skills from",
+    })
+    .pipe(optional),
   commands: Schema.Record(Schema.String, ConfigCommand.Info).annotate({
     description: "Named slash command definitions",
   }).pipe(optional),
-  instructions: Schema.String.pipe(Schema.Array, optional).annotate({
-    description: "Additional paths or URLs supplying ambient instructions",
-  }),
+  instructions: Schema.Array(Schema.String)
+    .annotate({
+      description: "Additional paths or URLs supplying ambient instructions",
+    })
+    .pipe(optional),
   references: ConfigReference.Info.annotate({
     description: "Named local directories or Git repositories available as external context",
   }).pipe(optional),

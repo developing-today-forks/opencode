@@ -8,9 +8,6 @@ name: publish
 run-name: "${{ format('release {0}', inputs.bump) }}"
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       bump:
@@ -47,7 +44,22 @@ env:
   OPENCODE_CHANNEL: ${{ (github.ref_name == 'dev' && !inputs.bump && !inputs.version && 'dev') || '' }}
 
 jobs:
+  main-gate:
+    # Phase 3 release gate (code#1782): no publish step runs from a SHA
+    # whose main-gate is not green — see .github/ci-policy.md.
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/main-gate
+        with:
+          override: ${{ vars.MAIN_GATE_OVERRIDE }}
+
   version:
+    needs: main-gate
     timeout-minutes: 15
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04

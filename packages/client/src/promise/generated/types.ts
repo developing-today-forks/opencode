@@ -2199,6 +2199,7 @@ export type CredentialKey = {
 export type ConfigModelRoutes = {
   [x: string]: {
     name?: string
+    system?: string
     targets: Array<ConfigModelRouteTarget>
     cache_format?: ModelCacheFormat
     health?: {
@@ -2480,6 +2481,7 @@ export type ModelInfo = {
   cost: Array<ModelCost>
   status: "alpha" | "beta" | "deprecated" | "active"
   enabled: boolean
+  hidden?: boolean
   limit: { context: number; input?: number; output: number }
 }
 
@@ -2756,6 +2758,7 @@ export type ConfigEntry =
                       cache?: { read?: MoneyUSDPerMillionTokens; write?: MoneyUSDPerMillionTokens }
                     }>
                 disabled?: boolean
+                hidden?: boolean
                 limit?: { context?: number; input?: number; output?: number }
               }
             }
@@ -3697,6 +3700,7 @@ export type SessionStatsInput = {
 export type SessionStatsOutput = { data: SessionStatsInfo }["data"]
 
 export type SessionCreateInput = {
+  readonly directory?: { readonly directory?: string | undefined }["directory"]
   readonly id?: {
     readonly id?: string | null
     readonly parentID?: string | null

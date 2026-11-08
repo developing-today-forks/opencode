@@ -6,8 +6,6 @@ name: check
 # or gate individual steps with if: on the runner.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -39,7 +37,6 @@ jobs:
       # Every GUI package file (app, desktop, gui-extensions, ui, session-ui) a pull request adds or edits must be free of
       # oxlint problems, warn-level rules (anti-slop) included. Other packages are not affected.
       - name: Lint changed files
-        if: github.event_name == 'pull_request'
         # Against the merge's first parent, so base-branch commits the pull request has not merged are not counted as its
         # changes (the event's base SHA can predate them).
         run: bun run lint:changed HEAD^1

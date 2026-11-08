@@ -202,6 +202,18 @@ describe("ConfigModelRoutes field descriptions", () => {
   })
 })
 
+describe("ConfigModelRoutes.Window bounds", () => {
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects empty or reversed epoch ranges and accepts one-sided or ordered bounds", () => {
+    expect(() => decode({ from: 2, until: 1 })).toThrow("window from must be before until")
+    expect(() => decode({ from: 1, until: 1 })).toThrow("window from must be before until")
+    expect(decode({ from: 1 })).toMatchObject({ from: 1 })
+    expect(decode({ until: 1 })).toMatchObject({ until: 1 })
+    expect(decode({ from: 1, until: 2 })).toMatchObject({ from: 1, until: 2 })
+  })
+})
+
 describe("field descriptions beyond model-routes (#650)", () => {
   // Same defect as #240, in the remaining schema files: a description annotated outside the package
   // `optional` helper never reaches the encoded JSON schema. These cases pin the fields fixed by #650.
@@ -239,13 +251,16 @@ describe("field descriptions beyond model-routes (#650)", () => {
           "formatter",
           "update",
           "share",
+          "policies",
+          "skills",
+          "instructions",
         ],
       ],
       [ConfigMessaging.Info, ["embedding"]],
       [ConfigMessaging.Search, ["match", "model"]],
       [ConfigMessaging.Embedding, ["tier", "pooling", "gpu_layers"]],
       [ConfigMessaging.Remote, ["key"]],
-      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "routes"]],
+      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "policies", "routes"]],
       [ConfigExperimental.Routes, ["schedules"]],
       [ConfigAlias.Info, ["providers", "models", "variants"]],
       [ConfigWarming.Info, ["prompt"]],
@@ -266,6 +281,14 @@ describe("field descriptions beyond model-routes (#650)", () => {
     )
     expect(described(Messaging.Writer).children).toContain("Also allow its descendants")
     expect(described(Config.Info).shell).toContain("Default shell to use")
+    expect(described(Config.Info)).toMatchObject({
+      policies: "Ordered policies controlling access to providers, tools, and integrations",
+      skills: "Additional paths or URLs to discover skills from",
+      instructions: "Additional paths or URLs supplying ambient instructions",
+    })
+    expect(described(ConfigExperimental.Info).policies).toBe(
+      "Deprecated: use top-level policies. Ordered policies controlling access to configured resources",
+    )
   })
 })
 
@@ -410,9 +433,42 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
       { network: { windowMs: 0 } },
       { escalation: { outcomeWindow: 0 } },
       { escalation: { afterGiveUps: 51 } },
+      { escalation: { afterGiveUps: 6, outcomeWindow: 5 } },
+      { escalation: { afterGiveUps: 6 } },
+      { escalation: { outcomeWindow: 1 } },
       { continuity: { hedgeRequests: 0 } },
       { overrides: { preferredFactor: 0 } },
     ]
     for (const value of bad) expect(() => decode({ routes: { settings: value } })).toThrow()
+  })
+
+  test("accepts escalation pairs at the cross-field boundary (#1163)", () => {
+    // Equality is valid: every outcome in the window giving up reaches the threshold exactly.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5, outcomeWindow: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    // One-sided values at the default of the other side (afterGiveUps 2, outcomeWindow 5) are valid.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    expect(decode({ routes: { settings: { escalation: { outcomeWindow: 2 } } } }).routes?.settings?.escalation?.outcomeWindow).toBe(2)
+    // The invariant also holds decoding Escalation on its own.
+    const decodeEscalation = Schema.decodeUnknownSync(ConfigModelRoutes.Escalation)
+    expect(decodeEscalation({ afterGiveUps: 2, outcomeWindow: 2 }).afterGiveUps).toBe(2)
+    expect(() => decodeEscalation({ afterGiveUps: 3, outcomeWindow: 2 })).toThrow()
+  })
+
+  test("enforces exactly one of factor and weight on schedules (#1589)", () => {
+    const decodeSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.Schedule)
+    // Exactly one set decodes, either way around.
+    expect(decodeSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    // Both set would silently discard factor in core's interpreter; neither is inert.
+    expect(() => decodeSchedule({ when: {}, factor: 2, weight: 5 })).toThrow("exactly one of factor and weight")
+    expect(() => decodeSchedule({ when: {} })).toThrow("exactly one of factor and weight")
+
+    const decodeGlobalSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.GlobalSchedule)
+    expect(decodeGlobalSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeGlobalSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    expect(() => decodeGlobalSchedule({ when: {}, factor: 2, weight: 5 })).toThrow(
+      "exactly one of factor and weight",
+    )
+    expect(() => decodeGlobalSchedule({ when: {} })).toThrow("exactly one of factor and weight")
   })
 })

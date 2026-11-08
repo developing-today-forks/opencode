@@ -158,7 +158,7 @@ const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9.
 
 /** A recurring local-time window. Days and time bounds all have to match when set, so
  * `daysOfMonth: [1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month. */
-export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
+class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")({
   daysOfWeek: Schema.Array(DayOfWeek)
     .annotate({
       description: "Weekdays the window is active on. Empty or unset means every day.",
@@ -205,6 +205,15 @@ export class Window extends Schema.Class<Window>("Config.ModelRoute.Window")({
   }).pipe(optional),
 }) {}
 
+export const Window = WindowClass.check(
+  Schema.makeFilter((window: WindowClass) =>
+    window.from === undefined || window.until === undefined || window.from < window.until
+      ? undefined
+      : "window from must be before until",
+  ),
+).annotate({ identifier: "Config.ModelRoute.Window" })
+export type Window = WindowClass
+
 /** A schedule's window: inline, or the name of a window defined once in
  * experimental.routes.windows and reused by every rule that shares the meter's clock. */
 const ScheduleWindow = Schema.Union([Window, Schema.String]).annotate({
@@ -214,7 +223,7 @@ const ScheduleWindow = Schema.Union([Window, Schema.String]).annotate({
 
 /** A time-bound weight change inside one route. `factor` scales a target's weight; `weight` replaces
  * it. Everything is unchanged outside the window. */
-export class Schedule extends Schema.Class<Schedule>("Config.ModelRoute.Schedule")({
+class ScheduleClass extends Schema.Class<ScheduleClass>("Config.ModelRoute.Schedule")({
   id: Schema.String.annotate({ description: "Name for the schedule, shown in decisions and editors." }).pipe(optional),
   targets: Schema.Array(Schema.String)
     .annotate({
@@ -234,8 +243,26 @@ export class Schedule extends Schema.Class<Schedule>("Config.ModelRoute.Schedule
   note: Schema.String.annotate({ description: "Why the schedule exists, kept for review." }).pipe(optional),
 }) {}
 
+/** Schedule as it decodes: exactly one of `factor` and `weight` must be set (#1589). The
+ * fields are each optional, so the rule lives in this cross-field check, in the shape of
+ * the Escalation check below (#1163). With both set, core's scheduled() interpreter
+ * silently lets `weight` win and discards `factor`; with neither, the schedule matches
+ * its window and targets and then changes nothing — either way the operator believes
+ * a weight change is in force that routing does not perform. */
+export const Schedule = ScheduleClass.check(
+  Schema.makeFilter((schedule: ScheduleClass) =>
+    (schedule.factor === undefined) !== (schedule.weight === undefined)
+      ? undefined
+      : "a schedule must set exactly one of factor and weight",
+  ),
+  // The check wrapper drops the class identifier from the encoded JSON
+  // schema (the struct inlines at every use site instead of registering
+  // as a named definition); restating it keeps the OpenAPI shape stable.
+).annotate({ identifier: "Config.ModelRoute.Schedule" })
+export type Schedule = ScheduleClass
+
 /** A scheduled weight change that applies across routes, optionally scoped to some of them. */
-export class GlobalSchedule extends Schema.Class<GlobalSchedule>("Config.ModelRoute.GlobalSchedule")({
+class GlobalScheduleClass extends Schema.Class<GlobalScheduleClass>("Config.ModelRoute.GlobalSchedule")({
   id: Schema.String.pipe(optional),
   providers: Schema.Array(Schema.String)
     .annotate({
@@ -266,6 +293,20 @@ export class GlobalSchedule extends Schema.Class<GlobalSchedule>("Config.ModelRo
   }).pipe(optional),
   note: Schema.String.pipe(optional),
 }) {}
+
+/** GlobalSchedule as it decodes: the same exactly-one rule as Schedule (#1589), for the
+ * same reason — core's scheduled() interpreter applies this class through the same
+ * weight-wins path, so a both-set global schedule silently discards its `factor` and a
+ * neither-set one is silently inert. */
+export const GlobalSchedule = GlobalScheduleClass.check(
+  Schema.makeFilter((schedule: GlobalScheduleClass) =>
+    (schedule.factor === undefined) !== (schedule.weight === undefined)
+      ? undefined
+      : "a global schedule must set exactly one of factor and weight",
+  ),
+  // See Schedule: restating the identifier keeps the encoded definition.
+).annotate({ identifier: "Config.ModelRoute.GlobalSchedule" })
+export type GlobalSchedule = GlobalScheduleClass
 
 export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
   name: Schema.String.pipe(optional),
@@ -420,17 +461,33 @@ export class QuotaGate extends Schema.Class<QuotaGate>("Config.ModelRoute.Settin
 }) {}
 
 /** Escalation: when a route races its next target because the current one keeps giving up. */
-export class Escalation extends Schema.Class<Escalation>("Config.ModelRoute.Settings.Escalation")({
+class EscalationClass extends Schema.Class<EscalationClass>("Config.ModelRoute.Settings.Escalation")({
   enabled: Schema.Boolean.annotate({
     description: "Whether routes race their next target once the current one keeps giving up. Defaults to true.",
   }).pipe(optional),
   afterGiveUps: SampleCount.annotate({
-    description: "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Defaults to 2.",
+    description:
+      "Give-ups among a target's recent outcomes that mark it unsteady and start escalation. Cannot exceed the outcome window, because the count reads only the retained outcomes in that window. Defaults to 2.",
   }).pipe(optional),
   outcomeWindow: SampleCount.annotate({
     description: "Recent finished requests per target that the give-up count reads. Defaults to 5.",
   }).pipe(optional),
 }) {}
+
+/** Escalation as it decodes: the cross-field invariant the fields cannot state alone (#1163).
+ * The give-up count reads only the `outcomeWindow` most recent outcomes, so an effective
+ * `afterGiveUps` above the effective window could never be reached and escalation would be
+ * silently inert. Reject that combination at decode, applying the field defaults (2 and 5)
+ * when either side is omitted, so one-sided overrides are checked too. Equality is valid:
+ * every outcome in the window giving up reaches the threshold exactly. */
+export const Escalation = EscalationClass.check(
+  Schema.makeFilter((escalation: EscalationClass) =>
+    (escalation.afterGiveUps ?? 2) <= (escalation.outcomeWindow ?? 5)
+      ? undefined
+      : "escalation afterGiveUps must not exceed outcomeWindow",
+  ),
+)
+export type Escalation = EscalationClass
 
 /** Telling a provider-wide fault from a local network fault. When several models of one
  * provider are cooling, the provider itself is demoted to last resort; when several unrelated

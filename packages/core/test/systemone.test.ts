@@ -8,7 +8,7 @@
  *
  * RE-RUN (laptop): cd packages/core && bun run test test/systemone.test.ts
  */
-import { afterAll, expect } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { SystemOne } from "@opencode/core/systemone"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { Effect, Layer } from "effect"
@@ -50,6 +50,35 @@ afterAll(() => {
 const attempts: ModelRouteLog.Attempt[] = []
 ModelRouteLog.setSink((event) => {
   if (event.kind === "attempt") attempts.push(event.row)
+})
+
+describe("dataPathTimeoutMs (#1477)", () => {
+  const saved = process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS
+  const restore = () => {
+    if (saved === undefined) delete process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS
+    else process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = saved
+  }
+  test("unset, invalid, and non-positive values fall back to 30s", () => {
+    delete process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS
+    expect(SystemOne.dataPathTimeoutMs()).toBe(30_000)
+    process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = "not-a-number"
+    expect(SystemOne.dataPathTimeoutMs()).toBe(30_000)
+    process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = "0"
+    expect(SystemOne.dataPathTimeoutMs()).toBe(30_000)
+    process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = "-5000"
+    expect(SystemOne.dataPathTimeoutMs()).toBe(30_000)
+    restore()
+  })
+  test("a normal override is honored", () => {
+    process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = "45000"
+    expect(SystemOne.dataPathTimeoutMs()).toBe(45_000)
+    restore()
+  })
+  test("an oversized override is clamped to the named maximum, not accepted whole", () => {
+    process.env.CLEF_PROXY_DATA_PATH_TIMEOUT_MS = "86400000000"
+    expect(SystemOne.dataPathTimeoutMs()).toBe(SystemOne.MAX_DATA_PATH_TIMEOUT_MS)
+    restore()
+  })
 })
 
 const it = testEffect(SystemOne.layer.pipe(Layer.provide(FetchHttpClient.layer)))

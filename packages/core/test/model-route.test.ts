@@ -771,6 +771,124 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
   })
 
+  test("a released probe claim leaves the bench in force and the probe due again (#1478)", () => {
+    const now = 850_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    // A release naming a different claim is not this claim's owner: the claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    // The owner's release hands the probe back: bench and expiry unchanged, probe due again.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.cooldownUntil(target, resetAt)).toBe(now + 7 + day)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + 1)).toBe(true)
+  })
+
+  test("a stale token release cannot clear a same-millisecond re-claim (#1486)", () => {
+    const now = 950_000_000
+    const resetAt = now + 5 * 3_600_000
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    const first = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(true)
+    // A newer pick re-claims within the same millisecond: the timestamp alone collides.
+    const second = ModelRoute.nextProbeClaimToken()
+    expect(second).not.toBe(first)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    // The first pick's redundant release names the same millisecond but a stale token:
+    // the newer claim stands.
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, first)).toBe(false)
+    expect(ModelRoute.activeBenches(resetAt)[0]?.probeClaimed).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, resetAt, second)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+  })
+
+  test("failed settles both probe scopes of one pick, even when the serving credential differs (#1486)", () => {
+    const now = 960_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+    const benchOf = (at: number, credentialID?: string) =>
+      ModelRoute.activeBenches(at).find(
+        (bench) => bench.modelID === "quota" && bench.credentialID === credentialID,
+      )
+
+    // Without the pick's claim, a serving-credential failure leaves both probe scopes stranded.
+    setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving")
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(true)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(true)
+
+    // With it, the same failure renews the target scope and the probe credential scope too,
+    // while the serving credential keeps its own health accounting.
+    const token = setup()
+    ModelRoute.failed(target, policy, resetAt + 1, { quota: true }, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(benchOf(resetAt + 1)?.probeClaimed).toBe(false)
+    expect(benchOf(resetAt + 1, "cred-probe")?.probeClaimed).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt + 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-probe", resetAt + 1)).toBe(false)
+  })
+
+  test("completed ends a probe credential that differs from the serving one (#1486)", () => {
+    const now = 970_000_000
+    const resetAt = now + 5 * 3_600_000
+    const setup = () => {
+      ModelRoute.resetHealth()
+      exhaustLadder(now)
+      exhaustLadder(now, "cred-probe")
+      ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", knownFull(resetAt, now + 10), now + 10)
+      const token = ModelRoute.nextProbeClaimToken()
+      expect(ModelRoute.claimBenchProbe(target, undefined, resetAt, token)).toBe(true)
+      expect(ModelRoute.claimBenchProbe(target, "cred-probe", resetAt, token)).toBe(true)
+      return token
+    }
+
+    // Without the pick's claim, success on the serving credential leaves the probe
+    // credential's bench (and its outstanding claim) in force.
+    setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBeGreaterThan(resetAt + 1)
+    expect(
+      ModelRoute.activeBenches(resetAt + 1).find((bench) => bench.credentialID === "cred-probe")?.probeClaimed,
+    ).toBe(true)
+
+    // With it, the same success ends the target scope and the probe credential scope too.
+    const token = setup()
+    ModelRoute.completed(target, policy, sample, resetAt + 1, "cred-serving", undefined, {
+      claimedAt: resetAt,
+      token,
+      credentialID: "cred-probe",
+    })
+    expect(ModelRoute.cooldownUntil(target, resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-probe", resetAt + 1)).toBe(0)
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBe(0)
+  })
+
   test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
     const now = 900_000_000
     const resetAt = now + 5 * 3_600_000
@@ -1748,6 +1866,17 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
   })
 
+  test("quota feeds are throttled per provider and location", () => {
+    ModelRoute.resetQuotaFeed()
+    expect(ModelRoute.shouldFeedQuota(1_000_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-b")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-a", "provider-a")).toBe(false)
+    expect(ModelRoute.shouldFeedQuota(1_030_000, "location-b", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-a")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(1_061_000, "location-a", "provider-b")).toBe(false)
+    ModelRoute.resetQuotaFeed()
+  })
+
   test("the escalation outcome window is configurable", () => {
     const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
     const other = ModelRoute.ref({ providerID: "openai", model: "gpt-6-terra" })
@@ -1764,6 +1893,594 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     ModelRoute.completed(other, policy, ok, 3_000)
     ModelRoute.completed(other, policy, ok, 4_000)
     expect(ModelRoute.escalates(other)).toBe(false)
+  })
+
+  test("a valid pair at a small configured window escalates exactly at the effective threshold (#1163)", () => {
+    const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+    const off = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 2, outcomeWindow: 2 } }),
+      "/loc/small-window",
+    )
+    try {
+      ModelRoute.resetHealth()
+      // One give-up in the window of 2: below the threshold of 2.
+      ModelRoute.failed(target, policy, 1_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A success pushes the give-up out of the small window: give-up, success, give-up
+      // leaves only one give-up in the last 2 outcomes, so still no escalation. (Under the
+      // default window of 5 the count would be 2 and this would already escalate.)
+      ModelRoute.completed(target, policy, ok, 2_000, undefined, "/loc/small-window")
+      ModelRoute.failed(target, policy, 3_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(false)
+      // A second consecutive give-up fills the window at the threshold exactly
+      // (afterGiveUps == outcomeWindow): escalation fires, so the equality pair is not inert.
+      ModelRoute.failed(target, policy, 4_000, undefined, undefined, "/loc/small-window")
+      expect(ModelRoute.escalates(target, undefined, "/loc/small-window")).toBe(true)
+    } finally {
+      off()
+    }
+  })
+
+  test("settings readers are scoped per Location, in either activation order", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, factor: 0.5 }, bench: { maxCooldownMs: 5_000 }, escalation: { afterGiveUps: 4 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 9, factor: 0.9 }, bench: { maxCooldownMs: 9_000 }, escalation: { afterGiveUps: 7 } }),
+      "/loc/b",
+    )
+    try {
+      // B activated last: before #1423 its reader would have governed A too.
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(7)
+      expect(ModelRoute.currentConstants("/loc/a").bench.maxCooldownMs).toBe(5_000)
+      expect(ModelRoute.currentConstants("/loc/b").bench.maxCooldownMs).toBe(9_000)
+      expect(ModelRoute.currentConstants("/loc/a").demotion.factor).toBe(0.5)
+      // An unscoped read with two Locations registered cannot know which it serves:
+      // it must fall back to the defaults rather than leak either Location's config.
+      expect(ModelRoute.currentSettings().escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("a Location with no settings block gets defaults without disturbing others", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ escalation: { afterGiveUps: 4 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      expect(ModelRoute.currentSettings("/loc/b").escalation.afterGiveUps).toBe(2)
+      expect(ModelRoute.currentSettings("/loc/a").escalation.afterGiveUps).toBe(4)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("behavior consumers judge with their own Location's settings, not the unscoped fallback (#1423)", () => {
+    ModelRoute.resetHealth()
+    const now = Date.now()
+    ModelRoute.failed(target, policy, now)
+    ModelRoute.failed(target, policy, now + 1)
+    ModelRoute.failed(target, policy, now + 2, { quota: true })
+    ModelRoute.failed(target, policy, now + 3, { quota: true })
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: false, afterGiveUps: 2 }, demotion: { after: 2, factor: 0.5 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { enabled: true, afterGiveUps: 2 }, demotion: { after: 9, factor: 0.9 } }),
+      "/loc/b",
+    )
+    try {
+      // Escalation: A switched it off, B left it on — each Location's step sees its own.
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.escalates(target, undefined, "/loc/b")).toBe(true)
+      // Quota demotion: two quota errors demote under A's threshold of 2, not B's 9.
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/a")).toBe(true)
+      expect(ModelRoute.demoted(target, now + 10, undefined, "/loc/b")).toBe(false)
+      // Weights: the traced demotion layer uses the judging Location's factor.
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/a" }).demotion).toBe(50)
+      expect(ModelRoute.tracedWeightOf(target, 100, now + 10, { location: "/loc/b" }).demotion).toBe(100)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("health recording keeps the judging Location's outcome window and bench ladder (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3 } }), "/loc/b")
+    try {
+      // Six give-ups recorded for A: A's window (10) keeps all six, so A's
+      // afterGiveUps (6) can actually trigger; the default window (5) would
+      // have truncated the history before the threshold could accumulate.
+      ModelRoute.resetHealth()
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 1_000_000 + index, undefined, undefined, "/loc/a")
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+      // Bench ladder: B's multiplier (3) doubles — triples — the second bench.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      ModelRoute.failed(target, policy, now, undefined, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 180_000)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-gate recording and evaluation use the owning Location's gate (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { fallbackMs: 120_000 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // A rate-limit exhaustion with no stated reset installs the fallback gate of
+      // the Location whose attempt reported it — one minute for A, not the
+      // compiled 30-minute default the unscoped read used once B registered.
+      ModelRoute.observeQuotaFailure(target, "settings-cred-a", undefined, now, "rate-limit", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now, "/loc/a")).toEqual({ until: now + 60_000 })
+      ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now, "/loc/b")).toEqual({ until: now + 120_000 })
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("threshold-derived balance holds are judged under the judging Location's threshold (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      // Armed under A's threshold (1): a balance of 0.5 is dead for A, alive for B (0.05).
+      ModelRoute.observeCredentialQuota(target, "loc-hold-cred", balance, now, "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now, "/loc/b")).toBeUndefined()
+      // The durable record carries the hold's threshold origin, not just its baseline.
+      expect(
+        ModelRoute.activeAdjustments(now).find((item) => item.id === "quota-credential:loc-hold-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("threshold")
+
+      // B feeding the same grant a lower balance corrects the retained snapshot:
+      // 0.03 is dead under B's threshold too, so B is now blocked as well.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 1, "/loc/a")).toEqual({ until: null })
+
+      // A fresh increase over the benched balance still releases the hold for everyone.
+      ModelRoute.observeCredentialQuota(
+        target,
+        "loc-hold-cred",
+        { ...balance, remaining: 2, observedAt: now + 2 },
+        now + 2,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/a")).toBeUndefined()
+      expect(ModelRoute.credentialQuotaBlocked("loc-hold-cred", now + 2, "/loc/b")).toBeUndefined()
+
+      // Attempt-reported exhaustion holds keep their unconditional force: installed
+      // from a balance of 5, they block even the Location whose threshold admits 5.
+      ModelRoute.resetHealth()
+      ModelRoute.observeCredentialQuota(target, "attempt-cred", { ...balance, remaining: 5, observedAt: now }, now, "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(target, "attempt-cred", undefined, now + 1, "balance-exhaustion", "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("attempt-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(
+        ModelRoute.activeAdjustments(now + 1).find((item) => item.id === "quota-credential:attempt-cred")
+          ?.balanceHoldOrigin,
+      ).toBe("attempt")
+
+      // A threshold hold restored from its durable record (no in-memory state) is
+      // judged by its benched balance under the judging Location's threshold.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:restored-cred",
+          match: "credential:restored-cred",
+          action: "skip",
+          balanceBaseline: 0.5,
+          balanceGrant: "credits-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          credentialID: "restored-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("restored-cred", now, "/loc/b")).toBeUndefined()
+
+      // Expiration is known-full regardless of the numeric threshold, including after
+      // restoring the durable credential hold without a fresh quota feed.
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:expired-cred",
+          match: "credential:expired-cred",
+          action: "skip",
+          balanceBaseline: 5,
+          balanceGrant: "expired-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          balanceHoldExpired: true,
+          credentialID: "expired-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("expired-cred", now, "/loc/b")).toEqual({ until: null })
+
+      // A tuning result computed under A's policy must not leak to B.
+      ModelRoute.setAdjustments([
+        {
+          id: "auto-quota:location-scoped",
+          match: `${target.providerID}/${target.id}`,
+          action: "skip",
+          location: "/loc/a",
+        },
+      ])
+      expect(ModelRoute.skipped(target, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(target, now, { location: "/loc/b" })).toBe(false)
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("a restored threshold hold is judged by its latest judged balance, not its benched baseline (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeCredentialQuota(target, "judged-cred", balance, now, "/loc/a")
+      ModelRoute.observeCredentialQuota(
+        target,
+        "judged-cred",
+        { ...balance, remaining: 0.03, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      const durable = ModelRoute.activeAdjustments(now + 1).find(
+        (item) => item.id === "quota-credential:judged-cred",
+      )
+      expect(durable?.balanceBaseline).toBe(0.5)
+      expect(durable?.balanceHoldBalance).toBe(0.03)
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/b")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("judged-cred", now + 1, "/loc/a")).toEqual({ until: null })
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("restored threshold holds keep tolerance, unknown-snapshot evidence, reactive timed gates, and timed provider skips (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    const offC = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.1 } }), "/loc/c")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "openai",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      // Tolerance: a restored balance a rounding hair above the threshold
+      // (0.4 - 0.3 = 0.10000000000000003 against 0.1) is still dead, as the live
+      // gate judges it -- on both the credential and provider durable paths.
+      ModelRoute.setAdjustments([
+        {
+          id: "quota-credential:tol-cred",
+          match: "credential:tol-cred",
+          action: "skip",
+          balanceBaseline: 0.10000000000000003,
+          balanceHoldBalance: 0.10000000000000003,
+          balanceGrant: "credits-plan\ncredits",
+          balanceHoldOrigin: "threshold",
+          credentialID: "tol-cred",
+          providerID: "openai",
+        },
+      ])
+      expect(ModelRoute.credentialQuotaBlocked("tol-cred", now, "/loc/c")).toEqual({ until: null })
+      const leafTol = ModelRoute.ref({ providerID: "prov-tol", model: "m" })
+      ModelRoute.setAdjustments([
+        {
+          id: "quota:prov-tol",
+          match: "prov-tol/",
+          action: "skip",
+          balanceBaseline: 0.10000000000000003,
+          balanceHoldBalance: 0.10000000000000003,
+          balanceHoldOrigin: "threshold",
+        },
+      ])
+      expect(ModelRoute.skipped(leafTol, now, { location: "/loc/c" })).toBe(true)
+
+      // Unknown first snapshot after a restart: the restored hold's preserved
+      // judged balance still governs -- A (threshold 1) stays blocked, B (0.05)
+      // still admits -- instead of the unknown reading admitting everyone.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      ModelRoute.observeCredentialQuota(target, "unknown-cred", balance, now, "/loc/a")
+      const durableUnknown = ModelRoute.activeAdjustments(now).find(
+        (item) => item.id === "quota-credential:unknown-cred",
+      )
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durableUnknown ? [durableUnknown] : [])
+      ModelRoute.observeCredentialQuota(
+        target,
+        "unknown-cred",
+        { ...balance, percent: null, remaining: null, observedAt: now + 1 },
+        now + 1,
+        "/loc/b",
+      )
+      expect(ModelRoute.credentialQuotaBlocked("unknown-cred", now + 1, "/loc/a")).toEqual({ until: null })
+      expect(ModelRoute.credentialQuotaBlocked("unknown-cred", now + 1, "/loc/b")).toBeUndefined()
+
+      // Reactive rate limit: B admits the held balance, but a plain rate limit
+      // reported under B gates the credential until its stated reset anyway;
+      // after the reset, B admits again while A stays balance-blocked.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      ModelRoute.observeCredentialQuota(target, "timed-cred", balance, now, "/loc/a")
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now, "/loc/b")).toBeUndefined()
+      ModelRoute.observeQuotaFailure(target, "timed-cred", now + 60_000, now + 1, "rate-limit", "/loc/b")
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 1, "/loc/b")).toEqual({ until: now + 60_000 })
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 60_001, "/loc/b")).toBeUndefined()
+      expect(ModelRoute.credentialQuotaBlocked("timed-cred", now + 60_001, "/loc/a")).toEqual({ until: null })
+
+      // Timed provider skips: two providers whose threshold holds B admits each
+      // gain a timed attempt-reported skip; the pool then counts as out under B.
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments([])
+      const leaf1 = ModelRoute.ref({ providerID: "prov-t1", model: "m" })
+      const leaf2 = ModelRoute.ref({ providerID: "prov-t2", model: "m" })
+      ModelRoute.observeProviderQuota(leaf1, { ...balance, providerID: "prov-t1" }, now, "/loc/a")
+      ModelRoute.observeProviderQuota(leaf2, { ...balance, providerID: "prov-t2" }, now, "/loc/a")
+      const definition = {
+        id: "timed-pool-route",
+        targets: [leaf1, leaf2],
+        targetVariants: [],
+        health: ModelRoute.policy(),
+        nodes: [
+          { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+          {
+            routeID: "timed-pool",
+            selection: "ordered" as const,
+            weights: [1, 1],
+            children: [{ leaf: 0 }, { leaf: 1 }],
+          },
+        ],
+      } as unknown as ModelRoute.Definition
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      ModelRoute.observeQuotaFailure(leaf1, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
+      ModelRoute.observeQuotaFailure(leaf2, undefined, now + 60_000, now + 1, "rate-limit", "/loc/b")
+      expect(ModelRoute.skipped(leaf1, now + 1, { location: "/loc/b" })).toBe(true)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now + 1, undefined, "/loc/b")).toBe(true)
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+      offC()
+    }
+  })
+
+  test("threshold-derived provider holds are judged under the requesting Location in skipped and pool pull-out (#1461)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const leafA = ModelRoute.ref({ providerID: "prov-hold", model: "m1" })
+      const leafB = ModelRoute.ref({ providerID: "prov-hold", model: "m2" })
+      const balance = {
+        planID: "credits-plan",
+        window: "credits",
+        providerID: "prov-hold",
+        percent: 100,
+        remaining: 0.5,
+        resetAt: null,
+        observedAt: now,
+        stale: false,
+        balance: true,
+      }
+      ModelRoute.observeProviderQuota(leafA, balance, now, "/loc/a")
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      const definition = {
+        id: "prov-hold-route",
+        targets: [leafA, leafB],
+        targetVariants: [],
+        health: ModelRoute.policy(),
+        nodes: [
+          { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+          {
+            routeID: "prov-hold-pool",
+            selection: "ordered" as const,
+            weights: [1, 1],
+            children: [{ leaf: 0 }, { leaf: 1 }],
+          },
+        ],
+      } as unknown as ModelRoute.Definition
+      // Both leaves share one provider gate, which counts as a single quota
+      // evidence source under main's #1389 dedup, so that gate alone does not
+      // pull the pool under either Location; the per-Location judgement is
+      // carried by skipped() above (and by distinct-provider pools in the
+      // timed-skip test below).
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+      const durable = ModelRoute.activeAdjustments(now).find((item) => item.id === "quota:prov-hold")
+      expect(durable?.balanceHoldOrigin).toBe("threshold")
+      ModelRoute.resetHealth()
+      ModelRoute.setAdjustments(durable ? [durable] : [])
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/a" })).toBe(true)
+      expect(ModelRoute.skipped(leafA, now, { location: "/loc/b" })).toBe(false)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/a")).toBe(false)
+      expect(ModelRoute.poolQuotaExhausted(definition, 0, now, undefined, "/loc/b")).toBe(false)
+    } finally {
+      ModelRoute.setAdjustments([])
+      offA()
+      offB()
+    }
+  })
+
+  test("network-fault evaluation and origin hedging use the owning Location's constants (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { providers: 2 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ network: { providers: 2 }, continuity: { hedgeRequests: 5 } }),
+      "/loc/b",
+    )
+    try {
+      // Network forgiveness: two unrelated transport failures meet A's configured
+      // providers threshold (2), so the first target's bench is cleared — the
+      // default threshold (3) the unscoped read used would have kept it benched.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 1, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 2, "/loc/a")).toBe(0)
+      // Origin hedging: B allows five away responses before the session settles,
+      // so the origin is still offered after three — the default (2) would not.
+      const origin = ModelRoute.ref({ providerID: "p", model: "a" })
+      const away = ModelRoute.ref({ providerID: "p", model: "b" })
+      ModelRoute.moved("r", "s-net", origin)
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      ModelRoute.served("r", "s-net", away, "/loc/b")
+      expect(ModelRoute.hedgeHome("r", "s-net", "/loc/b")).toBe("p/a")
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("shared outcome history keeps each Location's window: retention is the union, evaluation is scoped (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(() => undefined, "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const ok = { firstTokenMs: 10, responseMs: 20, tokensPerSecond: 50 }
+      for (let index = 0; index < 6; index++)
+        ModelRoute.failed(target, policy, 2_000_000 + index, undefined, undefined, "/loc/a")
+      // One success recorded through B (default window 5) must not erase the
+      // history A (window 10) still judges by.
+      ModelRoute.completed(target, policy, ok, 2_000_100, undefined, "/loc/b")
+      expect(ModelRoute.giveUps(target, undefined, "/loc/a")).toBe(6)
+      expect(ModelRoute.giveUps(target, undefined, "/loc/b")).toBe(4)
+      expect(ModelRoute.escalates(target, undefined, "/loc/a")).toBe(true)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("quota-event and network histories retain the union of Location windows (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { after: 2, windowMs: 60_000 }, network: { providers: 3, windowMs: 60_000 } }),
+      "/loc/a",
+    )
+    const offB = ModelRoute.onSettingsConfig(
+      () => ({ demotion: { windowMs: 1_000 }, network: { windowMs: 1_000 } }),
+      "/loc/b",
+    )
+    try {
+      // Quota events: B's narrow window (1s) recording the second event must not
+      // prune the first event A (60s window, threshold 2) still counts.
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRoute.failed(target, policy, now, { quota: true }, undefined, "/loc/a")
+      ModelRoute.failed(target, policy, now + 2_000, { quota: true }, undefined, "/loc/b")
+      expect(ModelRoute.demoted(target, now + 2_000, undefined, "/loc/a")).toBe(true)
+      // Network history: failures through B must not prune A's longer window, so
+      // the third unrelated failure still triggers A's outage forgiveness.
+      ModelRoute.resetHealth()
+      const first = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const second = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const third = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(first, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 1, "/loc/a")).toBeGreaterThan(now)
+      ModelRoute.failed(second, policy, now + 2_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(third, policy, now + 3_000, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(first, now + 3_001, "/loc/a")).toBe(0)
+    } finally {
+      offA()
+      offB()
+    }
+  })
+
+  test("network forgiveness clears only the failures inside the judging Location's window (#1423)", () => {
+    const offA = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 60_000 } }), "/loc/a")
+    const offB = ModelRoute.onSettingsConfig(() => ({ network: { windowMs: 1_000, providers: 2 } }), "/loc/b")
+    try {
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const old = ModelRoute.ref({ providerID: "p1", model: "m" })
+      const fresh1 = ModelRoute.ref({ providerID: "p2", model: "m" })
+      const fresh2 = ModelRoute.ref({ providerID: "p3", model: "m" })
+      ModelRoute.failed(old, policy, now, { network: true }, undefined, "/loc/a")
+      expect(ModelRoute.cooldownUntil(old, now + 1, "/loc/a")).toBeGreaterThan(now)
+      // Ten seconds later B detects its own outage from two fresh failures; its
+      // forgiveness must not reach back and clear A's older, unrelated bench,
+      // even though the shared history retains that entry for A's window.
+      ModelRoute.failed(fresh1, policy, now + 10_000, { network: true }, undefined, "/loc/b")
+      ModelRoute.failed(fresh2, policy, now + 10_500, { network: true }, undefined, "/loc/b")
+      expect(ModelRoute.cooldownUntil(fresh1, now + 10_501, "/loc/b")).toBe(0)
+      expect(ModelRoute.cooldownUntil(old, now + 10_501, "/loc/a")).toBeGreaterThan(now + 10_501)
+    } finally {
+      offA()
+      offB()
+    }
   })
 
   test("config feeds both layers at once, and behavior follows", () => {
@@ -1873,6 +2590,26 @@ describe("ModelRoute demotion policy (experimental.model_route_demotion, #1151)"
     // Both failures are inside the configured 6h window, so the target demotes there —
     // under the default 4h window the first failure would not count.
     expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-wide")).toBe(true)
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
+  })
+
+  test("a Location registering later with a wider window still counts earlier quota events (#1699)", () => {
+    const now = Date.now()
+    // Two quota failures land while no wide-window Location is registered.
+    ModelRoute.failed(target, policy, now, quota)
+    ModelRoute.failed(target, policy, now + 1, quota)
+    // A third failure five hours later is the pruning moment: under the old
+    // record-time retention (the registered readers' union, 4h by default)
+    // recording it discarded the first two events for good.
+    ModelRoute.failed(target, policy, now + 5 * 3_600_000, quota)
+    // Only now does the wider-window Location activate — no restart, so no
+    // ledger re-seed can recover anything the live path pruned.
+    offs.push(ModelRoute.onDemotionConfig(() => ({ threshold: 3, windowMs: 10 * 3_600_000 }), "/proj-late"))
+    // All three failures are inside its 10h window, so it demotes.
+    expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-late")).toBe(true)
+    // A narrower Location still judges only its own window over the retained
+    // events: just the latest failure is inside the default 4h window, so
+    // the wider retention does not demote for it.
     expect(ModelRoute.demoted(target, now + 5 * 3_600_000, undefined, "/proj-unconfigured")).toBe(false)
   })
 
@@ -1996,6 +2733,52 @@ describe("ModelRoute pool-shaped quota pull-out (#1014 PR3)", () => {
     expect(ModelRoute.poolQuotaExhausted(definition, 2, now)).toBe(true)
     // The pull-out holds until the reset the providers stated, then lifts by itself.
     expect(ModelRoute.poolQuotaExhausted(definition, 2, resetAt + 1)).toBe(false)
+    ModelRoute.resetHealth()
+  })
+
+  test("one shared credential or provider gate counts once, so a healthy leaf keeps the pool open (#1389)", () => {
+    const shared = [0, 1].map((index) => ModelRoute.ref({ providerID: "pool-shared", model: `s${index}` }))
+    const healthy = ModelRoute.ref({ providerID: "pool-healthy", model: "m2" })
+    const sharedDefinition = {
+      id: "pool-shared-route",
+      targets: [...shared, healthy],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        { routeID: "pool-shared-plan", selection: "ordered" as const, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] },
+      ],
+    } as unknown as ModelRoute.Definition
+    const now = Date.now()
+    const resetAt = now + 30 * 60_000
+
+    // Two leaves behind one gated credential are one quota signal, not two.
+    ModelRoute.resetHealth()
+    const sharedCredential = (index: number) =>
+      sharedDefinition.targets[index].providerID === "pool-shared" ? "cred-shared" : undefined
+    ModelRoute.observeQuotaFailure(shared[0], "cred-shared", resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 0, now, sharedCredential)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 1, now, sharedCredential)).toBe(false)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(false)
+    // A second, genuinely distinct gate on the healthy leaf's provider still exhausts the pool.
+    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, sharedCredential)).toBe(true)
+
+    // Two credential-less leaves behind one gated provider are one quota signal, not two.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(shared[0], undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(false)
+    ModelRoute.observeQuotaFailure(healthy, undefined, resetAt, now)
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now)).toBe(true)
+
+    // Two independent quota benches on distinct credentials still exhaust the pool.
+    ModelRoute.resetHealth()
+    const distinctCredential = (index: number) =>
+      sharedDefinition.targets[index].providerID === "pool-shared" ? `cred-${index}` : undefined
+    ModelRoute.failed(shared[0], policy, now, { quota: true }, "cred-0")
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(false)
+    ModelRoute.failed(shared[1], policy, now, { quota: true }, "cred-1")
+    expect(ModelRoute.poolQuotaExhausted(sharedDefinition, 2, now, distinctCredential)).toBe(true)
     ModelRoute.resetHealth()
   })
 })

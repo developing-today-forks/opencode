@@ -49,11 +49,11 @@ describe("checkServerHealth", () => {
 
   test("allows slow servers thirty seconds by default", async () => {
     const timeout = Object.getOwnPropertyDescriptor(AbortSignal, "timeout")
-    let timeoutMs = 0
+    const timeoutCalls: number[] = []
     Object.defineProperty(AbortSignal, "timeout", {
       configurable: true,
       value: (ms: number) => {
-        timeoutMs = ms
+        timeoutCalls.push(ms)
 
         return new AbortController().signal
       },
@@ -67,7 +67,11 @@ describe("checkServerHealth", () => {
       if (!timeout) delete (AbortSignal as Partial<typeof AbortSignal>).timeout
     })
 
-    expect(timeoutMs).toBe(30_000)
+    // Health's own bound is the first timeout requested (30s). The client
+    // then composes it with its own 120s deadline (#1385/#1562), which is
+    // the second call — health's 30s still fires first.
+    expect(timeoutCalls[0]).toBe(30_000)
+    expect(timeoutCalls).toContain(120_000)
   })
 
   test("uses timeout fallback when AbortSignal.timeout is unavailable", async () => {
@@ -118,7 +122,14 @@ describe("checkServerHealth", () => {
       signal: abort.signal,
     })
 
-    expect(signal).toBe(abort.signal)
+    // The client composes the provided signal with its 120s deadline
+    // (#1562), so the fetch sees a composed signal that follows the
+    // caller's signal rather than the caller's object itself.
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal).not.toBe(abort.signal)
+    expect(signal?.aborted).toBe(false)
+    abort.abort()
+    expect(signal?.aborted).toBe(true)
   })
 
   test("retries transient failures and eventually succeeds", async () => {

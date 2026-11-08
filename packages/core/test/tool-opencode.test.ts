@@ -256,3 +256,64 @@ worktreeIt.live("creates, lists, and removes worktrees for the plugin's project"
     expect((yield* run("worktree_list", {})).worktrees).not.toContainEqual({ directory, strategy: "git" })
   }),
 )
+it.effect("switches the current session's model for the next turn", () =>
+  Effect.gen(function* () {
+    const plugins = yield* Plugin.Service
+    const sessions = yield* Session.Service
+    const location = yield* Location.Service
+    const pluginHost = yield* PluginHost.make(plugins)
+    yield* OpenCodeTools.Plugin.effect(pluginHost)
+    const session = yield* sessions.create({
+      location: Location.Ref.make({ directory: location.directory }),
+      model: Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make("alpha") }),
+    })
+    const registry = yield* Tool.Service
+    const runRaw = (input: Record<string, unknown>) =>
+      executeTool(registry, {
+        sessionID: session.id,
+        ...toolIdentity,
+        call: {
+          type: "tool-call",
+          id: `call-switch-${JSON.stringify(input)}`,
+          name: "execute",
+          input: { code: `return await tools.opencode.session_switch_model(${JSON.stringify(input)})` },
+        },
+      })
+    const run = (input: Record<string, unknown>) =>
+      runRaw(input).pipe(
+        Effect.map((result) => JSON.parse(result.content?.[0]?.type === "text" ? result.content[0].text : "")),
+      )
+
+    expect(yield* run({ model: "other/beta" })).toEqual({
+      sessionID: session.id,
+      model: { providerID: "other", id: "beta" },
+    })
+    expect((yield* sessions.get(session.id)).model).toEqual(
+      Model.Ref.make({
+        providerID: Provider.ID.make("other"),
+        id: Model.ID.make("beta"),
+        variant: Model.VariantID.make("default"),
+      }),
+    )
+
+    // A variant rides along in the ref.
+    yield* run({ model: "test/alpha#fast" })
+    expect((yield* sessions.get(session.id)).model).toEqual(
+      Model.Ref.make({
+        providerID: Provider.ID.make("test"),
+        id: Model.ID.make("alpha"),
+        variant: Model.VariantID.make("fast"),
+      }),
+    )
+
+    // An invalid ref fails and leaves the model untouched.
+    yield* runRaw({ model: "not-a-ref" }).pipe(Effect.ignore)
+    expect((yield* sessions.get(session.id)).model).toEqual(
+      Model.Ref.make({
+        providerID: Provider.ID.make("test"),
+        id: Model.ID.make("alpha"),
+        variant: Model.VariantID.make("fast"),
+      }),
+    )
+  }),
+)

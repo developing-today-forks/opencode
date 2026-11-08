@@ -117,7 +117,20 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               timezone,
               tools: ctx.query.tools,
             }).pipe(
-              Effect.mapError(() => new InvalidRequestError({ message: "Stats range must end after it starts" })),
+              // SessionStats.InvalidRangeError has exactly two causes, and
+              // its from/to fields separate them: a reversed or empty range
+              // (from >= to), or a span over the service cap (#959). Report
+              // the actual cause — an over-wide span used to be mislabelled
+              // as a reversed range (#1000).
+              Effect.mapError(
+                (error) =>
+                  new InvalidRequestError({
+                    message:
+                      error.from >= error.to
+                        ? "Stats range must end after it starts"
+                        : `Stats range is too wide: the maximum span is ${SessionStats.MaxSpanDays} days`,
+                  }),
+              ),
             ),
           }
         }),
@@ -125,6 +138,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.create",
         Effect.fn(function* (ctx) {
+          if (ctx.query.directory !== undefined && ctx.payload.parentID !== undefined)
+            return yield* new InvalidRequestError({
+              message:
+                "The directory query parameter cannot be combined with parentID: a child session inherits its parent's location.",
+              field: "directory",
+            })
           return {
             data: yield* session
               .create({
@@ -136,7 +155,13 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 permissions: ctx.payload.permissions,
                 subagentPolicy: ctx.payload.subagentPolicy,
                 ...(ctx.payload.parentID === undefined
-                  ? { location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) } }
+                  ? {
+                      location:
+                        ctx.payload.location ??
+                        (ctx.query.directory === undefined
+                          ? { directory: AbsolutePath.make(process.cwd()) }
+                          : { directory: ctx.query.directory }),
+                    }
                   : { parentID: ctx.payload.parentID }),
               })
               .pipe(

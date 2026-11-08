@@ -61,6 +61,7 @@ import m58 from "./migration/20261030055406_blushing_adam_destine.js"
 import m59 from "./migration/20261031054328_route_health_credential.js"
 import m60 from "./migration/20261031233710_route_attempt_credential.js"
 import m61 from "./migration/20261102215234_openai_facade_response.js"
+import m62 from "./migration/20261105070500_workspace_safety_snapshots.js"
 
 export const migrations = [
   m00,
@@ -125,4 +126,5 @@ export const migrations = [
   m59,
   m60,
   m61,
+  m62,
 ] satisfies DatabaseMigration.Migration[]

@@ -10,7 +10,7 @@ export function resolveRendererPath(rendererRoot: string, pathname: string): Ren
     const file = path.resolve(rendererRoot, `.${decodeURIComponent(pathname)}`)
     const relative = path.relative(rendererRoot, file)
 
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
       return { kind: "rejected", file, response: new Response("Not found", { status: 404 }) }
     }
 

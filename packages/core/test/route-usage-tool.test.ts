@@ -146,6 +146,58 @@ describe("route_usage burn rates", () => {
     ),
   )
 
+  it.live("a session readout names the leaf that served the last step, with its failover (#1891)", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const attempt = (overrides: Record<string, unknown>) => ({
+          time_started: now - 60_000,
+          time_ended: now - 59_000,
+          route_id: "workhorse",
+          provider_id: "openai",
+          model_id: "gpt-6-luna",
+          variant: "xhigh",
+          outcome: "success" as const,
+          output_started: true,
+          session_id: "ses_serving_leaf",
+          assistant_message_id: "msg_last",
+          ...overrides,
+        })
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({ outcome: "failure", failed_over_to: "vibe-direct/mistral-small-latest", time_started: now - 60_000, time_ended: now - 59_500 }),
+        })
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({ provider_id: "vibe-direct", model_id: "mistral-small-latest", variant: "high", time_started: now - 59_000, time_ended: now - 58_000 }),
+        })
+        yield* Effect.sleep("100 millis")
+
+        const report = yield* RouteUsageTool.collect({ hours: 24, session: "ses_serving_leaf" }, undefined, {
+          dataDir: tmp.path,
+          now: () => now,
+        })
+        expect(report.lastServing).toMatchObject({
+          leaf: "vibe-direct/mistral-small-latest",
+          attemptedLeaf: "openai/gpt-6-luna",
+          failedOver: true,
+          failedOverTo: "vibe-direct/mistral-small-latest",
+        })
+        expect(report.serving.map((step) => step.leaf)).toEqual([
+          "vibe-direct/mistral-small-latest",
+          "openai/gpt-6-luna",
+        ])
+        // Another session's attempts never leak into this session's readout.
+        const other = yield* RouteUsageTool.collect({ hours: 24, session: "ses_nobody" }, undefined, {
+          dataDir: tmp.path,
+          now: () => now,
+        })
+        expect(other.lastServing).toBeNull()
+        expect(other.serving).toEqual([])
+      }),
+    ),
+  )
+
   it.live("two windows of one provider with different limits get separate burn buckets (#1033)", () =>
     withTempDir((tmp) =>
       Effect.gen(function* () {

@@ -6,6 +6,8 @@ import {
   LanguageModel,
   Message,
   SystemPart,
+  InvalidRequestError,
+  QuotaExceededError,
   TransportError,
   type LLMRequest,
 } from "@opencode/ai"
@@ -30,6 +32,7 @@ import { Session } from "@opencode/core/session"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { App } from "@opencode/core/app"
+import { Credential } from "@opencode/core/credential"
 import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
@@ -42,6 +45,9 @@ import { testEffect } from "./lib/effect"
 let requests: LLMRequest[] = []
 let selectedSmall: Model.Info | undefined
 let selections: Array<Session.Info["model"]> = []
+let probeClaims = false
+let probeServingID: string | undefined
+let probeCredentialID: string | undefined
 const model = LanguageModel.make({
   id: "title-model",
   provider: "test",
@@ -89,15 +95,45 @@ const client = Layer.mock(LLMClient.Service)({
   },
   generate: () => Effect.die("unused"),
 })
+// Simulates a routed resolution the way the real resolver behaves after #1478: picking a
+// target whose bench probe is due spends the claim and stamps it on the routing block.
+const probeRouting = (language: LanguageModel) => {
+  const target = ModelRoute.ref({ providerID: "test", model: language.id })
+  const claimedAt = Date.now()
+  const token = ModelRoute.nextProbeClaimToken()
+  const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)
+  const credentialClaimed = probeCredentialID
+    ? ModelRoute.claimBenchProbe(target, Credential.ID.make(probeCredentialID), claimedAt, token)
+    : false
+  return {
+    routeID: Model.ID.make("title-route"),
+    target,
+    policy: ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 }),
+    attempts: 1,
+    ...(probeServingID ? { credentialID: Credential.ID.make(probeServingID) } : {}),
+    fallback: () => Effect.succeed(undefined),
+    ...(targetClaimed || credentialClaimed
+      ? {
+          probeClaim: {
+            claimedAt,
+            token,
+            ...(probeCredentialID ? { credentialID: Credential.ID.make(probeCredentialID) } : {}),
+          },
+        }
+      : {}),
+  }
+}
 const models = Layer.mock(SessionRunnerModel.Service)({
   resolve: (session) => {
     selections.push(session.model)
+    const language = session.model?.id === "title-small" ? smallModel : model
     return Effect.succeed(
-      SessionRunnerModel.resolved(session.model?.id === "title-small" ? smallModel : model, {
+      SessionRunnerModel.resolved(language, {
         capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
         cost,
         limit: { context: 200_000, output: 32_000 },
         variant: session.model?.variant,
+        ...(probeClaims ? { routing: probeRouting(language) } : {}),
       }),
     )
   },
@@ -187,6 +223,9 @@ beforeEach(() => {
   requests = []
   selectedSmall = undefined
   selections = []
+  probeClaims = false
+  probeServingID = undefined
+  probeCredentialID = undefined
   titleStream = successfulTitle
 })
 
@@ -257,6 +296,285 @@ it.live("counts a title request against its target's budget, and a restart resto
     const { db } = yield* Database.Service
     yield* ModelRouteLog.restoreUsageFrom(db)
     expect(ModelRoute.usageOf(target)).toEqual(live)
+  }),
+)
+
+it.live("settles the attempted model's probe claim and releases the unattempted primary's (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // Both title models sit on a quota bench whose known window reset has already passed,
+    // so each resolution spends that bench's single half-open probe claim.
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const primary = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const preferred = ModelRoute.ref({ providerID: "test", model: "title-small" })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    for (const target of [primary, preferred]) {
+      for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+      ModelRoute.observeProviderQuota(
+        target,
+        {
+          planID: "plan",
+          window: "five-hours",
+          providerID: "test",
+          percent: 100,
+          remaining: 0,
+          resetAt,
+          observedAt: plantedAt + 10,
+          stale: false,
+        },
+        plantedAt + 10,
+      )
+    }
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true)
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(true)
+
+    const sessionID = Session.ID.make("ses_title_probe_claim")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this with a probed model")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"])
+    // The attempted preferred model reported success: its bench ended outright.
+    expect(ModelRoute.cooldownUntil(preferred, Date.now())).toBe(0)
+    // The unattempted primary's claim was released: its bench is still in force and its
+    // probe is due again for the next real request.
+    expect(ModelRoute.cooldownUntil(primary, Date.now())).toBeGreaterThan(Date.now())
+    expect(ModelRoute.activeBenches(Date.now()).find((bench) => bench.modelID === "title-model")?.probeClaimed).toBe(
+      false,
+    )
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("settles a failed title attempt with its failure classification (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_failure_hint")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this despite a quota failure")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    // The failed attempt settles with the quota classification preserved: its bench is a
+    // quota bench on the quota cooldown, not an ordinary transient-failure bench.
+    const bench = ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")
+    expect(bench?.reason).toBe("quota")
+    expect(bench?.until).toBeGreaterThan(Date.now() + 60_000)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("settles the probe credential when it differs from the serving one (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    probeServingID = "cred-serving"
+    probeCredentialID = "cred-probe"
+    selectedSmall = small
+    yield* enableTitleAgent
+    // Both title models sit on quota benches whose known window resets have already
+    // passed, on the target scope and on the probe credential scope alike.
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const primary = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const preferred = ModelRoute.ref({ providerID: "test", model: "title-small" })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    const snapshot = (observedAt: number) => ({
+      planID: "plan",
+      window: "five-hours",
+      providerID: "test",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt,
+      stale: false,
+    })
+    for (const target of [primary, preferred]) {
+      for (let index = 0; index < 8; index++) {
+        ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+        ModelRoute.failed(target, policy, plantedAt + index, { quota: true }, "cred-probe")
+      }
+      ModelRoute.observeProviderQuota(target, snapshot(plantedAt + 10), plantedAt + 10)
+      ModelRoute.observeCredentialQuota(target, "cred-probe", snapshot(plantedAt + 10), plantedAt + 10)
+    }
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(true)
+    expect(ModelRoute.probeDue(preferred, "cred-probe")).toBe(true)
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_credential")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this with a divergent probe credential")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    // The failed attempt settled every scope its pick claimed: the target scope renewed
+    // on the quota ladder even though the serving credential differs, the probe
+    // credential scope renewed with it, and the serving credential kept its own
+    // quota accounting — with no claim left outstanding anywhere.
+    const targetBench = ModelRoute.activeBenches(Date.now()).find(
+      (bench) => bench.modelID === "title-small" && bench.credentialID === undefined,
+    )
+    expect(targetBench?.reason).toBe("quota")
+    expect(targetBench?.until).toBeGreaterThan(Date.now())
+    expect(ModelRoute.credentialCooldownUntil(preferred, "cred-probe")).toBeGreaterThan(Date.now())
+    expect(ModelRoute.credentialCooldownUntil(preferred, "cred-serving")).toBeGreaterThan(Date.now())
+    expect(ModelRoute.activeBenches(Date.now()).some((bench) => bench.probeClaimed)).toBe(false)
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(false)
+    expect(ModelRoute.probeDue(preferred, "cred-probe")).toBe(false)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("releases the model's probe claim when preparation is interrupted (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    yield* enableTitleAgent
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: plantedAt + 10,
+        stale: false,
+      },
+      plantedAt + 10,
+    )
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    // Stall request preparation inside a title hook, then interrupt the attempt.
+    const entered = yield* Deferred.make<void>()
+    const gate = yield* Deferred.make<void>()
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "title", () =>
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(gate)), Effect.asVoid),
+    )
+    const sessionID = Session.ID.make("ses_title_probe_interrupt")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Interrupt this title during preparation")
+
+    const title = yield* SessionTitle.Service
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped)
+    yield* Deferred.await(entered)
+    yield* Fiber.interrupt(fiber)
+    // No request ran, so nothing settled — but the claim is handed back instead of
+    // stranding the bench's probe behind the interrupted preparation.
+    expect(requests).toHaveLength(0)
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now())
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.effect("releases the model probe claim when the title stream is interrupted (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    yield* enableTitleAgent
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" })
+    const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const plantedAt = Date.now() - 60_000
+    const resetAt = plantedAt + 30_000
+    for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, plantedAt + index, { quota: true })
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: plantedAt + 10,
+        stale: false,
+      },
+      plantedAt + 10,
+    )
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    // The stream starts but never emits; interrupt the attempt mid-stream.
+    let markStarted: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    titleStream = () => {
+      markStarted()
+      return Stream.never
+    }
+    const sessionID = Session.ID.make("ses_title_probe_stream_interrupt")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Interrupt this title during the stream")
+
+    const title = yield* SessionTitle.Service
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped)
+    yield* Effect.promise(() => started)
+    expect(requests).toHaveLength(1)
+    yield* Fiber.interrupt(fiber)
+    // The interrupted stream unwinds the attempt before its settlement can run, so the
+    // claim is handed back from the stream interruption handler instead.
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now())
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    ModelRoute.resetHealth()
+  }),
+)
+
+it.live("releases instead of benching on a context-overflow title failure (#1478)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    probeClaims = true
+    selectedSmall = small
+    yield* enableTitleAgent
+    // The preferred (small) model rejects the oversized prompt as context overflow;
+    // the primary fallback succeeds. Overflow is a property of this request, not of
+    // the model, so the failed attempt must not bench the healthy target.
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.fail(
+            new AIError({
+              reason: new InvalidRequestError({ message: "prompt too long", classification: "context-overflow" }),
+            }),
+          )
+        : successfulTitle()
+    const sessionID = Session.ID.make("ses_title_probe_overflow")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Title this oversized prompt")
+
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    expect(ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")).toBeUndefined()
+    expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "test", model: "title-small" }), Date.now())).toBe(0)
+    ModelRoute.resetHealth()
   }),
 )
 

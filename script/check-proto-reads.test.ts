@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { collect, parseAllowlist, scanSource, staleEntries, unlistedHits, type Hit } from "./check-proto-reads"
+import { collect, parseAllowlist, SCAN_ROOTS, scanSource, staleEntries, unlistedHits, unscannedSrcTrees, type Hit } from "./check-proto-reads"
 
 describe("scanSource", () => {
   test("flags the P-A uppercase-table shape and the P-C ?? shape", () => {
@@ -29,6 +29,62 @@ describe("scanSource", () => {
   test("a guarded hasOwn line still matches, so it needs a disposition", () => {
     const hits = scanSource("f.ts", "const arity = Object.hasOwn(ARITY, key) ? ARITY[key] : undefined")
     expect(hits).toHaveLength(1)
+  })
+})
+
+describe("scan roots", () => {
+  test("scans packages/ai in addition to packages/core (#912)", () => {
+    expect(SCAN_ROOTS).toContain("packages/core/src")
+    expect(SCAN_ROOTS).toContain("packages/ai/src")
+  })
+
+  test("scans packages/plugin-github in addition to core and ai (#1361)", () => {
+    expect(SCAN_ROOTS).toContain("packages/plugin-github/src")
+  })
+
+  test("scans every remaining production tree (#1369)", () => {
+    for (const root of [
+      "packages/app/src",
+      "packages/client/src",
+      "packages/cli/src",
+      "packages/codemode/src",
+      "packages/console/app/src",
+      "packages/console/function/src",
+      "packages/desktop/src",
+      "packages/function/src",
+      "packages/gui-extensions/src",
+      "packages/http-recorder/src",
+      "packages/httpapi-codegen/src",
+      "packages/latex/src",
+      "packages/merman/src",
+      "packages/plugin/src",
+      "packages/plugin-browser/src",
+      "packages/posts/src",
+      "packages/protocol/src",
+      "packages/schema/src",
+      "packages/script/src",
+      "packages/sdk/src",
+      "packages/server/src",
+      "packages/session-ui/src",
+      "packages/simulation/src",
+      "packages/stats/app/src",
+      "packages/stats/core/src",
+      "packages/stats/server/src",
+      "packages/theme/src",
+      "packages/tui/src",
+      "packages/ui/src",
+      "packages/util/src",
+      "packages/web/src",
+      "services/changelog/src",
+      "services/files/src",
+      "services/update/src",
+      "services/www/src",
+    ])
+      expect(SCAN_ROOTS).toContain(root)
+  })
+
+  test("no src tree on disk is unscanned (#1369, the #1494 escape)", () => {
+    expect(unscannedSrcTrees(join(import.meta.dir, ".."), SCAN_ROOTS)).toEqual([])
   })
 })
 

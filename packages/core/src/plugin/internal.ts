@@ -18,6 +18,7 @@ import { ConfigAgentPlugin } from "../config/plugin/agent.js"
 import { ConfigCommandPlugin } from "../config/plugin/command.js"
 import { ConfigCompactionPlugin } from "../config/plugin/compaction.js"
 import { ConfigFormatterPlugin } from "../config/plugin/formatter.js"
+import { ConfigToolPlugin } from "../config/plugin/tool.js"
 import { ConfigImagePlugin } from "../config/plugin/image.js"
 import { ConfigInstructionPlugin } from "../config/plugin/instruction.js"
 import { ConfigLocationWatcherPlugin } from "../config/plugin/location-watcher.js"
@@ -281,6 +282,8 @@ const post = [
   BrowserPlugin,
   GitHubPlugin,
   ConfigCommandPlugin.Plugin,
+  // Custom tools load after built-ins and package plugins so they can override both (#1703).
+  ConfigToolPlugin.Plugin,
   ConfigCompactionPlugin.Plugin,
   ConfigFormatterPlugin.Plugin,
   ConfigImagePlugin.Plugin,

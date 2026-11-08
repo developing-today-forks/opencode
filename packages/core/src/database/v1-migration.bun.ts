@@ -1082,11 +1082,31 @@ function decodeBase64Payload(payload: string) {
 }
 
 function decodeFilePayload(payload: string) {
-  try {
-    return Buffer.from(decodeURIComponent(payload)).toString("base64")
-  } catch {
-    return undefined
+  // Decode as bytes, not as a URI string: decodeURIComponent decodes percent
+  // escapes as UTF-8 and throws on valid binary octets such as %FF, which
+  // misclassified valid binary data URLs as malformed and dropped the
+  // attachment (#1529). Each %HH escape becomes exactly one byte; unescaped
+  // literal text is encoded as UTF-8; a malformed escape is invalid.
+  const bytes: number[] = []
+  let literal = ""
+  const flush = () => {
+    if (!literal) return
+    for (const byte of new TextEncoder().encode(literal)) bytes.push(byte)
+    literal = ""
   }
+  for (let i = 0; i < payload.length; i++) {
+    if (payload[i] !== "%") {
+      literal += payload[i]
+      continue
+    }
+    const hex = payload.slice(i + 1, i + 3)
+    if (!/^[0-9a-fA-F]{2}$/.test(hex)) return undefined
+    flush()
+    bytes.push(parseInt(hex, 16))
+    i += 2
+  }
+  flush()
+  return Buffer.from(bytes).toString("base64")
 }
 
 function unavailableFile(part: SessionV1.FilePart) {

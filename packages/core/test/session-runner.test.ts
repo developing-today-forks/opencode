@@ -14,6 +14,7 @@ import {
   InvalidProviderOutputError,
   InvalidRequestError,
   RateLimitError,
+  ContentPolicyError,
   QuotaExceededError,
   UnknownProviderError,
 } from "@opencode/ai"
@@ -1219,6 +1220,153 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(String(s.requests[1]?.model.id)).toBe("replacement")
     expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+  })
+
+  scenario("fails over on a content-policy rejection without benching or gating the target", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), options)
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 3,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    // The wording is quota-bait on purpose: a policy rejection must not enter the quota
+    // path through the broad exhaustion text heuristics (#1084).
+    yield* s.llm.push(
+      TestLLM.failAfter(
+        new AIError({
+          reason: new ContentPolicyError({ message: "blocked: quota exhausted, insufficient credits" }),
+        }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    // No same-target retry and no credential switch: the request fails straight over.
+    expect(switches).toBe(0)
+    expect(fallbacks).toBe(1)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    // The rejection left route health and quota state untouched.
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.credentialCoolingDown(s.routing.target, Credential.ID.make("cred-lab"))).toBe(false)
+    expect(ModelRoute.steady(s.routing.target, Credential.ID.make("cred-lab"))).toBe(true)
+  })
+
+  scenario("keeps the target at full health across ten consecutive content-policy rejections", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      fallback: () => Effect.succeed(backup),
+    }
+    for (let i = 0; i < 10; i++) {
+      yield* s.llm.push(
+        TestLLM.failAfter(new AIError({ reason: new ContentPolicyError({ message: "blocked by policy" }) })),
+      )
+      yield* s.llm.push(TestLLM.text(`backup answer ${i}`, `t${i}`))
+      yield* s.runPrompt(`Prompt ${i}`)
+    }
+    expect(s.requests).toHaveLength(20)
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.steady(s.routing.target)).toBe(true)
+  })
+
+  scenario("releases the probe claim when a probe attempt ends in a content-filter finish", function* (s) {
+    ModelRoute.resetHealth()
+    const target = ModelRoute.ref({ providerID: "fake", model: "fake-model" })
+    const benchPolicy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const now = Date.now()
+    // The probe falls due at the quota window reset a minute out; every probeDue/claim
+    // call below is evaluated at that reset instead of sleeping (this harness runs on a
+    // TestClock, so a real sleep would never advance).
+    const resetAt = now + 60_000
+    const full = {
+      planID: "plan",
+      window: "five-hours",
+      providerID: "fake",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    } as const
+    // Bench both scopes the pick will claim (target and its serving credential), then arm
+    // each bench with the quota window reset that makes its probe due (#1620).
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true })
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true }, "cred-lab")
+    ModelRoute.observeProviderQuota(target, full, now)
+    ModelRoute.observeCredentialQuota(target, "cred-lab", full, now)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    const claimedAt = resetAt
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-lab", claimedAt, token)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(false)
+
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let fallbacks = 0
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target,
+      // fixed: failover only — the benched target's failure history must not trigger
+      // a hedge race against the fallback in this scenario.
+      autonomy: "fixed",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      probeClaim: { claimedAt, token, credentialID: Credential.ID.make("cred-lab") },
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "content-filter", raw: "SAFETY" } },
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+      ),
+    )
+    expect((yield* s.runPrompt("Probe the benched target").pipe(Effect.flip)).message).toBe(
+      "Provider blocked the response",
+    )
+
+    // No failover and no health accounting for a policy finish — but the claim is settled:
+    // the bench stands and both scopes are probe-eligible again instead of stranded
+    // behind the outstanding claim until the bench expires.
+    expect(fallbacks).toBe(0)
+    expect(s.requests).toHaveLength(1)
+    expect(ModelRoute.coolingDown(target)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    ModelRoute.resetHealth()
   })
 
   scenario("generates the title while the first model step is still running", function* (s) {

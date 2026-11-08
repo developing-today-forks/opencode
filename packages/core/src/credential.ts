@@ -27,6 +27,17 @@ export type Value = Credential.Value
 
 export const Event = Credential.Event
 
+/**
+ * Metadata key marking an OAuth credential whose token renewal is owned outside the credential store.
+ * An external importer (credential/codex-sync) keeps such a credential's tokens current, so connection
+ * resolution must never refresh it: a second refresher would rotate the shared refresh-token lineage
+ * out from under the external owner. The stored value is `true` when present.
+ */
+export const externalRefreshMetadataKey = "externalRefresh"
+
+/** True when the credential's renewal is owned outside the store; see externalRefreshMetadataKey. */
+export const refreshManagedExternally = (value: OAuth) => value.metadata?.[externalRefreshMetadataKey] === true
+
 export class Info extends Schema.Class<Info>("Credential.Info")({
   id: ID,
   integrationID: Integration.ID,

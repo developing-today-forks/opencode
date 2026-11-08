@@ -7,7 +7,7 @@ name: main-broken
 # Breakage-ID so the fleet queue owns the breakage at top priority.
 #
 # Breakage-ID = first 12 hex of
-#   sha256("developing-today/opencode|<workflow>|<sorted failing job names>")
+#   sha256("developing-today-forks/opencode|<workflow>|<sorted failing job names>")
 #
 # DISPATCH HANDOFF: the Jules leg is retired fleet-wide (this repo
 # never had a Jules API key secret, so the Jules-first step of the
@@ -66,6 +66,17 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # The remote action download can fail with the runner's
+      # `_staging/.../archive` error (#1418; #1519), before this job files
+      # the issue. Load it from a plain checkout; pm-dispatch-queue has no nested uses.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
       - name: Compute the main-broken filing decision
         id: filing
         env:
@@ -75,7 +86,7 @@ jobs:
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          REPO="developing-today/opencode"
+          REPO="developing-today-forks/opencode"
           DRY="$INPUT_DRY_RUN"
           RUN_ID="$INPUT_RUN_ID"
           if [ "$EVENT_NAME" = "workflow_run" ]; then
@@ -184,7 +195,7 @@ jobs:
       - name: Queue a new main-broken issue via pm-dispatch
         id: queue-new
         if: steps.filing.outputs.skip == 'false' && steps.filing.outputs.existing == ''
-        uses: developing-today/code/.github/actions/pm-dispatch-queue@main
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
         with:
           title: ${{ steps.filing.outputs.title }}
           prompt: ${{ steps.filing.outputs.prompt }}
@@ -201,7 +212,7 @@ jobs:
 
       - name: Attach a fresh task to the existing main-broken issue via pm-dispatch
         if: steps.filing.outputs.skip == 'false' && steps.filing.outputs.existing != ''
-        uses: developing-today/code/.github/actions/pm-dispatch-queue@main
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
         with:
           title: ${{ steps.filing.outputs.title }}
           prompt: ${{ steps.filing.outputs.prompt }}
@@ -285,7 +296,7 @@ jobs:
             # RUN-LINKS-END
           done
           if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
-            echo "this run created loser #$CREATED -- its links were forwarded to # above"
+            echo "this run created loser #$CREATED -- its links were forwarded to #$SURVIVOR above"
           else
             echo "reconcile complete -- single survivor #$SURVIVOR"
           fi

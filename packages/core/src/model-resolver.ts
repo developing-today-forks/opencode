@@ -14,6 +14,7 @@ import { Npm } from "@opencode/util/npm"
 import { Provider } from "./provider.js"
 import { Config } from "./config.js"
 import { ModelAlias } from "./model-alias.js"
+import { Location } from "./location.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
@@ -111,10 +112,10 @@ export class UnsupportedCompactionError extends Schema.TaggedError<UnsupportedCo
 
 export class RouteUnavailableError extends Schema.TaggedError<RouteUnavailableError>()(
   "SessionRunnerModel.RouteUnavailableError",
-  { routeID: ID },
+  { routeID: ID, providerID: Schema.optional(Provider.ID) },
 ) {
   override get message() {
-    return `No model is available for route ${ModelRoute.PROVIDER_ID}/${this.routeID}`
+    return `No model is available for route ${this.providerID ?? ModelRoute.PROVIDER_ID}/${this.routeID}`
   }
 }
 
@@ -171,6 +172,19 @@ export interface Resolved {
     readonly autonomy?: ModelRouteAutonomy.Level
     /** The active stored credential for the target's integration, when there is one (#6). */
     readonly credentialID?: Credential.ID
+    /** The half-open bench probe this resolution claimed at pick time (#1123), when it claimed
+     * one (#1478): the claim is spent before any request runs, so a consumer that resolves a
+     * model it never attempts must hand the claim back with
+     * `ModelRoute.releaseBenchProbe(target, credentialID, claimedAt, token)` — the credential named
+     * here is the one the claim was spent on, which may differ from the serving credential
+     * above. A consumer that does attempt the model settles the claim through
+     * `ModelRoute.completed` / `ModelRoute.failed` like the session runner does. The token
+     * names the pick's spend (#1486): every scope the pick claimed shares it. */
+    readonly probeClaim?: {
+      readonly claimedAt: number
+      readonly token: number
+      readonly credentialID?: Credential.ID
+    }
     /**
      * Activates the next eligible stored credential on the target's own integration and
      * re-resolves the same target on it (#6 credential failover). Eligibility is the Phase A
@@ -439,16 +453,22 @@ const refreshQuotaGate = (
   credentialByProvider: Map<string, Credential.ID>,
   dataDir: string | undefined,
   now: number,
+  location?: string,
 ) =>
   Effect.gen(function* () {
-    if (!ModelRoute.shouldFeedQuota(now)) return
+    const targetProviders = new Set<string>(
+      targets
+        .map((target) => target.providerID)
+        .filter((providerID) => ModelRoute.shouldFeedQuota(now, location, providerID)),
+    )
+    if (targetProviders.size === 0) return
+    const dueTargets = targets.filter((target) => targetProviders.has(target.providerID))
     let plans: readonly ModelPlan.Plan[] = []
     try {
       plans = ModelPlan.readStore(dataDir).plans
     } catch {
       return
     }
-    const targetProviders = new Set<string>(targets.map((target) => target.providerID))
     // Only plans that still feed the gate (#1340): ended plans are store history, not capacity.
     const relevantPlans = plans.filter((plan) => targetProviders.has(plan.providerID) && ModelPlan.feedsGate(plan))
     // Ended plans derive no replacement snapshot, so reconcile the retained gate state
@@ -475,7 +495,7 @@ const refreshQuotaGate = (
           if (rowsByWindow.has(key)) continue
           rowsByWindow.set(key, yield* ModelRouteLog.targetUsage(db, QuotaSnapshot.usageSince(plan, window, now)))
         }
-        for (const target of targets) {
+        for (const target of dueTargets) {
           const activeCredentialID = credentialByProvider.get(target.providerID)
           // Held credentials keep being fed after failover activates a sibling: their fresh
           // balance observations are the only way a balance hold on an inactive credential
@@ -501,19 +521,19 @@ const refreshQuotaGate = (
                   ),
                 ),
               now,
-              { now, balanceDeadThreshold: ModelRoute.currentConstants().quotaGate.balanceDeadThreshold },
+              { now, balanceDeadThreshold: ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold },
             )
             if (snapshots.length === 0) return
             const snapshot = QuotaSnapshot.gatingSnapshot(
               snapshots,
               now,
-              ModelRoute.currentConstants().quotaGate.balanceDeadThreshold,
+              ModelRoute.currentConstants(location).quotaGate.balanceDeadThreshold,
             )
             if (!snapshot) return
             if (credentialID) {
-              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now)
+              ModelRoute.observeCredentialQuota(target, credentialID, snapshot, now, location)
             } else {
-              ModelRoute.observeProviderQuota(target, snapshot, now)
+              ModelRoute.observeProviderQuota(target, snapshot, now, location)
             }
           }
           feed(activeCredentialID)
@@ -532,6 +552,11 @@ export const layer = Layer.effect(
     const integrations = yield* Integration.Service
     const npm = yield* Npm.Service
     const aisdk = yield* AISDK.Service
+    const location = yield* Effect.serviceOption(Location.Service)
+    const locationDirectory = Option.match(location, {
+      onNone: () => undefined,
+      onSome: (value) => value.directory as string,
+    })
     const config = yield* Effect.serviceOption(Config.Service)
     const global = yield* Effect.serviceOption(Global.Service)
     const dataDir = Option.match(global, { onNone: () => undefined, onSome: (g) => g.data })
@@ -630,15 +655,52 @@ export const layer = Layer.effect(
         // This snapshot is gate input only — serving attribution comes from load() itself,
         // because the active credential can change between this read and the load.
         const credentialByProvider = new Map<string, Credential.ID>()
+        // Every stored credential per target provider, active first (#1806): the ready
+        // filter below gates a leaf on its *effective* credential — the first stored
+        // credential that could actually serve it — not on the active one alone. The
+        // active-only snapshot judged a multi-credential leaf by a credential that
+        // would never serve it, stranding leaves whose active credential was
+        // credential-cooling or quota-blocked while a sibling credential was healthy.
+        const credentialsByProvider = new Map<string, Array<Credential.ID>>()
         for (const target of definition.targets) {
           if (credentialByProvider.has(target.providerID)) continue
           const provider = yield* providers.get(target.providerID)
-          const connection = yield* integrations.connection.active(
-            provider?.integrationID ?? Integration.ID.make(target.providerID),
-          )
-          if (connection?.type === "credential") credentialByProvider.set(target.providerID, connection.id)
+          const integrationID = provider?.integrationID ?? Integration.ID.make(target.providerID)
+          const connection = yield* integrations.connection.active(integrationID)
+          if (connection?.type === "credential") {
+            credentialByProvider.set(target.providerID, connection.id)
+            const info = yield* Effect.suspend(() => integrations.get(integrationID)).pipe(
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            )
+            const stored = (info?.connections ?? []).flatMap((item) =>
+              item.type === "credential" && item.id !== connection.id ? [item.id] : [],
+            )
+            credentialsByProvider.set(target.providerID, [connection.id, ...stored])
+          }
         }
-        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now)
+        yield* refreshQuotaGate(definition.targets, credentialByProvider, dataDir, now, locationDirectory)
+        // The credential a target's eligibility is judged by at `at`: the active one
+        // when it can serve, else the first stored sibling that can (not credential-
+        // cooling beyond a due probe, not quota-blocked). `activate` is set only in
+        // that sibling case — the pick then activates it before load, the same switch
+        // credentialFallback performs after a served failure (#6). When every stored
+        // credential is blocked, the active one is returned, so the exclusion reasons
+        // and the last-resort known-full handling below behave exactly as before.
+        const effectiveCredential = (
+          target: ModelRoute.Target,
+          at: number,
+        ): { readonly id: Credential.ID; readonly activate: boolean } | undefined => {
+          const candidates = credentialsByProvider.get(target.providerID)
+          if (!candidates || candidates.length === 0) return undefined
+          for (const id of candidates) {
+            const cooling =
+              ModelRoute.credentialCooldownUntil(target, id, at) > at && !ModelRoute.probeDue(target, id, at)
+            if (cooling) continue
+            if (ModelRoute.credentialQuotaBlocked(id, at, locationDirectory) !== undefined) continue
+            return { id, activate: id !== candidates[0] }
+          }
+          return { id: candidates[0], activate: false }
+        }
         const makeResolved = (
           current: Resolved,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
@@ -647,6 +709,10 @@ export const layer = Layer.effect(
           // even when undefined (an env connection served): the credentialByProvider
           // snapshot is only the ready filter's gate input, never serving attribution.
           servingCredentialID: Credential.ID | undefined,
+          // The bench probe claim the pick spent (#1478), when it spent one: only the
+          // resolution that walked away with the pick carries it — credential-fallback
+          // re-resolutions of the same target spend no new claim and pass none.
+          probeClaim?: { readonly claimedAt: number; readonly token: number; readonly credentialID?: Credential.ID },
         ): Resolved => {
           const branch = {
             tried: new Set(triedTargets),
@@ -674,6 +740,7 @@ export const layer = Layer.effect(
             ...(definition.hedgeAfterMs ? { hedgeAfterMs: definition.hedgeAfterMs } : {}),
             autonomy: definition.autonomy,
             ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
+            ...(probeClaim ? { probeClaim } : {}),
             fallback: () => {
               // Branch-local cascade state (#1014 Codex P2): a fallback call is a
               // speculative branch as often as it is the primary's next step — a
@@ -732,22 +799,26 @@ export const layer = Layer.effect(
           const unavailable = new Map<number, string>()
           const overLimit = new Set<number>()
           // Pool-shaped pull-out (#1014 PR3): a leaf whose nested group (pool) has had two
-          // distinct leaves answer quota in turn is out with its pool, derived from the
+          // distinct quota evidence sources answer quota in turn is out with its pool, derived from the
           // leaves' live quota benches/gates at this moment.
           const poolExhausted = new Map<number, boolean>()
           for (const index of indexes)
             poolExhausted.set(
               index,
-              ModelRoute.poolQuotaExhausted(definition, index, now, (leaf) =>
-                credentialByProvider.get(definition.targets[leaf].providerID),
+              ModelRoute.poolQuotaExhausted(
+                definition,
+                index,
+                now,
+                (leaf) => effectiveCredential(definition.targets[leaf], now)?.id,
+                locationDirectory,
               ),
             )
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
-            const until = ModelRoute.cooldownUntil(target, now)
+            const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
             // A fixed route only fails over: provider holds, skips and budgets are rules and above.
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
-            const scope = ModelRoute.scopeOf(definition)
+            const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
             // A user's "avoid" holds on every route; learned skips and budgets are rules the route opted into.
             const isSkipped =
               ModelRoute.userSkipped(target, now, scope) || (rules && ModelRoute.skipped(target, now, scope))
@@ -758,13 +829,13 @@ export const layer = Layer.effect(
             // reason, and only a limit-only exclusion is attributed to the limit.
             const isOverLimit = ModelRoute.overLimit(definition, index, requestTokens)
             if (isOverLimit) overLimit.add(index)
-            const credentialID = credentialByProvider.get(target.providerID)
+            const credentialID = effectiveCredential(target, now)?.id
             const limited = rules ? ModelRoute.limitedUntil(target, now, credentialID) : 0
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
-              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID)
+              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
-            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now) : undefined
+            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
@@ -804,8 +875,8 @@ export const layer = Layer.effect(
           // known-full-but-fitting target as the last resort.
           const usable = indexes.filter((index) => !overLimit.has(index))
           const nonFull = usable.filter((index) => {
-            const credentialID = credentialByProvider.get(definition.targets[index].providerID)
-            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now) === undefined
+            const credentialID = effectiveCredential(definition.targets[index], now)?.id
+            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
           // A quota-exhausted pool is a HARD exclusion, unlike budgets and skips: the last
           // resort never re-offers a pool its leaves have proven walled (#1014 PR3) — the
@@ -824,20 +895,52 @@ export const layer = Layer.effect(
             requestedVariant,
             unavailable,
             Math.random,
-            (index) => credentialByProvider.get(definition.targets[index].providerID),
+            (index) => effectiveCredential(definition.targets[index], now)?.id,
+            locationDirectory,
           )
           if (index === undefined) break
           triedTargets.add(index)
           const target = definition.targets[index]
+          const probeToken = ModelRoute.nextProbeClaimToken()
           // Spend a due bench's probe claim on the target selection actually picked (#1123):
           // exactly one resolution walks away with it, and its outcome (completed/failed in
           // the runner) is what ends or renews the bench. Claims on scopes that are not due
-          // — an ordinary eligible target — are refused and change nothing.
-          ModelRoute.claimBenchProbe(target, undefined, now)
-          const probeCredential = credentialByProvider.get(target.providerID)
-          if (probeCredential) ModelRoute.claimBenchProbe(target, probeCredential, now)
+          // — an ordinary eligible target — are refused and change nothing. One token
+          // names the pick's spend on every scope it claims (#1486).
+          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now, probeToken)
+          const probeCredential = effectiveCredential(target, now)?.id
+          const credentialClaimed = probeCredential
+            ? ModelRoute.claimBenchProbe(target, probeCredential, now, probeToken)
+            : false
+          // The claim this pick walked away with (#1478): stamped on the Resolved below so a
+          // consumer that never attempts the model can release it, and one that does attempt
+          // it knows the claim is its to settle. The release is token-guarded, so naming
+          // both scopes is safe — a scope this pick did not claim does not match and no-ops.
+          const probeClaim =
+            targetClaimed || credentialClaimed
+              ? { claimedAt: now, token: probeToken, ...(probeCredential ? { credentialID: probeCredential } : {}) }
+              : undefined
           const source = yield* models.get(target.providerID, target.id)
-          if (!source?.enabled) continue
+          if (!source?.enabled) {
+            // This pick spent a probe claim but will never be attempted: hand it back
+            // (#1486, review follow-up) instead of stranding it until the bench expires.
+            if (probeClaim) {
+              ModelRoute.releaseBenchProbe(target, undefined, probeClaim.claimedAt, probeClaim.token)
+              if (probeClaim.credentialID)
+                ModelRoute.releaseBenchProbe(target, probeClaim.credentialID, probeClaim.claimedAt, probeClaim.token)
+            }
+            continue
+          }
+          // The pick was judged on its effective credential (#1806): when that is a
+          // stored sibling of the blocked active credential, activate it before the
+          // load so the load actually serves on it — the same switch
+          // credentialFallback performs after a served failure (#6).
+          const effective = effectiveCredential(target, now)
+          if (effective?.activate) {
+            yield* Effect.suspend(() => integrations.connection.activate(effective.id)).pipe(
+              Effect.catchCause(() => Effect.void),
+            )
+          }
           const targetVariants = definition.targetVariants[index]
           // A requested route variant runs the target at its remap, else at the same variant when the
           // target has it natively: the route only offers variants every target can produce one of
@@ -851,7 +954,9 @@ export const layer = Layer.effect(
             load(source, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
           )
           if (Result.isFailure(resolved)) {
-            ModelRoute.failed(target, definition.health, now)
+            // The pick's probe claim settles here too (#1486): the target scope benches as
+            // before, and a credential-scope claim from the same pick renews with it.
+            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory, probeClaim)
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.
@@ -910,8 +1015,8 @@ export const layer = Layer.effect(
                     connection.id !== servingID &&
                     !tried.has(connection.id) &&
                     ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
-                    ModelRoute.credentialQuotaBlocked(connection.id, at) === undefined &&
-                    !ModelRoute.demoted(target, at, connection.id),
+                    ModelRoute.credentialQuotaBlocked(connection.id, at, locationDirectory) === undefined &&
+                    !ModelRoute.demoted(target, at, connection.id, locationDirectory),
                 )
                 for (const candidate of candidates) {
                   if (candidate.type !== "credential") continue
@@ -960,7 +1065,7 @@ export const layer = Layer.effect(
                 return undefined
               })
           // A session that just moved off its origin races that origin rather than the next fallback.
-          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID)
+          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID, locationDirectory)
           const homeIndex =
             home === undefined ? -1 : definition.targets.findIndex((item) => `${item.providerID}/${item.id}` === home)
           const origin =
@@ -977,7 +1082,7 @@ export const layer = Layer.effect(
                     cascade,
                   )
               : undefined
-          return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID)
+          return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID, probeClaim)
         }
         if (lastError) return yield* Effect.fail(lastError)
         return undefined
@@ -1035,9 +1140,14 @@ export const layer = Layer.effect(
         }
         if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
           cascade.chain.push({ definition: from, tried: fromTried })
+        // Fallback discovery is execution, not picker discovery (#230): a hidden
+        // parent route still cascades, so candidates are the enabled records.
         const available = yield* models
-          .available()
-          .pipe(Effect.catchCause(() => Effect.succeed([] as readonly Info[])))
+          .all()
+          .pipe(
+            Effect.map((list) => list.filter((model) => model.enabled)),
+            Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+          )
         const definitions = new Map<string, ModelRoute.Definition>()
         for (const candidate of available) {
           if (candidate.providerID !== ModelRoute.PROVIDER_ID) continue
@@ -1096,11 +1206,11 @@ export const layer = Layer.effect(
       })
 
     const resolveSelected = (selected: Info, variant?: VariantID, sessionID?: string, requestTokens?: number) => {
-      if (selected.providerID !== ModelRoute.PROVIDER_ID)
-        return load(selected, variant).pipe(Effect.map((loaded) => loaded.resolved))
       const definition = ModelRoute.definition(selected)
+      if (selected.providerID !== ModelRoute.PROVIDER_ID && !definition)
+        return load(selected, variant).pipe(Effect.map((loaded) => loaded.resolved))
       if (!definition || definition.targets.length === 0)
-        return Effect.fail(new RouteUnavailableError({ routeID: selected.id }))
+        return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
       const requestedVariant = variant === "default" ? undefined : variant
       if (requestedVariant && !selected.variants.some((item) => item.id === requestedVariant))
         return Effect.fail(
@@ -1145,7 +1255,7 @@ export const layer = Layer.effect(
             ? Effect.succeed(resolved)
             : cascade.loadErrors.length > 0
               ? Effect.fail(cascade.loadErrors[0])
-              : Effect.fail(new RouteUnavailableError({ routeID: selected.id })),
+              : Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID })),
         ),
       )
     }
@@ -1158,7 +1268,9 @@ export const layer = Layer.effect(
           const entries = yield* cfg.entries()
           const aliases = Config.latest(entries, "aliases")
           if (aliases) {
-            const availableModels = yield* models.available()
+            // Alias precedence is execution semantics (#230): a real model keeps
+            // precedence over an alias whether or not it is picker-hidden.
+            const availableModels = (yield* models.all()).filter((model) => model.enabled)
             const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
               availableModels.some((m) => m.providerID === providerID && m.id === modelID)
             const refStr = ModelAlias.refString(target)

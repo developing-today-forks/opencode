@@ -2,7 +2,7 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { expiresInSeconds } from "./expires.js"
 import { Form } from "@opencode/schema/form"
 import { Clock, Deferred, Effect, Option, Schema, Stream } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { App } from "../../app.js"
 import { Bus } from "../../bus.js"
 import { Credential } from "../../credential.js"
@@ -10,11 +10,20 @@ import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { configuredSettings } from "./configured.js"
+import { collectBoundedResponseBody, readExcerptResponseText } from "../../tool/http-body.js"
 
 const providerID = Provider.ID.make("snowflake-cortex")
 const integrationID = Integration.ID.make(providerID)
 const methodID = Integration.MethodID.make("browser")
 const clientID = "LOCAL_APPLICATION"
+/** Cap on OAuth token/error response bodies (#1029): a token response is a few hundred bytes;
+ * a user-entered Snowflake host must not stream unbounded data into login or refresh.
+ * Mirrors the #1026 bound the native-fetch providers apply via readBoundedResponseText. */
+export const oauthMaxResponseBytes = 64 * 1024
+/** Cap on a 400 error body read by the http.response hook (#1049): the hook only needs the
+ * small JSON error document, and an over-cap body cannot be the "conversation complete"
+ * answer it rewrites, so it is left alone instead of being buffered whole. */
+export const errorResponseMaxBytes = 64 * 1024
 const accountForm = Form.Fields.make([
   {
     type: "string",
@@ -61,11 +70,31 @@ export const SnowflakeCortexPlugin = define({
           HttpClientRequest.bodyUrlParams({ ...form, client_id: clientID }),
         ),
       )
-      if (response.status < 200 || response.status >= 300)
-        return yield* Effect.fail(
-          new Error(`Snowflake token request failed (${response.status}): ${yield* response.text}`),
+      if (response.status < 200 || response.status >= 300) {
+        // Bounded read (#1029): collect the error body under the cap first; an over-cap
+        // body reads as empty and the status carries the failure.
+        const text = yield* Effect.scoped(
+          collectBoundedResponseBody(
+            response,
+            oauthMaxResponseBytes,
+            () => new Error(`Snowflake token error response exceeded ${oauthMaxResponseBytes} bytes`),
+          ),
+        ).pipe(
+          Effect.map((body) => body.toString("utf8")),
+          Effect.orElseSucceed(() => ""),
         )
-      const tokens = yield* HttpClientResponse.schemaBodyJson(Token)(response)
+        return yield* Effect.fail(new Error(`Snowflake token request failed (${response.status}): ${text}`))
+      }
+      // Bounded read (#1029): collect the token body under the cap first, then decode the
+      // bounded bytes instead of schemaBodyJson on the raw response.
+      const raw = yield* Effect.scoped(
+        collectBoundedResponseBody(
+          response,
+          oauthMaxResponseBytes,
+          () => new Error(`Snowflake token response exceeded ${oauthMaxResponseBytes} bytes`),
+        ),
+      )
+      const tokens = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Token))(raw.toString("utf8"))
       const refresh = tokens.refresh_token || form.refresh_token
       if (!refresh) return yield* Effect.fail(new Error("Snowflake token response did not include refresh_token"))
       return Credential.OAuth.make({
@@ -226,7 +255,28 @@ export const SnowflakeCortexPlugin = define({
       "http.response",
       Effect.fn(function* (event) {
         if (event.response.status !== 400) return
-        const error = Option.getOrUndefined(decodeError(yield* Effect.promise(() => event.response.clone().text())))
+        const body = yield* Effect.tryPromise(() =>
+          // The excerpt reader, not the bounded reader: the hook awaits this read of a
+          // clone before downstream code may consume the original response, and the
+          // bounded reader awaits cancellation at the cap — cancelling a tee'd clone
+          // can pend until the original branch is consumed, deadlocking oversized
+          // error responses. The excerpt reader reads at most the cap, truncates, and
+          // cancels without awaiting; a truncated body decodes to no error below,
+          // which is the same fail-closed outcome as an over-cap refusal (#1049).
+          readExcerptResponseText(
+            // SAFETY: the hook event's response and the excerpt reader's Response are the
+            // same runtime fetch Response; only their type packages differ (undici-types
+            // vs the Bun lib types), and the reader uses only headers/body/text.
+            event.response.clone() as Response,
+            errorResponseMaxBytes,
+          ),
+        ).pipe(Effect.orElseSucceed(() => undefined))
+        // An excerpt that filled the cap may be truncated — or, worse, a complete
+        // small error document followed by padding — so it counts as over-cap and
+        // is left alone, the bounded reader's refusal outcome (#1049).
+        const complete =
+          body !== undefined && new TextEncoder().encode(body).byteLength < errorResponseMaxBytes ? body : undefined
+        const error = complete === undefined ? undefined : Option.getOrUndefined(decodeError(complete))
         // oxlint-disable-next-line typescript-eslint/no-base-to-string -- Preserve V1's error-body coercion.
         const message = String(error?.message || error?.error || "")
         if (!message.toLowerCase().includes("conversation complete")) return

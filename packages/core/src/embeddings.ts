@@ -13,12 +13,21 @@ export * as Embeddings from "./embeddings.js"
  * adding a registration; its dimension comes from the registration,
  * never from an assumption in this layer.
  *
- * Backends speak the OpenAI embeddings shape over HTTP, exactly like
- * the messaging embedding client: the service POSTs to
- * `<baseURL>/embeddings` and validates what comes back (count, order,
- * and that each vector's length is the registered dimension — or the
- * caller-requested supported dimension — so a misbehaving backend
- * fails loudly instead of returning wrong-shaped vectors).
+ * A registration also names its backend kind. The HTTP kind is served
+ * by an OpenAI-compatible sidecar; the native-onnx kind (#1554) runs
+ * the model's ONNX graph in this process instead (see
+ * embeddings-native.ts). The default registration uses native-onnx
+ * after the deliberate step-3 flip (#1690). The kinds are
+ * interchangeable to every layer above the service: same parse, same
+ * response shape, same ledger row. The Node bundle explicitly does not
+ * support native-onnx; the Bun build is the supported route.
+ *
+ * The HTTP backend speaks the OpenAI embeddings shape over HTTP,
+ * exactly like the messaging embedding client: the service POSTs to
+ * `<baseURL>/embeddings`. Both backends return that same shape, and the
+ * service validates count, order, and vector dimensions so a
+ * misbehaving backend fails loudly instead of returning wrong-shaped
+ * vectors.
  *
  * Varied lengths: the door passes the caller's input array through
  * faithfully — no truncation, padding or chunking at this layer.
@@ -39,7 +48,34 @@ import { HttpClient, HttpClientRequest } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { ModelRouteLog } from "./model-route-log.js"
+import { embedNative } from "./embeddings-native.js"
 import { collectBoundedResponseBody } from "./tool/http-body.js"
+
+/** HTTP backend: the service POSTs the OpenAI embeddings shape to
+ * the registration's `baseURL` (a sidecar process). The default for
+ * every registration that names no backend. */
+export interface HttpEmbeddingBackend {
+  readonly kind: "http"
+}
+
+/** Native in-process backend (#1554): the server runs the model's
+ * ONNX graph itself — no sidecar, no HTTP hop. The snapshot is an
+ * HF model snapshot directory (tokenizer.json + the ONNX graph);
+ * loaded lazily on the first embed call, never at boot. */
+export interface NativeOnnxEmbeddingBackend {
+  readonly kind: "native-onnx"
+  /** HF snapshot directory holding `tokenizer.json` and the ONNX graph. */
+  readonly snapshotDir?: string
+  /** Environment variable that overrides `snapshotDir` when set. */
+  readonly snapshotEnv?: string
+  /** ONNX graph file inside the snapshot. Defaults to "onnx/model_int8.onnx". */
+  readonly onnxFile?: string
+  /** The model's token context. Longer inputs are rejected loudly by
+   * the backend, never silently truncated. */
+  readonly maxTokens: number
+}
+
+export type EmbeddingBackend = HttpEmbeddingBackend | NativeOnnxEmbeddingBackend
 
 export interface EmbeddingModel {
   /** Catalog ref the caller addresses: `provider/model`. */
@@ -58,15 +94,20 @@ export interface EmbeddingModel {
   /** Environment variable holding the backend's bearer key, when it needs one. */
   readonly apiKeyEnv?: string
   readonly ownedBy: string
+  /** Which backend serves this registration. Absent = the HTTP
+   * backend: every existing registration keeps its current behavior.
+   * The native in-process backend (#1554, step 2) becomes a
+   * registration's backend only by a deliberate flip (step 3). */
+  readonly backend?: EmbeddingBackend
 }
 
 /**
  * The embedding catalog. First registration (Drew, 2026-11-02:
- * "support embeddings using local snowflake"): a LOCAL Snowflake
- * Arctic Embed backend — an OpenAI-compatible embedder served on the
- * same machine (dev backend: the laptop service in ~/local-embed,
- * ONNX int8 weights from Snowflake/snowflake-arctic-embed-m-v2.0).
- * Local means local: no hosted embeddings API is registered here.
+ * "support embeddings using local snowflake"): local Snowflake Arctic
+ * Embed, originally served by an OpenAI-compatible sidecar and now
+ * using the native-onnx backend by default (#1690). Its HTTP settings
+ * remain for the sidecar transition; no hosted embeddings API is
+ * registered here.
  * Arctic Embed m-v2.0 is 768-dimensional and supports Matryoshka
  * truncation to 256, which the local backend honors.
  */
@@ -80,6 +121,20 @@ export const EMBEDDING_MODELS: ReadonlyArray<EmbeddingModel> = [
     baseURL: "http://127.0.0.1:18752/v1",
     baseURLEnv: "OPENCODE_LOCAL_EMBED_BASE_URL",
     ownedBy: "local-embed",
+    // Step 3 flip (#1554, 2026-11-05): the native in-process backend
+    // is now the default for this registration. The HTTP registration
+    // data above (baseURL/baseURLEnv) stays intact for step 4, which
+    // retires the sidecar. Snapshot resolution: the LOCAL_EMBED_SNAPSHOT
+    // env var (the same one the sidecar service uses) wins; otherwise
+    // the HF cache snapshot dir below (the sidecar default) is used.
+    // The backend throws loudly when the snapshot is missing.
+    backend: {
+      kind: "native-onnx",
+      snapshotEnv: "LOCAL_EMBED_SNAPSHOT",
+      snapshotDir:
+        "~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-m-v2.0/snapshots/95c2741480856aa9666782eb4afe11959938017f",
+      maxTokens: 8192,
+    },
   },
 ]
 
@@ -249,6 +304,33 @@ export const layer = Layer.effect(
         })
         const result = yield* Effect.result(
           Effect.gen(function* () {
+            if (input.model.backend?.kind === "native-onnx") {
+              if (process.env.OPENCODE_NODE_BUNDLE === "1")
+                return yield* Effect.fail(
+                  new Error(
+                    "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
+                  ),
+                )
+              const native = yield* Effect.tryPromise({
+                try: () =>
+                  embedNative({
+                    backend: input.model.backend as NativeOnnxEmbeddingBackend,
+                    inputs: input.inputs,
+                    ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
+                    nativeDimensions: input.model.dimensions,
+                  }),
+                catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+              })
+              const expected = input.dimensions ?? input.model.dimensions
+              for (const vector of native.vectors)
+                if (vector.length !== expected)
+                  return yield* Effect.fail(
+                    new Error(
+                      `embedding backend returned a ${vector.length}-dimensional vector for ${input.model.ref}; expected ${expected}`,
+                    ),
+                  )
+              return native
+            }
             const baseURL = (
               (input.model.baseURLEnv ? process.env[input.model.baseURLEnv] : undefined) ?? input.model.baseURL
             ).replace(/\/+$/, "")
@@ -293,6 +375,23 @@ export const layer = Layer.effect(
               return yield* Effect.fail(
                 new Error(`expected ${input.inputs.length} embeddings from ${baseURL}, got ${decoded.data.length}`),
               )
+            const seenIndices = new Set<number>()
+            for (const item of decoded.data) {
+              if (
+                !Number.isInteger(item.index) ||
+                item.index < 0 ||
+                item.index >= input.inputs.length ||
+                seenIndices.has(item.index)
+              )
+                return yield* Effect.fail(
+                  new Error(
+                    `embeddings backend returned an invalid index set for ${input.inputs.length} inputs from ${baseURL}: expected each index 0..${input.inputs.length - 1} exactly once, got [${decoded.data
+                      .map((entry) => entry.index)
+                      .join(", ")}]`,
+                  ),
+                )
+              seenIndices.add(item.index)
+            }
             const expected = input.dimensions ?? input.model.dimensions
             const vectors = decoded.data
               .toSorted((left, right) => left.index - right.index)

@@ -8,6 +8,7 @@ import { Context, Effect, FiberMap, Layer, Option, PubSub, Ref, Schema, Semaphor
 import { Directory, Document, Info, type Patch, type Entry, Event } from "@opencode/schema/config"
 import { ephemeral } from "@opencode/schema/event"
 import { Credential } from "./credential.js"
+import { CodexSync } from "./credential/codex-sync.js"
 import { Bus } from "./bus.js"
 import { Watcher } from "./filesystem/watcher.js"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -443,7 +444,10 @@ export const layer = (options?: Options) =>
             ),
           catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
         })
-        yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+        // Atomic replace via the shared #1345 contract: a crash mid-write never
+        // leaves the user config truncated, a symlinked config keeps its link
+        // and its mode, and a fresh file is created at 0o600 (#998).
+        yield* fs.writeAtomic(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
       })
 
       const update = Effect.fn("Config.update")(
@@ -493,6 +497,7 @@ export function configured(options?: Options) {
       Global.node,
       Location.node,
       Credential.node,
+      CodexSync.loopNode,
       WellKnown.node,
       AppProcess.node,
     ],

@@ -416,6 +416,17 @@ const zaiMessages: Protocol = (model, support) => {
   }
 }
 
+// Antigravity's v1internal wire honors only thinkingLevel + includeThoughts: its
+// generationConfig carries exactly those two fields, and thinkingBudget is parsed
+// from provider options but never lowered — so unlike gemini there is no honest
+// budget or off spelling, and effort is the only variant axis.
+const antigravity: Protocol = (_, support) => {
+  if (support.type !== "effort") return []
+  return efforts(support.values ?? EFFORTS, (effort) => ({
+    settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: effort } },
+  }))
+}
+
 const gemini: Protocol = (model, support) => {
   switch (support.type) {
     case "effort":
@@ -641,6 +652,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/alibaba/chat": alibabaChat,
   "@opencode/ai/providers/baseten": basetenChat,
   "@opencode/ai/providers/cerebras": openaiChat,
+  "@opencode/ai/providers/commandcode": openaiChat,
   "@opencode/ai/providers/cloudflare-workers-ai": workersAIChat,
   "@opencode/ai/providers/cohere/chat": openaiChat,
   "@opencode/ai/providers/deepinfra": deepinfraChat,
@@ -651,6 +663,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/meta/chat": openaiChat,
   "@opencode/ai/providers/minimax/chat": openaiChat,
   "@opencode/ai/providers/mistral": openaiChat,
+  "@opencode/ai/providers/vibe": openaiChat,
   "@opencode/ai/providers/google-vertex/mistral": openaiChat,
   "@opencode/ai/providers/google-vertex-mistral": openaiChat,
   "@opencode/ai/providers/moonshot": moonshotChat,
@@ -663,6 +676,7 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/zai-coding-plan/chat": zaiChat,
 
   "@opencode/ai/providers/anthropic": anthropicMessages,
+  "@opencode/ai/providers/claude-code": anthropicMessages,
   "@opencode/ai/providers/anthropic-compatible": anthropicMessages,
   "@opencode/ai/providers/amazon-bedrock/mantle/messages": anthropicMessages,
   "@opencode/ai/providers/google-vertex/messages": anthropicMessages,
@@ -680,6 +694,8 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/google/interactions": googleInteractions,
   "@opencode/ai/providers/google-vertex/interactions": googleInteractions,
   "@opencode/ai/providers/google-vertex-interactions": googleInteractions,
+
+  "@opencode/ai/providers/antigravity": antigravity,
 
   "@opencode/ai/providers/amazon-bedrock": bedrockConverse,
   "@opencode/ai/providers/cohere": cohere,

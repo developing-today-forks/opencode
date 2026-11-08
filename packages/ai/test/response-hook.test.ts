@@ -246,6 +246,17 @@ describe("RequestExecutor.responseRateLimit", () => {
     expect(RequestExecutor.responseRateLimit({ "retry-after": "2026-01-01T24:00:00Z" })).toBeUndefined()
   })
 
+  test("ignores calendar-invalid named-form retry-after dates (#1003)", () => {
+    expect(RequestExecutor.responseRateLimit({ "retry-after": "Feb 30 2026" })).toBeUndefined()
+    expect(RequestExecutor.responseRateLimit({ "retry-after": "30 Feb 2026" })).toBeUndefined()
+    expect(RequestExecutor.responseRateLimit({ "retry-after": "Feb 28 2026 24:00" })).toBeUndefined()
+  })
+
+  test("keeps valid named-form retry-after dates (#1003)", () => {
+    expect(RequestExecutor.responseRateLimit({ "retry-after": "Oct 21 2015" })).toMatchObject({ retryAfterMs: 0 })
+    expect(RequestExecutor.responseRateLimit({ "retry-after": "21 Oct 2015" })).toMatchObject({ retryAfterMs: 0 })
+  })
+
   test("keeps valid ISO retry-after dates (#713)", () => {
     const details = RequestExecutor.responseRateLimit({
       "retry-after": new Date(Date.now() + 60_000).toISOString(),
