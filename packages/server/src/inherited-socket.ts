@@ -16,11 +16,11 @@ export function adoptInheritedSocket(server: HttpServer, fd: number): HttpServer
       return server
     },
     address: () => listener.address(),
-    // Stop accepting here and drop idle keep-alive connections, as node:http's close does. The supervisor keeps
-    // its descriptor, so connections queue for the successor instead of being refused.
+    // Stop accepting here; the supervisor keeps its descriptor, so connections queue for the successor.
+    // Do not close idle connections here: a connection accepted just before the drain may not have sent
+    // its request yet, and the drain serves accepted connections for a short linger before closing them.
     close: (callback?: (error?: Error) => void) => {
       listener.close(callback)
-      server.closeIdleConnections()
       return server
     },
   })

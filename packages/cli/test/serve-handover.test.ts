@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import http from "node:http"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { Duration } from "effect"
@@ -121,6 +122,35 @@ for (const runtime of ["node", "bun"] as const) {
       }
     },
     300_000,
+  )
+
+  posixTest(
+    `${runtime}: a drain answers a request on a connection the server accepted before it began`,
+    async () => {
+      if (runtime === "node") await ensureNodeBundle()
+      const listener = listenSocket()
+      const session = await sessionRoot()
+      const server = serve({ root: session.root, port: listener.port, listenFd: listener.fd, runtime })
+      const idle = idleConnection(listener.port)
+      try {
+        await server.ready()
+        await idle.connected
+        // Let the server accept the connection, then leave it idle: nothing is in flight, so only
+        // tracking accepted connections can keep it alive across the drain.
+        await Bun.sleep(250)
+        server.child.kill("SIGTERM")
+        // The drain has begun. A request that arrives now is on a connection the predecessor accepted.
+        await Bun.sleep(200)
+        expect(await idle.request()).toBe(200)
+        expect(await exited(server.child, 30_000)).not.toBe("timeout")
+      } finally {
+        idle.close()
+        server.child.kill("SIGKILL")
+        closeSocket(listener.fd)
+        await session.cleanup()
+      }
+    },
+    120_000,
   )
 }
 
@@ -334,6 +364,47 @@ function heldSession(base: string, root: string) {
     finish() {
       request.end(body.slice(half))
       return response
+    },
+  }
+}
+
+// A TCP connection to the server that has sent no request yet. The server accepts it on connect, so it
+// is a connection the predecessor already owns by the time a drain begins.
+function idleConnection(port: number) {
+  const socket = net.connect({ host: "127.0.0.1", port })
+  const connected = new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve())
+    socket.once("error", reject)
+  })
+  return {
+    connected,
+    request() {
+      const response = new Promise<number>((resolve, reject) => {
+        let text = ""
+        const timer = setTimeout(() => reject(new Error("no response within 5s")), 5_000)
+        socket.on("data", (chunk) => {
+          text += chunk.toString("latin1")
+          const status = text.match(/^HTTP\/1\.[01] (\d{3})/)
+          if (!status) return
+          clearTimeout(timer)
+          resolve(Number(status[1]))
+        })
+        socket.once("error", (error) => {
+          clearTimeout(timer)
+          reject(error)
+        })
+        socket.once("close", () => {
+          clearTimeout(timer)
+          reject(new Error(`connection closed without a response: ${JSON.stringify(text)}`))
+        })
+      })
+      socket.write(
+        `GET /api/location HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: ${authorization}\r\nConnection: close\r\n\r\n`,
+      )
+      return response
+    },
+    close() {
+      socket.destroy()
     },
   }
 }

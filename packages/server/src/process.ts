@@ -14,7 +14,7 @@ import { Cause, Context, Duration, Effect, Exit, Latch, Layer, Option, Ref, Scop
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { NetAddress } from "effect/net"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
-import type { ListenOptions } from "node:net"
+import type { ListenOptions, Socket } from "node:net"
 import { ServerAuth } from "./auth"
 import { isAllowedCorsOrigin } from "./cors"
 import { adoptInheritedSocket } from "./inherited-socket"
@@ -65,9 +65,21 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   // Requests still running when a drain starts keep the process up until they finish. Event streams are
   // open-ended, so the drain does not wait for them; they end when the process exits.
   const inFlight = new Set<ServerResponse>()
+  // Connections the listener has accepted. A connection accepted in the last instant before a drain
+  // starts may not have sent its request yet, so it is not in inFlight; the drain keeps serving
+  // accepted connections briefly instead of resetting a request that was already on its way.
+  const accepted = new Set<Socket>()
   let draining = false
+  bound.server.on("connection", (socket: Socket) => {
+    accepted.add(socket)
+    socket.once("close", () => accepted.delete(socket))
+  })
   bound.server.on("request", (request: IncomingMessage, response: ServerResponse) => {
-    if (new URL(request.url ?? "/", "http://localhost").pathname === EVENT_STREAM_PATH) return
+    // Event streams are open-ended: the drain does not wait for them, so they must not hold the linger either.
+    if (new URL(request.url ?? "/", "http://localhost").pathname === EVENT_STREAM_PATH) {
+      accepted.delete(request.socket)
+      return
+    }
     inFlight.add(response)
     response.once("close", () => inFlight.delete(response))
     // A draining process closes each connection after its current response, so clients reconnect to the successor.
@@ -141,6 +153,12 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     const untilIdle = Effect.gen(function* () {
       while ((yield* runningSessions).length > 0 || inFlight.size > 0) yield* Effect.sleep("250 millis")
     })
+    const waitForAccepted = Effect.gen(function* () {
+      while (accepted.size > 0) yield* Effect.sleep("10 millis")
+    })
+    const waitForRequests = Effect.gen(function* () {
+      while (inFlight.size > 0) yield* Effect.sleep("10 millis")
+    })
     return {
       address: bound.http.address,
       shutdown: shutdown.await,
@@ -158,10 +176,22 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
             bound.server.close()
           })
           const sessions = yield* runningSessions
-          if (sessions.length === 0 && inFlight.size === 0) return
-          yield* Effect.logInfo("draining running sessions and requests", { sessions, requests: inFlight.size, grace })
-          // The interrupt that started this drain must not cancel the wait.
-          yield* untilIdle.pipe(Effect.timeoutOption(grace), Effect.raceFirst(cutNow), Effect.uninterruptible)
+          if (sessions.length > 0 || inFlight.size > 0)
+            yield* Effect.logInfo("draining running sessions and requests", {
+              sessions,
+              requests: inFlight.size,
+              grace,
+            })
+          // The interrupt that started this drain must not cancel the wait; a second SIGTERM ends it.
+          yield* Effect.gen(function* () {
+            if (sessions.length > 0 || inFlight.size > 0) yield* untilIdle.pipe(Effect.timeoutOption(grace))
+            // Keep serving connections the listener accepted before it closed: their requests may not have
+            // arrived when the drain began, so inFlight did not see them. Bounded so idle keep-alive
+            // connections cannot hold shutdown.
+            yield* waitForAccepted.pipe(Effect.timeoutOption(drainLinger))
+            // A request that arrived during the linger is now in flight; finish it before closing.
+            yield* waitForRequests.pipe(Effect.timeoutOption(grace))
+          }).pipe(Effect.raceFirst(cutNow), Effect.uninterruptible)
           const remaining = yield* runningSessions
           if (remaining.length > 0 || inFlight.size > 0)
             yield* Effect.logWarning("shutdown ended with sessions or requests still running; interrupting them", {
@@ -191,6 +221,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
 })
 
 const EVENT_STREAM_PATH = "/api/event"
+
+// How long a draining server keeps serving connections it already accepted before closing them. A
+// request on such a connection usually arrives within one round trip; this covers a slow one without
+// letting idle keep-alive connections hold shutdown.
+const drainLinger = Duration.millis(500)
 
 function listen(options: {
   readonly hostname: string
