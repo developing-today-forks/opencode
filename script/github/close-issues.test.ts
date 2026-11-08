@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { closeStaleIssues } from "./close-issues"
 
 // Regression test for #2132: close-issues.ts offset-paginates the open
@@ -12,6 +12,7 @@ type FakeIssue = {
   updated_at: string
   author_association: string
   user: { login: string } | null
+  pull_request?: { url: string }
 }
 
 function fakeFetch(open: FakeIssue[], closed: number[]): typeof fetch {
@@ -86,5 +87,30 @@ describe("closeStaleIssues (#2132)", () => {
     })
     expect(count).toBe(1)
     expect(closed).toEqual([2])
+  })
+
+  test("skips pull requests on a mixed stale page and closes only issues", async () => {
+    const open: FakeIssue[] = [
+      { ...staleIssue(1), pull_request: { url: "https://api.github.com/repos/example/repo/pulls/1" } },
+      staleIssue(2),
+    ]
+    const closed: number[] = []
+    const log = spyOn(console, "log").mockImplementation(() => {})
+
+    try {
+      const count = await closeStaleIssues({
+        repo: "developing-today-forks/opencode",
+        headers: {},
+        fetchImpl: fakeFetch(open, closed),
+        cutoffDate: new Date("2021-01-01T00:00:00Z"),
+      })
+
+      expect(count).toBe(1)
+      expect(closed).toEqual([2])
+      expect(open.map((issue) => issue.number)).toEqual([1])
+      expect(log.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("Skipping stale pull request #1")
+    } finally {
+      log.mockRestore()
+    }
   })
 })
