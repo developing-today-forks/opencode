@@ -53,7 +53,12 @@ const PORTAL_ORIGIN = "https://dev.meta.ai"
 const DEFAULT_TEAM_ID = "1073226932208501"
 const WEEKLY_SECONDS = 7 * 24 * 60 * 60
 
-const teamIdOf = (ctx: QuotaContext, pageUrl: string): string => {
+/** The portal team a read targets, in the one place the precedence is
+ * stated: the team_id carried by the open portal page's URL first (the
+ * page is the user's own view of the portal), then the META_TEAM_ID
+ * env override, then the default team. An empty or unparseable page
+ * URL names no team and falls through to the env/default (#1931). */
+export const teamIdOf = (ctx: QuotaContext, pageUrl: string): string => {
   try {
     const fromPage = new URL(pageUrl).searchParams.get("team_id")
     if (fromPage) return fromPage
@@ -382,12 +387,20 @@ export const provider: QuotaProvider = {
     // Portal first: it is the system of record for percentages.
     let portalFailure: { failureClass: string; message: string } | null = null
     try {
-      const team = teamIdOf(ctx, "")
-      const paths = [
+      const portalPaths = (team: string) => [
         `/api/portal/teams/${team}/subscription-quota`,
         `/api/portal/teams/${team}/billing-banner`,
       ]
-      const outcome = await cdpPageFetch(ctx, PORTAL_ORIGIN, paths)
+      // The team is resolved inside the CDP fetch from the open page's
+      // URL (teamIdOf precedence: page, then env, then default) — the
+      // paths cannot be built from the page team before that call,
+      // because the page URL is only known once the page is
+      // established (#1931). The paths are then re-derived from the
+      // returned pageUrl, which is the same URL the resolver saw.
+      const outcome = await cdpPageFetch(ctx, PORTAL_ORIGIN, portalPaths(teamIdOf(ctx, "")), (pageUrl) =>
+        portalPaths(teamIdOf(ctx, pageUrl)),
+      )
+      const paths = portalPaths(teamIdOf(ctx, outcome.pageUrl))
       const quotaResult = outcome.results[paths[0]]
       const bannerResult = outcome.results[paths[1]]
       if (quotaResult && isSessionExpiredStatus(quotaResult)) {

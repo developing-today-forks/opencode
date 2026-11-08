@@ -208,6 +208,12 @@ export const cdpPageFetch = async (
   ctx: QuotaContext,
   origin: string,
   paths: string[],
+  // Some reads cannot know their paths until the page they run in is
+  // known — the Meta portal's team is carried by the open page's URL
+  // (#1931). When a resolver is given, the paths actually fetched are
+  // the ones it returns for the established page's URL; `paths` is the
+  // pre-page default the caller would have used without one.
+  resolvePaths?: (pageUrl: string) => string[],
 ): Promise<CdpPageFetchOutcome> => {
   const base = cdpBaseOf(ctx)
   let targets: CdpTarget[]
@@ -244,8 +250,9 @@ export const cdpPageFetch = async (
   try {
     client = await connectWs(page.webSocketDebuggerUrl, ctx.cdpRequestTimeoutMs ?? CDP_REQUEST_TIMEOUT_MS)
     const pageUrl = await waitForPage(client, origin)
+    const effectivePaths = resolvePaths ? resolvePaths(pageUrl) : paths
     const expression = `(async () => {
-      const paths = ${JSON.stringify(paths)};
+      const paths = ${JSON.stringify(effectivePaths)};
       const out = {};
       const readBoundedText = async (response) => {
         const reader = response.body?.getReader();
@@ -297,7 +304,7 @@ export const cdpPageFetch = async (
         }
       }
     }
-    for (const path of paths) {
+    for (const path of effectivePaths) {
       if (!results[path]) results[path] = { status: 0, url: "", text: "" }
     }
     return { results, pageUrl }
