@@ -109,8 +109,8 @@ export const protocol = Protocol.make({
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "claude-code",
-  providerMetadataKey: "claude-code",
+  provider: "_claude",
+  providerMetadataKey: "_claude",
   protocol,
   endpoint: Endpoint.path(AnthropicMessages.PATH, { baseURL: AnthropicMessages.DEFAULT_BASE_URL }),
   auth: Auth.none,

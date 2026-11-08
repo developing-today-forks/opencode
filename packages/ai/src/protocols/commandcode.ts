@@ -754,8 +754,8 @@ export const httpTransport = HttpTransport.sseJson.with<CommandCodeBody>().with(
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "commandcode",
-  providerMetadataKey: "commandcode",
+  provider: "_commandcode",
+  providerMetadataKey: "_commandcode",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
