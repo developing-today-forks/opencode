@@ -652,6 +652,31 @@ describe("toNumber blank-string handling (#1741)", () => {
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
   })
 
+
+  test("an empty percent field mints no 0%-used opencode-go window", () => {
+    // Rule 4: an entry with no usable percent publishes no window (a
+    // percent-bearing entry would keep its window with a null reset —
+    // rule 3, the #1725 conformance change pinned below).
+    const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
+    expect(parseOpenCodeGoUsage(payload)).toEqual({})
+  })
+
+  test("an empty weighted-used field fails meta parseSubscriptionQuota null gate", () => {
+    const payload = {
+      subscription_quota: {
+        window_weighted_used: "",
+        window_weighted_limit: "100",
+        weekly_weighted_used: "10",
+        weekly_weighted_limit: "100",
+        window_resets_at: "1893456000",
+        weekly_resets_at: "1893456000",
+        window_duration_secs: "18000",
+      },
+    }
+    expect(parseSubscriptionQuota(payload)).toBeNull()
+  })
+})
+
 describe("command-code monthly over-included credits (#1744)", () => {
   test("remaining above the included amount publishes a 0%-used monthly window", () => {
     const windows = parseCommandCodeCredits({ credits: { monthlyCredits: 25 } })
@@ -710,30 +735,6 @@ describe("command-code windowLimits clamp-both disposition (#1821)", () => {
       expect(window?.resetAtFormatted).toBeNull()
       expect(window?.resetAfterFormatted).toBeNull()
     }
-  })
-})
-
-  test("an empty percent field mints no 0%-used opencode-go window", () => {
-    // Rule 4: an entry with no usable percent publishes no window (a
-    // percent-bearing entry would keep its window with a null reset —
-    // rule 3, the #1725 conformance change pinned below).
-    const payload = { usage: { rolling: { percent: "", resetsAt: 1893456000 } } }
-    expect(parseOpenCodeGoUsage(payload)).toEqual({})
-  })
-
-  test("an empty weighted-used field fails meta parseSubscriptionQuota null gate", () => {
-    const payload = {
-      subscription_quota: {
-        window_weighted_used: "",
-        window_weighted_limit: "100",
-        weekly_weighted_used: "10",
-        weekly_weighted_limit: "100",
-        window_resets_at: "1893456000",
-        weekly_resets_at: "1893456000",
-        window_duration_secs: "18000",
-      },
-    }
-    expect(parseSubscriptionQuota(payload)).toBeNull()
   })
 })
 
