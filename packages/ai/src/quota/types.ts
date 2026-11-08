@@ -112,10 +112,11 @@
  *     that issue's, per design #1794 phase 3).
  *   opendesign — parseCodingPlanWindows (exported);
  *     normalizeOpenDesignCredential (credential normalization, not a
- *     window parser). KNOWN-LOSSY: #1879 (over-limit remaining clamps
- *     the percent but stays raw in the value label, violating rule 5).
- *     Keep-first, zero-limit, and unknown-duration cases remain
- *     conforming (#1750).
+ *     window parser). Conforming: remaining is clamped to [0, limit]
+ *     once and both the percent and the value label derive from the
+ *     clamped figure, so a window's fields agree (rule 5, #1879;
+ *     pinned by the matrix). Keep-first, zero-limit, and
+ *     unknown-duration cases remain conforming (#1750).
  *   openrouter — resolveResetAt (exported from the provider module;
  *     the remaining parsing is inline in the fetch path).
  *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).

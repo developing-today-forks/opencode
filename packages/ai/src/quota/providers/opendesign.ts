@@ -96,12 +96,17 @@ export const parseCodingPlanWindows = (payload: JsonValue): Record<string, Quota
     // entry used to silently overwrite it; contradictory duplicates
     // are a payload anomaly, not an update.
     if (label in windows) continue
-    const usedPercent = Math.min(100, Math.max(0, (1 - remaining / limit) * 100))
+    // Clamp remaining into [0, limit] once and derive both fields from
+    // it, so the percent and the credits label cannot contradict (#1879:
+    // raw remaining published "-50 / 100 credits" at 100% used and
+    // "150 / 100 credits" at 0% used).
+    const clampedRemaining = Math.min(limit, Math.max(0, remaining))
+    const usedPercent = (1 - clampedRemaining / limit) * 100
     windows[label] = toUsageWindow({
       usedPercent,
       windowSeconds: duration,
       resetAt: toTimestamp(record.resetsAt),
-      valueLabel: `${remaining} / ${limit} credits`,
+      valueLabel: `${clampedRemaining} / ${limit} credits`,
     })
   }
   return Object.keys(windows).length > 0 ? windows : null
