@@ -914,6 +914,35 @@ const quotaEvidence = (
   return undefined
 }
 
+/** Whether every gate that could independently hold this provider out has been
+ * re-judged clear at `now` (#1974): no live balance hold, no known-full retained
+ * snapshot, no blocking quota skip, and (when a credential is named) no credential
+ * gate. Used to decide whether a bench's quota evidence is stale — planted against
+ * gates that have since lapsed or been replaced — rather than live. */
+const staleGateEvidence = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): boolean => {
+  if (credentialID && credentialQuotaBlocked(credentialID, now, location) !== undefined) return false
+  const provider = providerQuota.get(target.providerID)
+  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
+    return false
+  if (
+    provider &&
+    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+  )
+    return false
+  if (
+    activeAdjustments(now).some(
+      (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
+    )
+  )
+    return false
+  return true
+}
+
 interface PoolMembership {
   readonly id: string
   readonly leaves: readonly number[]
@@ -1013,6 +1042,12 @@ export const poolQuotaExhausted = (
     const source = quotaEvidence(target, credentialID, now, location)
     if (!source) continue
     if (probeDue(target, credentialID, now) && !independentQuotaGate(target, credentialID, now, location)) continue
+    // A bench whose gates have all been re-judged clear since it was planted is a
+    // recovery candidate, not exhaustion evidence, even when the bench carries no
+    // armed reset of its own (#1974): a credential exhaustion bench planted under a
+    // provider skip keeps counting after the skip's window rolls and the skip lapses,
+    // and counting it strands the healthy leaf behind the pool verdict forever.
+    if (source.startsWith("bench:") && staleGateEvidence(target, credentialID, now, location)) continue
     evidence.add(source)
   }
   return evidence.size >= POOL_QUOTA_LEAVES

@@ -2310,6 +2310,54 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     }
   })
 
+  test("a bench planted under a provider skip stops counting as pool evidence once the skip lapses (#1974)", () => {
+    const now = 600_000_000
+    const resetAt = now + 3_600_000
+    const policy = ModelRoute.policy()
+    const leafA = ModelRoute.ref({ providerID: "prov-a", model: "m" })
+    const leafB = ModelRoute.ref({ providerID: "prov-b", model: "m" })
+    const definition = {
+      id: "stale-bench-pool",
+      targets: [leafA, leafB],
+      targetVariants: [],
+      health: policy,
+      nodes: [
+        { selection: "ordered" as const, weights: [1], children: [{ node: 1 }] },
+        {
+          routeID: "stale-pool",
+          selection: "ordered" as const,
+          weights: [1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }],
+        },
+      ],
+    } as unknown as ModelRoute.Definition
+
+    ModelRoute.resetHealth()
+    // Both providers rate-limited (attempt-reported skips until resetAt) and both
+    // leaves quota-benched by their failures: two evidence sources, pool exhausted.
+    ModelRoute.observeQuotaFailure(leafA, undefined, resetAt, now, "rate-limit")
+    ModelRoute.observeQuotaFailure(leafB, undefined, resetAt, now, "rate-limit")
+    ModelRoute.failed(leafA, policy, now, { quota: true, quotaResetAtMs: resetAt }, undefined)
+    ModelRoute.failed(leafB, policy, now, { quota: true, quotaResetAtMs: resetAt }, undefined)
+    expect(ModelRoute.poolQuotaExhausted(definition, 0, now + 1)).toBe(true)
+
+    // The window rolls: the skips lapse at their stated resets, but the benches
+    // (escalated ladder) are still planted. Their evidence is stale — the gates
+    // that justified counting them have been re-judged clear — so the pool verdict
+    // lifts and the leaves re-enter candidacy instead of stranding until the
+    // ladder expires.
+    expect(ModelRoute.poolQuotaExhausted(definition, 0, resetAt + 1)).toBe(false)
+
+    // Control: while a provider skip is still in force (reset still ahead), the
+    // bench evidence keeps counting exactly as before.
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leafA, undefined, resetAt, now, "rate-limit")
+    ModelRoute.observeQuotaFailure(leafB, undefined, resetAt, now, "rate-limit")
+    ModelRoute.failed(leafA, policy, now, { quota: true, quotaResetAtMs: resetAt }, undefined)
+    ModelRoute.failed(leafB, policy, now, { quota: true, quotaResetAtMs: resetAt }, undefined)
+    expect(ModelRoute.poolQuotaExhausted(definition, 0, now + 1)).toBe(true)
+  })
+
   test("threshold-derived provider holds are judged under the requesting Location in skipped and pool pull-out (#1461)", () => {
     const offA = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 1 } }), "/loc/a")
     const offB = ModelRoute.onSettingsConfig(() => ({ quotaGate: { balanceDeadThreshold: 0.05 } }), "/loc/b")
