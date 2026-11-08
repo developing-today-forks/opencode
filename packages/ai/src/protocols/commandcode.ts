@@ -109,7 +109,7 @@ const Options = Schema.Struct({
   reasoningEffort: Schema.optional(Schema.String),
   reasoning_effort: Schema.optional(Schema.String),
   /** Wire permissionMode (bundle: "standard" | "auto-accept" | "plan"); defaults to "standard". */
-  permissionMode: Schema.optional(Schema.String),
+  permissionMode: Schema.optional(Schema.Literals(["standard", "auto-accept", "plan"])),
   /** Resume a gateway thread: only uuid thread ids are sent (bundle: toWireThreadId). */
   threadId: Schema.optional(Schema.String),
   /** Full replacement for the built server config (the bundle's buildServerConfig shape). */
@@ -322,6 +322,15 @@ const fromRequest = Effect.fn("CommandCode.fromRequest")(function* (request: LLM
       `Command Code's /alpha/generate wire carries no tool_choice field, so a forced tool choice ` +
         `(${request.toolChoice.type}) cannot be honored; failing closed instead of silently downgrading it to auto`,
     )
+  // Fail closed on a non-UUID threadId: the bundle silently drops one
+  // (toWireThreadId), which loses session continuity with no error
+  // surface. A supplied id that cannot be honored must fail locally,
+  // exactly like a forced tool choice above; an absent id stays absent
+  // and a valid UUID is forwarded unchanged.
+  if (options.threadId !== undefined && !UUID_PATTERN.test(options.threadId))
+    return yield* ProviderShared.invalidRequest(
+      `Command Code threadId must be a UUID, got "${options.threadId}"; failing closed instead of silently dropping a non-UUID threadId`,
+    )
   const toolsSuppressed = request.toolChoice?.type === "none"
 
   const systemParts: Array<{ type: "text"; text: string }> = request.system
@@ -399,7 +408,7 @@ const fromRequest = Effect.fn("CommandCode.fromRequest")(function* (request: LLM
     taste: null,
     skills: null,
     permissionMode: options.permissionMode ?? "standard",
-    threadId: options.threadId !== undefined && UUID_PATTERN.test(options.threadId) ? options.threadId : undefined,
+    threadId: options.threadId,
     mode: undefined,
     promptCache: undefined,
     params: {

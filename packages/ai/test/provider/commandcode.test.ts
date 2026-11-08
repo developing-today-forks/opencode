@@ -200,6 +200,42 @@ it.effect("a forced tool choice fails closed: the wire has no tool_choice field 
   }),
 )
 
+it.effect("a valid UUID threadId is forwarded and an absent threadId stays absent", () =>
+  Effect.gen(function* () {
+    const uuid = "123e4567-e89b-42d3-a456-426614174000"
+    const compiled = yield* compileRequest(
+      LLM.request({ model, prompt: "hi", providerOptions: { threadId: uuid } }),
+    )
+    expect((compiled.body as Record<string, never>).threadId).toBe(uuid)
+    const absent = yield* compileRequest(LLM.request({ model, prompt: "hi" }))
+    expect((absent.body as Record<string, never>).threadId).toBeUndefined()
+  }),
+)
+
+it.effect("a non-UUID threadId is rejected locally instead of silently dropped", () =>
+  Effect.gen(function* () {
+    const result = yield* compileRequest(
+      LLM.request({ model, prompt: "hi", providerOptions: { threadId: "not-a-uuid" } }),
+    ).pipe(Effect.result)
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("threadId")
+  }),
+)
+
+it.effect("valid permissionMode values are forwarded and invalid ones are rejected locally", () =>
+  Effect.gen(function* () {
+    for (const permissionMode of ["standard", "auto-accept", "plan"] as const) {
+      const compiled = yield* compileRequest(LLM.request({ model, prompt: "hi", providerOptions: { permissionMode } }))
+      expect((compiled.body as Record<string, never>).permissionMode).toBe(permissionMode)
+    }
+    const result = yield* compileRequest(
+      LLM.request({ model, prompt: "hi", providerOptions: { permissionMode: "yolo" } }),
+    ).pipe(Effect.result)
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("permissionMode")
+  }),
+)
+
 it.effect("Command Code stream: NDJSON deltas, a tool call, and finish become a real client tool call", () =>
   Effect.gen(function* () {
     const tricky = 'A "quoted" line\nsecond line — café ☃ MARKER-ALPHA-731'
