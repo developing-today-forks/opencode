@@ -146,6 +146,55 @@ describe("ConfigToolPlugin.Plugin", () => {
     ).pipe(Effect.provide(PluginTestLayer)),
   )
 
+  it.live("later config root wins for a same-named tool even when its path sorts earlier (#1932)", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          // Entry order is config priority: global first, project second
+          // (later wins). Their paths sort the opposite way
+          // (zzz-global > aaa-project), so a lexicographic sort across
+          // roots would wrongly let the global tool win.
+          const globalRoot = path.join(tmp.path, "zzz-global")
+          const projectRoot = path.join(tmp.path, "aaa-project")
+          const marker = (label: string) => `
+              import { tool } from "@opencode-ai/plugin"
+              export default tool({
+                description: "Duplicate-name probe ${label}",
+                args: {},
+                async execute() {
+                  return "${label}"
+                },
+              })
+            `
+          yield* writeTools(globalRoot, { "dup.ts": marker("global") })
+          yield* writeTools(projectRoot, { "dup.ts": marker("project") })
+          const config = yield* Config.Test
+          const plugins = yield* Plugin.Service
+          const tools = yield* Tool.Service
+          yield* config.setEntries([
+            new Directory({ type: "directory", path: AbsolutePath.make(globalRoot) }),
+            new Directory({ type: "directory", path: AbsolutePath.make(projectRoot) }),
+          ])
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+
+          const names = (yield* tools.list()).map((tool) => tool.name).filter((name) => name === "dup")
+          expect(names).toHaveLength(1)
+
+          const snapshot = yield* tools.snapshot()
+          const result = yield* snapshot.execute({
+            sessionID,
+            agent: Agent.ID.make("build"),
+            messageID: SessionMessage.ID.make("msg_custom_tool_test"),
+            call: { type: "tool-call", id: "call_dup_tool", name: "execute", input: { code: "return await tools.dup({})" } },
+          })
+          expect(JSON.stringify(result)).toContain("project")
+          expect(JSON.stringify(result)).not.toContain("global")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(Effect.provide(PluginTestLayer)),
+  )
+
   it.live("reloads when a tool file appears under a config root", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
