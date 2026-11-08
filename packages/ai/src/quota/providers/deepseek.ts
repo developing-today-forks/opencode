@@ -85,6 +85,10 @@ export const provider: QuotaProvider = {
         }) ??
         zeroBalances.find((info) => infoField(info, "currency") === "USD") ??
         zeroBalances.find((info) => infoField(info, "currency") === "CNY") ??
+        zeroBalances.find((info) => {
+          const currency = infoField(info, "currency")
+          return currency !== "USD" && currency !== "CNY"
+        }) ??
         null
       const rawBalance = balanceInfo ? infoField(balanceInfo, "total_balance") : undefined
       const totalBalance =
