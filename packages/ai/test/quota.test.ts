@@ -222,6 +222,68 @@ describe("meta key-endpoint subs_usage windows (#1907)", () => {
     expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
     expect(result.usage?.windows.weekly?.usedPercent).toBe(25)
   })
+
+  test("a weekly-length rolling window survives beside the weekly window (#1777)", async () => {
+    // 10080 minutes = 604800s, a weekly-length rolling window: its
+    // derived label would be "weekly" and used to overwrite the fixed
+    // weekly entry. It now publishes under its semantic role key.
+    const result = await fetchWith(
+      {
+        window: { used_percent: 10, window_duration_mins: 10080, resets_at: 1893456000 },
+        weekly: { used_percent: 90, resets_at: 1893456000 },
+      },
+      true,
+    )
+    expect(result.ok).toBe(true)
+    expect(Object.keys(result.usage?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
+    expect(result.usage?.windows.rolling?.windowSeconds).toBe(604800)
+    expect(result.usage?.windows.weekly?.usedPercent).toBe(90)
+  })
+})
+
+describe("meta rolling window key never collides with weekly (#1777)", () => {
+  // The #1794 window contract rule 1: identity is semantic — a derived
+  // label never erases a window. Filing probe (2026-11-05): a
+  // weekly-length rolling window (604800s) with the weekly entry
+  // present published only the weekly window at 90%; the rolling
+  // window vanished.
+  const quota = (patch: Record<string, unknown>) => ({
+    subscription_quota: {
+      tier: "Muse Code High Usage",
+      window_weighted_used: "10",
+      window_weighted_limit: "100",
+      weekly_weighted_used: "90",
+      weekly_weighted_limit: "100",
+      window_duration_secs: 604800,
+      window_resets_at: 1893456000,
+      weekly_resets_at: 1893456000,
+      ...patch,
+    },
+  })
+
+  test("a weekly-length rolling window survives beside the weekly window (filing probe)", () => {
+    const parsed = parseSubscriptionQuota(quota({}))
+    expect(Object.keys(parsed?.windows ?? {}).toSorted()).toEqual(["rolling", "weekly"])
+    expect(parsed?.windows.rolling?.usedPercent).toBe(10)
+    expect(parsed?.windows.rolling?.windowSeconds).toBe(604800)
+    expect(parsed?.windows.weekly?.usedPercent).toBe(90)
+  })
+
+  test("controls: 18000s and 86400s rolling windows keep their derived labels", () => {
+    const fiveHour = parseSubscriptionQuota(quota({ window_duration_secs: 18000 }))
+    expect(Object.keys(fiveHour?.windows ?? {}).toSorted()).toEqual(["5h", "weekly"])
+    expect(fiveHour?.windows["5h"]?.usedPercent).toBe(10)
+    const daily = parseSubscriptionQuota(quota({ window_duration_secs: 86400 }))
+    expect(Object.keys(daily?.windows ?? {}).toSorted()).toEqual(["1d", "weekly"])
+    expect(daily?.windows["1d"]?.usedPercent).toBe(10)
+  })
+
+  test("a weekly-length rolling window with no weekly entry still publishes once", () => {
+    const parsed = parseSubscriptionQuota(quota({ weekly_weighted_limit: 0 }))
+    expect(Object.keys(parsed?.windows ?? {})).toEqual(["rolling"])
+    expect(parsed?.windows.rolling?.usedPercent).toBe(10)
+  })
 })
 
 describe("meta portal subscription-quota mapping", () => {
@@ -1361,10 +1423,11 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
   // rate-limit windows, command-code, and meta's conforming cases.
   // Known-lossy paths remain marked in types.ts: codex credits_balance
-  // (#1924), deepseek balance (#1928), and meta collisions (#1777).
+  // (#1924) and deepseek balance (#1928).
   // opencode-go and openrouter reset math left the known-lossy set when
   // #1725 landed: opencode-go conforms to rules 3/4 and resolveResetAt
-  // is pinned by its dedicated describe.
+  // is pinned by its dedicated describe. meta left it when #1777 landed:
+  // a weekly-length rolling window no longer overwrites the weekly entry.
   // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
   // dedicated describes; mistral #1785 is likewise pinned by its
   // dedicated describe. If a

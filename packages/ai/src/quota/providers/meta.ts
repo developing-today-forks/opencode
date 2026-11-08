@@ -65,6 +65,19 @@ const teamIdOf = (ctx: QuotaContext, pageUrl: string): string => {
 
 // ---- portal mapping (fixture-tested against the 2026-10-27 payload) ----
 
+// The key a rolling/subscription window publishes under. Its identity
+// is its duration-derived label, except when that label would be
+// "weekly": the fixed weekly window owns that key, so a weekly-length
+// rolling window publishes under its semantic role name instead and
+// survives beside the weekly entry rather than being silently
+// overwritten (contract rule 1 — identity is semantic, a derived label
+// never erases a window; #1777). "rolling" cannot collide with any
+// derived label, which never names a bare role.
+const rollingWindowKey = (windowSeconds: number | null): string => {
+  const label = windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"
+  return label === "weekly" ? "rolling" : label
+}
+
 export const parseSubscriptionQuota = (
   payload: JsonValue,
 ): { tier: string | null; windows: Record<string, QuotaWindow> } | null => {
@@ -96,7 +109,7 @@ export const parseSubscriptionQuota = (
   const windowSeconds = durationSecs !== null && durationSecs > 0 ? durationSecs : null
   const windows: Record<string, QuotaWindow> = {}
   if (windowLimit > 0) {
-    windows[windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"] = toUsageWindow({
+    windows[rollingWindowKey(windowSeconds)] = toUsageWindow({
       usedPercent: pct(windowUsed, windowLimit),
       windowSeconds,
       resetAt: toTimestamp(windowReset),
@@ -230,7 +243,7 @@ const keyUsageResult = (body: JsonObject): QuotaResult => {
   if (rolling && rollingPercent !== null) {
     const durationMinutes = toNumber(rolling.window_duration_mins)
     const windowSeconds = durationMinutes !== null && durationMinutes > 0 ? durationMinutes * 60 : null
-    windows[windowSeconds ? resolveWindowLabel(windowSeconds) : "rolling"] = toUsageWindow({
+    windows[rollingWindowKey(windowSeconds)] = toUsageWindow({
       usedPercent: rollingPercent,
       windowSeconds,
       resetAt: toTimestamp(rolling.resets_at),
