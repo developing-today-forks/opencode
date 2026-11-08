@@ -93,11 +93,12 @@
  *     header window construction is inline and clamps over-limit
  *     remaining whole-window (#1897/#1921; rule 5).
  *   meta — parseSubscriptionQuota, parseBillingBanner (both
- *     exported); keyUsageResult is module-private. KNOWN-LOSSY:
- *     #1777 (a weekly-length rolling window can be overwritten by
- *     the literal weekly entry at both collision sites).
- *     parseSubscriptionQuota's absent/non-positive-reset-is-null
- *     case conforms to rule 3 and is pinned by the matrix (#1855).
+ *     exported); keyUsageResult is module-private. Conforming: a
+ *     weekly-length rolling window publishes under its semantic role
+ *     key instead of overwriting the literal weekly entry, at both
+ *     collision sites (#1777, rule 1). parseSubscriptionQuota's
+ *     absent/non-positive-reset-is-null case conforms to rule 3 and
+ *     is pinned by the matrix (#1855).
      A zero or negative limit drops only that window (rule 4),
      pinned by the matrix (#1849).
  *   mistral — parseMistralBudget (exported; wraps the module-private
@@ -106,20 +107,24 @@
  *     — rule 5, #1785; pinned by the mistral console budget mapping
  *     describe in quota.test.ts).
  *   opencode-go — parseOpenCodeGoUsage, parseConsoleGoUsage,
- *     parseConsoleBillingBalance (all exported). KNOWN-LOSSY:
- *     #1725 (unpinned remainder; a window is dropped when resetAt
- *     is null instead of nulling the field — rule 3 decision is
- *     that issue's, per design #1794 phase 3).
+ *     parseConsoleBillingBalance (all exported). Conforming: a
+ *     percent-bearing entry keeps its window with an absent reset as
+ *     an honest null resetAt (rule 3, #1725), and an entry with no
+ *     usable percent publishes no window (rule 4) — matching codex's
+ *     percent-less case. Pinned by the OpenCode Go API-key usage
+ *     mapping describe in quota.test.ts.
  *   opendesign — parseCodingPlanWindows (exported);
  *     normalizeOpenDesignCredential (credential normalization, not a
- *     window parser). KNOWN-LOSSY: #1879 (over-limit remaining clamps
- *     the percent but stays raw in the value label, violating rule 5).
- *     Keep-first, zero-limit, and unknown-duration cases remain
- *     conforming (#1750).
+ *     window parser). Conforming: remaining is clamped to [0, limit]
+ *     once and both the percent and the value label derive from the
+ *     clamped figure, so a window's fields agree (rule 5, #1879;
+ *     pinned by the matrix). Keep-first, zero-limit, and
+ *     unknown-duration cases remain conforming (#1750).
  *   openrouter — resolveResetAt (exported from the provider module;
  *     the remaining parsing is inline in the fetch path).
- *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).
- *     Conforming: zero-limit publishes no window (#1799, rule 4).
+ *     Conforming: zero-limit publishes no window (#1799, rule 4);
+ *     resolveResetAt's UTC daily/weekly (next Monday, +7d on Monday)
+ *     and monthly arithmetic is pinned (#1725).
  *   turso — tursoWindows (exported pure window builder over the
  *     org-usage figures and TURSO_LIMITS). Conforming: only finite,
  *     nonnegative counts publish; each percent and value label derive

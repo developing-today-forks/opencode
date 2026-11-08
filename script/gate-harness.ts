@@ -112,22 +112,32 @@ export function collect(
  * Every package-owned tree on disk under `root` whose directory name is in
  * `names`: a directory at any nesting depth below the package-name level
  * (packages/console/app, packages/stats/core) whose parent directory (the
- * package root) or the tree itself carries a package.json. Folders with no
- * package.json at either level (skill assets, content folders) are not
- * package trees and are excluded, as is any node_modules subtree. A found
+ * package root) or the tree itself carries a package.json. The walk covers
+ * the whole repo tree (#1758: sdks/vscode and github trees escaped when it
+ * only walked packages/ and services/), pruning node_modules and hidden
+ * directories, and a depth-2 tree counts when its parent is a package root
+ * (github/script). Folders with no package.json at either level (skill
+ * assets, content folders) are not package trees and are excluded. A found
  * tree is not descended into.
  */
 export function treesOnDisk(root: string, names: readonly string[]): string[] {
   const trees: string[] = []
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isDirectory() || entry.name === "node_modules") continue
+      if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue
       const path = join(dir, entry.name)
       const rel = relative(root, path).split(sep).join("/")
+      const depth = rel.split("/").length
+      const parentOwned = existsSync(join(dir, "package.json"))
+      // #1758: the walk is repo-wide, not just packages/ + services/, and a
+      // depth-2 tree whose parent is a package root (github/script, whose
+      // parent github/ carries package.json) is a package tree. A depth-2
+      // tree owned only by its own package.json (packages/script, a package
+      // itself, not a tree inside a package) is not. Deeper trees keep the
+      // historical parent-or-self ownership rule.
       if (
         names.includes(entry.name) &&
-        rel.split("/").length >= 3 &&
-        (existsSync(join(dir, "package.json")) || existsSync(join(path, "package.json")))
+        ((depth >= 3 && (parentOwned || existsSync(join(path, "package.json")))) || (depth === 2 && parentOwned))
       ) {
         trees.push(rel)
         continue
@@ -135,7 +145,7 @@ export function treesOnDisk(root: string, names: readonly string[]): string[] {
       walk(path)
     }
   }
-  for (const top of ["packages", "services"]) if (existsSync(join(root, top))) walk(join(root, top))
+  walk(root)
   return trees.toSorted()
 }
 
