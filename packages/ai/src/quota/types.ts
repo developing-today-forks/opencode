@@ -63,18 +63,21 @@
  *
  *   antigravity — parseBucket / transformSummary / transformModels
  *     (all exported pure transforms). Conforming (unrecognized
- *     window strings skipped, same-label collisions keep-first,
- *     missing remainingFraction propagates as null, #1768; pinned
- *     by its dedicated describe in quota.test.ts, per rule 7).
+ *     window strings skipped and same-label collisions keep-first,
+ *     #1768; figure-less summary buckets are dropped (#1917/#1940),
+ *     as are fallback models without a usable figure (#1912/#1937).
  *   claude — toClaudeUsage (exported pure transform);
  *     findClaudeCredential (credential lookup, not a window parser).
  *     KNOWN-LOSSY: #1781 (unconditional addWindow overwrites
- *     duplicates instead of keeping the first).
+ *     duplicates instead of keeping the first). Spend defects #1919
+ *     and #1920 were fixed by #1957 and #1949, respectively.
  *   cline-pass — fetch-only: limit parsing is inline in the fetch
  *     path; no exported pure parser. Conforming (keep-first, #1769).
  *   codex — fetch-only: window mapping is inline in the fetch path;
- *     no exported pure parser. Conforming (collision qualifiers and
- *     the phantom-window guard, #1762).
+ *     no exported pure parser. KNOWN-LOSSY: #1924 (a negative
+ *     credits.balance is published as the credits_balance label).
+ *     Rate-limit windows retain the collision qualifiers and
+ *     phantom-window guard from #1762.
  *   command-code — parseCommandCodeCredits. Conforming
  *     (publish-truthfully over-included credits, #1744; credit
  *     balances are not windows, #1746; windowLimits windows use the
@@ -82,11 +85,12 @@
  *     the clamped used figure — and a non-positive resetAt is
  *     null, #1821).
  *   deepseek — fetch-only: balance parsing is inline in
- *     provider.fetchQuota; no exported pure parser (its only window
- *     is a credits_balance label, which carries no figure to parse).
+ *     provider.fetchQuota; no exported pure parser. KNOWN-LOSSY:
+ *     #1928 (the balance figure is parsed and published as
+ *     credits_balance, including a negative-only response).
  *   groq — parseGroqResetSeconds (exported scalar duration parser);
- *     window construction from rate-limit headers is inline in the
- *     fetch path.
+ *     header window construction is inline and clamps over-limit
+ *     remaining whole-window (#1897/#1921; rule 5).
  *   meta — parseSubscriptionQuota, parseBillingBanner (both
  *     exported); keyUsageResult is module-private. KNOWN-LOSSY:
  *     #1777 (a weekly-length rolling window can be overwritten by
@@ -107,14 +111,19 @@
  *     that issue's, per design #1794 phase 3).
  *   opendesign — parseCodingPlanWindows (exported);
  *     normalizeOpenDesignCredential (credential normalization, not a
- *     window parser). Conforming (keep-first, zero-limit publishes
- *     nothing, unknown durations skipped, #1750).
+ *     window parser). KNOWN-LOSSY: #1879 (over-limit remaining clamps
+ *     the percent but stays raw in the value label, violating rule 5).
+ *     Keep-first, zero-limit, and unknown-duration cases remain
+ *     conforming (#1750).
  *   openrouter — resolveResetAt (exported from the provider module;
  *     the remaining parsing is inline in the fetch path).
  *     KNOWN-LOSSY: #1725 (resolveResetAt unpinned, with opencode-go).
  *     Conforming: zero-limit publishes no window (#1799, rule 4).
  *   turso — tursoWindows (exported pure window builder over the
- *     org-usage figures and TURSO_LIMITS).
+ *     org-usage figures and TURSO_LIMITS). Conforming: only finite,
+ *     nonnegative counts publish; each percent and value label derive
+ *     from the same count, including intentionally preserved over-limit
+ *     usage (#6227); invalid period bounds leave reset fields null.
  */
 
 export interface QuotaWindow {
