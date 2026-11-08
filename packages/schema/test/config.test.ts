@@ -214,6 +214,69 @@ describe("ConfigModelRoutes.Window bounds", () => {
   })
 })
 
+describe("ConfigModelRoutes.Window string fields (#1681)", () => {
+  // Oracle: the runtime parser in packages/core/src/model-route-schedule.ts
+  // (ModelRouteSchedule.parse) drops the WHOLE window when any of these strings is
+  // unreadable. Decode must reject exactly what the parser rejects for these fields,
+  // and accept what it accepts, so a typo fails at load instead of silently
+  // disabling every rule gated on the window.
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects date entries the parser drops: non-grammar, non-real, and reversed ranges", () => {
+    expect(() => decode({ dates: ["2026-02-30"] })).toThrow("not a real calendar date")
+    expect(() => decode({ excludeDates: ["2026-02-30"] })).toThrow("not a real calendar date")
+    expect(() => decode({ dates: ["2026/02/03"] })).toThrow("invalid window date entry")
+    expect(() => decode({ dates: ["2026-13-01"] })).toThrow("not a real calendar date")
+    expect(() => decode({ dates: ["2026-03-10/2026-03-01"] })).toThrow("range end is before its start")
+    expect(() => decode({ dates: [] })).toThrow("window dates must not be empty")
+    expect(() => decode({ excludeDates: [] })).toThrow("window excludeDates must not be empty")
+  })
+
+  test("accepts valid single dates and ordered ranges", () => {
+    expect(decode({ dates: ["2026-02-28"] })).toMatchObject({ dates: ["2026-02-28"] })
+    expect(decode({ dates: ["2026-03-01/2026-03-10"] })).toMatchObject({ dates: ["2026-03-01/2026-03-10"] })
+    expect(decode({ dates: ["2026-03-01/2026-03-01"] })).toMatchObject({ dates: ["2026-03-01/2026-03-01"] })
+    expect(decode({ excludeDates: ["2028-02-29"] })).toMatchObject({ excludeDates: ["2028-02-29"] })
+  })
+
+  test("rejects times the parser drops and accepts its friendly forms", () => {
+    expect(() => decode({ start: "25:00" })).toThrow("invalid window time")
+    expect(() => decode({ end: "9:60" })).toThrow("invalid window time")
+    expect(() => decode({ start: "9:30:60" })).toThrow("invalid window time")
+    expect(() => decode({ start: "half past nine" })).toThrow("invalid window time")
+    expect(decode({ start: "9:30" })).toMatchObject({ start: "9:30" })
+    expect(decode({ start: "9:5" })).toMatchObject({ start: "9:5" })
+    expect(decode({ start: "9:30:15" })).toMatchObject({ start: "9:30:15" })
+    expect(decode({ end: "17:00" })).toMatchObject({ end: "17:00" })
+  })
+
+  test("rejects start equal to end after normalization, accepts one-sided and wrapping bounds", () => {
+    expect(() => decode({ start: "09:00", end: "09:00" })).toThrow("window start and end must differ")
+    expect(() => decode({ start: "9:00", end: "09:00:00" })).toThrow("window start and end must differ")
+    expect(() => decode({ start: "09:00:30", end: "09:00:45" })).toThrow("window start and end must differ")
+    expect(decode({ start: "22:00", end: "06:00" })).toMatchObject({ start: "22:00", end: "06:00" })
+    expect(decode({ start: "09:00" })).toMatchObject({ start: "09:00" })
+  })
+
+  test("rejects timezones the runtime does not recognize, accepts IANA names and omission", () => {
+    expect(() => decode({ timezone: "Not/AZone" })).toThrow("unknown window timezone")
+    expect(() => decode({ timezone: "" })).toThrow("unknown window timezone")
+    expect(decode({ timezone: "America/Chicago" })).toMatchObject({ timezone: "America/Chicago" })
+    expect(decode({ timezone: "UTC" })).toMatchObject({ timezone: "UTC" })
+    expect(decode({})).toMatchObject({})
+  })
+
+  test("nested windows decode with the same validation", () => {
+    const decodeWindows = Schema.decodeUnknownSync(ConfigModelRoutes.Windows)
+    expect(() => decodeWindows({ peak: { dates: ["2026-02-30"] } })).toThrow("not a real calendar date")
+    expect(decodeWindows({ peak: { start: "9:30", end: "17:00", timezone: "America/Chicago" } })).toBeDefined()
+
+    const decodeSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.Schedule)
+    expect(() => decodeSchedule({ when: { start: "25:00" }, factor: 0.8 })).toThrow("invalid window time")
+    expect(decodeSchedule({ when: { dates: ["2026-12-25"] }, weight: 2 })).toBeDefined()
+  })
+})
+
 describe("field descriptions beyond model-routes (#650)", () => {
   // Same defect as #240, in the remaining schema files: a description annotated outside the package
   // `optional` helper never reaches the encoded JSON schema. These cases pin the fields fixed by #650.
