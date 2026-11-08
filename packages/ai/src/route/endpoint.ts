@@ -48,25 +48,34 @@ export const merge = <Body, Request = LLMRequest>(
 
 export const trimBaseUrl = (value: string) => value.replace(/\/+$/, "")
 
+// The path's leading API version segment ("/v1", "/v2", "/v2beta"), if any.
+const versionPath = /^\/v\d+[a-zA-Z0-9._-]*(?=\/|$|\?)/
+
 const renderPart = <Body, Request>(part: EndpointPart<Body, Request>, input: EndpointInput<Body, Request>) =>
   typeof part === "function" ? part(input) : part
+
+/**
+ * The version segment may live in the baseURL or in the route path, never both. The media protocols are split on this
+ * (OpenAI and Google put it in the baseURL; Deepgram, ElevenLabs and AssemblyAI put it in the path), so a baseURL
+ * ending in the path's leading version segment would otherwise render a doubled segment and 404 (#1956, #1959).
+ */
+const trimVersionPath = (baseURL: string, path: string) => {
+  const version = versionPath.exec(path)?.[0]
+  if (version === undefined || baseURL === "" || !baseURL.endsWith(version)) return path
+  return path.slice(version.length) || "/"
+}
+
+/** Compose a baseURL and a route path with the version segment de-duplicated; the single URL builder for every route. */
+export const renderURL = (baseURL: string, path: string) => {
+  const base = trimBaseUrl(baseURL)
+  return new URL(`${base}${trimVersionPath(base, path)}`)
+}
 
 export const render = <Body, Request = LLMRequest>(
   endpoint: Definition<Body, Request>,
   input: EndpointInput<Body, Request>,
 ) => {
-  const baseURL = trimBaseUrl(endpoint.baseURL ?? "")
-  let path = renderPart(endpoint.path, input)
-  // A baseURL that already ends in the path's leading version segment must
-  // not render that segment twice: a provider baseURL ending in "/v1"
-  // (Cloudflare's ".../anthropic/v1" passthrough, Bedrock Mantle's
-  // ".../anthropic/v1", a user's ".../v1" Anthropic-compatible baseURL)
-  // combined with the Anthropic Messages path "/v1/messages" posted to
-  // "/v1/v1/messages" and 404'd (#1956). The version segment lives in
-  // exactly one place after this de-duplication.
-  if (baseURL.endsWith("/v1") && (path === "/v1" || path.startsWith("/v1/") || path.startsWith("/v1?")))
-    path = path.slice("/v1".length) || "/"
-  const url = new URL(`${baseURL}${path}`)
+  const url = renderURL(endpoint.baseURL ?? "", renderPart(endpoint.path, input))
   for (const [key, value] of Object.entries(endpoint.query ?? {})) url.searchParams.set(key, value)
   return url
 }
