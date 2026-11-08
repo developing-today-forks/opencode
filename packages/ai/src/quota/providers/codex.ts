@@ -143,8 +143,14 @@ const fetchQuotaForEntry = async (
     }
     if (credits) {
       const balance = toNumber(credits.balance)
+      // A negative balance is not a balance: the sibling providers read
+      // negative amounts as absent (meta parseBillingBanner, opencode-go
+      // toMicroCents), so a negative balance publishes no credits_balance
+      // window -- and alone it reaches the #1762 no-data contract below
+      // instead of returning ok:true with a "-5" label (#1924).
+      const usableBalance = balance !== null && balance >= 0 ? balance : null
       const unlimited = Boolean(credits.unlimited)
-      const label = unlimited ? "Unlimited" : balance !== null ? String(balance) : null
+      const label = unlimited ? "Unlimited" : usableBalance !== null ? String(usableBalance) : null
       // An empty credits object carries no usable data either (#1762).
       if (label !== null) {
         windows.credits_balance = toUsageWindow({

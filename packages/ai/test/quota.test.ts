@@ -1151,6 +1151,35 @@ describe("codex quota window mapping (#1762)", () => {
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("12.5")
   })
 
+  test("a negative credits balance is read as absent, never published (#1924)", async () => {
+    // Negative-only: no credits_balance window, and the payload reaches
+    // the #1762 no-data contract instead of ok:true with a "-5" label.
+    const negativeOnly = await fetchWith({ rate_limit: {}, credits: { balance: -5, unlimited: false } })
+    expect(negativeOnly.ok).toBe(false)
+    expect(negativeOnly.error).toBe("No quota data in response")
+    expect(negativeOnly.usage).toBeNull()
+
+    // Negative beside a real window: the window publishes, the negative
+    // balance does not.
+    const beside = await fetchWith({
+      rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_at: reset } },
+      credits: { balance: -5, unlimited: false },
+    })
+    expect(beside.ok).toBe(true)
+    expect(beside.usage?.windows["5h"]?.usedPercent).toBe(25)
+    expect(beside.usage?.windows.credits_balance).toBeUndefined()
+
+    // Controls: zero and positive balances publish unchanged, and the
+    // unlimited label path is untouched by the sign guard.
+    const zero = await fetchWith({ rate_limit: {}, credits: { balance: 0, unlimited: false } })
+    expect(zero.ok).toBe(true)
+    expect(zero.usage?.windows.credits_balance?.valueLabel).toBe("0")
+    const positive = await fetchWith({ rate_limit: {}, credits: { balance: 42, unlimited: false } })
+    expect(positive.usage?.windows.credits_balance?.valueLabel).toBe("42")
+    const unlimited = await fetchWith({ rate_limit: {}, credits: { balance: -5, unlimited: true } })
+    expect(unlimited.usage?.windows.credits_balance?.valueLabel).toBe("Unlimited")
+  })
+
   test("spend-control window: percent and label derive from one clamped used figure (#1882)", async () => {
     const control = await fetchWith({
       rate_limit: {},
