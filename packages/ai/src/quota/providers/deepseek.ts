@@ -75,6 +75,7 @@ export const provider: QuotaProvider = {
         const num = toNumber(infoField(info, "total_balance"))
         return typeof num === "number" && num > 0
       })
+      const zeroBalances = balanceInfos.filter((info) => toNumber(infoField(info, "total_balance")) === 0)
       const balanceInfo =
         positiveBalances.find((info) => infoField(info, "currency") === "USD") ??
         positiveBalances.find((info) => infoField(info, "currency") === "CNY") ??
@@ -82,8 +83,8 @@ export const provider: QuotaProvider = {
           const currency = infoField(info, "currency")
           return currency !== "USD" && currency !== "CNY"
         }) ??
-        balanceInfos.find((info) => infoField(info, "currency") === "USD") ??
-        balanceInfos.find((info) => infoField(info, "currency") === "CNY") ??
+        zeroBalances.find((info) => infoField(info, "currency") === "USD") ??
+        zeroBalances.find((info) => infoField(info, "currency") === "CNY") ??
         null
       const rawBalance = balanceInfo ? infoField(balanceInfo, "total_balance") : undefined
       const totalBalance =
