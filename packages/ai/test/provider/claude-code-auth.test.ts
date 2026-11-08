@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
   ClaudeCodeSignInError,
+  ClaudeCodeCredentialWriteError,
   NOT_SIGNED_IN_MESSAGE,
   OAUTH_AUTHORIZE_URL,
   OAUTH_CLIENT_ID,
@@ -10,11 +11,13 @@ import {
   OAUTH_TOKEN_RESPONSE_MAX_BYTES,
   OAUTH_TOKEN_URL,
   beginClaudeCodeSignIn,
+  buildCredentialsFileContents,
   claudeCodeAuth,
   expiredMessage,
   parseCredentialsFile,
   resolveCredential,
   writeCredential,
+  type ClaudeCodeOAuthBlob,
   type CredentialSources,
 } from "../../src/providers/claude-code-auth.js"
 import { ClaudeCodeMessages } from "../../src/protocols/claude-code-messages.js"
@@ -278,6 +281,126 @@ describe("writeCredential — the shared atomic write helper (#1852)", () => {
       refreshToken: "ref-new",
       expiresAt: 42,
     })
+  })
+})
+
+describe("writeCredential - the write boundary refuses an empty credential (code#7098)", () => {
+  const guardHarness = () => {
+    const writes: Array<{ path: string; contents: string }> = []
+    const renames: Array<{ from: string; to: string }> = []
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      readFile: () => blob("tok-old", 1893456000000),
+      writeFile: async (writePath, contents) => {
+        writes.push({ path: writePath, contents })
+      },
+      renameFile: async (from, to) => {
+        renames.push({ from, to })
+      },
+      randomValues: (length) => new Uint8Array(length).fill(7),
+    }
+    return { sources, writes, renames }
+  }
+
+  const refused: Array<[string, ClaudeCodeOAuthBlob]> = [
+    ["an empty access token", { accessToken: "" }],
+    ["a whitespace-only access token", { accessToken: "   " }],
+    ["an empty refresh token", { accessToken: "tok-new", refreshToken: "" }],
+    ["a whitespace-only refresh token", { accessToken: "tok-new", refreshToken: " " }],
+    ["a zero expiry", { accessToken: "tok-new", refreshToken: "ref-new", expiresAt: 0 }],
+  ]
+  for (const [label, oauth] of refused) {
+    test(`refuses ${label} by name and writes nothing`, async () => {
+      const { sources, writes, renames } = guardHarness()
+      const error = await writeCredential(sources, oauth).catch((cause: unknown) => cause)
+      expect(error).toBeInstanceOf(ClaudeCodeCredentialWriteError)
+      expect(writes).toHaveLength(0)
+      expect(renames).toHaveLength(0)
+    })
+  }
+
+  test("buildCredentialsFileContents refuses an empty blob too", () => {
+    expect(() => buildCredentialsFileContents(blob("tok-old"), { accessToken: "" })).toThrow(
+      ClaudeCodeCredentialWriteError,
+    )
+  })
+})
+
+describe("claudeCodeAuth - renewal refuses a malformed success response (code#7098)", () => {
+  const apply = (sources: CredentialSources) =>
+    Effect.runPromise(
+      claudeCodeAuth({ sources }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: Headers.empty,
+      }),
+    )
+
+  const expiredBlob = () =>
+    JSON.stringify({
+      claudeAiOauth: { accessToken: "tok-old", refreshToken: "ref-old", expiresAt: 1_000, subscriptionType: "pro" },
+      otherTool: { keep: true },
+    })
+
+  const harness = (response: () => Response) => {
+    const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", expiredBlob()]])
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => 2_000,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      fetchFn: async () => response(),
+    }
+    return { sources, store }
+  }
+
+  const okJson = (payload: Record<string, unknown>) => () =>
+    new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } })
+
+  test("a 200 with an empty refresh_token is discarded and the file stays byte-identical", async () => {
+    const { sources, store } = harness(okJson({ access_token: "tok-new", refresh_token: "", expires_in: 3600 }))
+    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(Error)
+    expect(JSON.stringify(error)).toContain("discarded")
+    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+  })
+
+  test("a 200 with expires_in of 0 is discarded and the file stays byte-identical", async () => {
+    const { sources, store } = harness(okJson({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 0 }))
+    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(Error)
+    expect(JSON.stringify(error)).toContain("discarded")
+    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+  })
+
+  test("a 200 with a non-JSON body is discarded and the file stays byte-identical", async () => {
+    const { sources, store } = harness(() => new Response("not json", { status: 200 }))
+    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(Error)
+    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+  })
+
+  test("a 200 with an empty access_token is discarded and the file stays byte-identical", async () => {
+    const { sources, store } = harness(okJson({ access_token: "", refresh_token: "ref-new", expires_in: 3600 }))
+    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(Error)
+    expect(JSON.stringify(error)).toContain("discarded")
+    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
   })
 })
 

@@ -191,8 +191,40 @@ export interface ClaudeCodeOAuthBlob {
   readonly scopes?: ReadonlyArray<string>
 }
 
+/** A credential write refused at the boundary: the blob would persist an empty token (code#7098). */
+export class ClaudeCodeCredentialWriteError extends Error {
+  override readonly name = "ClaudeCodeCredentialWriteError"
+}
+
+/**
+ * The write-boundary invariant (code#7098): a credential whose access
+ * token is empty or whitespace, whose refresh token is present but
+ * empty or whitespace, or whose expiry is not a positive timestamp is
+ * NEVER persisted. The 2026-11-07 blanking wrote exactly that shape
+ * (both tokens empty, expiresAt 0, subscriptionType retained) through
+ * an unguarded write path, and an empty refresh token cannot be
+ * renewed - every blanking costs a full manual re-sign-in. Any caller
+ * handing the write helper such a blob is refused by name before any
+ * write, and the existing file stays byte-identical.
+ */
+const assertPersistableOAuthBlob = (oauth: ClaudeCodeOAuthBlob): void => {
+  if (typeof oauth.accessToken !== "string" || oauth.accessToken.trim().length === 0)
+    throw new ClaudeCodeCredentialWriteError(
+      "Refusing to write ~/.claude/.credentials.json: the access token is empty. The existing file is unchanged.",
+    )
+  if (oauth.refreshToken !== undefined && oauth.refreshToken.trim().length === 0)
+    throw new ClaudeCodeCredentialWriteError(
+      "Refusing to write ~/.claude/.credentials.json: the refresh token is empty. The existing file is unchanged.",
+    )
+  if (oauth.expiresAt !== undefined && (!Number.isFinite(oauth.expiresAt) || oauth.expiresAt <= 0))
+    throw new ClaudeCodeCredentialWriteError(
+      "Refusing to write ~/.claude/.credentials.json: the expiry is not a positive timestamp. The existing file is unchanged.",
+    )
+}
+
 /** Serialize the credentials file with `oauth` as its claudeAiOauth blob, preserving unrelated fields. */
 export const buildCredentialsFileContents = (existing: string | undefined, oauth: ClaudeCodeOAuthBlob): string => {
+  assertPersistableOAuthBlob(oauth)
   let top: Record<string, unknown> = {}
   if (existing !== undefined) {
     try {
@@ -307,6 +339,15 @@ const refreshAndPersist = async (sources: CredentialSources, refreshToken: strin
   const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
   if (accessToken.length === 0)
     throw new ClaudeCodeRefreshError("Claude Code OAuth refresh returned no access token; the tokens were discarded.")
+  if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+    throw new ClaudeCodeRefreshError(
+      "Claude Code OAuth refresh returned an empty refresh token; the tokens were discarded.",
+    )
+  if (
+    "expires_in" in tokens &&
+    (typeof tokens.expires_in !== "number" || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0)
+  )
+    throw new ClaudeCodeRefreshError("Claude Code OAuth refresh returned an invalid expiry; the tokens were discarded.")
   const now = sources.now ? sources.now() : Date.now()
   const oauth: ClaudeCodeOAuthBlob = {
     accessToken,
@@ -420,6 +461,13 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
     if (accessToken.length === 0)
       throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned no access token.")
+    if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+      throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned an empty refresh token.")
+    if (
+      "expires_in" in tokens &&
+      (typeof tokens.expires_in !== "number" || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0)
+    )
+      throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned an invalid expiry.")
     const now = sources.now ? sources.now() : Date.now()
     const oauth: ClaudeCodeOAuthBlob = {
       accessToken,
