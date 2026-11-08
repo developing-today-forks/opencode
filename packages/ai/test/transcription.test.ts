@@ -14,6 +14,9 @@ const layer = (handler: Parameters<typeof dynamicResponse>[0]) =>
 const audio = Media.bytes(Uint8Array.from([0x49, 0x44, 0x33, 1, 2, 3]), "audio/mpeg")
 const openai = OpenAI.configure({ apiKey: "test", baseURL: "https://openai.test/v1" })
 const deepgram = Deepgram.configure({ apiKey: "test", baseURL: "https://deepgram.test" }).transcription("nova-3")
+const deepgramVersioned = Deepgram.configure({ apiKey: "test", baseURL: "https://deepgram.test/v1" }).transcription(
+  "nova-3",
+)
 const google = Google.configure({ apiKey: "test", baseURL: "https://google.test/v1beta" }).transcription(
   "gemini-3.5-transcribe",
 )
@@ -35,9 +38,17 @@ const formFields = (call: Call) =>
 const assemblyai = AssemblyAI.configure({ apiKey: "aai-key", baseURL: "https://assemblyai.test" }).transcription(
   "universal-3-5-pro",
 )
+const assemblyaiVersioned = AssemblyAI.configure({
+  apiKey: "aai-key",
+  baseURL: "https://assemblyai.test/v2",
+}).transcription("universal-3-5-pro")
 const elevenlabs = ElevenLabs.configure({ apiKey: "test", baseURL: "https://elevenlabs.test" }).transcription(
   "scribe_v2",
 )
+const elevenlabsVersioned = ElevenLabs.configure({
+  apiKey: "test",
+  baseURL: "https://elevenlabs.test/v1",
+}).transcription("scribe_v2")
 
 describe("Transcription", () => {
   it.effect("rejects what a route cannot honor before sending anything", () =>
@@ -308,6 +319,31 @@ describe("Transcription", () => {
     }),
   )
 
+  it.effect("does not double Deepgram's versioned baseURL", () =>
+    Effect.gen(function* () {
+      const calls: Array<Call> = []
+      yield* Transcription.generate({
+        model: deepgramVersioned,
+        audio: Media.url("https://a.test/call.mp3", { mediaType: "audio/mpeg" }),
+      }).pipe(
+        Effect.provide(
+          layer((input) =>
+            observe(calls, input).pipe(
+              Effect.as(
+                json(input, {
+                  metadata: { request_id: "dg_1", duration: 2 },
+                  results: { channels: [{ alternatives: [{ transcript: "Hello there." }] }] },
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+
+      expect(new URL(calls[0].url).pathname).toBe("/v1/listen")
+    }),
+  )
+
   it.effect("transcribes an AssemblyAI URL source without uploading it first", () =>
     Effect.gen(function* () {
       const calls: Array<Call> = []
@@ -339,6 +375,33 @@ describe("Transcription", () => {
       expect(response).toMatchObject({ text: "Hello there.", usage: { type: "seconds", seconds: 2 } })
     }),
   )
+
+  it.effect("does not double AssemblyAI's versioned baseURL for upload, submit, or poll", () => {
+    const calls: Array<Call> = []
+    return Effect.gen(function* () {
+      const generation = yield* Transcription.start({ model: assemblyaiVersioned, audio })
+      const status = yield* generation.refresh()
+
+      expect(status.status).toBe("completed")
+      expect(calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
+        "POST /v2/upload",
+        "POST /v2/transcript",
+        "GET /v2/transcript/tr_1",
+      ])
+    }).pipe(
+      Effect.provide(
+        layer((input) =>
+          Effect.gen(function* () {
+            const { call } = yield* observe(calls, input)
+            if (call.url.endsWith("/v2/upload"))
+              return json(input, { upload_url: "https://cdn.assemblyai.test/upload/1" })
+            if (call.method === "POST") return json(input, { id: "tr_1", status: "queued" })
+            return json(input, { id: "tr_1", status: "completed", text: "Hello there.", audio_duration: 2 })
+          }),
+        ),
+      ),
+    )
+  })
 
   it.effect(
     "uploads inline audio to AssemblyAI, resumes polling from a persisted token, and surfaces failed transcripts",
@@ -568,6 +631,34 @@ describe("Transcription", () => {
       expect(response.language).toBe("eng")
       expect(response.usage).toEqual({ type: "seconds", seconds: 2 })
       expect(response.providerMetadata).toEqual({ elevenlabs: { transcriptionId: "tr_1" } })
+    }),
+  )
+
+  it.effect("does not double ElevenLabs' versioned baseURL", () =>
+    Effect.gen(function* () {
+      const calls: Array<Call> = []
+      yield* Transcription.generate({
+        model: elevenlabsVersioned,
+        audio: Media.url("https://a.test/call.mp3"),
+      }).pipe(
+        Effect.provide(
+          layer((input) =>
+            observe(calls, input).pipe(
+              Effect.as(
+                json(input, {
+                  language_code: "ENG",
+                  text: "Hello there.",
+                  words: [],
+                  transcription_id: "tr_1",
+                  audio_duration_secs: 2,
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+
+      expect(new URL(calls[0].url).pathname).toBe("/v1/speech-to-text")
     }),
   )
 

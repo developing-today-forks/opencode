@@ -5,7 +5,7 @@ import { Speech, SpeechClient, SpeechEvent } from "../src/index.js"
 import { Cartesia, Deepgram, ElevenLabs, Google, OpenAI } from "../src/providers.js"
 import { SpeechStream } from "../src/protocols/utils/speech-stream.js"
 import { it } from "./lib/effect.js"
-import { dynamicResponse } from "./lib/http.js"
+import { dynamicResponse, observe, type Call } from "./lib/http.js"
 import { sseEvents } from "./lib/sse.js"
 
 // Recorded tests in test/provider cover lowering and decoding; these cover what recordings cannot.
@@ -37,9 +37,29 @@ const google38Lite = Google.configure({ apiKey: "test", baseURL: "https://google
   "gemini-3.8-flash-lite-tts",
 )
 const deepgram = Deepgram.configure({ apiKey: "test", baseURL: "https://deepgram.test" }).speech("aura-2-thalia-en")
+const deepgramVersioned = Deepgram.configure({ apiKey: "test", baseURL: "https://deepgram.test/v1" }).speech(
+  "aura-2-thalia-en",
+)
 const voice = "JBFqnCBsd6RMkjVDRZzb"
 
 describe("Speech", () => {
+  it.effect("does not double Deepgram's versioned baseURL", () =>
+    Effect.gen(function* () {
+      const calls: Array<Call> = []
+      yield* Speech.generate({ model: deepgramVersioned, text: "Hi" }).pipe(
+        Effect.provide(
+          layer((input) =>
+            observe(calls, input).pipe(
+              Effect.as(input.respond(Uint8Array.from([1, 2]), { headers: { "content-type": "audio/mpeg" } })),
+            ),
+          ),
+        ),
+      )
+
+      expect(new URL(calls[0].url).pathname).toBe("/v1/speak")
+    }),
+  )
+
   it.effect("preserves Google's WAV output instead of describing it as raw PCM", () =>
     Effect.gen(function* () {
       const bytes = new TextEncoder().encode("RIFF....WAVEfmt ")

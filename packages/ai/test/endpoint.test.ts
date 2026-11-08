@@ -40,12 +40,24 @@ describe("Endpoint", () => {
   })
 
   test("does not double a trailing /v1 baseURL segment against a /v1 path (#1956)", () => {
-    const url = Endpoint.render(Endpoint.path("/v1/messages", { baseURL: "https://gateway.example.test/anthropic/v1" }), {
+    const url = Endpoint.render(
+      Endpoint.path("/v1/messages", { baseURL: "https://gateway.example.test/anthropic/v1" }),
+      {
+        request: request(),
+        body: {},
+      },
+    )
+
+    expect(url.toString()).toBe("https://gateway.example.test/anthropic/v1/messages")
+  })
+
+  test("does not double a matching /v2 baseURL segment against a /v2 path", () => {
+    const url = Endpoint.render(Endpoint.path("/v2/transcript", { baseURL: "https://api.example.test/v2" }), {
       request: request(),
       body: {},
     })
 
-    expect(url.toString()).toBe("https://gateway.example.test/anthropic/v1/messages")
+    expect(url.toString()).toBe("https://api.example.test/v2/transcript")
   })
 
   test("keeps a /v1 path intact when the baseURL does not end in /v1", () => {
