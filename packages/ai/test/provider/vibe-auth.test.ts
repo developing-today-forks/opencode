@@ -56,6 +56,35 @@ describe("parseDotEnv", () => {
     expect(parseDotEnv("MISTRAL_API_KEY='abc123' # don't fail").MISTRAL_API_KEY).toBe("abc123")
   })
 
+  test("a multiline quoted value parses as one value and fabricates no keys from its inner lines", () => {
+    const parsed = parseDotEnv(['A="line1', "B=injected", 'line3"', "C=real"].join("\n"))
+    expect(parsed).toEqual({ A: "line1\nB=injected\nline3", C: "real" })
+    const shadowed = parseDotEnv(['OUTER="x', "MISTRAL_API_KEY=fabricated", 'y"', "REAL=1"].join("\n"))
+    expect(shadowed).toEqual({ OUTER: "x\nMISTRAL_API_KEY=fabricated\ny", REAL: "1" })
+    expect("MISTRAL_API_KEY" in shadowed).toBe(false)
+  })
+
+  test("multiline single-quoted values stay literal, escapes included", () => {
+    const parsed = parseDotEnv(["A='one", "two'", "B='a\\nb'"].join("\n"))
+    expect(parsed).toEqual({ A: "one\ntwo", B: "a\\nb" })
+  })
+
+  test("double-quoted escapes expand while single-quoted values stay literal", () => {
+    const parsed = parseDotEnv('D="a\\nb\\tc\\rd\\\\e\\"f"\nS=' + "'a\\nb'")
+    expect(parsed).toEqual({ D: "a\nb\tc\rd\\e\"f", S: "a\\nb" })
+  })
+
+  test("unquoted trailing comments strip after a tab as well as a space", () => {
+    expect(parseDotEnv("E=value\t# comment")).toEqual({ E: "value" })
+    expect(parseDotEnv("E=value # comment")).toEqual({ E: "value" })
+  })
+
+  test("a quoted value followed by non-comment junk is skipped, not returned verbatim", () => {
+    expect(parseDotEnv('F="quoted" junk')).toEqual({})
+    expect(parseDotEnv('G="quoted" # a comment')).toEqual({ G: "quoted" })
+    expect(parseDotEnv("H='quoted'\t# a comment")).toEqual({ H: "quoted" })
+  })
+
   test("handles CRLF and empty values", () => {
     const parsed = parseDotEnv("A=1\r\nB=\r\nC=3")
     expect(parsed).toEqual({ A: "1", B: "", C: "3" })

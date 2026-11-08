@@ -62,23 +62,70 @@ export interface ShadowDiagnostic {
 /** Minimal dotenv parser: KEY=VALUE lines, `#` comments, optional `export `, optional quotes. */
 export const parseDotEnv = (contents: string): Readonly<Record<string, string>> => {
   const values: Record<string, string> = {}
-  for (const rawLine of contents.split(/\r?\n/)) {
-    const line = rawLine.trim()
+  const lines = contents.split(/\r?\n/)
+  // Index of the closing quote in a quoted value that starts at index 0, or
+  // -1. A backslash escapes the next character inside double quotes only;
+  // single-quoted values are literal.
+  const closingQuote = (text: string, quote: string): number => {
+    for (let i = 1; i < text.length; i++) {
+      if (quote === '"' && text[i] === "\\") {
+        i++
+        continue
+      }
+      if (text[i] === quote) return i
+    }
+    return -1
+  }
+  const expandDoubleQuoted = (inner: string): string =>
+    inner.replace(/\\(.)/g, (whole, ch: string) => {
+      switch (ch) {
+        case "n":
+          return "\n"
+        case "r":
+          return "\r"
+        case "t":
+          return "\t"
+        case "\\":
+          return "\\"
+        case '"':
+          return '"'
+        default:
+          return whole
+      }
+    })
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li].trim()
     if (!line || line.startsWith("#")) continue
     const statement = line.startsWith("export ") ? line.slice("export ".length) : line
     const eq = statement.indexOf("=")
     if (eq <= 0) continue
     const key = statement.slice(0, eq).trim()
-    let value = statement.slice(eq + 1).trim()
-    const quoted = value.match(/^(['"])((?:\\.|(?!\1).)*)\1(?:[ \t]*#.*)?$/)
-    if (quoted) {
-      value = quoted[2]
-    } else {
-      // Unquoted values may carry a trailing comment (`KEY=value # note`).
-      const comment = value.indexOf(" #")
-      if (comment >= 0) value = value.slice(0, comment).trimEnd()
+    if (!key) continue
+    const value = statement.slice(eq + 1).trim()
+    const quote = value.startsWith('"') || value.startsWith("'") ? value[0] : undefined
+    if (quote) {
+      // A quoted value consumes lines until its closing quote, so lines
+      // inside a multiline value never parse as assignments of their own.
+      let text = value
+      let endQuote = closingQuote(text, quote)
+      while (endQuote < 0 && li + 1 < lines.length) {
+        li++
+        text += "\n" + lines[li]
+        endQuote = closingQuote(text, quote)
+      }
+      if (endQuote < 0) continue
+      const rest = text.slice(endQuote + 1).trim()
+      // Only a trailing comment may follow a closing quote; any other junk
+      // invalidates the assignment rather than becoming part of the value.
+      if (rest && !rest.startsWith("#")) continue
+      const inner = text.slice(1, endQuote)
+      values[key] = quote === '"' ? expandDoubleQuoted(inner) : inner
+      continue
     }
-    if (key) values[key] = value
+    // Unquoted values may carry a trailing comment (`KEY=value # note`,
+    // with a space or a tab before the `#`).
+    const comment = value.search(/\s#/)
+    values[key] = comment >= 0 ? value.slice(0, comment).trimEnd() : value
   }
   return values
 }
