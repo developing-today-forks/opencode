@@ -1,5 +1,4 @@
-import { execFile } from "node:child_process"
-import { accessSync, constants, readFileSync, readdirSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -47,10 +46,8 @@ const ANTIGRAVITY_ENDPOINTS = [
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
   "https://cloudcode-pa.googleapis.com",
 ]
-// The token refresh rides the fork's own antigravity-auth bridge:
-// it holds the Antigravity installed-app client identity and extracts
-// the paired secret from the agy binary at runtime (memory only,
-// never persisted) — this file carries no client secret.
+// The token refresh rides the fork's own antigravity-auth bridge, which
+// reads its separately provisioned client secret from the provider env.
 const ANTIGRAVITY_CLIENT_VERSION = "2.24.0"
 
 const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
@@ -90,56 +87,17 @@ const readJsonFile = (filePath: string): JsonValue | null => {
   }
 }
 
-const findSecretTool = (ctx: QuotaContext): string | null => {
-  const env = ctx.env ?? process.env
-  const candidates: string[] = []
-  if (env.SECRET_TOOL_PATH) candidates.push(env.SECRET_TOOL_PATH)
-  for (const dir of (env.PATH ?? "").split(":")) if (dir) candidates.push(join(dir, "secret-tool"))
-  try {
-    for (const store of readdirSync("/nix/store").filter((entry) => entry.includes("libsecret")).sort()) {
-      candidates.push(join("/nix/store", store, "bin", "secret-tool"))
-    }
-  } catch {
-    // No nix store on this machine; the PATH candidates stand.
-  }
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, constants.X_OK)
-      return candidate
-    } catch {
-      // Next candidate.
-    }
-  }
-  return null
-}
-
 const keyringAuth = async (ctx: QuotaContext): Promise<AntigravityAuth | null> => {
-  const tool = findSecretTool(ctx)
-  if (!tool) return null
-  const token = await new Promise<{ access_token?: string; refresh_token?: string } | null>((resolve) => {
-    const env = { ...(ctx.env ?? process.env) }
-    if (!env.DBUS_SESSION_BUS_ADDRESS && typeof process.getuid === "function") {
-      env.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${process.getuid()}/bus`
-    }
-    execFile(
-      tool,
-      ["lookup", "service", "gemini", "username", "antigravity"],
-      { env, timeout: 15_000, maxBuffer: 1 << 20 },
-      (error, out) => {
-        if (error) return resolve(null)
-        const tokenRecord = asObject(asObject(parseJsonValue(out))?.token)
-        resolve(
-          tokenRecord
-            ? {
-                access_token: asNonEmptyString(tokenRecord.access_token),
-                refresh_token: asNonEmptyString(tokenRecord.refresh_token),
-              }
-            : null,
-        )
-      },
-    )
-  })
-  if (!token?.refresh_token) return null
+  const { lookupSecretService } = await import("../../providers/secret-service.js")
+  const raw = await lookupSecretService("gemini", "antigravity")
+  if (!raw) return null
+  const tokenRecord = asObject(asObject(parseJsonValue(raw))?.token)
+  if (!tokenRecord) return null
+  const token = {
+    access_token: asNonEmptyString(tokenRecord.access_token),
+    refresh_token: asNonEmptyString(tokenRecord.refresh_token),
+  }
+  if (!token.refresh_token) return null
   const parts = parseGoogleRefreshToken(token.refresh_token)
   if (!parts.refreshToken) return null
   return { refreshToken: parts.refreshToken, projectId: parts.projectId ?? parts.managedProjectId ?? undefined, origin: "keyring" }
