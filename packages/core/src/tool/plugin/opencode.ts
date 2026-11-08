@@ -107,7 +107,7 @@ export const Plugin = {
         draft.namespace({
           name: "opencode",
           description:
-            "Tools for managing OpenCode itself, such as working with sessions and worktrees, searching the available models, and reading MCP resources.",
+            "Tools for managing OpenCode itself, such as working with sessions and worktrees, searching the available models, and reading MCP resources. These tools do not let a session change its own model or route; ask the launcher. A launcher-side change takes effect on the next model call and invalidates the prompt cache.",
         })
         draft.add({
           name: "session_rename",
