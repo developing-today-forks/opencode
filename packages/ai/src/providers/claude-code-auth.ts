@@ -32,16 +32,21 @@
 // failure below fires exactly as before.
 //
 // The credential is read IN PLACE, fresh per request, never copied into
-// the fork's credential store, and never logged. The one write to the
-// file is the in-provider OAuth sign-in below (#1852): it writes the
-// FULL claudeAiOauth blob atomically (temp file + rename, 0600) through
-// the single write helper, preserving unrelated fields, so a provider
-// sign-in and a CLI sign-in stay interchangeable. This provider
-// deliberately does NOT refresh the token: the refresh token is
-// the CLI's, a refresh here would rotate it out from under the CLI
-// (renewal is task 10996's half of #1818). An
-// expired credential therefore fails LOUDLY (see claudeCodeAuth) instead
-// of silently degrading — the fail-closed floor of code#6117.
+// the fork's credential store, and never logged. The writes to the file
+// are the in-provider OAuth sign-in (#1852) and the OAuth renewal below
+// (#1818): both write the FULL claudeAiOauth blob atomically (temp file
+// + rename, 0600) through the single write helper, preserving unrelated
+// fields, so a provider sign-in and a CLI sign-in stay interchangeable.
+//
+// An expired credentials-file credential carrying a refresh token is
+// renewed in place (#1818): one form-encoded refresh-token exchange with
+// the Claude Code client identity, and the rotated pair is written back
+// BEFORE the new access token is used — Anthropic rotates the refresh
+// token on every exchange, so an unpersisted rotated token would burn the
+// login. A failed write discards the rotated pair and leaves the file
+// untouched; a failed exchange keeps the fail-loud floor. The env token
+// (#1752) and an expired file with no refresh token still fail LOUDLY
+// (see claudeCodeAuth) instead of silently degrading.
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { deadlineSignal, readBoundedResponseText } from "@opencode/util/http-body"
@@ -89,6 +94,8 @@ export interface ClaudeCodeCredential {
   readonly accessToken: string
   /** Epoch milliseconds, when the source carries expiry metadata. */
   readonly expiresAt?: number
+  /** The single-use refresh token, present only on a credentials-file credential (#1818). */
+  readonly refreshToken?: string
   readonly source: "credentials-file" | "environment"
 }
 
@@ -122,15 +129,17 @@ export const parseCredentialsFile = (contents: string): ClaudeCodeCredential | u
   if (typeof parsed !== "object" || parsed === null) return undefined
   const oauth = (parsed as Record<string, unknown>).claudeAiOauth
   if (typeof oauth !== "object" || oauth === null) return undefined
-  const { accessToken, expiresAt } = oauth as Record<string, unknown>
+  const { accessToken, expiresAt, refreshToken } = oauth as Record<string, unknown>
   // A blank value is no credential (the vibe-auth rule): trim, and treat
   // whitespace-only as absent, so resolution falls through to the env tier
   // instead of sending a Bearer of spaces.
   const token = typeof accessToken === "string" ? accessToken.trim() : ""
   if (token.length === 0) return undefined
+  const refresh = typeof refreshToken === "string" ? refreshToken.trim() : ""
   return {
     accessToken: token,
     expiresAt: typeof expiresAt === "number" && Number.isFinite(expiresAt) ? expiresAt : undefined,
+    ...(refresh.length === 0 ? {} : { refreshToken: refresh }),
     source: "credentials-file",
   }
 }
@@ -241,6 +250,92 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
   await renameFile(temp, path)
 }
 
+/** A refresh failure with a named, token-free message (#1818). */
+export class ClaudeCodeRefreshError extends Error {
+  override readonly name = "ClaudeCodeRefreshError"
+}
+
+/**
+ * Exchange the credentials file's single-use refresh token for a new
+ * credential set and persist it BEFORE the new access token is used
+ * (#1818). Anthropic rotates the refresh token on every exchange, so the
+ * exchange and its write-back are one operation: if the write fails the
+ * rotated pair is discarded, the file is left untouched, and no
+ * in-memory-only credential exists (an unpersisted rotated token is a
+ * burned login). Tokens are never logged.
+ */
+const refreshAndPersist = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
+  const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    signal: deadlineSignal(undefined, sources.tokenExchangeTimeoutMs ?? OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS),
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: OAUTH_CLIENT_ID,
+      refresh_token: refreshToken,
+    }).toString(),
+  }).catch((cause: unknown) => {
+    throw new ClaudeCodeRefreshError(
+      `Claude Code OAuth refresh failed to reach the token endpoint: ${cause instanceof Error ? cause.message : "network error"}. ` +
+        "Re-run the claude-code provider's in-product sign-in if this persists.",
+    )
+  })
+  if (!response.ok)
+    throw new ClaudeCodeRefreshError(
+      `Claude Code OAuth refresh was rejected with HTTP ${response.status}: the CLI's login is no longer renewable. ` +
+        "Re-run the claude-code provider's in-product sign-in.",
+    )
+  let data: unknown
+  try {
+    data = JSON.parse(
+      await readBoundedResponseText(
+        response,
+        OAUTH_TOKEN_RESPONSE_MAX_BYTES,
+        () =>
+          new ClaudeCodeRefreshError(
+            `Claude Code OAuth refresh response exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes; the tokens were discarded.`,
+          ),
+      ),
+    )
+  } catch (cause) {
+    if (cause instanceof ClaudeCodeRefreshError) throw cause
+    throw new ClaudeCodeRefreshError(
+      "Claude Code OAuth refresh returned a malformed response; the tokens were discarded.",
+    )
+  }
+  const tokens = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {}
+  const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
+  if (accessToken.length === 0)
+    throw new ClaudeCodeRefreshError("Claude Code OAuth refresh returned no access token; the tokens were discarded.")
+  const now = sources.now ? sources.now() : Date.now()
+  const oauth: ClaudeCodeOAuthBlob = {
+    accessToken,
+    // A refresh response that omits the refresh token leaves the prior
+    // one in place (buildCredentialsFileContents merges over the blob).
+    refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : refreshToken,
+    expiresAt:
+      typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in)
+        ? now + tokens.expires_in * 1000
+        : undefined,
+    subscriptionType: typeof tokens.subscription_type === "string" ? tokens.subscription_type : undefined,
+    scopes: typeof tokens.scope === "string" ? tokens.scope.split(" ").filter(Boolean) : undefined,
+  }
+  try {
+    await writeCredential(sources, oauth)
+  } catch {
+    throw new ClaudeCodeRefreshError(
+      "Claude Code OAuth refresh succeeded but the rotated credential could not be written to ~/.claude/.credentials.json; " +
+        "the tokens were discarded and the file is unchanged.",
+    )
+  }
+  return {
+    accessToken,
+    expiresAt: oauth.expiresAt,
+    refreshToken: oauth.refreshToken,
+    source: "credentials-file",
+  }
+}
+
 const generatePKCE = async (sources: CredentialSources) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
   const verifier = Array.from(randomBytes(sources, 43), (byte) => chars[byte % chars.length]).join("")
@@ -308,10 +403,13 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     let data: unknown
     try {
       data = JSON.parse(
-        await readBoundedResponseText(response, OAUTH_TOKEN_RESPONSE_MAX_BYTES, () =>
-          new ClaudeCodeSignInError(
-            `Claude Code sign-in token exchange response exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes.`,
-          ),
+        await readBoundedResponseText(
+          response,
+          OAUTH_TOKEN_RESPONSE_MAX_BYTES,
+          () =>
+            new ClaudeCodeSignInError(
+              `Claude Code sign-in token exchange response exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes.`,
+            ),
         ),
       )
     } catch (cause) {
@@ -368,17 +466,49 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
   }
 }
 
+/** Concurrent expired requests share exactly one inflight refresh exchange (#1818). */
+const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
+
+const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
+  const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
+  const existing = inflightRefresh.get(key)
+  if (existing !== undefined) return existing
+  const attempt = refreshAndPersist(sources, credential.refreshToken as string)
+  inflightRefresh.set(key, attempt)
+  // Clear on settle so a later expiry refreshes again; a rejection must
+  // not be cached forever.
+  attempt
+    .catch(() => {})
+    .finally(() => {
+      if (inflightRefresh.get(key) === attempt) inflightRefresh.delete(key)
+    })
+  return attempt
+}
+
 const loadCredentialEffect = (sources: CredentialSources) =>
   Effect.gen(function* () {
     const credential = yield* Effect.promise(() => resolveCredential(sources))
     if (credential === undefined)
       return yield* new AIError({ reason: new AuthenticationError({ message: NOT_SIGNED_IN_MESSAGE }) })
     const now = sources.now ? sources.now() : Date.now()
-    if (credential.expiresAt !== undefined && credential.expiresAt <= now)
+    const expired = credential.expiresAt !== undefined && credential.expiresAt <= now
+    if (!expired) return credential
+    // An expired credentials-file credential with a refresh token renews
+    // (#1818); the env tier (#1752) and a file with no refresh token keep
+    // the fail-loud floor.
+    if (credential.source !== "credentials-file" || credential.refreshToken === undefined)
       return yield* new AIError({
-        reason: new AuthenticationError({ message: expiredMessage(credential.expiresAt) }),
+        reason: new AuthenticationError({ message: expiredMessage(credential.expiresAt as number) }),
       })
-    return credential
+    return yield* Effect.tryPromise({
+      try: () => refreshCredential(sources, credential),
+      catch: (cause) =>
+        new AIError({
+          reason: new AuthenticationError({
+            message: cause instanceof ClaudeCodeRefreshError ? cause.message : "Claude Code OAuth refresh failed.",
+          }),
+        }),
+    })
   })
 
 /**
