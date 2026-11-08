@@ -8,10 +8,12 @@
  * Run `bun test test/provider/antigravity.test.ts` to verify the partition
  * and the request mapping against this snapshot.
  *
- * Probe recorded 2026-11-07 UTC. Both endpoints returned these same 23 keys.
+ * Probe recorded 2026-11-08 UTC (re-confirmed from a fresh live probe; the
+ * 2026-11-07 probe returned the identical 23 keys). Both daily-cloudcode-pa
+ * and production cloudcode-pa returned these same 23 keys.
  */
 export const ANTIGRAVITY_MODEL_CATALOG = {
-  observedAt: "2026-11-07",
+  observedAt: "2026-11-08",
   endpoints: {
     dailyCloudcodePa: [
       "chat_20706",
