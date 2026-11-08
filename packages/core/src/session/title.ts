@@ -18,6 +18,7 @@ import { SessionSchema } from "./schema.js"
 import { ModelRoute } from "../model-route.js"
 import { ModelRouteLog } from "../model-route-log.js"
 import { SessionUsage } from "./usage.js"
+import { Text } from "../util/text.js"
 import { SessionStore } from "./store.js"
 
 const MAX_LENGTH = 100
@@ -32,7 +33,8 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
 
-const truncate = (value: string) => (value.length <= MAX_LENGTH ? value : `${value.slice(0, MAX_LENGTH - 3)}...`)
+const truncate = (value: string) =>
+  value.length <= MAX_LENGTH ? value : `${Text.truncate(value, MAX_LENGTH - 3)}...`
 export const isUntitled = (session: SessionSchema.Info) =>
   isExactRootFallback({
     title: session.title,

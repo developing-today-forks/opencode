@@ -12,6 +12,7 @@ import { SessionSchema } from "../schema.js"
 import { SessionError } from "@opencode/schema/session-error"
 import { Money } from "@opencode/schema/money"
 import { SessionUsage } from "../usage.js"
+import { Text } from "../../util/text.js"
 import { contentFilterError } from "../to-session-error.js"
 import type { Tool } from "../../tool.js"
 
@@ -667,7 +668,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
 }
 
 function inputExcerpt(value: string): InputExcerpt {
-  return { text: value.slice(0, INPUT_EXCERPT_LIMIT), length: value.length }
+  return { text: Text.truncate(value, INPUT_EXCERPT_LIMIT), length: value.length }
 }
 
 function inputFailure(input: InputExcerpt | undefined, reason: InputFailureReason) {

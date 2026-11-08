@@ -8,6 +8,7 @@ import { collectStream, waitForAbort } from "@opencode/util/process"
 import { Environment } from "./environment/index.js"
 import { NonNegativeInt, PositiveInt, RelativePath } from "./schema.js"
 import { RipgrepBinary } from "./ripgrep/binary.js"
+import { Text } from "./util/text.js"
 
 /**
  * Small core-owned ripgrep execution adapter. It deliberately exposes raw
@@ -258,7 +259,7 @@ const layer = Layer.effect(
                 }),
                 line: match.line_number,
                 offset: match.absolute_offset,
-                text: match.lines.text.length > 2_000 ? match.lines.text.slice(0, 2_000) + "..." : match.lines.text,
+                text: match.lines.text.length > 2_000 ? Text.truncate(match.lines.text, 2_000) + "..." : match.lines.text,
                 submatches: match.submatches.map((submatch) => ({
                   text: submatch.match.text,
                   start: submatch.start,

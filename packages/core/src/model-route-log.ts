@@ -6,6 +6,7 @@ import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { ModelRouteLimits } from "./model-route-limits.js"
+import { Text } from "./util/text.js"
 import { DEFAULT_MAX_AGE_MS } from "./quota-snapshot.js"
 import { Database } from "./database/database.js"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable, RouteNoteTable } from "./model-route-log/sql.js"
@@ -276,7 +277,7 @@ export const failureFields = (reason: unknown, options?: { readonly captureBody?
     // Kept only when configured: a provider body can echo the request, so it is opt-in and redacted.
     error_body:
       (options?.captureBody ?? captureErrorBodies()) && typeof value.body === "string"
-        ? redactBody(value.body).slice(0, 2_000)
+        ? Text.truncate(redactBody(value.body), 2_000)
         : undefined,
     quota,
   }
