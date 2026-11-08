@@ -163,6 +163,12 @@ const addWindow = (
   input: { percent: number | null; resetAt: number | null; valueLabel?: string | null; windowSeconds?: number | null },
 ) => {
   if (input.percent === null && !input.valueLabel) return
+  // Duplicates keep the first (window contract rule 2, #1781): a
+  // repeated limits entry for an already-published window is a
+  // payload anomaly, not an update - the #1750/#1769 convention the
+  // sibling providers already follow. The null-figure early return
+  // above runs first, so a figure-less entry never claims the key.
+  if (key in target) return
   target[key] = toUsageWindow({
     usedPercent: input.percent,
     windowSeconds: input.windowSeconds ?? null,
@@ -188,7 +194,11 @@ export const toClaudeUsage = (rawPayload: JsonValue): { windows: WindowMap; mode
     } else if (limit.kind === "weekly_all") {
       addWindow(windows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
     } else if (limit.kind === "weekly_scoped" && modelName) {
-      const modelWindows: WindowMap = {}
+      // Reuse the model's existing map so duplicate scoped entries
+      // for one model meet addWindow's keep-first rule instead of
+      // replacing the whole entry (#1781); distinct models keep
+      // their own maps and both survive.
+      const modelWindows = models[modelName]?.windows ?? {}
       addWindow(modelWindows, WEEKLY_WINDOW, { percent, resetAt, windowSeconds: WEEKLY_WINDOW_SECONDS })
       if (Object.keys(modelWindows).length > 0) models[modelName] = { windows: modelWindows }
     }
