@@ -169,16 +169,19 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     reason.message?.startsWith("No response output within ")
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
-  const quotaResetAtMs = quota
-    ? ModelRouteLimits.resetAtFromMessage(reason.message ?? reason.body, Date.now())
-    : undefined
+  // Extraction reads the same combined text classification reads, in the same
+  // message-then-body order: a reset stated only in the raw body must bind to
+  // the bench exactly as one stated in the message does (#2108). Reading
+  // `message ?? body` instead would discard the body whenever a message
+  // exists, even when the message states no reset at all.
+  const quotaResetAtMs = quota ? ModelRouteLimits.resetAtFromMessage(text, Date.now()) : undefined
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
       (clientTimeoutMessage
         ? undefined
-        : ModelRouteLimits.retryHintFromMessage(reason.message ?? reason.body, Date.now())),
+        : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
     // Optional hint fields are omitted when unset, never present-but-undefined — the
     // same convention the route policy follows.
