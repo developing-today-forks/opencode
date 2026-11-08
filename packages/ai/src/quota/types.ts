@@ -138,7 +138,13 @@ export interface QuotaWindow {
   windowSeconds: number | null
   resetAfterSeconds: number | null
   resetAt: number | null
+  /** Absolute reset instant, formatted (answers "when"). */
   resetAtFormatted: string | null
+  /**
+   * Relative reset wait, formatted as a human duration derived from
+   * resetAfterSeconds (answers "how long"; #2103). "0s" for a past
+   * reset, null when there is no reset.
+   */
   resetAfterFormatted: string | null
   valueLabel?: string
 }
