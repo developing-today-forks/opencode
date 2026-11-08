@@ -827,7 +827,7 @@ export function expand(
         )
         if (child !== undefined) {
           const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
-          attach({ node: child, ...(gate ? { gate } : {}) }, `${ModelRoute.PROVIDER_ID}/${ref.id}`)
+          attach({ node: child, ...(gate ? { gate } : {}) }, `${ref.id}`)
         }
         continue
       }
