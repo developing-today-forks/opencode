@@ -412,6 +412,83 @@ it.effect("convertSchema expands multi-valued type unions into branches (#1556)"
   }),
 )
 
+it.effect("convertSchema keeps multi-valued type conjunctive with the node's own anyOf/oneOf (#1926)", () =>
+  Effect.sync(() => {
+    // Oracle: JSON Schema conjunction — an instance must satisfy the node's
+    // `type` AND its anyOf/oneOf independently. The type-union branches must
+    // not flatten into the node's own composition array: on Gemini the bare
+    // {STRING} branch would admit "ab" (the source rejects it: a string must
+    // pass the anyOf, whose string branch needs minLength 5); on Anthropic
+    // the merged oneOf would count a type match plus an own-branch match as
+    // two and reject valid instances. The type branches ride in an allOf
+    // wrapper beside the node's own composition instead.
+    const combined = {
+      type: "object",
+      properties: {
+        v: {
+          type: ["string", "integer"],
+          anyOf: [
+            { type: "string", minLength: 5 },
+            { type: "integer", minimum: 10 },
+          ],
+        },
+      },
+    }
+    expect(convertSchema(combined as never)).toEqual({
+      type: "OBJECT",
+      properties: {
+        v: {
+          anyOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+    })
+    expect(convertSchema(combined as never, true)).toEqual({
+      type: "OBJECT",
+      properties: {
+        v: {
+          oneOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+    })
+    // The node's own oneOf gets the same conjunctive treatment.
+    const combinedOneOf = {
+      type: ["string", "integer"],
+      oneOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }
+    expect(convertSchema(combinedOneOf as never)).toEqual({
+      oneOf: [
+        { type: "STRING", minLength: 5 },
+        { type: "INTEGER", minimum: 10 },
+      ],
+      allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+    })
+    expect(convertSchema(combinedOneOf as never, true)).toEqual({
+      oneOf: [
+        { type: "STRING", minLength: 5 },
+        { type: "INTEGER", minimum: 10 },
+      ],
+      allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+    })
+    // A node-owned allOf alone needs no wrapper: allOf siblings are already
+    // conjunctive, so the type branches keep the flat #1556 shape beside it.
+    expect(convertSchema({ type: ["string", "integer"], allOf: [{ type: "string", minLength: 2 }] } as never)).toEqual({
+      allOf: [{ type: "STRING", minLength: 2 }],
+      anyOf: [{ type: "STRING" }, { type: "INTEGER" }],
+    })
+  }),
+)
+
 it.effect("convertSchema keeps prefixItems on the node in type unions, branches carry items (#1820)", () =>
   Effect.sync(() => {
     // prefixItems is a node-level keyword (#1820, triage task 10959): in a

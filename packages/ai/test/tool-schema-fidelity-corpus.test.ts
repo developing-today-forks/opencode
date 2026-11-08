@@ -202,6 +202,58 @@ export const antigravityTable: ReadonlyArray<Row> = [
     },
   },
   {
+    shape: "multi-valued type + anyOf",
+    disposition: "preserved",
+    note: "Type and anyOf are conjunctive in JSON Schema: the type branches ride in an allOf wrapper beside the node's own anyOf instead of flattening into it (#1926).",
+    input: P({
+      type: ["string", "integer"],
+      anyOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }),
+    expected: {
+      properties: {
+        v: {
+          anyOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ anyOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+      type: "OBJECT",
+      required: ["v"],
+    },
+  },
+  {
+    shape: "multi-valued type + anyOf (Anthropic target)",
+    disposition: "approximated",
+    direction: "narrowing",
+    note: "The node's anyOf folds into oneOf (#1550), and the type branches ride in an allOf wrapper as oneOf — the conjunction itself is preserved, so valid instances are no longer rejected by an exactly-one miscount (#1926).",
+    anthropic: true,
+    input: P({
+      type: ["string", "integer"],
+      anyOf: [
+        { type: "string", minLength: 5 },
+        { type: "integer", minimum: 10 },
+      ],
+    }),
+    expected: {
+      properties: {
+        v: {
+          oneOf: [
+            { type: "STRING", minLength: 5 },
+            { type: "INTEGER", minimum: 10 },
+          ],
+          allOf: [{ oneOf: [{ type: "STRING" }, { type: "INTEGER" }] }],
+        },
+      },
+      type: "OBJECT",
+      required: ["v"],
+    },
+  },
+  {
     shape: "type with null member",
     disposition: "preserved",
     note: "The null member becomes nullable:true on the concrete type.",
