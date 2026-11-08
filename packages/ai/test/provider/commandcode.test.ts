@@ -85,6 +85,11 @@ it.effect("the request body matches the CLI bundle's createModelClient envelope"
     // is a live-probed 400); the lowering builds the CLI's shape from
     // the server process, with the bundle's non-git fallback values.
     const config = body.config as Record<string, unknown>
+    // #1948 disposition (accept, not minimize): the default block discloses
+    // the server process's absolute cwd and that directory's top-level
+    // listing on every call. This pins the disclosure deliberately — a
+    // change here is a disclosure change and must update the header
+    // comment and the README's "Command Code route" section with it.
     expect(config.workingDir).toBe(process.cwd())
     expect(config.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(config.environment).toBe(process.platform)

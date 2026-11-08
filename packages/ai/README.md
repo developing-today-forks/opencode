@@ -1391,6 +1391,39 @@ LLM.request({
 
 Compose a route with `Route.make({ protocol, endpoint, auth, framing, ... })`. The route owns endpoint/auth/framing and the protocol owns body construction plus stream parsing. Transports receive the route's endpoint and auth when preparing requests. Unsupported request shapes fail during protocol lowering.
 
+### Command Code route: what leaves the machine
+
+The `commandcode` protocol emulates the Command Code CLI's `/alpha/generate` wire, and that wire carries a `config` block on every request. The gateway validates all nine of its fields, so the block is always sent; by default it is built from the server process:
+
+| Field | Default value |
+| --- | --- |
+| `workingDir` | the server process's **absolute cwd** (`process.cwd()`) |
+| `structure` | the sorted, non-hidden, non-`node_modules` **top-level entry names** of that directory |
+| `date`, `environment` | today's date and the platform |
+| `isGitRepo`, `currentBranch`, `mainBranch`, `gitStatus`, `recentCommits` | inert non-git fallbacks (this protocol does not shell out to git) |
+
+So a server started in `$HOME` sends the home directory's path and its top-level listing to `api.commandcode.ai` on every generate call. This matches the first-party CLI's own per-turn behavior and is accepted rather than minimized (a minimized block has not been probed against the gateway — see #1948). To send a different block, supply the whole object as the `serverConfig` provider option:
+
+```ts
+LLM.request({
+  model,
+  prompt,
+  providerOptions: {
+    serverConfig: {
+      workingDir: ".",
+      date: "2026-01-01",
+      environment: "linux",
+      structure: [],
+      isGitRepo: false,
+      currentBranch: "",
+      mainBranch: "",
+      gitStatus: "",
+      recentCommits: [],
+    },
+  },
+})
+```
+
 ## Effect
 
 This package is built on Effect. Public methods return `Effect` or `Stream`; provide `AIClient.layer` (or `AIClient.layerWith(executor)`) for every modality, then import the provider/protocol modules for the routes you use. The example at `example/tutorial.ts` is a runnable walkthrough.
