@@ -47,6 +47,15 @@ describe("parseDotEnv", () => {
     })
   })
 
+  test("strips trailing comments after quoted values without stripping quoted hashes", () => {
+    expect(parseDotEnv('MISTRAL_API_KEY="abc123" # rotated').MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv("MISTRAL_API_KEY='abc123' # note").MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv('MISTRAL_API_KEY="abc #123"').MISTRAL_API_KEY).toBe("abc #123")
+    expect(parseDotEnv("MISTRAL_API_KEY=abc123 # note").MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv('MISTRAL_API_KEY="abc123" # note "comment" with quotes').MISTRAL_API_KEY).toBe("abc123")
+    expect(parseDotEnv("MISTRAL_API_KEY='abc123' # don't fail").MISTRAL_API_KEY).toBe("abc123")
+  })
+
   test("handles CRLF and empty values", () => {
     const parsed = parseDotEnv("A=1\r\nB=\r\nC=3")
     expect(parsed).toEqual({ A: "1", B: "", C: "3" })
