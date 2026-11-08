@@ -16,7 +16,17 @@ export const mergeJsonRecords = (
   for (const item of defined) {
     for (const [key, value] of Object.entries(item)) {
       if (value === undefined) continue
-      result[key] = isRecord(result[key]) && isRecord(value) ? mergeJsonRecords(result[key], value) : value
+      const existing = Object.hasOwn(result, key) ? result[key] : undefined
+      const merged = isRecord(existing) && isRecord(value) ? mergeJsonRecords(existing, value) : value
+      // Assigning result["__proto__"] invokes the prototype setter instead of creating an
+      // own property: the key vanishes from serialization and the merged record's
+      // prototype changes, so absent-key reads return overlay values. Define it as an
+      // ordinary own data property so it survives Object.keys / JSON.stringify.
+      if (key === "__proto__") {
+        Object.defineProperty(result, key, { value: merged, writable: true, enumerable: true, configurable: true })
+      } else {
+        result[key] = merged
+      }
     }
   }
   return Object.keys(result).length === 0 ? undefined : result
