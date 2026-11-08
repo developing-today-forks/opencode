@@ -242,6 +242,32 @@ describe("Patch", () => {
     ).toBe("line 1\nLINE 2\nline 3\nLINE 4\n")
   })
 
+  test("inserts a pure-addition chunk after its @@ context line", () => {
+    const original = "fn a\nx\nfn b\ny\n"
+    expect(
+      Patch.derive("update.txt", [{ oldLines: [], newLines: ["inserted"], changeContext: "fn a" }], original).content,
+    ).toBe("fn a\ninserted\nx\nfn b\ny\n")
+    expect(
+      Patch.derive("update.txt", [{ oldLines: [], newLines: ["inserted"], changeContext: "fn b" }], original).content,
+    ).toBe("fn a\nx\nfn b\ninserted\ny\n")
+    expect(
+      Patch.derive(
+        "update.txt",
+        [
+          { oldLines: [], newLines: ["A"], changeContext: "fn a" },
+          { oldLines: [], newLines: ["B"], changeContext: "fn b" },
+        ],
+        original,
+      ).content,
+    ).toBe("fn a\nA\nx\nfn b\nB\ny\n")
+    expect(() =>
+      Patch.derive("update.txt", [{ oldLines: [], newLines: ["inserted"], changeContext: "fn c" }], original),
+    ).toThrow("Failed to find context 'fn c'")
+    expect(
+      Patch.derive("update.txt", [{ oldLines: [], newLines: ["tail"], endOfFile: true }], original).content,
+    ).toBe("fn a\nx\nfn b\ny\ntail\n")
+  })
+
   test("appends a pure-addition chunk to a nonempty file", () => {
     expect(
       Patch.derive("update.txt", [{ oldLines: [], newLines: ["added 1", "added 2"] }], "line 1\nline 2\n").content,
