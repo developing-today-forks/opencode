@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
-import { absentFileExceptions, collectViolations, parseWorkflow, sourceViolations, triggerNames, workflowFiles, workflowViolations } from "./check-workflows"
+import {
+  absentFileExceptions,
+  collectViolations,
+  parseWorkflow,
+  sourceViolations,
+  triggerNames,
+  workflowFiles,
+  workflowViolations,
+} from "./check-workflows"
 
 const compliant = [
   "name: example",
@@ -89,7 +97,13 @@ describe("sourceViolations", () => {
   test("flags a pull_request_target trigger (list form)", () => {
     const violations = sourceViolations(
       ".github/workflows/example.yml",
-      ["on: [pull_request_target, workflow_dispatch]", "permissions: { contents: read }", "jobs:", "  test:", "    timeout-minutes: 15"].join("\n"),
+      [
+        "on: [pull_request_target, workflow_dispatch]",
+        "permissions: { contents: read }",
+        "jobs:",
+        "  test:",
+        "    timeout-minutes: 15",
+      ].join("\n"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["no-pr-trigger"])
   })
@@ -177,10 +191,10 @@ describe("sourceViolations", () => {
 
   test("allows GitHub's reusable-workflow caller keywords", () => {
     const violations = sourceViolations(
-      ".github/workflows/example.yml",
+      ".github/workflows/agents.yml",
       [
         "on: [workflow_dispatch]",
-        "permissions: { contents: read }",
+        "permissions: { contents: read, id-token: write }",
         "jobs:",
         "  scheduled:",
         "    name: Scheduled tasks",
@@ -197,11 +211,58 @@ describe("sourceViolations", () => {
     )
     expect(violations).toEqual([])
   })
+
+  test("flags scalar permissions on a reusable-workflow caller", () => {
+    const violations = sourceViolations(
+      ".github/workflows/agents.yml",
+      [
+        "on: [workflow_dispatch]",
+        "permissions: { contents: read, id-token: write }",
+        "jobs:",
+        "  scheduled:",
+        "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
+        "    permissions: write-all",
+      ].join("\n"),
+    )
+    expect(violations.map((violation) => violation.rule)).toContain("permissions-mapping-form")
+  })
+
+  test("flags an unbaselined caller permissions block", () => {
+    const violations = sourceViolations(
+      ".github/workflows/example.yml",
+      [
+        "on: [workflow_dispatch]",
+        "permissions: { contents: read }",
+        "jobs:",
+        "  scheduled:",
+        "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
+        "    permissions: { contents: read }",
+      ].join("\n"),
+    )
+    expect(violations).toContainEqual(expect.objectContaining({ rule: "no-job-level-permissions", job: "scheduled" }))
+  })
+
+  test("accepts a caller permissions block within its named baseline", () => {
+    const violations = sourceViolations(
+      ".github/workflows/agents.yml",
+      [
+        "on: [workflow_dispatch]",
+        "permissions: { contents: read, id-token: write }",
+        "jobs:",
+        "  scheduled:",
+        "    uses: developing-today/code/.github/workflows/pm-scheduled.yml@main",
+        "    permissions: { contents: read, id-token: write }",
+      ].join("\n"),
+    )
+    expect(violations).toEqual([])
+  })
 })
 
 describe("permissions policy (#1503)", () => {
-  const base = (permissions: string, jobs: string[] = ["  test:", "    timeout-minutes: 15", "    runs-on: ubuntu-24.04"]) =>
-    ["on: [workflow_dispatch]", permissions, "jobs:", ...jobs].join("\n")
+  const base = (
+    permissions: string,
+    jobs: string[] = ["  test:", "    timeout-minutes: 15", "    runs-on: ubuntu-24.04"],
+  ) => ["on: [workflow_dispatch]", permissions, "jobs:", ...jobs].join("\n")
 
   test("flags a workflow with no top-level permissions", () => {
     const violations = sourceViolations(
@@ -263,10 +324,54 @@ describe("permissions policy (#1503)", () => {
     expect(violations).toEqual([])
   })
 
+  test("flags a baselined job block that exceeds its scope levels", () => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read, checks: write }", [
+        "  ci-fix:",
+        "    timeout-minutes: 15",
+        "    permissions: { contents: read, issues: write, actions: read }",
+      ]),
+    )
+    expect(violations.map((violation) => violation.rule)).toContain("job-permissions-baseline")
+    expect(violations.map((violation) => violation.rule)).toContain("permissions-write-scope")
+  })
+
+  test("flags scalar shorthand in a baselined job block", () => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read, checks: write }", [
+        "  ci-fix:",
+        "    timeout-minutes: 15",
+        "    permissions: write-all",
+      ]),
+    )
+    expect(violations.map((violation) => violation.rule)).toEqual(["permissions-mapping-form"])
+  })
+
+  test.each([
+    ["bogus", "read", "permissions-scope"],
+    ["contents", "admin", "permissions-level"],
+  ])("validates job-level permission scope and level (%s: %s)", (scope, level, rule) => {
+    const violations = sourceViolations(
+      ".github/workflows/test.yml",
+      base("permissions: { contents: read, checks: write }", [
+        "  ci-fix:",
+        "    timeout-minutes: 15",
+        `    permissions: { ${scope}: ${level} }`,
+      ]),
+    )
+    expect(violations.map((violation) => violation.rule)).toContain(rule)
+  })
+
   test("flags a baselined write grant that is no longer used", () => {
     const violations = sourceViolations(
       ".github/workflows/test.yml",
-      base("permissions: { contents: read }", ["  ci-fix:", "    timeout-minutes: 15", "    permissions: { contents: read }"]),
+      base("permissions: { contents: read }", [
+        "  ci-fix:",
+        "    timeout-minutes: 15",
+        "    permissions: { contents: read }",
+      ]),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["stale-permission-exception"])
   })
