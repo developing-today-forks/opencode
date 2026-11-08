@@ -77,6 +77,32 @@ describe("Media", () => {
     }),
   )
 
+  it.effect("dispatches ISO-BMFF media types on the ftyp major brand (#2127)", () =>
+    Effect.sync(() => {
+      const ftyp = (brand: string) => {
+        const bytes = new Uint8Array(16)
+        bytes.set([0, 0, 0, 24])
+        bytes.set(new TextEncoder().encode("ftyp"), 4)
+        bytes.set(new TextEncoder().encode(brand), 8)
+        return bytes
+      }
+      expect(Media.detectMediaType(ftyp("isom"))).toBe("video/mp4")
+      expect(Media.detectMediaType(ftyp("mp42"))).toBe("video/mp4")
+      expect(Media.detectMediaType(ftyp("M4A "))).toBe("audio/mp4")
+      expect(Media.detectMediaType(ftyp("M4B "))).toBe("audio/mp4")
+      expect(Media.detectMediaType(ftyp("avif"))).toBe("image/avif")
+      expect(Media.detectMediaType(ftyp("avis"))).toBe("image/avif")
+      expect(Media.detectMediaType(ftyp("heic"))).toBe("image/heic")
+      expect(Media.detectMediaType(ftyp("heix"))).toBe("image/heic")
+      expect(Media.detectMediaType(ftyp("mif1"))).toBe("image/heif")
+      expect(Media.detectMediaType(ftyp("zzzz"))).toBeUndefined()
+      expect(fileMediaType(ftyp("M4A "), "song.m4a")).toBe("audio/mp4")
+      expect(fileMediaType(ftyp("avif"), "photo.avif")).toBe("image/avif")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "photo.avif")).toBe("image/avif")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "photo.heic")).toBe("image/heic")
+    }),
+  )
+
   it.effect("does not read media-type lookups through the prototype chain", () =>
     Effect.sync(() => {
       for (const name of ["constructor", "__proto__", "toString"]) {

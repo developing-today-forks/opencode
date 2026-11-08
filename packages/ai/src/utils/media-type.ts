@@ -1,5 +1,27 @@
 const ascii = (bytes: Uint8Array, start: number, end: number) => String.fromCharCode(...bytes.subarray(start, end))
 
+/** ISO-BMFF ftyp major brands this sniffer claims, by the media type the brand actually denotes. */
+const FTYP_BRANDS: Readonly<Record<string, string>> = {
+  "M4A ": "audio/mp4",
+  "M4B ": "audio/mp4",
+  "M4P ": "audio/mp4",
+  avif: "image/avif",
+  avis: "image/avif",
+  heic: "image/heic",
+  heix: "image/heic",
+  mif1: "image/heif",
+  msf1: "image/heif",
+  isom: "video/mp4",
+  iso2: "video/mp4",
+  iso5: "video/mp4",
+  iso6: "video/mp4",
+  mp41: "video/mp4",
+  mp42: "video/mp4",
+  avc1: "video/mp4",
+  dash: "video/mp4",
+  "M4V ": "video/mp4",
+}
+
 const startsWith = (bytes: Uint8Array, prefix: ReadonlyArray<number>) =>
   bytes.length >= prefix.length && prefix.every((value, index) => bytes[index] === value)
 
@@ -17,7 +39,14 @@ export const detectMediaType = (bytes: Uint8Array): string | undefined => {
     if (riffType === "WAVE") return "audio/wav"
   }
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46])) return "application/pdf"
-  if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") return "video/mp4"
+  if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") {
+    // ISO-BMFF is a family, not a type: the major brand (bytes 8-12) names the actual container - an M4A audiobook
+    // and an AVIF image both open with ftyp. An unrecognized brand falls through to undefined rather than claiming
+    // video/mp4 for a file that may be neither audio nor video (#2127).
+    const brand = ascii(bytes, 8, 12)
+    if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand as keyof typeof FTYP_BRANDS]
+    return undefined
+  }
   if (startsWith(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm"
   if (startsWith(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"
   // An 11-bit frame sync; layer bits `00` mark AAC ADTS, any other layer is MPEG audio.
@@ -36,6 +65,9 @@ const EXTENSIONS: Readonly<Record<string, string>> = {
   webp: "image/webp",
   pdf: "application/pdf",
   mp4: "video/mp4",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
   webm: "video/webm",
   mp3: "audio/mpeg",
   m4a: "audio/mp4",
