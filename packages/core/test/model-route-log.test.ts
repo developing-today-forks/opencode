@@ -4,6 +4,7 @@ import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
 import { Permission } from "@opencode/core/permission"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { QuotaCurrent } from "@opencode/core/quota-current"
 import { ModelRouteReview } from "@opencode/core/model-route-review"
 import { ModelUsage } from "@opencode/core/model-usage"
 import { AIError, AuthenticationError, QuotaExceededError, RateLimitError } from "@opencode/ai"
@@ -805,6 +806,127 @@ describe("cooldown restore", () => {
       expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "restart-extended", model: "m" }))).toBe(
         now + 90_000,
       )
+    }),
+  )
+})
+
+describe("quota cooldown restore re-judged against current quota (#1976)", () => {
+  const reading = (
+    providerID: string,
+    models: Record<string, { percent: number; resetAt: number | null }>,
+    now: number,
+  ): QuotaCurrent.ProviderReading => ({
+    providerID,
+    measuredAt: now,
+    windows: [],
+    models: Object.fromEntries(
+      Object.entries(models).map(([modelID, window]) => [
+        modelID,
+        [{ name: "window", usedPercent: window.percent, resetAt: window.resetAt, measuredAt: now }],
+      ]),
+    ),
+  })
+  const bench = (provider_id: string, model_id: string, reason: string, until: number, now: number) =>
+    ModelRouteLog.record({
+      kind: "health",
+      row: { time: now - 5_000, provider_id, model_id, kind: "cooldown-start", reason, until },
+    })
+
+  it.live("a family-A wall does not re-bench sibling family B on the same credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-family", "fam-a", "quota credential:cred-shared", now + 3_600_000, now)
+      bench("restore-family", "fam-b", "quota credential:cred-shared", now + 3_600_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading(
+          "restore-family",
+          {
+            "fam-a": { percent: 100, resetAt: now + 1_800_000 },
+            "fam-b": { percent: 40, resetAt: null },
+          },
+          now,
+        ),
+      ])
+      const famA = ModelRoute.ref({ providerID: "restore-family", model: "fam-a" })
+      const famB = ModelRoute.ref({ providerID: "restore-family", model: "fam-b" })
+      // Family A is still full: its bench stands, bounded by the measured reset.
+      expect(ModelRoute.credentialCooldownUntil(famA, "cred-shared", now)).toBe(now + 1_800_000)
+      // Family B has headroom on its own leg: its persisted bench is discarded, and
+      // family A's full window never held it.
+      expect(ModelRoute.credentialCoolingDown(famB, "cred-shared", now)).toBe(false)
+      expect(ModelRoute.coolingDown(famB, now)).toBe(false)
+    }),
+  )
+
+  it.live("a fresh headroom reading releases a restored quota bench", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-headroom", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-headroom", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-headroom", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(false)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+    }),
+  )
+
+  it.live("a still-full matching window remains benched, bounded by its measured reset", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-full", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-full", { m: { percent: 100, resetAt: now + 30_000 } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-full", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 30_000)
+    }),
+  )
+
+  it.live("a non-quota transport bench restores unchanged despite a headroom reading", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-transport", "m", "failure", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-transport", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-transport", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    }),
+  )
+
+  it.live("no reading for the leg keeps the persisted quota bench", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-noreading", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("someone-else", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-noreading", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
     }),
   )
 })
