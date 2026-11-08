@@ -17,7 +17,23 @@ export const detectMediaType = (bytes: Uint8Array): string | undefined => {
     if (riffType === "WAVE") return "audio/wav"
   }
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46])) return "application/pdf"
-  if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") return "video/mp4"
+  if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") {
+    const brand = ascii(bytes, 8, 12)
+    if (brand === "M4A " || brand === "M4B ") return "audio/mp4"
+    if (brand === "avif" || brand === "avis") return "image/avif"
+    if (brand === "heic" || brand === "heix" || brand === "mif1") return "image/heic"
+    if (
+      brand === "isom" ||
+      brand === "iso2" ||
+      brand === "mp41" ||
+      brand === "mp42" ||
+      brand === "avc1" ||
+      brand === "dash"
+    )
+      return "video/mp4"
+    if (brand.startsWith("3gp")) return "video/3gpp"
+    return undefined
+  }
   if (startsWith(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm"
   if (startsWith(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"
   // An 11-bit frame sync; layer bits `00` mark AAC ADTS, any other layer is MPEG audio.
@@ -34,11 +50,15 @@ const EXTENSIONS: Readonly<Record<string, string>> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heic",
   pdf: "application/pdf",
   mp4: "video/mp4",
   webm: "video/webm",
   mp3: "audio/mpeg",
   m4a: "audio/mp4",
+  m4b: "audio/mp4",
   wav: "audio/wav",
   ogg: "audio/ogg",
   flac: "audio/flac",
@@ -64,6 +84,7 @@ const EXTENSION_ALIASES: Readonly<Record<string, string>> = {
   "audio/wave": "wav",
   "audio/x-wav": "wav",
   "audio/x-flac": "flac",
+  "image/heif": "heic",
 }
 
 export const mediaTypeExtension = (mediaType: string): string | undefined => {
