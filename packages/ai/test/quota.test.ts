@@ -13,7 +13,7 @@ import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js
 import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
-import { provider as metaProvider } from "../src/quota/providers/meta.js"
+import { provider as metaProvider, teamIdOf } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
 import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
@@ -239,6 +239,33 @@ describe("meta key-endpoint subs_usage windows (#1907)", () => {
     expect(result.usage?.windows.rolling?.usedPercent).toBe(10)
     expect(result.usage?.windows.rolling?.windowSeconds).toBe(604800)
     expect(result.usage?.windows.weekly?.usedPercent).toBe(90)
+  })
+})
+
+describe("meta portal team selection (#1931)", () => {
+  const ctxWithEnv = (env: Record<string, string>) =>
+    ({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env,
+    }) as never
+
+  test("a page URL carrying a non-default team_id wins over env and default", () => {
+    expect(teamIdOf(ctxWithEnv({ META_TEAM_ID: "env-team" }), "https://dev.meta.ai/portal?team_id=page-team")).toBe(
+      "page-team",
+    )
+  })
+
+  test("env wins when the page URL names no team", () => {
+    expect(teamIdOf(ctxWithEnv({ META_TEAM_ID: "env-team" }), "https://dev.meta.ai/portal")).toBe("env-team")
+    expect(teamIdOf(ctxWithEnv({ META_TEAM_ID: "env-team" }), "")).toBe("env-team")
+  })
+
+  test("the default team stands when neither page nor env names one", () => {
+    expect(teamIdOf(ctxWithEnv({}), "https://dev.meta.ai/portal")).toBe("1073226932208501")
+    expect(teamIdOf(ctxWithEnv({}), "not a url")).toBe("1073226932208501")
   })
 })
 

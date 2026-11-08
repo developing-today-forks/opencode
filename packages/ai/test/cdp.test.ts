@@ -20,7 +20,7 @@ type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply"
  * fetch evaluate ("wedge-after-location", the wedged-renderer shape
  * from #1803).
  */
-const startFakeCdp = (mode: FakeMode) => {
+const startFakeCdp = (mode: FakeMode, locationSuffix = "") => {
   const closedPageIds: string[] = []
   let created = false
   let port = 0
@@ -67,7 +67,9 @@ const startFakeCdp = (mode: FakeMode) => {
         if (mode === "silent") return
         const expression = parsed.params?.expression ?? ""
         if (expression.includes("document.location.href")) {
-          ws.send(JSON.stringify({ id, result: { result: { value: `http://127.0.0.1:${port}/` } } }))
+          ws.send(
+            JSON.stringify({ id, result: { result: { value: `http://127.0.0.1:${port}/${locationSuffix}` } } }),
+          )
           return
         }
         if (mode === "reply") {
@@ -182,6 +184,31 @@ describe("cdp websocket request bounds (#1803)", () => {
     } finally {
       http.stop(true)
       stall.close()
+    }
+  })
+
+  test("cdpPageFetch fetches the paths a resolver derives from the page URL (#1931)", async () => {
+    const fake = startFakeCdp("reply", "?team_id=team-page")
+    try {
+      const ctx = quotaCtx({ cdpBase: fake.base, cdpRequestTimeoutMs: 2_000 })
+      const outcome = await cdpPageFetch(ctx, fake.origin, ["/api/portal/teams/default/subscription-quota"], (pageUrl) => [
+        `/api/portal/teams/${new URL(pageUrl).searchParams.get("team_id") ?? "none"}/subscription-quota`,
+      ])
+      expect(outcome.pageUrl).toContain("team_id=team-page")
+      expect(Object.keys(outcome.results)).toEqual(["/api/portal/teams/team-page/subscription-quota"])
+    } finally {
+      fake.stop()
+    }
+  })
+
+  test("cdpPageFetch without a resolver fetches the given paths (control, #1931)", async () => {
+    const fake = startFakeCdp("reply", "?team_id=team-page")
+    try {
+      const ctx = quotaCtx({ cdpBase: fake.base, cdpRequestTimeoutMs: 2_000 })
+      const outcome = await cdpPageFetch(ctx, fake.origin, ["/api/thing"])
+      expect(Object.keys(outcome.results)).toEqual(["/api/thing"])
+    } finally {
+      fake.stop()
     }
   })
 
