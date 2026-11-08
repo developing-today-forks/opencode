@@ -876,7 +876,9 @@ const quotaSkipBlocks = (item: Adjustment, now: number, location?: string): bool
  * once per provider. Bench evidence takes priority over a shared gate on the same
  * leaf, so two genuinely independent benches under one gate still count separately.
  * Balance holds count until a fresh balance increase releases them, so a pool held by
- * a balance gate stays out with no timer-based re-admission (#1014). */
+ * a balance gate stays out with no timer-based re-admission (#1014). A bench whose
+ * half-open probe is due still produces evidence here; `poolQuotaExhausted` carves
+ * due probes back out so the pool verdict does not defeat the recovery path (#1390). */
 const quotaEvidence = (
   target: Model.Ref,
   credentialID: string | undefined,
@@ -951,13 +953,46 @@ const poolOf = (definition: Definition, index: number): PoolMembership | undefin
 /** The id of the pool (nested group) a leaf belongs to, or undefined when it sits on the root. */
 export const poolIDOf = (definition: Definition, index: number) => poolOf(definition, index)?.id
 
+/** Whether an independent quota gate currently blocks a leaf, apart from any bench:
+ * a quota gate on its credential, or one on its provider (a known-full snapshot, a
+ * balance hold, or the reactive attempt-reported skip). A due bench probe never
+ * bypasses these gates (see `probeDue`), so a gated leaf cannot recover through its
+ * probe until the gate's own reset passes. */
+const independentQuotaGate = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now: number,
+  location?: string,
+): boolean => {
+  if (credentialID && credentialQuotaBlocked(credentialID, now, location) !== undefined) return true
+  const provider = providerQuota.get(target.providerID)
+  if (provider?.balanceHold !== undefined && holdBlocks(provider.balanceHold, provider.snapshot, now, location))
+    return true
+  if (
+    provider &&
+    QuotaSnapshot.isKnownFull(provider.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
+  )
+    return true
+  return activeAdjustments(now).some(
+    (item) => item.id === `quota:${target.providerID}` && item.action === "skip" && quotaSkipBlocks(item, now, location),
+  )
+}
+
 /** Whether a leaf's pool is quota-exhausted: at least two distinct quota evidence
  * sources across the pool's leaves are currently out, so the pool is pulled as a whole
  * instead of spending attempts on its remaining leaves one by one (#1014 PR3 dynamic
  * pull-out). Evidence is deduplicated by identity — two leaves out only through one
  * shared credential or provider gate count as one signal, so a single provider's quota
  * wall cannot hard-exclude a healthy leaf from another provider (#1389) — while a
- * leaf's own quota bench always counts per leaf. The verdict is derived from the
+ * leaf's own quota bench always counts per leaf. A leaf whose bench probe is due
+ * contributes no evidence — unless an independent quota gate (on its credential or
+ * its provider) still blocks it: a probe never bypasses a gate whose own reset is
+ * still ahead, so a gated leaf's due probe cannot recover it yet and the leaf keeps
+ * counting (Codex review, PR #1473). An ungated due probe's bench still excludes
+ * ordinary candidacy, but the pool verdict must not defeat the half-open recovery
+ * the probe exists for (#1390). A claimed or not-yet-due bench keeps counting,
+ * because `probeDue` is false while a probe is outstanding and before its reset
+ * passes. The verdict is derived from the
  * leaves' live quota state, so it lifts by itself when the benches reach their stated
  * reset, when a balance hold is released by a fresh increase, or when a benched leaf
  * recovers — a recovered pool re-enters rotation with no second producer. */
@@ -974,8 +1009,11 @@ export const poolQuotaExhausted = (
   for (const leaf of pool.leaves) {
     const target = definition.targets[leaf]
     if (!target) continue
-    const source = quotaEvidence(target, credentialOf?.(leaf), now, location)
-    if (source) evidence.add(source)
+    const credentialID = credentialOf?.(leaf)
+    const source = quotaEvidence(target, credentialID, now, location)
+    if (!source) continue
+    if (probeDue(target, credentialID, now) && !independentQuotaGate(target, credentialID, now, location)) continue
+    evidence.add(source)
   }
   return evidence.size >= POOL_QUOTA_LEAVES
 }
