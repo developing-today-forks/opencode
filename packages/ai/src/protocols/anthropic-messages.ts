@@ -40,9 +40,11 @@ const ADAPTER = "anthropic-messages"
 // (Anthropic 404), which broke every AnthropicMessages consumer that
 // relied on the default (notably the claude-code provider, #6117).
 export const DEFAULT_BASE_URL = "https://api.anthropic.com"
-// NOTE: the path carries the /v1 prefix - Endpoint.render concatenates
-// baseURL + path with no de-duplication, and DEFAULT_BASE_URL above is
+// NOTE: the path carries the /v1 prefix, and DEFAULT_BASE_URL above is
 // the bare origin, so the version segment lives here exactly once.
+// Endpoint.render de-duplicates a trailing "/v1" on a provider-supplied
+// baseURL against this prefix (#1956), so consumers may also pass a
+// "/v1"-suffixed baseURL safely.
 export const PATH = "/v1/messages"
 export const DEFAULT_MAX_TOKENS = 32_000
 const MIN_THINKING_BUDGET = 1_024
