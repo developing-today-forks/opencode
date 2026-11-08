@@ -1997,6 +1997,51 @@ describe("antigravity quota transformModels fallback figure check (#1912)", () =
   })
 })
 
+describe("antigravity quota float percents (#1941)", () => {
+  // Both conversion sites publish the float percent derived from
+  // remainingFraction: integer quantization read 99.9% used as
+  // 100% / 0% remaining and 0.1% used as 0% / 100% remaining.
+  test("parseBucket publishes sub-percent precision", () => {
+    const cases: Array<[number, number]> = [
+      [0.999, 0.1],
+      [0.001, 99.9],
+      [0.504, 49.6],
+    ]
+    for (const [fraction, used] of cases) {
+      const parsed = parseBucket(
+        { window: "5h", remainingFraction: fraction, resetTime: "2026-12-01T00:00:00Z" } as never,
+      )
+      expect(parsed?.window.usedPercent).toBeCloseTo(used, 10)
+      expect(parsed?.window.remainingPercent).toBeCloseTo(100 - used, 10)
+      // The raw fraction retention (weekly-constrained ordering) is unchanged.
+      expect(parsed?.remainingFraction).toBe(fraction)
+    }
+    // Round-fraction control stays exact.
+    const control = parseBucket(
+      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
+    )
+    expect(control?.window.usedPercent).toBe(50)
+    expect(control?.window.remainingPercent).toBe(50)
+  })
+
+  test("transformModels fallback publishes sub-percent precision", () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    const cases: Array<[number, number]> = [
+      [0.999, 0.1],
+      [0.001, 99.9],
+      [0.504, 49.6],
+    ]
+    for (const [fraction, used] of cases) {
+      const models = transformModels(
+        { models: { "gemini-x": { quotaInfo: { remainingFraction: fraction, resetTime } } } } as never,
+        [],
+      )
+      expect(models["gemini-x"]?.windows["5h"]?.usedPercent).toBeCloseTo(used, 10)
+      expect(models["gemini-x"]?.windows["5h"]?.remainingPercent).toBeCloseTo(100 - used, 10)
+    }
+  })
+})
+
 describe("normalizeTimestamp non-positive handling (#1857)", () => {
   test("non-positive spellings convert to null, never 1969/1970 credential expiries", () => {
     expect(normalizeTimestamp(-5000)).toBeNull()
