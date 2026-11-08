@@ -140,7 +140,9 @@ const normalizeImageAttachment = Effect.fn("SessionPrompt.normalizeImageAttachme
   data: string,
   mime: string,
 ) {
-  if (!mime.startsWith("image/")) return { data: Base64.make(data), mime }
+  // Photon does not decode HEIC/HEIF; preserve their detected type and pass bytes through.
+  if (!mime.startsWith("image/") || mime === "image/heic" || mime === "image/heif")
+    return { data: Base64.make(data), mime }
   const image = yield* Image.Service
   const label = attachmentLabel(input)
   const content = { uri: label, content: data, encoding: "base64" as const, mime }

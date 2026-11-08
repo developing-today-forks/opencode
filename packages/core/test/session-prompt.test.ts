@@ -76,8 +76,12 @@ const locations = makeGlobalNode({
               replacements: [Bus.node.replace(Layer.succeed(Bus.Service, bus))],
             }),
             Layer.mock(Image.Service, {
-              normalize: (_resource, content) =>
-                Effect.succeed(content.content.length > 5 * 1024 * 1024 ? { ...content, content: "AA==" } : content),
+              normalize: (resource, content) =>
+                content.mime === "image/heic" || content.mime === "image/heif"
+                  ? Effect.fail(new Image.DecodeError({ resource }))
+                  : Effect.succeed(
+                      content.content.length > 5 * 1024 * 1024 ? { ...content, content: "AA==" } : content,
+                    ),
             }),
             Layer.mock(Snapshot.Service, {
               capture: () => Effect.undefined,
@@ -456,6 +460,44 @@ describe("Session.prompt", () => {
       ])
       const stored = yield* admitted(message.id)
       expect(stored?.type === "user" ? stored.payload.files : undefined).toEqual(message.payload.files)
+    }),
+  )
+
+  it.effect("passes HEIC and HEIF attachments through without Photon decoding", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const directory = yield* tmpdirScoped("opencode-session-prompt-")
+
+      for (const [brand, mime] of [
+        ["heic", "image/heic"],
+        ["mif1", "image/heif"],
+      ]) {
+        const source = path.join(directory.path, `${brand}.bin`)
+        const bytes = Buffer.concat([
+          Buffer.from([0, 0, 0, 16]),
+          Buffer.from("ftyp"),
+          Buffer.from(brand),
+          Buffer.alloc(4),
+        ])
+        yield* Effect.promise(() => Bun.write(source, bytes))
+
+        const message = yield* session.prompt({
+          sessionID,
+          text: "Inspect this image",
+          files: [{ uri: pathToFileURL(source).href }],
+          resume: false,
+        })
+
+        expect(message.payload.files).toEqual([
+          {
+            data: bytes.toString("base64"),
+            mime,
+            source: { type: "uri", uri: pathToFileURL(source).href },
+            name: `${brand}.bin`,
+          },
+        ])
+      }
     }),
   )
 
