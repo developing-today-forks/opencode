@@ -1349,20 +1349,18 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // ORACLE: the window contract stated in src/quota/types.ts ("Parse
   // the window you were sent, or none", rules 1-7). The fixtures are
   // payload shapes; the model is the contract itself, not any one
-  // provider's current behaviour. Each test names its rule. Only the
-  // already-conforming parsers are asserted here — opendesign
-  // parseCodingPlanWindows, cline-pass (via provider.fetchQuota),
-  // codex (via provider.fetchQuota), command-code
-  // parseCommandCodeCredits, and meta parseBillingBanner /
-  // parseSubscriptionQuota's conforming cases. Known-lossy parsers
-  // are NOT asserted as conforming: meta's collision sites (#1777),
-  // claude duplicates (#1781), and opencode-go + openrouter (#1725)
-  // live in the types.ts inventory as known-lossy until their own
-  // issues land and flip their rows. Antigravity (#1768) and mistral
-  // (#1785) have landed and flipped to conforming: they are not in
-  // this matrix — their rule-7 pins are their dedicated describes
-  // in this file (the antigravity quota bucket labelling (#1768)
-  // describe and the mistral console budget mapping describe). If a
+  // provider's current behaviour. Each test names its rule. The matrix
+  // asserts specific conforming paths, not whole providers: opendesign's
+  // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
+  // rate-limit windows, command-code, and meta's conforming cases.
+  // Known-lossy paths remain marked in types.ts: opendesign's
+  // over-remaining label (#1879; probed below), codex credits_balance
+  // (#1924), deepseek balance (#1928), meta collisions (#1777), claude
+  // duplicates (#1781), and opencode-go/openrouter reset math (#1725).
+  // The #1879 test below records current behavior, not conformance.
+  // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
+  // dedicated describes; mistral #1785 is likewise pinned by its
+  // dedicated describe. If a
   // conforming parser's disposition changes
   // without the contract changing, a case here must fail.
 
@@ -1571,7 +1569,7 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     expect(windows.monthly?.valueLabel).toContain("25")
   })
 
-  test("rule 5 (fields agree, out-of-range): opendesign over-remaining clamps the percent and keeps the real figures in the label", () => {
+  test("known-lossy #1879: opendesign clamps over-remaining percent but keeps the raw label", () => {
     const windows = parseCodingPlanWindows({
       windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
     })
