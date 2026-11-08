@@ -10,7 +10,7 @@ const quotaCtx = (overrides: Partial<QuotaContext>): QuotaContext => ({
   ...overrides,
 })
 
-type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply"
+type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply" | "eval-exception"
 
 /**
  * A fake DevTools endpoint: HTTP /json routes plus a WebSocket whose
@@ -74,6 +74,18 @@ const startFakeCdp = (mode: FakeMode, locationSuffix = "") => {
         }
         if (mode === "reply") {
           ws.send(JSON.stringify({ id, result: { ok: true } }))
+          return
+        }
+        if (mode === "eval-exception") {
+          ws.send(
+            JSON.stringify({
+              id,
+              result: {
+                result: { type: "object" },
+                exceptionDetails: { text: "Uncaught", exception: { description: "Error: boom in page" } },
+              },
+            }),
+          )
           return
         }
         // wedge-after-location: the fetch evaluate is never answered.
@@ -207,6 +219,23 @@ describe("cdp websocket request bounds (#1803)", () => {
       const ctx = quotaCtx({ cdpBase: fake.base, cdpRequestTimeoutMs: 2_000 })
       const outcome = await cdpPageFetch(ctx, fake.origin, ["/api/thing"])
       expect(Object.keys(outcome.results)).toEqual(["/api/thing"])
+    } finally {
+      fake.stop()
+    }
+  })
+
+  test("cdpPageFetch passes page eval exceptions through in their own class and runs its cleanup (#2165)", async () => {
+    const fake = startFakeCdp("eval-exception")
+    try {
+      const ctx = quotaCtx({ cdpBase: fake.base, cdpRequestTimeoutMs: 2_000 })
+      const error = await cdpPageFetch(ctx, fake.origin, ["/api/thing"]).catch((caught: unknown) => caught)
+      expect(error).toBeInstanceOf(Error)
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message.startsWith("page eval exception:")).toBe(true)
+      expect(message).toContain("boom in page")
+      expect(message).not.toContain("cdp-unavailable")
+      // The finally cleanup closed the page this call created.
+      expect(fake.closedPageIds).toEqual(["page-1"])
     } finally {
       fake.stop()
     }
