@@ -1501,8 +1501,10 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // asserts specific conforming paths, not whole providers: opendesign's
   // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
   // rate-limit windows, command-code, and meta's conforming cases.
-  // Known-lossy paths remain marked in types.ts: codex credits_balance
-  // (#1924) and deepseek balance (#1928).
+  // The paths this matrix once marked known-lossy — codex
+  // credits_balance (#1924) and deepseek balance (#1928) — have
+  // landed and are pinned by their dedicated describes and by the
+  // figure-contract matrix below.
   // opencode-go and openrouter reset math left the known-lossy set when
   // #1725 landed: opencode-go conforms to rules 3/4 and resolveResetAt
   // is pinned by its dedicated describe. meta left it when #1777 landed:
@@ -1771,6 +1773,154 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     const result = await clineFetchWith({ data: { limits: [{ type: "daily", percentUsed: 5 }] } })
     expect(result.ok).toBe(false)
     expect(result.error).toBe("No quota data in response")
+  })
+})
+
+describe("quota figure contract — shared figure probe matrix (#1943, design #1942 phase 1)", () => {
+  // ORACLE: the figure contract stated in src/quota/types.ts ("A
+  // figure that cannot exist is not a figure", rules 1-6). The
+  // fixtures are payload shapes; the model is the contract itself,
+  // not any one provider's current behaviour. Each test names its
+  // rule. The matrix asserts the already-conforming figure paths:
+  // meta parseBillingBanner, opencode-go toMicroCents (through its
+  // exported console paths) and its balance path, command-code's
+  // clamp-both windows, turso's numNonNegative path, and the paths
+  // the design's phases 2-3 landed against this contract — claude
+  // spend (negative #1919, exponent #1920), codex credits (#1924),
+  // deepseek balance (#1928), groq's pair clamp (#1897), opendesign's
+  // pair clamp (#1879) and antigravity's float precision (#1941).
+  // If a conforming parser's figure disposition changes without the
+  // contract changing, a case here must fail.
+
+  const codexFetchWith = (payload: unknown) =>
+    codexProvider.fetchQuota({
+      credentials: [
+        {
+          id: "row-1",
+          integrationID: "openai",
+          active: true,
+          value: { type: "oauth", access: "tok-fixture", refresh: "fixture", expires: 4_102_444_800_000 },
+        },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  const deepseekFetchWith = (payload: unknown) =>
+    deepseekProvider.fetchQuota({
+      credentials: [
+        { id: "row-1", integrationID: "deepseek", active: true, value: { type: "key", key: "fixture-key" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: async () =>
+        new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }),
+      env: {},
+    })
+
+  test("rule 1 (negative figure reads as absent): meta, opencode-go, turso, codex and deepseek negative figures publish nothing", async () => {
+    expect(parseBillingBanner({ remaining_minor_units: -5, currency: "USD" })).toBeNull()
+    expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
+    expect(parseConsoleGoUsage({ access: { meters: { fiveHour: { limitMicroCents: 100, usedMicroCents: -1, resetsAt: "2027-01-01T00:00:00Z" } } } })).toEqual({})
+    expect(tursoWindows({ usage: { databases: -1 } }, {})?.windows.databases).toBeUndefined()
+    const codex = await codexFetchWith({ credits: { balance: -5, unlimited: false } })
+    expect(codex.usage?.windows.credits_balance).toBeUndefined()
+    const deepseek = await deepseekFetchWith({ balance_infos: [{ currency: "USD", total_balance: -5 }] })
+    expect(deepseek.ok).toBe(false)
+    expect(deepseek.usage).toBeNull()
+  })
+
+  test("rule 1 (zero is a real figure): zero publishes unchanged on the same paths", async () => {
+    expect(parseBillingBanner({ remaining_minor_units: 0, currency: "USD" })).toBe(0)
+    expect(parseConsoleBillingBalance({ availableMicroCents: 0 })).toBe(0)
+    expect(tursoWindows({ usage: { databases: 0 } }, {})?.windows.databases?.usedPercent).toBe(0)
+    expect(tursoWindows({ usage: { databases: 0 } }, {})?.windows.databases?.valueLabel).toBe("0 / 100")
+    const codex = await codexFetchWith({ credits: { balance: 0, unlimited: false } })
+    expect(codex.usage?.windows.credits_balance?.valueLabel).toBe("0")
+    const deepseek = await deepseekFetchWith({ balance_infos: [{ currency: "USD", total_balance: 0 }] })
+    expect(deepseek.ok).toBe(true)
+    expect(deepseek.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
+  })
+
+  test("rule 2 (a pair is judged as a pair): command-code, opendesign and codex spend clamp percent and label from one figure", async () => {
+    const ccOver = parseCommandCodeCredits({ windowLimits: { fiveHour: { used: 15, cap: 10 } } })
+    expect(ccOver["5h"]?.usedPercent).toBe(100)
+    expect(ccOver["5h"]?.valueLabel).toBe("10 / 10")
+    const ccUnder = parseCommandCodeCredits({ windowLimits: { fiveHour: { used: -5, cap: 10 } } })
+    expect(ccUnder["5h"]?.usedPercent).toBe(0)
+    expect(ccUnder["5h"]?.valueLabel).toBe("0 / 10")
+    const odOver = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }] })
+    expect(odOver?.["5h"]?.usedPercent).toBe(0)
+    expect(odOver?.["5h"]?.valueLabel).toBe("100 / 100 credits")
+    const odUnder = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }] })
+    expect(odUnder?.["5h"]?.usedPercent).toBe(100)
+    expect(odUnder?.["5h"]?.valueLabel).toBe("0 / 100 credits")
+    const codex = await codexFetchWith({ spend_control: { individual_limit: { used: 15, limit: 10 } } })
+    expect(codex.usage?.windows.credits?.usedPercent).toBe(100)
+    expect(codex.usage?.windows.credits?.valueLabel).toBe("10 / 10 used")
+  })
+
+  test("rule 2 (named exception): turso over-limit counts publish truthfully, percent and label together", () => {
+    const mapped = tursoWindows({ usage: { databases: 150 } }, {})
+    expect(mapped?.windows.databases?.usedPercent).toBe(150)
+    expect(mapped?.windows.databases?.valueLabel).toBe("150 / 100")
+  })
+
+  test("rule 3 (scaling inputs are figures too): an out-of-range claude exponent reads the amount as absent, the percent still publishes", () => {
+    for (const exponent of [999, -2, 2.5]) {
+      const { windows } = toClaudeUsage({
+        spend: {
+          enabled: true,
+          percent: 50,
+          used: { amount_minor: 500, exponent, currency: "USD" },
+          limit: { amount_minor: 1000, exponent },
+        },
+      })
+      expect(windows["extra_usage"]?.usedPercent).toBe(50)
+      expect(windows["extra_usage"]?.valueLabel).toBeUndefined()
+    }
+    // In-range control: the same payload at exponent 2 labels unchanged.
+    const control = toClaudeUsage({
+      spend: {
+        enabled: true,
+        percent: 50,
+        used: { amount_minor: 500, exponent: 2, currency: "USD" },
+        limit: { amount_minor: 1000, exponent: 2 },
+      },
+    })
+    expect(control.windows["extra_usage"]?.valueLabel).toBe("$5.00 / $10.00")
+  })
+
+  test("rule 4 (precision is part of the figure): antigravity and turso publish sub-percent precision, unrounded", () => {
+    const bucket = parseBucket({ window: "5h", remainingFraction: 0.999, resetTime: "2026-12-01T00:00:00Z" } as never)
+    expect(bucket?.window.usedPercent).toBeCloseTo(0.1, 10)
+    expect(bucket?.window.remainingPercent).toBeCloseTo(99.9, 10)
+    // turso's stated precision is 3 decimal places (pct3): a
+    // sub-percent count publishes at that precision, not rounded
+    // to an integer or to zero.
+    const mapped = tursoWindows({ usage: { storage_bytes: 1234567 } }, {})
+    expect(mapped?.windows.storage?.usedPercent).toBe(0.025)
+  })
+
+  test("rule 5 (only figure impossible is no result): a negative-only figure empties the result into the no-data contract", async () => {
+    const deepseek = await deepseekFetchWith({ balance_infos: [{ currency: "CNY", total_balance: -7 }] })
+    expect(deepseek.ok).toBe(false)
+    expect(deepseek.error).toBe("No quota data in response")
+    const codex = await codexFetchWith({ credits: { balance: -5, unlimited: false } })
+    expect(codex.ok).toBe(false)
+    expect(codex.usage).toBeNull()
+    expect(parseCommandCodeCredits({ credits: { monthlyCredits: -5 } })).toEqual({})
+  })
+
+  test("rule 6 (every figure path pinned): the conforming money paths scale minor units exactly", () => {
+    expect(parseBillingBanner({ remaining_minor_units: 12345, currency: "USD" })).toBe(123.45)
+    expect(parseConsoleBillingBalance({ availableMicroCents: 100_000_000 })).toBe(1)
+    expect(parseConsoleBillingBalance({ availableMicroCents: 250_000_000 })).toBe(2.5)
   })
 })
 
