@@ -1,42 +1,28 @@
-import { afterAll, afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { afterAll, describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import {
-  AGY_SECRET_EXTRACTION_MESSAGE,
+  CLIENT_SECRET_NOT_FOUND_MESSAGE,
   FALLBACK_UA,
-  findSecretTool,
   parseKeyringCreds,
   refresh,
-  SECRET_TOOL_NOT_FOUND_MESSAGE,
   TOKEN_REFRESH_MAX_RESPONSE_BYTES,
 } from "../../src/providers/antigravity-auth.js"
 import { handlerLayer, observe } from "../lib/http.js"
 import { it } from "../lib/effect.js"
 
-const originalAgyBin = process.env.AGY_BIN
-
-// refresh() extracts the OAuth client secret from the agy binary; point it
-// at a fixture binary carrying an embedded GOCSPX blob + UA string.
-const fixtureDir = mkdtempSync(join(tmpdir(), "antigravity-auth-test-"))
-const fixtureBin = join(fixtureDir, "agy")
-writeFileSync(
-  fixtureBin,
-  `fixture GOCSPX-${"a".repeat(40)} antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)`,
-)
-chmodSync(fixtureBin, 0o755)
-process.env.AGY_BIN = fixtureBin
+const TEST_CLIENT_SECRET = "test-client-secret"
+const originalClientSecret = process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
+process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET = TEST_CLIENT_SECRET
 
 afterAll(() => {
-  if (originalAgyBin === undefined) delete process.env.AGY_BIN
-  else process.env.AGY_BIN = originalAgyBin
+  if (originalClientSecret === undefined) delete process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
+  else process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET = originalClientSecret
 })
 
 describe("Antigravity token refresh bounding (#1469)", () => {
-  it.effect("refreshes through the Effect HTTP client", () =>
+  it.effect("refreshes with the provisioned client secret and no agy executable", () =>
     Effect.gen(function* () {
       let observed: { method: string; url: string; body: string } | undefined
       const layer = handlerLayer((input) =>
@@ -48,13 +34,36 @@ describe("Antigravity token refresh bounding (#1469)", () => {
           })
         }),
       )
-      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+      const originalPath = process.env.PATH
+      const originalAgyBin = process.env.AGY_BIN
+      process.env.PATH = ""
+      delete process.env.AGY_BIN
+      try {
+        const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
+        expect(token.accessToken).toBe("fresh-token")
+        expect(token.expiryMs).toBeGreaterThan(Date.now())
+        expect(observed?.method).toBe("POST")
+        expect(observed?.url).toBe("https://oauth2.googleapis.com/token")
+        const body = new URLSearchParams(observed?.body)
+        expect(body.get("refresh_token")).toBe("refresh-fixture")
+        expect(body.get("client_secret")).toBe(TEST_CLIENT_SECRET)
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH
+        else process.env.PATH = originalPath
+        if (originalAgyBin === undefined) delete process.env.AGY_BIN
+        else process.env.AGY_BIN = originalAgyBin
+      }
+    }),
+  )
 
-      expect(token.accessToken).toBe("fresh-token")
-      expect(token.expiryMs).toBeGreaterThan(Date.now())
-      expect(observed?.method).toBe("POST")
-      expect(observed?.url).toBe("https://oauth2.googleapis.com/token")
-      expect(new URLSearchParams(observed?.body).get("refresh_token")).toBe("refresh-fixture")
+  it.effect("fails with provisioning guidance when the client secret is absent", () =>
+    Effect.gen(function* () {
+      const error = yield* refresh("refresh-fixture", undefined, "").pipe(
+        Effect.provide(FetchHttpClient.layer),
+        Effect.flip,
+      )
+      expect(error.message).toBe(CLIENT_SECRET_NOT_FOUND_MESSAGE)
+      expect(error.message).toContain("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
     }),
   )
 
@@ -92,7 +101,7 @@ describe("Antigravity token refresh bounding (#1469)", () => {
           )
         }),
       )
-      const fiber = yield* refresh("refresh-fixture", 50).pipe(
+      const fiber = yield* refresh("refresh-fixture", 50, TEST_CLIENT_SECRET).pipe(
         Effect.provide(layer),
         Effect.flip,
         Effect.forkChild({ startImmediately: true }),
@@ -103,233 +112,6 @@ describe("Antigravity token refresh bounding (#1469)", () => {
       const error = yield* Fiber.join(fiber)
 
       expect(error.message).toContain("timed out")
-    }),
-  )
-})
-
-describe("Antigravity client-secret candidates (#1633)", () => {
-  const ua = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
-  const writeFixture = (name: string, content: string) => {
-    const path = join(fixtureDir, name)
-    writeFileSync(path, content)
-    chmodSync(path, 0o755)
-    process.env.AGY_BIN = path
-    return path
-  }
-  afterEach(() => {
-    process.env.AGY_BIN = fixtureBin
-  })
-
-  // Token endpoint double: accepts exactly one candidate; every other
-  // candidate gets Google's invalid_client rejection. The sent candidate
-  // is identified by matching the request body against the known fixture
-  // candidates. All secrets below are synthetic fixture strings, never
-  // real credential material.
-  const endpoint = (accepted: string, candidates: readonly string[], sent: Array<string | undefined>) =>
-    handlerLayer((input) =>
-      Effect.gen(function* () {
-        const { call } = yield* observe([], input)
-        const candidate = candidates.find((known) => call.body.includes(known))
-        sent.push(candidate)
-        if (candidate !== accepted)
-          return input.respond(
-            JSON.stringify({ error: "invalid_client", error_description: "The provided client secret is invalid." }),
-            { status: 401, headers: { "content-type": "application/json" } },
-          )
-        return input.respond(JSON.stringify({ ["access" + "_token"]: "fresh-token", expires_in: 3600 }), {
-          headers: { "content-type": "application/json" },
-        })
-      }),
-    )
-
-  it.effect("advances past a decoy first run to the pairing secret (agy 1.4.11 layout)", () =>
-    Effect.gen(function* () {
-      // 1.4.11 layout: runs of 40/43/40 chars; only run 2's [:35] pairs.
-      const decoy = `GOCSPX-${"d".repeat(33)}`
-      const pairing = `GOCSPX-${"p".repeat(36)}`
-      const third = `GOCSPX-${"e".repeat(33)}`
-      writeFixture("agy-1411", `noise ${decoy} mid ${pairing} tail ${third} ${ua}`)
-      const candidates = [decoy.slice(0, 35), pairing.slice(0, 35), third.slice(0, 35)]
-      const sent: Array<string | undefined> = []
-      const layer = endpoint(pairing.slice(0, 35), candidates, sent)
-
-      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
-      expect(token.accessToken).toBe("fresh-token")
-      // Decoy rejected with invalid_client, pairing accepted; third never tried.
-      expect(sent).toEqual([decoy.slice(0, 35), pairing.slice(0, 35)])
-
-      // Winner is cached in memory: the next refresh tries it first.
-      const again = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
-      expect(again.accessToken).toBe("fresh-token")
-      expect(sent).toEqual([decoy.slice(0, 35), pairing.slice(0, 35), pairing.slice(0, 35)])
-    }),
-  )
-
-  it.effect("offers both halves of a 70-char concatenated run (agy 1.4.8 layout)", () =>
-    Effect.gen(function* () {
-      // 1.4.8 layout: one 70-char run concatenating two secrets; here the
-      // endpoint accepts the SECOND half, proving it is a candidate too.
-      const run = `GOCSPX-${"a".repeat(28)}${"b".repeat(35)}`
-      expect(run).toHaveLength(70)
-      writeFixture("agy-148", `noise ${run} ${ua}`)
-      const sent: Array<string | undefined> = []
-      const layer = endpoint(run.slice(35, 70), [run.slice(0, 35), run.slice(35, 70)], sent)
-
-      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
-      expect(token.accessToken).toBe("fresh-token")
-      expect(sent).toEqual([run.slice(0, 35), run.slice(35, 70)])
-    }),
-  )
-
-  it.effect("does not cycle candidates on a non-invalid_client failure", () =>
-    Effect.gen(function* () {
-      const decoy = `GOCSPX-${"d".repeat(33)}`
-      const pairing = `GOCSPX-${"p".repeat(36)}`
-      writeFixture("agy-grant", `noise ${decoy} mid ${pairing} ${ua}`)
-      const sent: Array<string | undefined> = []
-      const layer = handlerLayer((input) =>
-        Effect.gen(function* () {
-          const { call } = yield* observe([], input)
-          sent.push([decoy.slice(0, 35), pairing.slice(0, 35)].find((known) => call.body.includes(known)))
-          return input.respond(JSON.stringify({ error: "invalid_grant", error_description: "Token has been revoked." }), {
-            status: 400,
-            headers: { "content-type": "application/json" },
-          })
-        }),
-      )
-      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
-
-      expect(error.message).toContain("invalid_grant")
-      expect(sent).toHaveLength(1)
-    }),
-  )
-})
-
-describe("Antigravity missing-binary errors name the alternatives (#1825)", () => {
-  test("findSecretTool fails naming secret-tool and the remedies when no binary exists", async () => {
-    const savedPath = process.env.PATH
-    const savedToolPath = process.env.SECRET_TOOL_PATH
-    delete process.env.SECRET_TOOL_PATH
-    process.env.PATH = fixtureDir
-    try {
-      // Empty nix-store dir + a PATH with no secret-tool + no explicit
-      // path: the missing case, simulated deterministically on any host.
-      const error = await findSecretTool(join(fixtureDir, "empty-nix-store")).catch((cause) => cause)
-      expect(error).toBeInstanceOf(Error)
-      expect(error.message).toBe(SECRET_TOOL_NOT_FOUND_MESSAGE)
-      expect(error.message).toContain("secret-tool")
-      expect(error.message).toContain("SECRET_TOOL_PATH")
-      expect(error.message).toContain("libsecret")
-      expect(error.message).toContain("agy CLI")
-    } finally {
-      if (savedPath === undefined) delete process.env.PATH
-      else process.env.PATH = savedPath
-      if (savedToolPath === undefined) delete process.env.SECRET_TOOL_PATH
-      else process.env.SECRET_TOOL_PATH = savedToolPath
-    }
-  })
-
-  it.effect("refresh fails naming the agy binary and AGY_BIN when no secret can be extracted", () =>
-    Effect.gen(function* () {
-      const path = join(fixtureDir, "agy-no-secret")
-      writeFileSync(path, "fixture binary with no embedded client secret")
-      chmodSync(path, 0o755)
-      process.env.AGY_BIN = path
-      try {
-        const error = yield* refresh("refresh-fixture").pipe(
-          Effect.provide(FetchHttpClient.layer),
-          Effect.flip,
-        )
-        expect(error.message).toBe(AGY_SECRET_EXTRACTION_MESSAGE)
-        expect(error.message).toContain("could not extract OAuth client secret from agy binary")
-        expect(error.message).toContain("AGY_BIN")
-      } finally {
-        process.env.AGY_BIN = fixtureBin
-      }
-    }),
-  )
-})
-
-describe("Antigravity GOCSPX stable-boundary recovery (#1822)", () => {
-  const ua = "antigravity/cli/1.4.11 (aidev_client; os_type=linux; arch=amd64; cl=1010154931; auth_method=consumer)"
-  const writeFixture = (name: string, content: string) => {
-    const path = join(fixtureDir, name)
-    writeFileSync(path, content)
-    chmodSync(path, 0o755)
-    process.env.AGY_BIN = path
-    return path
-  }
-  afterEach(() => {
-    process.env.AGY_BIN = fixtureBin
-  })
-
-  // Same token-endpoint double shape as the #1633 suite: accepts exactly
-  // one candidate, records every candidate sent (identified against the
-  // known list, whole candidate first so a truncated prefix of it cannot
-  // masquerade as the whole).
-  const endpoint = (accepted: string, candidates: readonly string[], sent: Array<string | undefined>) =>
-    handlerLayer((input) =>
-      Effect.gen(function* () {
-        const { call } = yield* observe([], input)
-        const candidate = candidates.find((known) => call.body.includes(known))
-        sent.push(candidate)
-        if (candidate !== accepted)
-          return input.respond(
-            JSON.stringify({ error: "invalid_client", error_description: "The provided client secret is invalid." }),
-            { status: 401, headers: { "content-type": "application/json" } },
-          )
-        return input.respond(JSON.stringify({ ["access" + "_token"]: "fresh-token", expires_in: 3600 }), {
-          headers: { "content-type": "application/json" },
-        })
-      }),
-    )
-
-  const CHUNK = 1 << 20
-  const STABLE_END = CHUNK - 256
-  // A run of runLen chars with exactly `inside` of its chars inside the
-  // first chunk's stable region; tail filler pushes the file past 1 MiB.
-  const boundaryRun = (inside: number, runLen: number, tail: number) => {
-    const run = `GOCSPX-${"s".repeat(runLen - 7)}`
-    return { run, content: `${"x".repeat(STABLE_END - inside)}${run} ${ua} ${"y".repeat(tail)}` }
-  }
-  const expectWholeOnly = (name: string, content: string, run: string, truncated: string) =>
-    Effect.gen(function* () {
-      writeFixture(name, content)
-      const sent: Array<string | undefined> = []
-      const layer = endpoint(run.slice(0, 35), [run.slice(0, 35), truncated], sent)
-      const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
-      expect(token.accessToken).toBe("fresh-token")
-      // Exactly one attempt, carrying the WHOLE run's candidate: no
-      // truncated-prefix candidate was tried before it (or instead).
-      expect(sent).toEqual([run.slice(0, 35)])
-    })
-
-  it.effect("recovers a run straddling the stable boundary (20 chars inside) whole", () =>
-    Effect.gen(function* () {
-      const { run, content } = boundaryRun(20, 47, 600)
-      yield* expectWholeOnly("agy-1822-stable20", content, run, run.slice(0, 20))
-    }),
-  )
-
-  it.effect("recovers a run starting below the match minimum inside the stable region (10 chars inside)", () =>
-    Effect.gen(function* () {
-      const { run, content } = boundaryRun(10, 47, 600)
-      yield* expectWholeOnly("agy-1822-stable10", content, run, run.slice(0, 10))
-    }),
-  )
-
-  it.effect("recovers a long run straddling the stable boundary into the next chunk whole", () =>
-    Effect.gen(function* () {
-      const { run, content } = boundaryRun(20, 300, 5000)
-      yield* expectWholeOnly("agy-1822-stable300", content, run, run.slice(0, 20))
-    }),
-  )
-
-  it.effect("still collects a chunk-boundary straddle whole (control)", () =>
-    Effect.gen(function* () {
-      const run = `GOCSPX-${"s".repeat(40)}`
-      const content = `${"x".repeat(CHUNK - 20)}${run} ${ua} ${"y".repeat(600)}`
-      yield* expectWholeOnly("agy-1822-chunk20", content, run, run.slice(0, 20))
     }),
   )
 })
