@@ -156,6 +156,73 @@ const DayOfMonth = Schema.Union([
 
 const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/))
 
+/** Decode-time validation for the Window string fields (#1681). The oracle is the runtime
+ * parser in packages/core/src/model-route-schedule.ts (`ModelRouteSchedule.parse`): every
+ * grammar it accepts must decode here, and every string it would reject — dropping the
+ * whole window — must fail decode instead, with a diagnostic. Schema must not import Core
+ * (the package boundary), so the small grammars are restated here and pinned by tests
+ * against the parser's documented acceptance set. */
+const DATE_ENTRY = /^(\d{4}-\d{2}-\d{2})(?:\/(\d{4}-\d{2}-\d{2}))?$/
+
+/** A real calendar date check: 2026-02-30 matches the shape but is not a date. */
+const isRealDate = (text: string): boolean => {
+  const [year, month, day] = text.split("-").map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+/** One `dates`/`excludeDates` entry: a single "YYYY-MM-DD" day, or an inclusive
+ * "YYYY-MM-DD/YYYY-MM-DD" range whose end is not before its start. */
+const DateEntry = Schema.String.check(
+  Schema.makeFilter((value: string) => {
+    const match = DATE_ENTRY.exec(value.trim())
+    if (!match)
+      return `invalid window date entry "${value}": expected "YYYY-MM-DD" or an inclusive "YYYY-MM-DD/YYYY-MM-DD" range`
+    const start = match[1]
+    const end = match[2]
+    if (!isRealDate(start) || (end !== undefined && !isRealDate(end)))
+      return `invalid window date entry "${value}": not a real calendar date`
+    if (end !== undefined && end < start)
+      return `invalid window date entry "${value}": range end is before its start`
+    return undefined
+  }),
+)
+
+/** Minutes since local midnight for a parser-accepted time ("9:30", "09:30", "9:5",
+ * "9:30:15" — seconds round down, as in the runtime parser), or undefined. */
+const timeMinutes = (value: string): number | undefined => {
+  const match = /^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/.exec(value.trim())
+  if (!match) return undefined
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  const seconds = match[3] === undefined ? 0 : Number(match[3])
+  if (hours > 23 || minutes > 59 || seconds > 59) return undefined
+  return hours * 60 + minutes
+}
+
+const timeOfDay = (description: string) =>
+  Schema.String.annotate({ description }).check(
+    Schema.makeFilter((value: string) =>
+      timeMinutes(value) === undefined
+        ? `invalid window time "${value}": expected "HH:mm" with hours 0-23 and minutes 0-59`
+        : undefined,
+    ),
+  )
+
+/** A timezone the runtime recognizes: `Intl` must resolve it, as in the runtime parser.
+ * The parser trims before resolving, so this check does the same. */
+const timezone = (description: string) =>
+  Schema.String.annotate({ description }).check(
+    Schema.makeFilter((value: string) => {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: value.trim() })
+        return undefined
+      } catch {
+        return `unknown window timezone "${value}": expected an IANA timezone such as "America/Chicago"`
+      }
+    }),
+  )
+
 /** A recurring local-time window. Days and time bounds all have to match when set, so
  * `daysOfMonth: [1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month. */
 class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")({
@@ -169,13 +236,13 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
       description: "Days of the month the window is active on. Empty or unset means every day.",
     })
     .pipe(optional),
-  dates: Schema.Array(Schema.String)
+  dates: Schema.Array(DateEntry)
     .annotate({
       description:
         'Specific local calendar dates the window is active on, each "YYYY-MM-DD" or an inclusive range "YYYY-MM-DD/YYYY-MM-DD", read as calendar days in the window\'s timezone. Unset means every date. Use for one-off days a recurring day list cannot express, such as a holiday calendar defined once as a named window.',
     })
     .pipe(optional),
-  excludeDates: Schema.Array(Schema.String)
+  excludeDates: Schema.Array(DateEntry)
     .annotate({
       description:
         'Local calendar dates the window is never active on, each "YYYY-MM-DD" or an inclusive range "YYYY-MM-DD/YYYY-MM-DD", in the window\'s timezone. Exclusions win over every other field — e.g. a weekday peak window with the provider\'s public holidays here stays off on those holidays.',
@@ -187,16 +254,9 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
         "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion.",
     })
     .pipe(optional),
-  start: Schema.String.annotate({
-    description:
-      'Local start of the daily window as "HH:mm". Unset means from the start of the day. A start later than the end runs past midnight into the following morning.',
-  }).pipe(optional),
-  end: Schema.String.annotate({
-    description: 'Local end of the daily window as "HH:mm", exclusive. Unset means to the end of the day.',
-  }).pipe(optional),
-  timezone: Schema.String.annotate({
-    description: 'IANA timezone such as "America/Chicago". Unset means the host\'s local timezone.',
-  }).pipe(optional),
+  start: timeOfDay('Local start of the daily window as "HH:mm". Unset means from the start of the day. A start later than the end runs past midnight into the following morning.').pipe(optional),
+  end: timeOfDay('Local end of the daily window as "HH:mm", exclusive. Unset means to the end of the day.').pipe(optional),
+  timezone: timezone('IANA timezone such as "America/Chicago". Unset means the host\'s local timezone.').pipe(optional),
   from: PositiveInt.annotate({
     description: "Epoch milliseconds before which the window never applies.",
   }).pipe(optional),
@@ -206,11 +266,23 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
 }) {}
 
 export const Window = WindowClass.check(
-  Schema.makeFilter((window: WindowClass) =>
-    window.from === undefined || window.until === undefined || window.from < window.until
+  Schema.makeFilter((window: WindowClass) => {
+    // An empty date list is unreadable to the runtime parser, which drops the window (#1681).
+    if (window.dates !== undefined && window.dates.length === 0) return "window dates must not be empty"
+    if (window.excludeDates !== undefined && window.excludeDates.length === 0)
+      return "window excludeDates must not be empty"
+    // Equal start/end after normalization (seconds round down, "9:30" is "09:30") is an
+    // empty daily range the runtime parser drops; an all-day window omits both fields.
+    if (
+      window.start !== undefined &&
+      window.end !== undefined &&
+      timeMinutes(window.start) === timeMinutes(window.end)
+    )
+      return "window start and end must differ"
+    return window.from === undefined || window.until === undefined || window.from < window.until
       ? undefined
-      : "window from must be before until",
-  ),
+      : "window from must be before until"
+  }),
 ).annotate({ identifier: "Config.ModelRoute.Window" })
 export type Window = WindowClass
 
