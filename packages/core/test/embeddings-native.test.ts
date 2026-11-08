@@ -8,13 +8,13 @@ import { Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { testEffect } from "./lib/effect"
 
-// ---------------------------------------------------------- step 3 flip
+// ---------------------------------------------------------- native-only registration
 //
 // The native in-process backend (#1554) registers behind the same
 // EMBEDDING_MODELS registry; step 3 flipped the shipped registration
 // to it: the default backend is now native-onnx, with snapshot
-// resolution via LOCAL_EMBED_SNAPSHOT / the HF cache default. The
-// HTTP registration data stays intact for step 4 (sidecar retirement).
+// resolution via LOCAL_EMBED_SNAPSHOT / the HF cache default. Step 4
+// (#1689) retired the HTTP sidecar, so native-onnx is the only kind.
 test("the registered Snowflake model defaults to the native-onnx backend", () => {
   expect(EMBEDDING_MODELS[0]?.backend).toEqual({
     kind: "native-onnx",
@@ -23,14 +23,13 @@ test("the registered Snowflake model defaults to the native-onnx backend", () =>
       "~/.cache/huggingface/hub/models--Snowflake--snowflake-arctic-embed-m-v2.0/snapshots/95c2741480856aa9666782eb4afe11959938017f",
     maxTokens: 8192,
   })
-  expect(EMBEDDING_MODELS[0]?.baseURL).toBe("http://127.0.0.1:18752/v1")
 })
 
 // ---------------------------------------------------------- native parity
 //
 // Reference vectors: test/fixtures/embeddings-native-parity.json,
-// captured from the live :18752 sidecar (the step-1 spike's vectors,
-// re-verified bit-identical against the sidecar before baking in).
+// captured from the retired :18752 sidecar (the step-1 spike's vectors,
+// re-verified bit-identical against it before baking in).
 // The native backend must reproduce them in-process: bit-identical
 // for the 768-d outputs (single and mixed-length batch), and within
 // float rounding for the 256-d Matryoshka truncation.
@@ -87,7 +86,6 @@ const nativeModel: EmbeddingModel = {
   modelID: "snowflake-arctic-embed-m-v2.0",
   dimensions: 768,
   supportedDimensions: [768, 256],
-  baseURL: "http://127.0.0.1:18752/v1",
   ownedBy: "local-embed",
   backend: { kind: "native-onnx", snapshotDir, maxTokens: 8192 },
 }

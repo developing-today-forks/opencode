@@ -1,14 +1,13 @@
 /**
  * Native in-process embeddings backend (#1554, step 2).
  *
- * The embeddings door's first backend is a local HTTP sidecar (the
- * python service in ~/local-embed, :18752). This module is the same
- * backend baked into the server process: the fork loads the model's
- * ONNX graph with onnxruntime-node and tokenizes with the
+ * The embeddings door's original backend was a local HTTP sidecar (a
+ * python service on :18752, retired in step 4 / #1689). This module is
+ * that backend baked into the server process: the fork loads the
+ * model's ONNX graph with onnxruntime-node and tokenizes with the
  * @huggingface/transformers JS tokenizer, so a call never leaves the
- * process. It registers additively behind `EMBEDDING_MODELS`
- * (backend kind "native-onnx"); the HTTP backend stays the default
- * until a registration is deliberately flipped (step 3).
+ * process. It is the only backend kind behind `EMBEDDING_MODELS`
+ * (backend kind "native-onnx") since the sidecar was retired.
  *
  * Sidecar semantics replicated exactly — parity is defined against
  * the sidecar, and the step-1 spike (branch spike/1554-native-embeddings)
