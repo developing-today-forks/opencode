@@ -379,7 +379,15 @@ export const transformModels = (
       for (const [label, window] of Object.entries(matchedGroup.windows)) {
         if (!reordered[label]) reordered[label] = window
       }
-      transformed[name] = { windows: reordered }
+      // Own-property write (#2110): name is a payload model key;
+      // defineProperty keeps a model named __proto__ as an own,
+      // enumerable entry instead of invoking the prototype setter.
+      Object.defineProperty(transformed, name, {
+        value: { windows: reordered },
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
     } else {
       const quotaInfo = asObject(modelData?.quotaInfo)
       const remainingFraction = toNumber(quotaInfo?.remainingFraction)
@@ -409,9 +417,14 @@ export const transformModels = (
         label = "daily"
         seconds = DAILY_WINDOW_SECONDS
       }
-      transformed[name] = {
-        windows: { [label]: toUsageWindow({ usedPercent, windowSeconds: seconds, resetAt }) },
-      }
+      Object.defineProperty(transformed, name, {
+        value: {
+          windows: { [label]: toUsageWindow({ usedPercent, windowSeconds: seconds, resetAt }) },
+        },
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
     }
   }
   return transformed
