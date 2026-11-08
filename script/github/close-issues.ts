@@ -85,6 +85,49 @@ export async function closeIssue(num: number, input: RequestOptions) {
   console.log(`Closed https://github.com/${input.repo}/issues/${num}`)
 }
 
+export async function collectStaleIssueNumbers(input: RequestOptions & { cutoffDate?: Date }): Promise<number[]> {
+  const cutoffDate = input.cutoffDate ?? cutoff
+  const stale: number[] = []
+  let page = 1
+  while (true) {
+    const all = await fetchIssuePage({ ...input, page })
+    if (all.length === 0) break
+    console.log(`Fetched page ${page} ${all.length} issues`)
+    let fresh = false
+    for (const i of all) {
+      if (new Date(i.updated_at) < cutoffDate) {
+        if (shouldSkip(i)) {
+          console.log(`Skipping stale issue #${i.number}; author ${i.user?.login ?? "unknown"} is exempt`)
+          continue
+        }
+        stale.push(i.number)
+      } else {
+        console.log(`\nFound fresh issue #${i.number}, stopping`)
+        fresh = true
+        break
+      }
+    }
+    if (fresh) break
+    page++
+  }
+  return stale
+}
+
+export async function closeStaleIssues(input: RequestOptions & { cutoffDate?: Date }): Promise<number> {
+  // Collect the full stale set BEFORE closing any issue (#2132):
+  // closing mutates the open list that fetchIssuePage offset-paginates,
+  // so closing between page fetches shifts the next page of stale
+  // issues onto an already-fetched page and they are never examined.
+  const stale = await collectStaleIssueNumbers(input)
+  let closed = 0
+  for (const num of stale) {
+    await closeIssue(num, input)
+    closed++
+  }
+  console.log(`Closed ${closed} issues total`)
+  return closed
+}
+
 async function main() {
   // One shared convention (#1972): the sweeper supplies GH_TOKEN.
   // A missing token is a hard failure by design - the step (and job)
@@ -93,48 +136,7 @@ async function main() {
   const token = resolveGitHubToken()
   if (!token) throw new Error(GITHUB_TOKEN_REQUIRED_MESSAGE)
   const requestOptions = { repo, headers: { ...headers, Authorization: `Bearer ${token}` } }
-
-  let page = 1
-  let closed = 0
-
-  while (true) {
-    const all = await fetchIssuePage({ ...requestOptions, page })
-    if (all.length === 0) break
-    console.log(`Fetched page ${page} ${all.length} issues`)
-
-    const stale: number[] = []
-    for (const i of all) {
-      const updated = new Date(i.updated_at)
-      if (updated < cutoff) {
-        if (shouldSkip(i)) {
-          console.log(`Skipping stale issue #${i.number}; author ${i.user?.login ?? "unknown"} is exempt`)
-          continue
-        }
-        stale.push(i.number)
-      } else {
-        console.log(`\nFound fresh issue #${i.number}, stopping`)
-        if (stale.length > 0) {
-          for (const num of stale) {
-            await closeIssue(num, requestOptions)
-            closed++
-          }
-        }
-        console.log(`Closed ${closed} issues total`)
-        return
-      }
-    }
-
-    if (stale.length > 0) {
-      for (const num of stale) {
-        await closeIssue(num, requestOptions)
-        closed++
-      }
-    }
-
-    page++
-  }
-
-  console.log(`Closed ${closed} issues total`)
+  await closeStaleIssues(requestOptions)
 }
 
 async function readBoundedJson(response: Response, signal: AbortSignal, operation: string): Promise<unknown> {
