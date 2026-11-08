@@ -5,7 +5,8 @@ import {
   asObject,
   fetchQuotaForProviderInstances,
   isJsonObject,
-  listConfiguredQuotaProviders,
+  listConfiguredQuotaProvidersDetailed,
+  quotaProbeFailureResult,
   parseJsonValue,
   resolveQuotaProviderName,
   toNumber,
@@ -45,13 +46,32 @@ import { errorMessage } from "../../util/error"
  * produced no successful result.
  */
 
-const DEFAULT_QUOTA_TIMEOUT_MS = 30_000
+export const DEFAULT_QUOTA_TIMEOUT_MS = 30_000
 
-const quotaTimeoutMs = (): number => {
-  const parsed = toNumber(process.env.OPENCODE_QUOTA_TIMEOUT_MS)
+/**
+ * Mistral quota read is CDP-backed (#1729): cdpPageFetch can spend
+ * up to 20s waiting for a matching console page, plus several 10s-bound
+ * HTTP calls, so a progressing read legitimately exceeds the uniform
+ * 30s outer race. Its bounded budget is 60s; every other provider keeps
+ * the default (or the explicit OPENCODE_QUOTA_TIMEOUT_MS override).
+ * Providers with their own inner timeouts (the direct cookie/API-key
+ * 15s signals) are unaffected - this is only the outer race.
+ */
+export const MISTRAL_QUOTA_TIMEOUT_MS = 60_000
+
+const quotaTimeoutMs = (env: NodeJS.ProcessEnv = process.env): number => {
+  const parsed = toNumber(env.OPENCODE_QUOTA_TIMEOUT_MS)
   return parsed !== null && Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647
     ? parsed
     : DEFAULT_QUOTA_TIMEOUT_MS
+}
+
+export const quotaTimeoutMsForProvider = (
+  providerId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number => {
+  const base = quotaTimeoutMs(env)
+  return providerId === "mistral" ? Math.max(base, MISTRAL_QUOTA_TIMEOUT_MS) : base
 }
 
 interface GlobalPaths {
@@ -314,8 +334,18 @@ export const buildQuotaContext = async (
   }
 }
 
-const fetchProviderWithTimeout = async (ctx: QuotaContext, providerId: string): Promise<QuotaResult[]> => {
-  const timeoutMs = quotaTimeoutMs()
+/**
+ * Race one provider fetch against its timeout budget (per-provider:
+ * see quotaTimeoutMsForProvider). A timeout or a throw becomes an
+ * error row for that provider, never an absent row (#1729).
+ * fetchProvider and timeoutMs are injectable so tests can pin the
+ * race without waiting out the real budgets.
+ */
+export const fetchWithQuotaTimeout = async (
+  providerId: string,
+  fetchProvider: () => Promise<QuotaResult[]>,
+  timeoutMs: number = quotaTimeoutMsForProvider(providerId),
+): Promise<QuotaResult[]> => {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<QuotaResult[]>((resolve) => {
     timer = setTimeout(
@@ -335,7 +365,7 @@ const fetchProviderWithTimeout = async (ctx: QuotaContext, providerId: string): 
     )
   })
   try {
-    return await Promise.race([fetchQuotaForProviderInstances(ctx, providerId), deadline])
+    return await Promise.race([fetchProvider(), deadline])
   } catch (error) {
     return [
       {
@@ -352,6 +382,9 @@ const fetchProviderWithTimeout = async (ctx: QuotaContext, providerId: string): 
     if (timer) clearTimeout(timer)
   }
 }
+
+const fetchProviderWithTimeout = async (ctx: QuotaContext, providerId: string): Promise<QuotaResult[]> =>
+  fetchWithQuotaTimeout(providerId, () => fetchQuotaForProviderInstances(ctx, providerId))
 
 /**
  * Fetch the named providers for a `quota <name>...` invocation. An
@@ -452,10 +485,18 @@ const handler = Effect.fn("cli.quota")(function* (input: Runtime.Input<typeof Co
   const groups: { providerId: string; results: QuotaResult[] }[] = []
 
   if (requested.length === 0) {
-    const ids = yield* Effect.promise(() => listConfiguredQuotaProviders(ctx, { includeDisabled: input.all }))
-    for (const providerId of ids) {
+    const listing = yield* Effect.promise(() =>
+      listConfiguredQuotaProvidersDetailed(ctx, { includeDisabled: input.all }),
+    )
+    for (const providerId of listing.providerIds) {
       const results = yield* Effect.promise(() => fetchProviderWithTimeout(ctx, providerId))
       groups.push({ providerId, results })
+    }
+    // Probe failure is a result, never absence (#1729): a provider
+    // whose isConfigured probe threw gets an error row in the listing
+    // instead of silently vanishing from it.
+    for (const failure of listing.probeFailures) {
+      groups.push({ providerId: failure.providerId, results: [quotaProbeFailureResult(failure)] })
     }
   } else {
     const named = yield* Effect.promise(() => collectNamedQuotaGroups(ctx, requested, fetchProviderWithTimeout))
