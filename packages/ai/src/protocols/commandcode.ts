@@ -30,6 +30,20 @@
 // this protocol does not shell out to git); a deployment can supply
 // the whole object via the `serverConfig` provider option.
 //
+// DISCLOSURE (#1948): by default this block leaves the machine on every
+// /alpha/generate call. `workingDir` is the server process's ABSOLUTE
+// cwd and `structure` is the sorted non-hidden, non-node_modules
+// top-level entry names of that directory — for a server started in
+// $HOME, that is the home directory's path and its top-level listing.
+// The other seven fields are inert here (a fixed date/platform and the
+// non-git fallbacks). This is the first-party CLI's own per-turn
+// behavior, kept because the route emulates that wire (see
+// specs/emulation-doctrine.md); the disposition is ACCEPT, not
+// minimize: a minimized block (empty `structure`, non-identifying
+// `workingDir`) has never been probed against the gateway, and the
+// probe is blocked while the account is rate-limited (#1948). Supply
+// `serverConfig` to send a different block, including a minimized one.
+//
 // The hosted Provider API (api.commandcode.ai/provider/v1, OpenAI /
 // Anthropic shaped) is a different surface: it rejects the fleet's Go
 // plan outright ("Your Go plan doesn't include API access", 403
