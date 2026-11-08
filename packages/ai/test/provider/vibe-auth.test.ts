@@ -223,6 +223,64 @@ describe("resolveApiKey — shadow diagnostic (#1809)", () => {
     await expect(resolveApiKey(sources)).resolves.toBe("env-key")
     expect(seen).toEqual([])
   })
+  test("throwing keyringLookup on the environment win path still resolves with no diagnostic", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: { MISTRAL_API_KEY: "env-key" },
+      readFile: noFile,
+      keyringLookup: async () => {
+        throw new Error("keyring unavailable")
+      },
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("env-key")
+    expect(seen).toEqual([])
+  })
+
+  test("throwing keyringLookup on the .env file win path still resolves with no diagnostic", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const sources: CredentialSources = {
+      env: {},
+      readFile: () => "MISTRAL_API_KEY=" + "file-key",
+      keyringLookup: async () => {
+        throw new Error("keyring unavailable")
+      },
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("file-key")
+    expect(seen).toEqual([])
+  })
+
+  test("throwing onShadowDiagnostic sink still resolves the winning key", async () => {
+    const sources: CredentialSources = {
+      env: { MISTRAL_API_KEY: "env-key" },
+      readFile: noFile,
+      keyringLookup: keyringWith({ [KEYRING_SERVICE]: "keyring-key" }),
+      onShadowDiagnostic: () => {
+        throw new Error("sink unavailable")
+      },
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("env-key")
+  })
+
+  test("a lookup throwing on the primary service abandons the probe: legacy is never queried and no diagnostic fires", async () => {
+    const { seen, onShadowDiagnostic } = capture()
+    const queried: string[] = []
+    const sources: CredentialSources = {
+      env: { MISTRAL_API_KEY: "env-key" },
+      readFile: noFile,
+      keyringLookup: async (service: string) => {
+        queried.push(service)
+        if (service === KEYRING_SERVICE) throw new Error("keyring unavailable")
+        return "legacy-key"
+      },
+      onShadowDiagnostic,
+    }
+    await expect(resolveApiKey(sources)).resolves.toBe("env-key")
+    expect(queried).toEqual([KEYRING_SERVICE])
+    expect(seen).toEqual([])
+  })
+
 })
 
 describe("vibeAuth - process cache and invalidate (#1900)", () => {
