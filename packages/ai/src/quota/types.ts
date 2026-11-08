@@ -93,11 +93,12 @@
  *     header window construction is inline and clamps over-limit
  *     remaining whole-window (#1897/#1921; rule 5).
  *   meta — parseSubscriptionQuota, parseBillingBanner (both
- *     exported); keyUsageResult is module-private. KNOWN-LOSSY:
- *     #1777 (a weekly-length rolling window can be overwritten by
- *     the literal weekly entry at both collision sites).
- *     parseSubscriptionQuota's absent/non-positive-reset-is-null
- *     case conforms to rule 3 and is pinned by the matrix (#1855).
+ *     exported); keyUsageResult is module-private. Conforming: a
+ *     weekly-length rolling window publishes under its semantic role
+ *     key instead of overwriting the literal weekly entry, at both
+ *     collision sites (#1777, rule 1). parseSubscriptionQuota's
+ *     absent/non-positive-reset-is-null case conforms to rule 3 and
+ *     is pinned by the matrix (#1855).
      A zero or negative limit drops only that window (rule 4),
      pinned by the matrix (#1849).
  *   mistral — parseMistralBudget (exported; wraps the module-private
