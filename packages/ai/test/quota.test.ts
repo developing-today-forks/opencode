@@ -459,6 +459,25 @@ describe("groq quota header parsing (#1793)", () => {
     expect(result.usage?.windows.requests_daily?.resetAt).toBeNull()
   })
 
+  test("remaining above the limit is clamped whole-window (#1897)", async () => {
+    const requests = await fetchWith({
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "150",
+    })
+    expect(requests.ok).toBe(true)
+    expect(requests.usage?.windows.requests_daily?.usedPercent).toBe(0)
+    expect(requests.usage?.windows.requests_daily?.remainingPercent).toBe(100)
+    expect(requests.usage?.windows.requests_daily?.valueLabel).toBe("100 / 100 requests remaining")
+    const tokens = await fetchWith({
+      "x-ratelimit-limit-tokens": "10000",
+      "x-ratelimit-remaining-tokens": "12000",
+    })
+    expect(tokens.ok).toBe(true)
+    expect(tokens.usage?.windows.tokens_minute?.usedPercent).toBe(0)
+    expect(tokens.usage?.windows.tokens_minute?.remainingPercent).toBe(100)
+    expect(tokens.usage?.windows.tokens_minute?.valueLabel).toBe("10000 / 10000 tokens remaining")
+  })
+
   test("plain counts and a well-formed reset still publish a window", async () => {
     const result = await fetchWith({
       "x-ratelimit-limit-requests": "100",
