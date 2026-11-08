@@ -8,26 +8,20 @@ export * as Embeddings from "./embeddings.js"
  * catalog, each with its own provider, model id, output dimension and
  * supported `dimensions` values. The translation layer below carries
  * no backend-specific branching — Snowflake Arctic Embed specifics
- * (provider id, model id, 768 dimensions, the local base URL) live
+ * (provider id, model id, 768 dimensions, the model snapshot) live
  * only in its registration. A future embedding model plugs in by
  * adding a registration; its dimension comes from the registration,
  * never from an assumption in this layer.
  *
- * A registration also names its backend kind. The HTTP kind is served
- * by an OpenAI-compatible sidecar; the native-onnx kind (#1554) runs
- * the model's ONNX graph in this process instead (see
- * embeddings-native.ts). The default registration uses native-onnx
- * after the deliberate step-3 flip (#1690). The kinds are
- * interchangeable to every layer above the service: same parse, same
- * response shape, same ledger row. The Node bundle explicitly does not
- * support native-onnx; the Bun build is the supported route.
+ * A registration also names its backend kind. The native-onnx kind
+ * (#1554) runs the model's ONNX graph in this process (see
+ * embeddings-native.ts); the old HTTP sidecar backend was retired in
+ * step 4 (#1689), so native-onnx is the only kind. The Node bundle
+ * explicitly does not support native-onnx; the Bun build is the
+ * supported route.
  *
- * The HTTP backend speaks the OpenAI embeddings shape over HTTP,
- * exactly like the messaging embedding client: the service POSTs to
- * `<baseURL>/embeddings`. Both backends return that same shape, and the
- * service validates count, order, and vector dimensions so a
- * misbehaving backend fails loudly instead of returning wrong-shaped
- * vectors.
+ * The service validates vector dimensions so a misbehaving backend
+ * fails loudly instead of returning wrong-shaped vectors.
  *
  * Varied lengths: the door passes the caller's input array through
  * faithfully — no truncation, padding or chunking at this layer.
@@ -44,19 +38,10 @@ export * as Embeddings from "./embeddings.js"
  * way; no new table or silent skip.
  */
 import { Context, Effect, Layer, Schema } from "effect"
-import { HttpClient, HttpClientRequest } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { ModelRouteLog } from "./model-route-log.js"
 import { embedNative } from "./embeddings-native.js"
-import { collectBoundedResponseBody } from "./tool/http-body.js"
-
-/** HTTP backend: the service POSTs the OpenAI embeddings shape to
- * the registration's `baseURL` (a sidecar process). The default for
- * every registration that names no backend. */
-export interface HttpEmbeddingBackend {
-  readonly kind: "http"
-}
 
 /** Native in-process backend (#1554): the server runs the model's
  * ONNX graph itself — no sidecar, no HTTP hop. The snapshot is an
@@ -75,7 +60,7 @@ export interface NativeOnnxEmbeddingBackend {
   readonly maxTokens: number
 }
 
-export type EmbeddingBackend = HttpEmbeddingBackend | NativeOnnxEmbeddingBackend
+export type EmbeddingBackend = NativeOnnxEmbeddingBackend
 
 export interface EmbeddingModel {
   /** Catalog ref the caller addresses: `provider/model`. */
@@ -87,27 +72,18 @@ export interface EmbeddingModel {
   /** Every `dimensions` value the backend honors, native included. A caller
    * asking for anything else is rejected loudly at parse time. */
   readonly supportedDimensions: ReadonlyArray<number>
-  /** OpenAI-compatible base URL of the provider's backend. */
-  readonly baseURL: string
-  /** Environment variable that overrides `baseURL` when set. */
-  readonly baseURLEnv?: string
-  /** Environment variable holding the backend's bearer key, when it needs one. */
-  readonly apiKeyEnv?: string
   readonly ownedBy: string
-  /** Which backend serves this registration. Absent = the HTTP
-   * backend: every existing registration keeps its current behavior.
-   * The native in-process backend (#1554, step 2) becomes a
-   * registration's backend only by a deliberate flip (step 3). */
-  readonly backend?: EmbeddingBackend
+  /** Which backend serves this registration. Native-onnx is the only
+   * kind since the HTTP sidecar was retired (#1689, step 4). */
+  readonly backend: EmbeddingBackend
 }
 
 /**
  * The embedding catalog. First registration (Drew, 2026-11-02:
  * "support embeddings using local snowflake"): local Snowflake Arctic
- * Embed, originally served by an OpenAI-compatible sidecar and now
- * using the native-onnx backend by default (#1690). Its HTTP settings
- * remain for the sidecar transition; no hosted embeddings API is
- * registered here.
+ * Embed, served by the native-onnx backend (#1690). The HTTP sidecar
+ * that originally served it was retired in step 4 (#1689); no hosted
+ * embeddings API is registered here.
  * Arctic Embed m-v2.0 is 768-dimensional and supports Matryoshka
  * truncation to 256, which the local backend honors.
  */
@@ -118,16 +94,10 @@ export const EMBEDDING_MODELS: ReadonlyArray<EmbeddingModel> = [
     modelID: "snowflake-arctic-embed-m-v2.0",
     dimensions: 768,
     supportedDimensions: [768, 256],
-    baseURL: "http://127.0.0.1:18752/v1",
-    baseURLEnv: "OPENCODE_LOCAL_EMBED_BASE_URL",
     ownedBy: "local-embed",
-    // Step 3 flip (#1554, 2026-11-05): the native in-process backend
-    // is now the default for this registration. The HTTP registration
-    // data above (baseURL/baseURLEnv) stays intact for step 4, which
-    // retires the sidecar. Snapshot resolution: the LOCAL_EMBED_SNAPSHOT
-    // env var (the same one the sidecar service uses) wins; otherwise
-    // the HF cache snapshot dir below (the sidecar default) is used.
-    // The backend throws loudly when the snapshot is missing.
+    // Snapshot resolution: the LOCAL_EMBED_SNAPSHOT env var wins;
+    // otherwise the HF cache snapshot dir below is used. The backend
+    // throws loudly when the snapshot is missing.
     backend: {
       kind: "native-onnx",
       snapshotEnv: "LOCAL_EMBED_SNAPSHOT",
@@ -276,23 +246,12 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Embeddings") {}
 
-/** Cap on a backend embeddings response body, same bound as the messaging
- * embedding client (#1079): a bounded read, never an unbounded buffer. */
-export const embeddingsMaxResponseBytes = 16 * 1024 * 1024
-const embeddingsErrorMaxResponseBytes = 64 * 1024
 /** A stalled local backend must fail, not hang the door. */
 const REQUEST_TIMEOUT = "60 seconds"
-
-const BackendResponse = Schema.Struct({
-  data: Schema.Array(Schema.Struct({ index: Schema.Number, embedding: Schema.Array(Schema.Number) })),
-  usage: Schema.Struct({ prompt_tokens: Schema.Number }).pipe(Schema.optional),
-})
 
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const http = yield* HttpClient.HttpClient
-
     const embed: Interface["embed"] = (input) =>
       Effect.gen(function* () {
         const startedAt = Date.now()
@@ -304,106 +263,31 @@ export const layer = Layer.effect(
         })
         const result = yield* Effect.result(
           Effect.gen(function* () {
-            if (input.model.backend?.kind === "native-onnx") {
-              if (process.env.OPENCODE_NODE_BUNDLE === "1")
-                return yield* Effect.fail(
-                  new Error(
-                    "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
-                  ),
-                )
-              const native = yield* Effect.tryPromise({
-                try: () =>
-                  embedNative({
-                    backend: input.model.backend as NativeOnnxEmbeddingBackend,
-                    inputs: input.inputs,
-                    ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
-                    nativeDimensions: input.model.dimensions,
-                  }),
-                catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
-              })
-              const expected = input.dimensions ?? input.model.dimensions
-              for (const vector of native.vectors)
-                if (vector.length !== expected)
-                  return yield* Effect.fail(
-                    new Error(
-                      `embedding backend returned a ${vector.length}-dimensional vector for ${input.model.ref}; expected ${expected}`,
-                    ),
-                  )
-              return native
-            }
-            const baseURL = (
-              (input.model.baseURLEnv ? process.env[input.model.baseURLEnv] : undefined) ?? input.model.baseURL
-            ).replace(/\/+$/, "")
-            const key = input.model.apiKeyEnv ? process.env[input.model.apiKeyEnv] : undefined
-            const request = HttpClientRequest.post(`${baseURL}/embeddings`).pipe(
-              HttpClientRequest.bodyJsonUnsafe({
-                model: input.model.modelID,
-                input: [...input.inputs],
-                encoding_format: "float",
-                ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
-              }),
-            )
-            const response = yield* http.execute(key ? HttpClientRequest.bearerToken(request, key) : request)
-            if (response.status !== 200) {
-              const text = yield* Effect.scoped(
-                collectBoundedResponseBody(
-                  response,
-                  embeddingsErrorMaxResponseBytes,
-                  () => new Error(`embeddings error response exceeded ${embeddingsErrorMaxResponseBytes} bytes`),
+            if (process.env.OPENCODE_NODE_BUNDLE === "1")
+              return yield* Effect.fail(
+                new Error(
+                  "native-onnx embeddings are unsupported in the Node bundle; use the Bun build for native embeddings",
                 ),
-              ).pipe(
-                Effect.map((body) => body.toString("utf8")),
-                Effect.orElseSucceed(() => ""),
               )
-              return yield* Effect.fail(
-                new Error(`HTTP ${response.status} from ${baseURL}/embeddings: ${text.slice(0, 500)}`),
-              )
-            }
-            const raw = yield* Effect.scoped(
-              collectBoundedResponseBody(
-                response,
-                embeddingsMaxResponseBytes,
-                () => new Error(`embeddings response exceeded ${embeddingsMaxResponseBytes} bytes`),
-              ),
-            )
-            const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(BackendResponse))(
-              raw.toString("utf8"),
-            ).pipe(
-              Effect.mapError((error) => new Error(`invalid embeddings response from ${baseURL}: ${error.message}`)),
-            )
-            if (decoded.data.length !== input.inputs.length)
-              return yield* Effect.fail(
-                new Error(`expected ${input.inputs.length} embeddings from ${baseURL}, got ${decoded.data.length}`),
-              )
-            const seenIndices = new Set<number>()
-            for (const item of decoded.data) {
-              if (
-                !Number.isInteger(item.index) ||
-                item.index < 0 ||
-                item.index >= input.inputs.length ||
-                seenIndices.has(item.index)
-              )
-                return yield* Effect.fail(
-                  new Error(
-                    `embeddings backend returned an invalid index set for ${input.inputs.length} inputs from ${baseURL}: expected each index 0..${input.inputs.length - 1} exactly once, got [${decoded.data
-                      .map((entry) => entry.index)
-                      .join(", ")}]`,
-                  ),
-                )
-              seenIndices.add(item.index)
-            }
+            const native = yield* Effect.tryPromise({
+              try: () =>
+                embedNative({
+                  backend: input.model.backend,
+                  inputs: input.inputs,
+                  ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
+                  nativeDimensions: input.model.dimensions,
+                }),
+              catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+            })
             const expected = input.dimensions ?? input.model.dimensions
-            const vectors = decoded.data
-              .toSorted((left, right) => left.index - right.index)
-              .map((item) => item.embedding)
-            for (const vector of vectors)
+            for (const vector of native.vectors)
               if (vector.length !== expected)
                 return yield* Effect.fail(
                   new Error(
                     `embedding backend returned a ${vector.length}-dimensional vector for ${input.model.ref}; expected ${expected}`,
                   ),
                 )
-            return { vectors, promptTokens: decoded.usage?.prompt_tokens ?? 0 }
+            return native
           }).pipe(
             Effect.timeoutOrElse({
               duration: REQUEST_TIMEOUT,
