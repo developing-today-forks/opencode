@@ -1369,6 +1369,20 @@ describe("deepseek quota mapping (#1800)", () => {
     expect(result.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
   })
 
+  test("does not publish a negative-only USD balance", async () => {
+    const result = await fetchWith({ balance_infos: [{ currency: "USD", total_balance: "-5" }] })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
+  test("does not publish a negative-only CNY balance", async () => {
+    const result = await fetchWith({ balance_infos: [{ currency: "CNY", total_balance: -7 }] })
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("No quota data in response")
+    expect(result.usage).toBeNull()
+  })
+
   test("missing or empty balance_infos returns the no-data error", async () => {
     for (const payload of [{}, { balance_infos: [] }]) {
       const result = await fetchWith(payload)
