@@ -275,7 +275,9 @@ export const parseBucket = (bucket: JsonValue): ParsedBucket | null => {
   const record = asObject(bucket)
   const remainingFraction = toNumber(record?.remainingFraction)
   if (remainingFraction === null) return null
-  const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
+  // Float percent, never integer-quantized (#1941) -- see the
+  // transformModels fallback site for the full note.
+  const remainingPercent = remainingFraction !== null ? remainingFraction * 100 : null
   const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
   const resetAt = toTimestamp(record?.resetTime)
   const windowStr = (asNonEmptyString(record?.window) ?? asNonEmptyString(record?.bucketId) ?? "").toLowerCase()
@@ -390,7 +392,11 @@ export const transformModels = (
       // Omitting the entry also keeps an all-figureless models
       // payload from reading as a successful quota read.
       if (remainingFraction === null) continue
-      const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null
+      // Float percent, never integer-quantized (#1941): the sibling parsers
+      // publish float percents (claude/codex clampPercent, turso to 3 decimals)
+      // and rounding belongs to the display layer (#1797). Integer rounding
+      // here read 99.9% used as 100% / 0% remaining and 0.1% used as 0%.
+      const remainingPercent = remainingFraction !== null ? remainingFraction * 100 : null
       const usedPercent = remainingPercent !== null ? Math.min(100, Math.max(0, 100 - remainingPercent)) : null
       const resetAt = toTimestamp(quotaInfo?.resetTime)
       const remainingSeconds = resetAt !== null ? Math.max(0, Math.round((resetAt - Date.now()) / 1000)) : null
