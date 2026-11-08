@@ -78,6 +78,68 @@ describe("SessionStep.failureHint", () => {
     expect(withReset.quotaResetAtMs).toBeLessThanOrEqual(after + 2 * 3600 * 1000)
   })
 
+  test("binds a quota reset stated only in the error body, not just the message (#2108)", () => {
+    const absolute = SessionStep.failureHint(
+      error(
+        new QuotaExceededError({
+          message: "out of quota",
+          body: "quota reset at 2099-01-01T00:00:00Z",
+        }),
+      ),
+    )
+    expect(absolute.quota).toBe(true)
+    expect(absolute.quotaResetAtMs).toBe(Date.parse("2099-01-01T00:00:00Z"))
+
+    const before = Date.now()
+    const relative = SessionStep.failureHint(
+      error(
+        new QuotaExceededError({
+          message: "out of quota",
+          body: "Individual quota reached. Resets in 2 hours.",
+        }),
+      ),
+    )
+    const after = Date.now()
+    expect(relative.quotaResetAtMs).toBeGreaterThanOrEqual(before + 2 * 3600 * 1000)
+    expect(relative.quotaResetAtMs).toBeLessThanOrEqual(after + 2 * 3600 * 1000)
+  })
+
+  test("reads a stated wait only in the error body as a retry-after (#2108)", () => {
+    expect(
+      SessionStep.failureHint(
+        error(new ProviderInternalError({ message: "overloaded", body: "please wait in 30 minutes" })),
+      ),
+    ).toMatchObject({ retryAfterMs: 30 * 60 * 1000, quota: false })
+  })
+
+  test("a reset stated in the message wins over one stated later in the body (#2108)", () => {
+    const hint = SessionStep.failureHint(
+      error(
+        new QuotaExceededError({
+          message: "quota exhausted, resets at 2099-01-01T00:00:00Z",
+          body: "resets at 2099-06-01T00:00:00Z",
+        }),
+      ),
+    )
+    expect(hint.quotaResetAtMs).toBe(Date.parse("2099-01-01T00:00:00Z"))
+  })
+
+  test("the client-timeout guard still suppresses a body-stated wait (#1551, #2108)", () => {
+    expect(
+      SessionStep.failureHint(
+        error(
+          new TransportError({
+            message: "No response output within 1000ms",
+            body: "wait in 30 minutes",
+            transport: "http",
+            operation: "request",
+            code: "Timeout",
+          }),
+        ),
+      ),
+    ).toMatchObject({ retryAfterMs: undefined, network: false })
+  })
+
   test("an ordinary provider failure may carry a retry-after and is never a quota", () => {
     expect(
       SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", retryAfterMs: 3_000 }))),
