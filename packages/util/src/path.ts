@@ -130,10 +130,15 @@ export function parsePathLineSuffix(input: string) {
   if (hashMatch) {
     const first = Number(hashMatch[2])
     const second = hashMatch[3] ? Number(hashMatch[3]) : first
+    const selection = toLineRange(first, second)
+    // An out-of-range suffix is not a line suffix at all (#2187): consumers treat
+    // path !== input as "a suffix was parsed", so stripping it here would silently
+    // drop the suffix (and mangle inputs like tel:5551234). Return the input untouched.
+    if (selection === undefined) return { path: input, selection: undefined }
 
     return {
       path: hashMatch[1] ?? "",
-      selection: toLineRange(first, second),
+      selection,
     }
   }
 
@@ -142,10 +147,12 @@ export function parsePathLineSuffix(input: string) {
   if (colonMatch && !/^[a-z]:?$/i.test(colonMatch[1] ?? "")) {
     const first = Number(colonMatch[2])
     const second = colonMatch[3] ? Number(colonMatch[3]) : first
+    const selection = toLineRange(first, second)
+    if (selection === undefined) return { path: input, selection: undefined }
 
     return {
       path: colonMatch[1] ?? "",
-      selection: toLineRange(first, second),
+      selection,
     }
   }
 
