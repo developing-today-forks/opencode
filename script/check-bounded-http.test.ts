@@ -242,6 +242,28 @@ describe("src trees (#1494)", () => {
   })
 })
 
+describe("GitHub Action scan root (#1436)", () => {
+  test("SCAN_ROOTS includes the published GitHub Action", () => {
+    expect(SCAN_ROOTS).toContain("github")
+  })
+
+  test("collect walks the GitHub Action tree on disk", () => {
+    const root = mkdtempSync(join(tmpdir(), "bounded-http-github-collect-"))
+    try {
+      const github = join(root, "github")
+      mkdirSync(github, { recursive: true })
+      writeFileSync(join(github, "index.ts"), 'const response = await fetch("https://example.com/action")\n')
+      const hits: Hit[] = []
+      collect(root, join(root, "github"), hits)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].file).toBe("github/index.ts")
+      expect(unlistedHits(hits, new Map())).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("isScannedFile", () => {
   test("includes Astro sources (executable frontmatter) and TS/TSX, excludes docs/data", () => {
     expect(isScannedFile("page.astro")).toBe(true)
