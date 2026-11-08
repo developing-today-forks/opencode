@@ -1353,11 +1353,9 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   // asserts specific conforming paths, not whole providers: opendesign's
   // keep-first/zero-limit/unknown-duration cases, cline-pass, codex
   // rate-limit windows, command-code, and meta's conforming cases.
-  // Known-lossy paths remain marked in types.ts: opendesign's
-  // over-remaining label (#1879; probed below), codex credits_balance
+  // Known-lossy paths remain marked in types.ts: codex credits_balance
   // (#1924), deepseek balance (#1928), meta collisions (#1777), and
   // opencode-go/openrouter reset math (#1725).
-  // The #1879 test below records current behavior, not conformance.
   // Antigravity's #1768, #1912, and #1917 cases are fixed and pinned by
   // dedicated describes; mistral #1785 is likewise pinned by its
   // dedicated describe. If a
@@ -1569,12 +1567,22 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
     expect(windows.monthly?.valueLabel).toContain("25")
   })
 
-  test("known-lossy #1879: opendesign clamps over-remaining percent but keeps the raw label", () => {
-    const windows = parseCodingPlanWindows({
+  test("rule 5 (fields agree, out-of-range): opendesign clamps remaining once for percent and label (#1879)", () => {
+    const over = parseCodingPlanWindows({
       windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
     })
-    expect(windows?.["5h"]?.usedPercent).toBe(0)
-    expect(windows?.["5h"]?.valueLabel).toBe("150 / 100 credits")
+    expect(over?.["5h"]?.usedPercent).toBe(0)
+    expect(over?.["5h"]?.valueLabel).toBe("100 / 100 credits")
+    const under = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }],
+    })
+    expect(under?.["5h"]?.usedPercent).toBe(100)
+    expect(under?.["5h"]?.valueLabel).toBe("0 / 100 credits")
+    const inRange = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 25 }],
+    })
+    expect(inRange?.["5h"]?.usedPercent).toBe(75)
+    expect(inRange?.["5h"]?.valueLabel).toBe("25 / 100 credits")
   })
 
   test("rule 5 (fields agree, out-of-range): meta over-limit weekly clamps to 100 and the window does not vanish", () => {
