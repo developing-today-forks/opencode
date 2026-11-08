@@ -88,14 +88,6 @@ export const driveStep = async (input: DriveInput): Promise<DriveResult> => {
     const indexes = definition.targets.flatMap((_, index) => (tried.has(index) ? [] : [index]))
     const unavailable = new Map<number, string>()
     const overLimit = new Set<number>()
-    const poolExhausted = new Map<number, boolean>()
-    for (const index of indexes)
-      poolExhausted.set(
-        index,
-        ModelRoute.poolQuotaExhausted(definition, index, now, (leaf) =>
-          credentialOf(definition.targets[leaf]),
-        ),
-      )
     const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
     const scope = ModelRoute.scopeOf(definition, [])
     const ready = indexes.filter((index) => {
@@ -115,16 +107,16 @@ export const driveStep = async (input: DriveInput): Promise<DriveResult> => {
       const quotaBlock = credentialID
         ? ModelRoute.credentialQuotaBlocked(credentialID, now)
         : undefined
+      const providerBlock = ModelRoute.providerQuotaBlocked(target, now)
       const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
       const credentialProbe =
         credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
-      const isPoolExhausted = poolExhausted.get(index) ?? false
       if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
       else if (credentialUntil > now && !credentialProbe)
         unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
       else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
-      else if (isPoolExhausted)
-        unavailable.set(index, `pool-quota-exhausted:${ModelRoute.poolIDOf(definition, index) ?? "pool"}`)
+      else if (providerBlock)
+        unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
       else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
       else if (isSkipped) unavailable.set(index, "user-skip")
       else if (isOverBudget) unavailable.set(index, "soft-budget")
@@ -133,7 +125,7 @@ export const driveStep = async (input: DriveInput): Promise<DriveResult> => {
         (until <= now || targetProbe) &&
         (credentialUntil <= now || credentialProbe) &&
         quotaBlock === undefined &&
-        !isPoolExhausted &&
+        providerBlock === undefined &&
         (limited <= now || kept) &&
         !isSkipped &&
         !isOverBudget &&
@@ -145,9 +137,7 @@ export const driveStep = async (input: DriveInput): Promise<DriveResult> => {
       const credentialID = credentialOf(definition.targets[index])
       return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now) === undefined
     })
-    const nonPool = usable.filter((index) => !poolExhausted.get(index))
-    const nonPoolNonFull = nonPool.filter((index) => nonFull.includes(index))
-    const lastResort = nonPool.length === 0 ? [] : nonPoolNonFull.length > 0 ? nonPoolNonFull : nonPool
+    const lastResort = nonFull.length > 0 ? nonFull : usable
     return { unavailable, eligible: ready.length > 0 ? ready : input.allowCooling ? lastResort : [] }
   }
 
