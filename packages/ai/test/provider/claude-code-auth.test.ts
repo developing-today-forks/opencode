@@ -534,6 +534,7 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     const { sources, calls } = harness()
     const signIn = await beginClaudeCodeSignIn(sources)
     await expect(signIn.callback("   ")).rejects.toBeInstanceOf(ClaudeCodeSignInError)
+    await expect(signIn.callback("auth-code-1")).rejects.toBeInstanceOf(ClaudeCodeSignInError)
     // The state mismatch is judged on its own paste, on the SAME
     // sign-in: a failed callback does not cache its rejection (#1868).
     await expect(signIn.callback("auth-code-1#wrong-state")).rejects.toThrow("state mismatch")
