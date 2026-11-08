@@ -12,6 +12,24 @@ export function getDirectory(path: string | undefined) {
   return parts.slice(0, parts.length - 1).join("/") + "/"
 }
 
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff
+
+// A cut between a high and a low surrogate would emit a lone surrogate;
+// drop the pair whole so the result stays well-formed (at most one char shorter).
+const safeHead = (text: string, end: number) =>
+  end > 0 && end < text.length && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))
+    ? text.slice(0, end - 1)
+    : text.slice(0, end)
+
+const safeTail = (text: string, count: number) => {
+  if (count <= 0) return ""
+  const start = text.length - count
+  return start > 0 && isHighSurrogate(text.charCodeAt(start - 1)) && isLowSurrogate(text.charCodeAt(start))
+    ? text.slice(start + 1)
+    : text.slice(start)
+}
+
 export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
   const filename = getFilename(path)
   if (filename.length <= maxLength) return filename
@@ -21,8 +39,8 @@ export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
   const lastDot = filename.lastIndexOf(".")
   const extension = lastDot <= 0 ? "" : filename.slice(lastDot)
   const available = maxLength - extension.length - 1
-  if (available <= 0) return filename.slice(0, maxLength - 1) + "…"
-  return filename.slice(0, available) + "…" + extension
+  if (available <= 0) return safeHead(filename, maxLength - 1) + "…"
+  return safeHead(filename, available) + "…" + extension
 }
 
 export function truncateMiddle(text: string, maxLength = 20) {
@@ -33,7 +51,7 @@ export function truncateMiddle(text: string, maxLength = 20) {
   const end = Math.floor(available / 2)
   // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
   // slicing with it would return the whole string.
-  return text.slice(0, start) + "…" + (end > 0 ? text.slice(-end) : "")
+  return safeHead(text, start) + "…" + (end > 0 ? safeTail(text, end) : "")
 }
 
 const isDrive = (value: string) => {
