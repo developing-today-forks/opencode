@@ -441,6 +441,7 @@ export interface ServingStep {
   readonly routeID: string
   readonly outcome: string
   readonly failedOverTo: string | null
+  readonly hedged: boolean | null
   readonly assistantMessageID: string | null
   readonly timeStarted: number
   readonly timeEnded: number
@@ -457,6 +458,7 @@ export const servingSteps = (rows: readonly ServingAttemptRow[]): ServingStep[] 
     routeID: row.routeID,
     outcome: row.outcome,
     failedOverTo: row.failedOverTo,
+    hedged: row.hedged,
     assistantMessageID: row.assistantMessageID,
     timeStarted: row.timeStarted,
     timeEnded: row.timeEnded,
@@ -477,6 +479,11 @@ export interface LastServing {
    * recorded a `failed_over_to` destination. */
   readonly failedOver: boolean
   readonly failedOverTo: string | null
+  /** True when the turn was a hedged race: some attempt ended `hedged-out`, or at least two
+   * attempts carry the hedged flag. A hedged race is not a failover - the losing leg did not
+   * fail, it was out-raced - so a turn whose non-serving attempts all ended `hedged-out`
+   * reports `failedOver: false` even when the hedge leg served. */
+  readonly hedged: boolean
   readonly timeStarted: number
 }
 
@@ -496,6 +503,11 @@ export const lastServing = (rows: readonly ServingAttemptRow[]): LastServing | n
   const attemptedLeaf = `${attempted.providerID}/${attempted.modelID}`
   const leaf = `${served.providerID}/${served.modelID}`
   const failedOverTo = chronological.find((row) => row.failedOverTo !== null)?.failedOverTo ?? null
+  const nonServing = chronological.filter((row) => row !== served)
+  const hedged =
+    chronological.some((row) => row.outcome === "hedged-out") ||
+    chronological.filter((row) => row.hedged === true).length >= 2
+  const allNonServingHedgedOut = nonServing.length > 0 && nonServing.every((row) => row.outcome === "hedged-out")
   return {
     leaf,
     providerID: served.providerID,
@@ -504,8 +516,9 @@ export const lastServing = (rows: readonly ServingAttemptRow[]): LastServing | n
     routeID: served.routeID,
     outcome: served.outcome,
     attemptedLeaf,
-    failedOver: attemptedLeaf !== leaf || failedOverTo !== null,
+    failedOver: !allNonServingHedgedOut && (attemptedLeaf !== leaf || failedOverTo !== null),
     failedOverTo,
+    hedged,
     timeStarted: served.timeStarted,
   }
 }
