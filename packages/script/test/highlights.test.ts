@@ -97,9 +97,9 @@ describe("highlights truncate surrogate pairs", () => {
   })
 
   test("keeps a pair that fits whole before the word-boundary cut", () => {
-    const title = "a".repeat(40) + " " + "b".repeat(16) + "😀" + " more words follow here"
+    const title = "a".repeat(40) + "😀" + " " + "b".repeat(16) + " more words follow here"
     const result = parse(notes(title, "short body"))
-    expect(result.items[0].title).toBe("a".repeat(40) + "…")
+    expect(result.items[0].title).toBe("a".repeat(40) + "😀…")
     expect(result.items[0].title.isWellFormed()).toBe(true)
   })
 
