@@ -5,6 +5,7 @@ import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { Effect } from "effect"
 import { SessionSystemPrompt } from "../session/system-prompt.js"
+import DELEGATION_PROMPT from "../session/runner/prompt/delegation.txt"
 
 import PROMPT_GPT from "./system-prompt/gpt.txt"
 import PROMPT_ASTRA from "./system-prompt/gpt-astra.txt"
@@ -66,11 +67,8 @@ export const DeepSeekPlugin = make("opencode.prompt.deepseek", (model) =>
   model.id.toLowerCase().includes("deepseek") ? PROMPT_KIMI : undefined,
 )
 
-// The shared delegation stance (#1888): the same sentence every family prompt
-// file carries, so a session's delegation behavior does not vary by serving leaf.
-export const DELEGATION_STANCE = `# Delegation
-
-Do not spawn subagents unless the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.`
+// The shared delegation guidance (#1887/#1888), rendered by the base and family prompts.
+export const DELEGATION_GUIDANCE = DELEGATION_PROMPT.trim()
 
 const FAMILY_MATCHES = ["gpt", "claude", "kimi", "trinity", "muse", "deepseek"] as const
 
@@ -79,7 +77,7 @@ const FAMILY_MATCHES = ["gpt", "claude", "kimi", "trinity", "muse", "deepseek"] 
 export const fallbackDelegationPrompt = (model: Model.Info): string | undefined => {
   const id = model.id.toLowerCase()
   if (FAMILY_MATCHES.some((family) => id.includes(family))) return undefined
-  return DELEGATION_STANCE
+  return DELEGATION_GUIDANCE
 }
 
 export const FallbackPlugin = make(
