@@ -461,6 +461,80 @@ describe("ModelUsage serving readout (#1891)", () => {
     expect(ModelUsage.servingSteps([])).toEqual([])
   })
 
+  test("lastServing does not report a hedged race won by the hedge leg as a failover", () => {
+    // Newest-first: the hedge leg (started later) won; the primary ended hedged-out, not failed.
+    const rows = [
+      servingRow({
+        providerID: "vibe-direct",
+        modelID: "mistral-small-latest",
+        variant: "high",
+        outcome: "success",
+        hedged: true,
+        timeStarted: 3_000,
+        timeEnded: 3_500,
+      }),
+      servingRow({ outcome: "hedged-out", hedged: true, timeStarted: 2_000, timeEnded: 3_400 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "vibe-direct/mistral-small-latest",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+      failedOverTo: null,
+      hedged: true,
+      outcome: "success",
+    })
+    expect(ModelUsage.servingSteps(rows).map((step) => step.hedged)).toEqual([true, true])
+  })
+
+  test("lastServing does not report a hedged race won by the primary as a failover", () => {
+    // Newest-first: the primary won; the hedge leg (started later) ended hedged-out.
+    const rows = [
+      servingRow({
+        providerID: "vibe-direct",
+        modelID: "mistral-small-latest",
+        variant: "high",
+        outcome: "hedged-out",
+        hedged: true,
+        timeStarted: 3_000,
+        timeEnded: 3_400,
+      }),
+      servingRow({ outcome: "success", hedged: true, timeStarted: 2_000, timeEnded: 3_500 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "openai/gpt-6-luna",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: false,
+      hedged: true,
+      outcome: "success",
+    })
+  })
+
+  test("lastServing still reports a failover when a turn also contains a hedged race", () => {
+    // Newest-first: the retry on the hedge target served; the turn also had a
+    // genuine failure (earliest attempt) and a hedged-out leg. The failure is
+    // not out-raced noise, so failedOver stays true while hedged is also true.
+    const rows = [
+      servingRow({
+        providerID: "vibe-direct",
+        modelID: "mistral-small-latest",
+        variant: "high",
+        outcome: "success",
+        timeStarted: 3_000,
+        timeEnded: 3_500,
+      }),
+      servingRow({ outcome: "hedged-out", hedged: true, timeStarted: 2_500, timeEnded: 3_400 }),
+      servingRow({ outcome: "failure", failedOverTo: "vibe-direct/mistral-small-latest", timeStarted: 2_000, timeEnded: 2_400 }),
+    ]
+    expect(ModelUsage.lastServing(rows)).toMatchObject({
+      leaf: "vibe-direct/mistral-small-latest",
+      attemptedLeaf: "openai/gpt-6-luna",
+      failedOver: true,
+      failedOverTo: "vibe-direct/mistral-small-latest",
+      hedged: true,
+      outcome: "success",
+    })
+  })
+
   test("lastServing only groups the newest turn, never an older turn's failover", () => {
     const rows = [
       servingRow({ assistantMessageID: "msg_2", timeStarted: 5_000, timeEnded: 5_500 }),

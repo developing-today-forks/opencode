@@ -266,11 +266,11 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>) => {
   if (report.lastServing) {
     const last = report.lastServing
     lines.push(
-      `serving last step: ${last.leaf}${last.variant ? `#${last.variant}` : ""} via route ${last.routeID} (outcome ${last.outcome})${last.failedOver ? `; attempted ${last.attemptedLeaf} -> failed over${last.failedOverTo ? ` to ${last.failedOverTo}` : ""}, served by ${last.leaf}` : "; no failover"}`,
+      `serving last step: ${last.leaf}${last.variant ? `#${last.variant}` : ""} via route ${last.routeID} (outcome ${last.outcome})${last.failedOver ? `; attempted ${last.attemptedLeaf} -> failed over${last.failedOverTo ? ` to ${last.failedOverTo}` : ""}, served by ${last.leaf}` : last.hedged ? "; hedged race (no failover)" : "; no failover"}`,
     )
     for (const step of report.serving.slice(0, 10)) {
       lines.push(
-        `serving step ${new Date(step.timeStarted).toISOString()}: ${step.leaf}${step.variant ? `#${step.variant}` : ""} via route ${step.routeID}, outcome ${step.outcome}${step.failedOverTo ? `, failed over to ${step.failedOverTo}` : ""}`,
+        `serving step ${new Date(step.timeStarted).toISOString()}: ${step.leaf}${step.variant ? `#${step.variant}` : ""} via route ${step.routeID}, outcome ${step.outcome}${step.hedged ? ", hedged" : ""}${step.failedOverTo ? `, failed over to ${step.failedOverTo}` : ""}`,
       )
     }
   }
