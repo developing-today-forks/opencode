@@ -112,7 +112,9 @@ describe("availability classification (#1828)", () => {
     ModelRoute.failed(target, policy, now, {})
     expect(ModelRoute.cooldownUntil(target, now) - now).toBe(120_000)
     ModelRoute.failed(target, policy, now, {})
-    expect(ModelRoute.cooldownUntil(target, now) - now).toBe(240_000)
+    // The third failure would double to 240s; the failure cap holds an ordinary
+    // (unknown) failure's grace at 120s instead (#2212).
+    expect(ModelRoute.cooldownUntil(target, now) - now).toBe(120_000)
     expect(availabilityOf("prov", now)[0]?.class).toBe("unknown")
     ModelRoute.completed(target, policy, { firstTokenMs: 25, responseMs: 90, tokensPerSecond: 60 }, now)
     ModelRoute.failed(target, policy, now, {})

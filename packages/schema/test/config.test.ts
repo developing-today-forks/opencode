@@ -434,6 +434,7 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
     bench: {
       maxCooldownMs: 3_600_000,
       multiplier: 3,
+      failureCapMs: 300_000,
       retryAfterMinMs: 2_000,
       cooldownCapMs: 120_000,
       quotaCooldownCapMs: 7_200_000,
@@ -484,6 +485,7 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
       { bench: { maxCooldownMs: -1 } },
       { bench: { maxCooldownMs: 0 } },
       { bench: { retryAfterMinMs: 86_400_001 } },
+      { bench: { failureCapMs: 86_400_001 } },
       { demotion: { factor: 0 } },
       { demotion: { factor: 1.5 } },
       { demotion: { factor: -0.5 } },

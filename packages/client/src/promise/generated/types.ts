@@ -2843,6 +2843,7 @@ export type ConfigEntry =
               bench?: {
                 maxCooldownMs?: number
                 multiplier?: number
+                failureCapMs?: number
                 retryAfterMinMs?: number
                 cooldownCapMs?: number
                 quotaCooldownCapMs?: number
@@ -2912,6 +2913,7 @@ export type ConfigEntry =
             bench?: {
               maxCooldownMs?: number
               multiplier?: number
+              failureCapMs?: number
               retryAfterMinMs?: number
               cooldownCapMs?: number
               quotaCooldownCapMs?: number
