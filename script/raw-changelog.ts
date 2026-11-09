@@ -81,8 +81,14 @@ function section(areas: Set<string>) {
   return "Core"
 }
 
-function type(message: string) {
-  if (message.match(/fix/i)) return "Bugfixes"
+const excluded = /^(?:ignore|test|chore|ci|release)(?:\([^)]*\))?!?:/i
+
+export function isExcluded(message: string) {
+  return excluded.test(message)
+}
+
+export function type(message: string) {
+  if (message.match(/^fix(?:\([^)]*\))?!?:/i)) return "Bugfixes"
   return "Improvements"
 }
 
@@ -126,7 +132,7 @@ async function commits(from: string, to: string) {
   for (const hash of log.split("\n").filter(Boolean)) {
     const item = data.get(hash)
     if (!item) continue
-    if (item.message.match(/^(ignore:|test:|chore:|ci:|release:)/i)) continue
+    if (isExcluded(item.message)) continue
 
     const diff = await $`git diff-tree --no-commit-id --name-only -r ${hash}`.text()
     const areas = new Set<string>()
@@ -161,7 +167,7 @@ async function contributors(from: string, to: string) {
   for (const item of await diff(base, head)) {
     const title = item.message.split("\n")[0] ?? ""
     if (!item.login || team.includes(item.login)) continue
-    if (title.match(/^(ignore:|test:|chore:|ci:|release:)/i)) continue
+    if (isExcluded(title)) continue
     if (!users.has(item.login)) users.set(item.login, new Set())
     users.get(item.login)!.add(title)
   }
