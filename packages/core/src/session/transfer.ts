@@ -1,6 +1,7 @@
 export * as SessionTransfer from "./transfer.js"
 
 import { SessionTransfer } from "@opencode/schema/session-transfer"
+import { SessionError } from "@opencode/schema/session-error"
 import { Tool } from "@opencode/schema/tool"
 import { Skill } from "@opencode/schema/skill"
 import { eq } from "drizzle-orm"
@@ -173,6 +174,16 @@ function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
 }
 
+function sanitizeError(id: string, error: SessionError.Error): SessionError.Error {
+  return {
+    ...error,
+    message: redact("error-message", id, error.message),
+    response: error.response
+      ? { ...error.response, body: redact("error-response-body", id, error.response.body) }
+      : undefined,
+  }
+}
+
 function metadata(kind: string, id: string, value: Readonly<Record<string, unknown>> | undefined) {
   if (!value) return value
   return Object.keys(value).length > 0 ? { redacted: `${kind}:${id}` } : value
@@ -265,6 +276,11 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
     return {
       ...message,
       metadata: meta,
+      error: message.error === undefined ? undefined : sanitizeError(message.id, message.error),
+      retry:
+        message.retry === undefined
+          ? undefined
+          : { ...message.retry, error: sanitizeError(message.id, message.retry.error) },
       content: message.content.map((content) => {
         if (content.type === "text")
           return {
@@ -293,6 +309,7 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
       return {
         ...message,
         metadata: meta,
+        error: sanitizeError(message.id, message.error),
       }
     return {
       ...message,
@@ -307,6 +324,12 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
         : {}),
     }
   }
+  if (message.type === "idle")
+    return {
+      ...message,
+      metadata: meta,
+      error: message.error === undefined ? undefined : sanitizeError(message.id, message.error),
+    }
   return { ...message, metadata: meta }
 }
 
@@ -325,6 +348,7 @@ function sanitizeToolState(id: string, state: SessionMessage.ToolState): Session
   return {
     ...state,
     input: { redacted: `tool-input:${id}` },
+    error: sanitizeError(id, state.error),
     content: state.content ? map(state.content, (item) => sanitizeToolContent(id, item)) : undefined,
     metadata: meta,
   }
