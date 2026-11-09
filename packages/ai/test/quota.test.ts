@@ -3,7 +3,17 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { resolveTursoLimits, tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { formatResetAfter, normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
+import {
+  formatResetAfter,
+  getAuthEntry,
+  normalizeTimestamp,
+  projectAuth,
+  QUOTA_RESPONSE_MAX_BYTES,
+  readQuotaJson,
+  toNumber,
+  toTimestamp,
+  toUsageWindow,
+} from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
@@ -2767,5 +2777,37 @@ describe("OpenRouter calendar reset calculation", () => {
 
   test("unknown reset periods have no calendar reset", () => {
     expect(resolveResetAt("quarterly", Date.UTC(2026, 11, 31))).toBeNull()
+  })
+})
+
+describe("getAuthEntry reads own properties only (#2189)", () => {
+  test("returns null for prototype-named aliases that are not own entries", () => {
+    const auth = {}
+    for (const alias of ["toString", "constructor", "valueOf", "__proto__", "hasOwnProperty"]) {
+      expect(getAuthEntry(auth, [alias])).toBeNull()
+    }
+    expect(getAuthEntry(auth, ["groq"])).toBeNull()
+  })
+
+  test("returns the first own entry in alias order and ignores inherited members", () => {
+    const entry = { type: "api", key: "sk-fixture" } as const
+    const auth = { groq: entry }
+    expect(getAuthEntry(auth, ["toString", "groq"])).toEqual(entry)
+    expect(getAuthEntry(auth, ["groq", "toString"])).toEqual(entry)
+  })
+
+  test("an own prototype-named entry stored by projectAuth still round-trips", () => {
+    const ctx = {
+      credentials: [
+        { id: "row-1", integrationID: "toString", active: true, value: { type: "key", key: "sk-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: {},
+    }
+    const auth = projectAuth(ctx as never)
+    expect(Object.hasOwn(auth, "toString")).toBe(true)
+    expect(getAuthEntry(auth, ["toString"])).toEqual({ type: "api", key: "sk-fixture" })
   })
 })
