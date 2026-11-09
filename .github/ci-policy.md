@@ -1,8 +1,8 @@
-# CI policy — fast tier, full main tier (no PR triggers)
+# CI policy — basic tier, main tier (no PR triggers, no push triggers)
 
 This repo follows the fleet CI design `ci-fast-pr-full-main`
 (developing-today/code#1779; phases code#1780/#1781/#1782, tracker
-code#1599): merges to `main` get basic validation fast and then run
+code#1599): the basic tier validates fast, the main tier runs
 everything, and a red main is owned by the remediation chain
 (`.github/workflows/main-broken.yml`). Tuning the line between the
 tiers means editing this table — never the pipeline shape.
@@ -10,29 +10,42 @@ tiers means editing this table — never the pipeline shape.
 No workflow triggers on `pull_request` or `pull_request_target`:
 that is the deliberate no-PR-trigger policy (PR #1401, enforced by
 the workflow-policy gate, #1406) so a fork PR can never run code
-with this repo's credentials. The tier split below therefore runs
-on push to `main`, on the nightly schedule, and by hand — there is
-no PR tier, whatever older text said (#1533).
+with this repo's credentials.
+
+Since PR #1635 there is likewise no push-triggered validation:
+every `push:` trigger was removed from the validation workflows
+(Drew's dispatch/schedule-only ruling), and this file was reconciled
+to that reality by #1927. The tiers therefore run **by manual
+dispatch and on schedule only** — a merge to `main` starts no
+validation run by itself. The single remaining `push:` trigger in
+the repo is `nix-hashes.yml` (paths-gated to `bun.lock`,
+`package.json`, `flake.lock`, and the nix node_modules inputs): it
+is a hash-maintenance automation, not a validation tier, and it is
+the exception that proves the rule below. There is no PR tier and
+no push tier, whatever older text said (#1533).
 
 ## Change-class policy (design §3.3)
 
 Highest class wins when a change spans classes.
 
-| class | trigger paths (examples) | fast tier (push to `main`) |
+| class | trigger paths (examples) | basic tier |
 |---|---|---|
 | 0 — prose | `**.md`, `docs/`, comments-only changes | nothing, or markdown lint only |
 | 1 — config/data | `**.json/yaml/toml` non-build, `.github/**` (non-workflow) | syntax parse + lint of changed files |
 | 2 — package source (default) | one package's `src` + tests | lint/format + typecheck/syntax of affected packages + affected unit tests |
 | 3 — elevated | lockfiles, `go.mod`/`go.sum` roots, `flake.nix`/`flake.lock`, build definitions, `.github/workflows/**`, shared/core libraries | class 2 + compile check of affected packages |
-| 4 — nix expressions | `**.nix` | class 1 + parse/eval of the changed files only (never full flake check in the fast tier) |
+| 4 — nix expressions | `**.nix` | class 1 + parse/eval of the changed files only (never full flake check in the basic tier) |
 
 ## Merge requirement
 
 **Merge requirement: none at the PR. No checks run on a pull
 request at all (no-PR-trigger policy, PR #1401 / gate #1406), so
-nothing can gate a merge from the PR side; validation lands with
-the push to `main`, and a red main is owned by the remediation
-chain (`main-broken.yml`).**
+nothing can gate a merge from the PR side — and no validation run
+starts automatically at merge time either. Validation happens when
+the tier workflows are dispatched against `main` (and, for `test`,
+on the nightly schedule); a red main is owned by the remediation
+chain (`main-broken.yml`, which watches the tier workflows'
+`workflow_run` completions on `main`).**
 
 The basic tier's checks are named so the tier is recognizable in
 the check list on a `main` run — they carry the `basic` prefix:
@@ -48,22 +61,24 @@ Workflow names (`test`, `check`, `nix-eval`) are deliberately NOT
 renamed: the Phase 3 watcher (`main-broken.yml`) references them by
 name in its `workflow_run` trigger. Job display names carry the tier
 label instead. The full main-tier jobs (`build`, `e2e` suites) run
-in the same push-to-`main` runs, after the basic tier.
+in the same dispatched or scheduled runs, after the basic tier.
 
 ## How the classes map to this repo's workflows
 
-- `check` (typecheck + changed-file lint) — the fast tier's core; runs
-  on push to `main` and on manual dispatch. Unchanged by the tier split.
-- `test` — fast tier: `affected` + `unit` for affected packages only.
-  Main tier: `build` and `e2e` additionally run on push to `main`, on
-  manual dispatch, and on the nightly schedule (`0 3 * * *`), which
-  re-runs the full suite as a backstop. The `e2e (<os>)` aggregator job
-  treats a tier-skipped e2e suite as the expected result on those runs.
-- `nix-eval` — full evaluation on every push to `main` and on manual
-  dispatch (the push trigger carries no paths filter; there is no
-  paths-gated PR variant, because there are no PR triggers).
-- `storybook` — paths-gated already; unchanged apart from the standard
-  concurrency group.
+- `check` (typecheck + changed-file lint) — the basic tier's core;
+  **manual dispatch only** (`workflow_dispatch`). Unchanged by the
+  tier split.
+- `test` — basic tier: `affected` + `unit` for affected packages
+  only. Main tier: `build` and `e2e` additionally run **on manual
+  dispatch and on the nightly schedule (`0 3 * * *`)**, which
+  re-runs the full suite as a backstop. The `e2e (<os>)` aggregator
+  job treats a tier-skipped e2e suite as the expected result on
+  those runs.
+- `nix-eval` — full evaluation on **manual dispatch only** (there
+  is no push trigger and no paths-gated PR variant, because there
+  are no PR triggers).
+- `storybook` — **manual dispatch only**; unchanged apart from the
+  standard concurrency group.
 
 ## Release gate (Phase 3, code#1782 step 7)
 
@@ -85,10 +100,11 @@ vscode, the checked-out code's SHA is gated as well), and pass the
 same tag to the publish script as a pinned argument — the gated
 commit is always the published one. `release-github-action.yml` only
 cuts the `github-v*` tag and publishes nothing itself; the publish it
-feeds is gated, so it carries no separate gate. Because the main tier
-runs concurrently with a push-triggered publish, a push whose gate
-has not completed yet is refused: wait for a green main for that SHA,
-then re-run (dispatch) the publish workflow.
+feeds is gated, so it carries no separate gate. Because the tier
+workflows run only on dispatch or schedule, a publish dispatch whose
+gate has not completed for that SHA is refused: dispatch the tier
+workflows, wait for a green main for that SHA, then re-run
+(dispatch) the publish workflow.
 
 Hotfix override: set the repository variable `MAIN_GATE_OVERRIDE=1`
 to bypass the gate for one release — the bypass is announced as a
@@ -99,14 +115,19 @@ main; it is not a way to make red-main releases routine.
 ## Dedup rule
 
 A commit must not run the same suite twice: no workflow triggers
-on `pull_request` at all (#1401), and `push` is restricted to
-`branches: [main]` everywhere, so each merge produces exactly one
-push-to-main run — the main tier, not a duplicate.
+on `pull_request` at all (#1401), and validation workflows carry
+no `push:` trigger at all (#1635), so a merge produces **zero**
+automatic validation runs — each tier run is a deliberate dispatch
+(or the nightly scheduled `test` run), never a duplicate of a
+push-triggered one.
 
 ## Concurrency standard (design §4)
 
-Branch and dispatch check runs cancel on supersede; push-to-main
-runs are keyed by `run_id` so they are never cancelled:
+Runs on `main` are keyed by `run_id` so they are never cancelled;
+branch and dispatch runs on other refs cancel on supersede.
+`check.yml` and `test.yml` express this as a `case(...)` on
+`github.ref`; `nix-eval.yml` and `storybook.yml` still carry the
+equivalent template expression:
 
 ```yaml
 concurrency:
