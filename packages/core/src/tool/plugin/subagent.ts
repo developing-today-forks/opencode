@@ -66,7 +66,7 @@ export const Output = Schema.Struct({
 })
 export const description = [
   "Spawns an agent in a child session to work on the specified task.",
-  "Subagents are the default way to delegate non-trivial work: launch one rather than doing everything in the current session.",
+  "Spawn subagents only when the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.",
   "A subagent may itself launch subagents, subject to the depth limit and to model governance; governance failures name the allowed models, so pick a permitted one and retry.",
   "The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
