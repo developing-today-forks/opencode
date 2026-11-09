@@ -3,7 +3,17 @@ import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { resolveTursoLimits, tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
-import { formatResetAfter, getAuthEntry, normalizeTimestamp, projectAuth, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
+import {
+  formatResetAfter,
+  getAuthEntry,
+  normalizeTimestamp,
+  projectAuth,
+  QUOTA_RESPONSE_MAX_BYTES,
+  readQuotaJson,
+  toNumber,
+  toTimestamp,
+  toUsageWindow,
+} from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
