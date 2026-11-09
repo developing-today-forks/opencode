@@ -1,2 +1,6 @@
 # Code comments
 By default, match the surrounding comment density: where the code has none, add none. Use comments sparingly, only where they are appropriate, such as for behavior that is not obvious from the code itself. Instructions from the user or the project take precedence over this guidance.
+
+# Delegation
+
+Do not spawn subagents unless the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.
