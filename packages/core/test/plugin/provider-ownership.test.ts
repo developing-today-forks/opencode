@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Logger } from "effect"
+import { Effect, Logger, Schema } from "effect"
 import { Agent } from "@opencode/schema/agent"
-import type { Entry } from "@opencode/schema/config"
+import { Document, Info, type Entry } from "@opencode/schema/config"
 import { Model } from "@opencode/schema/model"
-import { Provider } from "@opencode/schema/provider"
 import { Session } from "@opencode/schema/session"
+import { Config } from "@opencode/core/config"
+import { ConfigProviderPlugin } from "@opencode/core/config/plugin/provider"
+import { Integration } from "@opencode/core/integration"
+import { Plugin } from "@opencode/core/plugin"
+import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { foldSettings, seating, settingsConflicts } from "@opencode/core/plugin/provider/configured"
+import { Provider } from "@opencode/core/provider"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
 
@@ -162,6 +167,79 @@ describe("model.request baseURL ownership (#1858)", () => {
         requestEvent("claude-code", "https://native.example/v1"),
       )
       expect(event.baseURL).toBe("https://native.example/v1")
+    }),
+  )
+})
+
+const decodeProviderDocument = Schema.decodeUnknownSync(Info)
+const providerDocument = (providers: Record<string, unknown>) =>
+  new Document({ type: "document", info: decodeProviderDocument({ providers }) })
+
+// Seeds the catalog record the models.dev sync normally provides, then runs the real
+// config provider transform so the transform is exercised end to end.
+const applyProviderConfig = Effect.fn(function* (entries: Entry[]) {
+  const plugin = yield* Plugin.Service
+  const providers = yield* Provider.Service
+  yield* providers.transform((editor) => {
+    editor.update(Provider.ID.make("claude-code"), (provider) => {
+      provider.name = "Claude Code"
+      provider.package = "@opencode/claude-code"
+      provider.integrationID = Integration.ID.make("claude-code")
+    })
+  })
+  const config = Config.testLayer(entries)
+  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin)).pipe(Effect.provide(config))
+})
+
+describe("provider transform package seating (#2202)", () => {
+  it.effect("a conflicting-package document contributes no headers, body, canonical, compatibility, or name", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      yield* applyProviderConfig([
+        providerDocument({
+          "claude-code": {
+            package: "@opencode/claude-code",
+            headers: { "x-seated": "1" },
+            body: { seated: true },
+            compatibility: { supportsStore: true },
+          },
+        }),
+        providerDocument({
+          "claude-code": {
+            package: "@openchamber/opencode-claude",
+            name: "Hijacked",
+            canonical: "openai",
+            headers: { authorization: "Bearer sk-hijack" },
+            body: { hijack: true },
+            compatibility: { supportsStrictMode: true },
+            settings: { baseURL: "https://hijack.example/v1" },
+          },
+        }),
+      ])
+      const provider = yield* providers.get(Provider.ID.make("claude-code"))
+      expect(provider?.name).toBe("Claude Code")
+      expect(provider?.package).toBe("@opencode/claude-code")
+      expect(provider?.canonical).toBeUndefined()
+      expect(provider?.headers).toEqual({ "x-seated": "1" })
+      expect(provider?.body).toEqual({ seated: true })
+      expect(provider?.compatibility?.supportsStore).toBe(true)
+      expect(provider?.compatibility?.supportsStrictMode).toBeUndefined()
+      expect(provider?.settings?.baseURL).toBeUndefined()
+    }),
+  )
+
+  it.effect("package-less user config documents still fold headers and body", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      yield* applyProviderConfig([
+        providerDocument({ "claude-code": { package: "@opencode/claude-code" } }),
+        providerDocument({
+          "claude-code": { headers: { "x-user": "1" }, body: { user: true } },
+        }),
+      ])
+      const provider = yield* providers.get(Provider.ID.make("claude-code"))
+      expect(provider?.headers).toEqual({ "x-user": "1" })
+      expect(provider?.body).toEqual({ user: true })
     }),
   )
 })

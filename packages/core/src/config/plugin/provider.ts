@@ -91,8 +91,13 @@ export const Plugin = define({
       for (const [id, item, conflict] of items) {
         const providerID = id
         const current = providers.get(providerID)
-        const source = providers.get(item.canonical ?? current?.provider.canonical ?? providerID)
-        const changed = item.canonical !== undefined && item.canonical !== current?.provider.canonical
+        // A document that lost the package seat contributes nothing to the seated provider,
+        // identity included: its canonical neither remaps the provider nor selects the clone
+        // source (#2202). A conflicted canonical once resurrected the seated provider's
+        // models from a provider it does not own.
+        const canonical = conflict ? undefined : item.canonical
+        const source = providers.get(canonical ?? current?.provider.canonical ?? providerID)
+        const changed = canonical !== undefined && canonical !== current?.provider.canonical
         // The model-routes plugin owns the route provider and returns early when a record
         // already exists, so creating one here would suppress every pool. Its per-model
         // settings are still recorded below and applied by the model transform, after
@@ -108,15 +113,16 @@ export const Plugin = define({
             // An instance is available once its own account is connected, unless config supplies the key.
             if (!instances.has(Provider.ID.make(providerID)) || item.settings?.apiKey !== undefined)
               provider.activation = "enabled"
-            if (item.canonical !== undefined) provider.canonical = item.canonical
-            if (item.name) provider.name = item.name
+            if (canonical !== undefined) provider.canonical = canonical
+            if (!conflict && item.name) provider.name = item.name
             if (!conflict && item.package !== undefined) provider.package = item.package
-            if (item.compatibility !== undefined)
+            if (!conflict && item.compatibility !== undefined)
               provider.compatibility = { ...provider.compatibility, ...item.compatibility }
             if (!conflict && item.settings !== undefined)
               provider.settings = Provider.mergeOverlay(provider.settings, item.settings)
-            if (item.headers !== undefined) provider.headers = Provider.mergeHeaders(provider.headers, item.headers)
-            if (item.body !== undefined) provider.body = Provider.mergeOverlay(provider.body, item.body)
+            if (!conflict && item.headers !== undefined)
+              provider.headers = Provider.mergeHeaders(provider.headers, item.headers)
+            if (!conflict && item.body !== undefined) provider.body = Provider.mergeOverlay(provider.body, item.body)
           })
         // A provider-level baseURL replaces the catalog URL of every model of the provider, not only
         // the models config names (the per-model deletion in the loop below): catalog models such as
