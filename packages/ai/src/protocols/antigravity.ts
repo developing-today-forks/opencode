@@ -322,6 +322,17 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
   // constrain strings only, and minimum/maximum constrain numbers only,
   // so a root carrying only such a keyword describes that one type —
   // a forced OBJECT both narrows it to objects and strands the keyword.
+  // The same holds for a format-only root (#2235): format qualifies one
+  // scalar type (a string, number, or integer), never an object, so a
+  // forced OBJECT narrows it and strands the format. With format checked,
+  // this guard accounts for the whole SCHEMA_FIELDS vocabulary: the
+  // composition, enum, element, constraint, and format keywords checked
+  // below are self-describing; properties, propertyOrdering, required,
+  // minProperties, and maxProperties are object keywords and correctly
+  // keep the default; title, description, default, example, and nullable
+  // are annotations that pick no type. (exclusiveMinimum and
+  // exclusiveMaximum never reach the guard — convertSchemaNode folds
+  // them into minimum/maximum.)
   if (
     converted.type === undefined &&
     converted.anyOf === undefined &&
@@ -337,7 +348,8 @@ export const convertSchema = (schema: unknown, anthropic = false) => {
     converted.maxLength === undefined &&
     converted.pattern === undefined &&
     converted.minimum === undefined &&
-    converted.maximum === undefined
+    converted.maximum === undefined &&
+    converted.format === undefined
   )
     converted.type = "OBJECT"
   return converted
