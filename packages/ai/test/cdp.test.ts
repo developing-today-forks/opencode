@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cdpPageFetch, connectWs } from "../src/quota/cdp.js"
+import { cdpPageFetch, connectWs, isSessionExpiredStatus } from "../src/quota/cdp.js"
 import type { QuotaContext } from "../src/quota/types.js"
 
 const quotaCtx = (overrides: Partial<QuotaContext>): QuotaContext => ({
@@ -8,6 +8,44 @@ const quotaCtx = (overrides: Partial<QuotaContext>): QuotaContext => ({
   instances: new Map(),
   providerConfig: {},
   ...overrides,
+})
+
+describe("CDP session-expired classification (#2166)", () => {
+  const outcome = (status: number, url: string) => ({ status, url, text: "" })
+
+  test("200 quota reads ignore auth/login substrings in resource names and query values", () => {
+    for (const url of [
+      "https://admin.example/api/authorizations",
+      "https://admin.example/api/login-history",
+      "https://admin.example/authors/42",
+      "https://admin.example/api/quota?next=login&scope=auth",
+      "https://auth.example/api/quota",
+    ]) {
+      expect(isSessionExpiredStatus(outcome(200, url))).toBe(false)
+    }
+  })
+
+  test("401 responses are session-expired", () => {
+    expect(isSessionExpiredStatus(outcome(401, "https://admin.example/api/quota"))).toBe(true)
+  })
+
+  test("403 responses are session-expired", () => {
+    expect(isSessionExpiredStatus(outcome(403, "https://admin.example/api/quota"))).toBe(true)
+  })
+
+  test("a 200 redirect landing on a login page is session-expired", () => {
+    expect(isSessionExpiredStatus(outcome(200, "https://admin.example/login?next=%2Fapi%2Fquota"))).toBe(true)
+  })
+
+  test("a standalone auth path segment keeps the scoped boundary semantics", () => {
+    expect(isSessionExpiredStatus(outcome(200, "https://admin.example/auth/sign-in"))).toBe(true)
+  })
+
+  test("plain 200, 500, and missing-URL outcomes are not session-expired", () => {
+    expect(isSessionExpiredStatus(outcome(200, "https://admin.example/api/quota"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(500, "https://admin.example/api/quota"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(0, ""))).toBe(false)
+  })
 })
 
 type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply" | "eval-exception"
