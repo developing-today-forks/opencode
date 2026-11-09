@@ -652,6 +652,25 @@ it.effect("convertSchema leaves constraint-only roots self-describing (#1950)", 
   }),
 )
 
+it.effect("convertSchema leaves format-only roots self-describing (#2235)", () =>
+  Effect.sync(() => {
+    // A format-only root qualifies one scalar type — a string, number,
+    // or integer — never an object: forcing type OBJECT onto it narrows
+    // the formatted scalar to objects and strands the format, the #1950
+    // defect one vocabulary keyword past that fix's guard. Both targets
+    // behave alike.
+    for (const anthropic of [false, true]) {
+      expect(convertSchema({ format: "date-time" } as never, anthropic)).toEqual({ format: "date-time" })
+      expect(convertSchema({ format: "int64" } as never, anthropic)).toEqual({ format: "int64" })
+    }
+    // Controls: object keywords still take the OBJECT default — a
+    // minProperties root constrains objects, and the empty schema is the
+    // unconstrained parameters shape the default exists for.
+    expect(convertSchema({ minProperties: 1 } as never)).toEqual({ minProperties: 1, type: "OBJECT" })
+    expect(convertSchema({} as never)).toEqual({ type: "OBJECT" })
+  }),
+)
+
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
