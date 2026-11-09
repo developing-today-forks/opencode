@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { encodeFilePath, getDirectory, getFilename, getFilenameTruncated, truncateMiddle } from "./path.js"
+import {
+  comparablePath,
+  containsDirectory,
+  encodeFilePath,
+  getDirectory,
+  getFilename,
+  getFilenameTruncated,
+  sameDirectory,
+  truncateMiddle,
+} from "./path.js"
 
 describe("client paths", () => {
   test("reads POSIX and Windows paths with the same rules", () => {
@@ -93,5 +102,52 @@ describe("encodeFilePath", () => {
       expect(url.protocol).toBe("file:")
       expect(url.searchParams.get("start")).toBe("10")
     })
+  })
+})
+
+describe("directory containment", () => {
+  test("an empty parent contains nothing", () => {
+    expect(containsDirectory("", "/etc/passwd")).toBe(false)
+    expect(containsDirectory("", "/")).toBe(false)
+    expect(containsDirectory("", "rel/path")).toBe(false)
+    expect(containsDirectory("", "")).toBe(false)
+  })
+
+  test("empty-input behavior is pinned for comparablePath and sameDirectory", () => {
+    expect(comparablePath("")).toBe("")
+    expect(sameDirectory("", "")).toBe(false)
+    expect(sameDirectory("", "/a")).toBe(false)
+    expect(sameDirectory("/a", "")).toBe(false)
+  })
+
+  test.each([
+    ["/", "/etc", true],
+    ["/", "/", true],
+    ["/a/b", "/a/b", true],
+    ["/a/b", "/a/b/c", true],
+    ["/a/b/", "/a/b/c", true],
+    ["/a/b", "/a/bc", false],
+    ["/a/b", "/a", false],
+  ])("containsDirectory(%j, %j)", (parent, child, expected) => {
+    expect(containsDirectory(parent, child)).toBe(expected)
+  })
+
+  test("Windows drive and UNC paths compare case-insensitively", () => {
+    expect(containsDirectory("C:\\Repo", "c:/repo/src")).toBe(true)
+    expect(containsDirectory("c:/repo", "C:\\REPO\\SRC")).toBe(true)
+    expect(containsDirectory("C:\\Repo", "c:/repo2")).toBe(false)
+    expect(containsDirectory("\\\\Server\\Share", "//server/share/dir")).toBe(true)
+    expect(containsDirectory("\\\\Server\\Share", "//server/other/dir")).toBe(false)
+    expect(sameDirectory("C:\\Repo\\", "c:/repo")).toBe(true)
+    expect(sameDirectory("\\\\SERVER\\Share", "//server/share/")).toBe(true)
+  })
+
+  test("comparablePath normalizes trailing slashes and roots", () => {
+    expect(comparablePath("/")).toBe("/")
+    expect(comparablePath("/a/b/")).toBe("/a/b")
+    expect(comparablePath("C:\\repo\\")).toBe("C:/repo")
+    expect(comparablePath("C:")).toBe("C:/")
+    expect(sameDirectory("/a/b/", "/a/b")).toBe(true)
+    expect(sameDirectory("/a/b", "/a/bc")).toBe(false)
   })
 })
