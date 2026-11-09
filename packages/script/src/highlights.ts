@@ -53,9 +53,28 @@ function plain(value: string) {
 
 function truncate(value: string, limit: number) {
   if (value.length <= limit) return value
-  const cut = value.slice(0, limit - 1)
+  const cut = dropStraddlingPair(value, limit - 1)
   const space = cut.lastIndexOf(" ")
-  return `${(space > limit / 2 ? cut.slice(0, space) : cut).trimEnd()}…`
+  return `${(space > limit / 2 ? dropStraddlingPair(cut, space) : cut).trimEnd()}…`
+}
+
+// A cut at an index splits a surrogate pair when the code unit before it is a high surrogate and the one
+// at it is that pair's low half; keeping either side alone leaves ill-formed text that re-encodes as
+// U+FFFD. The house rule (core Text.truncate) is to never split a pair: a straddling pair is dropped
+// whole. @opencode/script has no core dependency, so the guard is replicated here.
+function splitsPair(value: string, index: number) {
+  return (
+    index > 0 &&
+    index < value.length &&
+    value.charCodeAt(index - 1) >= 0xd800 &&
+    value.charCodeAt(index - 1) <= 0xdbff &&
+    value.charCodeAt(index) >= 0xdc00 &&
+    value.charCodeAt(index) <= 0xdfff
+  )
+}
+
+function dropStraddlingPair(value: string, index: number) {
+  return value.slice(0, splitsPair(value, index) ? index - 1 : index)
 }
 
 /** Returns the JSON a stable release build embeds as `OPENCODE_RELEASE_HIGHLIGHTS`, warning about malformed notes. */

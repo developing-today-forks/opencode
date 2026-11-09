@@ -78,3 +78,36 @@ describe("highlights", () => {
     expect(result.problems).toEqual(["Kept the first 5 of 7 highlights"])
   })
 })
+
+describe("highlights truncate surrogate pairs", () => {
+  const notes = (title: string, body: string) => "### Highlights\n- **" + title + "**: " + body + "\n"
+
+  test("drops a pair straddling the title limit whole", () => {
+    const result = parse(notes("a".repeat(58) + "😀" + " extra words here to pass the limit", "short body"))
+    expect(result.problems).toEqual([])
+    expect(result.items[0].title).toBe("a".repeat(58) + "…")
+    expect(result.items[0].title.isWellFormed()).toBe(true)
+  })
+
+  test("drops a pair straddling the body limit whole", () => {
+    const result = parse(notes("short title", "b".repeat(298) + "😀" + " tail words to pass the body limit"))
+    expect(result.problems).toEqual([])
+    expect(result.items[0].body).toBe("b".repeat(298) + "…")
+    expect(result.items[0].body.isWellFormed()).toBe(true)
+  })
+
+  test("keeps a pair that fits whole before the word-boundary cut", () => {
+    const title = "a".repeat(40) + "😀" + " " + "b".repeat(16) + " more words follow here"
+    const result = parse(notes(title, "short body"))
+    expect(result.items[0].title).toBe("a".repeat(40) + "😀…")
+    expect(result.items[0].title.isWellFormed()).toBe(true)
+  })
+
+  test("non-straddling truncation is unchanged", () => {
+    const result = parse(notes("a".repeat(70), "short body"))
+    expect(result.items[0].title).toBe("a".repeat(59) + "…")
+    const words = parse(notes("word ".repeat(20).trim(), "short body"))
+    expect(words.items[0].title).toBe("word ".repeat(11).trim() + "…")
+    expect(words.items[0].title.isWellFormed()).toBe(true)
+  })
+})

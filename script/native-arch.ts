@@ -27,12 +27,15 @@ export namespace NativeArch {
   /**
    * Fails unless `file` is a native image for `arch` and every image embedded in it targets `arch` too. A
    * wrong-architecture library loads only on the machine that needs it, so it ships unnoticed: 2.0.27's ARM64
-   * Windows CLI embedded an x64 rust_pty.dll and could not open a terminal.
+   * Windows CLI embedded an x64 rust_pty.dll and could not open a terminal. A universal (fat) Mach-O is one
+   * image whose arches are all of its slices, so it passes only when every slice targets the requested arch:
+   * a multi-arch universal fails both single-arch gates, while a fat image whose slices all map to one arch
+   * (e.g. arm64 + arm64e) passes that arch's gate.
    */
   export async function verify(file: string, arch: "x64" | "arm64") {
     const found = images(await readFile(file))
     if (found[0]?.offset !== 0) throw new Error(`${file} is not a native executable or library`)
-    const wrong = found.filter((image) => !image.arches.includes(arch))
+    const wrong = found.filter((image) => image.arches.some((imageArch) => imageArch !== arch))
     if (wrong.length === 0) return
     throw new Error(
       `${file} must contain only ${arch} code, but has ${wrong
