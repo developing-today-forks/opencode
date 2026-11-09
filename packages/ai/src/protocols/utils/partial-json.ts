@@ -264,11 +264,16 @@ const _parseJSON = (jsonString: string, allow: number) => {
       return decodeJson(jsonString.substring(start, index))
     } catch (error) {
       if (jsonString.substring(start, index) === "-") markPartialJSON("Not sure what '-' is")
-      try {
-        return decodeJson(jsonString.substring(start, jsonString.lastIndexOf("e")))
-      } catch {
-        throwMalformedError(String(error))
+      if (Allow.NUM & allow) {
+        const token = jsonString.substring(start, index)
+        const exponent = token.lastIndexOf("e")
+        if (exponent > 0) {
+          try {
+            return decodeJson(token.substring(0, exponent))
+          } catch {}
+        }
       }
+      throwMalformedError(String(error))
     }
   }
 
