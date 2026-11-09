@@ -489,6 +489,7 @@ export interface FailureHint {
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
  * A stated retry-after is believed as-is and never multiplied; every other class multiplies its
  * bench by the configured bench multiplier per consecutive failure (auth and quota start from the long bench), capped at maxCooldownMs.
+ * An ordinary failure (no quota, no auth, no stated retry-after) is capped at failureCapMs instead: its grace stays short.
  * A quota bench may end sooner at a trustworthy window reset; that reset is remembered on
  * the state, and one learned later arms the bench the same way (armBenchProbe). The count survives recover() and
  * resets only on a success, so a permanently failing target backs off instead of being retried at
@@ -508,10 +509,20 @@ const bench = (
   state.consecutiveFailures += 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
   const ladder = currentConstants(location).bench
+  const escalated = base * ladder.multiplier ** (state.consecutiveFailures - 1)
+  // Drew's failover spec (2026-11-08, #2212): when a leg errors the route moves to the next
+  // candidate, and the leg's grace before it may be tried again is short. An ordinary failure
+  // -- a transport timeout, a provider-internal error, an unclassified one -- therefore stops
+  // escalating at failureCapMs (never below the route's own base): uncapped, a target with a
+  // healthy success rate but a small timeout rate was benched for hours on end, the cascade
+  // ran out of eligible candidates, and sessions died on the last error they saw. Quota and
+  // auth keep the long ladder: the provider stated the window, or the refusal cannot heal
+  // by itself. A stated retry-after is believed as-is, as before.
+  const graced = hint?.quota || hint?.auth ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
   const cooldown =
     hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
-      : Math.min(base * ladder.multiplier ** (state.consecutiveFailures - 1), ladder.maxCooldownMs)
+      : Math.min(graced, ladder.maxCooldownMs)
   const until = now + cooldown
   state.cooldownUntil = quotaResetAt !== undefined && quotaResetAt > now ? Math.min(until, quotaResetAt) : until
   const reason = hint?.quota
@@ -1234,6 +1245,7 @@ export interface SettingsConfig {
   readonly bench?: {
     readonly maxCooldownMs?: number
     readonly multiplier?: number
+    readonly failureCapMs?: number
     readonly retryAfterMinMs?: number
     readonly cooldownCapMs?: number
     readonly quotaCooldownCapMs?: number
@@ -3423,6 +3435,7 @@ export interface Constants {
   readonly bench: {
     readonly maxCooldownMs: number
     readonly multiplier: number
+    readonly failureCapMs: number
     readonly retryAfterMinMs: number
     readonly cooldownCapMs: number
     readonly quotaCooldownCapMs: number
@@ -3445,6 +3458,9 @@ export const DEFAULT_CONSTANTS: Constants = {
     maxCooldownMs: MAX_COOLDOWN_MS,
     // The `**` ladder in bench(): each consecutive failure multiplies the previous bench.
     multiplier: 2,
+    // The ceiling on an ordinary failure's escalated bench (#2212): the grace a leg gets
+    // before the route may try it again stays short, per Drew's failover spec (2026-11-08).
+    failureCapMs: 120_000,
     // The floor in bench(): a stated retry-after is believed, but never as less than this.
     retryAfterMinMs: 1_000,
     // The caps policy() applies to a route health block's bench bases.

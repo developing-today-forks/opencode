@@ -295,17 +295,20 @@ describe("ModelRoute failure hints", () => {
   })
 
   test("repeated failures double the bench, and the count survives the bench expiring", () => {
+    // Driven with quota failures: their ladder still escalates without the failure
+    // cap. An ordinary failure's ladder stops at failureCapMs (#2212), which the
+    // machinery-constants tests below pin down.
     ModelRoute.resetHealth()
-    ModelRoute.failed(t, policy, 1_000)
-    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 60_000)
-    ModelRoute.failed(t, policy, 61_000)
-    expect(ModelRoute.cooldownUntil(t, 61_000)).toBe(61_000 + 120_000)
-    ModelRoute.failed(t, policy, 181_000)
-    expect(ModelRoute.cooldownUntil(t, 181_000)).toBe(181_000 + 240_000)
+    ModelRoute.failed(t, policy, 1_000, { quota: true })
+    expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 900_000)
+    ModelRoute.failed(t, policy, 901_000, { quota: true })
+    expect(ModelRoute.cooldownUntil(t, 901_000)).toBe(901_000 + 1_800_000)
+    ModelRoute.failed(t, policy, 2_701_000, { quota: true })
+    expect(ModelRoute.cooldownUntil(t, 2_701_000)).toBe(2_701_000 + 3_600_000)
     // Expiry (recover) does not forgive the history: the next failure keeps escalating.
-    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(0)
-    ModelRoute.failed(t, policy, 421_000)
-    expect(ModelRoute.cooldownUntil(t, 421_000)).toBe(421_000 + 480_000)
+    expect(ModelRoute.cooldownUntil(t, 6_301_000)).toBe(0)
+    ModelRoute.failed(t, policy, 6_301_000, { quota: true })
+    expect(ModelRoute.cooldownUntil(t, 6_301_000)).toBe(6_301_000 + 7_200_000)
   })
 
   test("a success resets the escalation back to the base bench", () => {
@@ -335,8 +338,10 @@ describe("ModelRoute failure hints", () => {
   })
 
   test("the escalated bench is capped at a day", () => {
+    // Quota failures: the class whose ladder still runs to the 24h cap. An ordinary
+    // failure's ladder stops at failureCapMs long before this (#2212).
     ModelRoute.resetHealth()
-    for (let index = 0; index < 30; index++) ModelRoute.failed(t, policy, 1_000)
+    for (let index = 0; index < 30; index++) ModelRoute.failed(t, policy, 1_000, { quota: true })
     expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 86_400_000)
   })
 })
@@ -1760,6 +1765,7 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       bench: {
         maxCooldownMs: 86_400_000,
         multiplier: 2,
+        failureCapMs: 120_000,
         retryAfterMinMs: 1_000,
         cooldownCapMs: 3_600_000,
         quotaCooldownCapMs: 86_400_000,
@@ -1779,10 +1785,14 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.currentConstants()).toEqual(ModelRoute.DEFAULT_CONSTANTS)
   })
 
-  test("the bench ladder doubles toward the 24h cap by default, and stops at a configured cap", () => {
+  test("the bench ladder doubles to the failure cap by default, and stops at a configured cap", () => {
     const now = 1_000_000
     ModelRoute.failed(target, policy, now)
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 120_000)
+    // A third ordinary failure would double to 240s; the failure cap holds the grace at
+    // 120s instead -- the short grace of Drew's failover spec (#2212).
     ModelRoute.failed(target, policy, now)
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 120_000)
 
@@ -1793,10 +1803,26 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 5_000)
   })
 
+  test("the failure cap is configurable, and quota benches are not bounded by it", () => {
+    const now = 5_000_000
+    ModelRoute.configureConstants({ bench: { failureCapMs: 300_000 } })
+    for (let i = 0; i < 6; i++) ModelRoute.failed(target, policy, now)
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 300_000)
+
+    ModelRoute.resetHealth()
+    // A quota failure starts from the long bench and keeps doubling past the failure
+    // cap: the provider stated the window, so its bench is bounded by the stated reset
+    // and the 24h cap, not by the ordinary failure grace.
+    ModelRoute.failed(target, policy, now, { quota: true })
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 900_000)
+    ModelRoute.failed(target, policy, now, { quota: true })
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 1_800_000)
+  })
+
   test("a fractional bench multiplier keeps growing past the old exponent limit until it reaches the cap", () => {
     const now = 3_000_000
     const quick = ModelRoute.policy({ cooldownMs: 60_000 })
-    ModelRoute.configureConstants({ bench: { multiplier: 1.1 } })
+    ModelRoute.configureConstants({ bench: { multiplier: 1.1, failureCapMs: 86_400_000 } })
 
     Array.from({ length: 32 }, () => ModelRoute.failed(target, quick, now))
     expect(ModelRoute.cooldownUntil(target, now)).toBeGreaterThan(now + 60_000 * 1.1 ** 30)
@@ -1995,7 +2021,7 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       () => ({ escalation: { afterGiveUps: 6, outcomeWindow: 10 } }),
       "/loc/a",
     )
-    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3 } }), "/loc/b")
+    const offB = ModelRoute.onSettingsConfig(() => ({ bench: { multiplier: 3, failureCapMs: 300_000 } }), "/loc/b")
     try {
       // Six give-ups recorded for A: A's window (10) keeps all six, so A's
       // afterGiveUps (6) can actually trigger; the default window (5) would

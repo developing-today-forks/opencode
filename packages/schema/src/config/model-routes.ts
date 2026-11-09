@@ -469,7 +469,8 @@ export class Log extends Schema.Class<Log>("Config.ModelRoute.Log")({
 /** The bench ladder: how a failure benches a target (or one of its credentials), and how far
  * the bench can run. A stated retry-after is believed as-is within these bounds; every other
  * failure class doubles its bench per consecutive failure, and the count resets only on a
- * success. */
+ * success. An ordinary failure's bench stops escalating at failureCapMs; quota and
+ * authentication benches are not bounded by it. */
 export class Bench extends Schema.Class<Bench>("Config.ModelRoute.Settings.Bench")({
   maxCooldownMs: LongDurationMs.annotate({
     description: "The longest bench any failure can impose, however far the ladder escalates. Defaults to 86400000 (24h).",
@@ -480,6 +481,10 @@ export class Bench extends Schema.Class<Bench>("Config.ModelRoute.Settings.Bench
         "Each consecutive failure multiplies the bench by this. 1 keeps every bench at its base. Defaults to 2.",
     })
     .pipe(optional),
+  failureCapMs: DayDurationMs.annotate({
+    description:
+      "The longest bench an ordinary failure (transport, provider-internal, unclassified) can impose, however far its consecutive-failure ladder escalates: the leg gets this short grace and the route moves on. Quota and authentication benches are not bounded by it. Defaults to 120000.",
+  }).pipe(optional),
   retryAfterMinMs: DayDurationMs.annotate({
     description: "A provider's stated retry-after is believed, but never as less than this. Defaults to 1000.",
   }).pipe(optional),
