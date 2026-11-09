@@ -68,6 +68,10 @@ export function containsDirectory(parent: string, child: string) {
   }
   const root = normalize(parent)
   const target = normalize(child)
+  // An empty parent is not a directory: it contains nothing. Without this
+  // guard the prefix test below degenerates to startsWith("/") and every
+  // absolute path would count as contained.
+  if (!root) return false
   return target === root || target.startsWith(root.endsWith("/") ? root : `${root}/`)
 }
 

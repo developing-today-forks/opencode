@@ -40,7 +40,7 @@ jobs:
     # can run; masking just this leg lets compute-hash-darwin-fallback
     # (below) recover at the workflow level. If the fallback also fails,
     # the run still fails visibly. Linux legs keep failing the job as before.
-    continue-on-error: ${{ matrix.system == aarch64-darwin }}
+    continue-on-error: ${{ matrix.system == 'aarch64-darwin' }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,12 +107,12 @@ jobs:
   # #1871 fallback: run 42263623640 failed when the aarch64-darwin leg was
   # cancelled with zero steps - the macos-latest runner never started.
   # Recovery is workflow-level and bounded: exactly one recompute, on the
-  # alternate macos-14 runner pool, and only when the primary leg left no
+  # alternate macos-15 runner pool, and only when the primary leg left no
   # hash artifact. This job has no continue-on-error: if it fails, the run fails.
   compute-hash-darwin-fallback:
     timeout-minutes: 20
     needs: compute-hash
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -133,7 +133,7 @@ jobs:
             echo "Primary aarch64-darwin leg produced its hash; fallback compute not needed."
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Primary aarch64-darwin leg produced no hash artifact; computing it on macos-14 (see #1871)."
+            echo "::warning::Primary aarch64-darwin leg produced no hash artifact; computing it on macos-15 (see #1871)."
           fi
 
       - name: Setup Nix
