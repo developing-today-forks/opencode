@@ -69,7 +69,7 @@ entries. This is the rule-1 half of the audit, applied repo-wide.
 | --- | --- | --- | --- |
 | `vibe-direct` | S (static key) | clean | **COMPLIANT** (verified 2026-11-05) |
 | `antigravity-direct` | shares `vibe-auth` keyring pattern (via `secret-tool`) | clean | pending on `#1717` |
-| `muse-direct` | browser-born account token — rule-3 GAP (confirmed on `#2039`, 2026-11-08): no in-fork renewal or rotation, token expiry unrecorded; remedy determination routed under `#1717` | clean | pending on `#1717` |
+| `muse-direct` | `#13555` verdict (2026-11-08): the `dca:` account token is **not verifiably long-lived** (no expiry or refresh token recorded; two stored tokens returned 401, with rotation/revocation still a caveat). Use the stored minted `api_key` as primary; account-token exchange is bootstrap-only. | clean | api_key-primary remedy implemented; exchange 401 requires Muse app re-auth; account-token lifetime remains unverified |
 | `commandcode` | pending classification | clean | pending on `#1717` |
 | `claude-code` | stored `expiresAt` — classify leaf expiry | clean | pending on `#1717` |
 | `opencode-route` (façade) | leaves inherit their own classifications | clean | pending on `#1717` |

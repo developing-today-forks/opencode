@@ -21,6 +21,7 @@ const parseJson = (text: string): Record<string, string> => JSON.parse(text)
 const authFile = (metaJson: string) => `{"providers":{"meta":${metaJson}}}`
 const accountFile = authFile(`{"access_token":"${ACCOUNT_TOKEN}"}`)
 const storedKeyFile = authFile(`{"api_key":"${STORED_KEY}"}`)
+const storedKeyWithAccountFile = authFile(`{"access_token":"${ACCOUNT_TOKEN}","api_key":"${STORED_KEY}"}`)
 const keySettings = (key: string): MuseDirect.LanguageModelOptions => JSON.parse(`{"apiKey":${JSON.stringify(key)}}`)
 
 const textStream = (text: string) =>
@@ -389,6 +390,89 @@ it.effect("an api_key-only auth file is used directly, with no exchange", () =>
     expect(response.text).toBe("Direct")
     expect(calls).toHaveLength(1)
     expect(calls[0]!.headers.get("authorization")).toBe(`Bearer ${STORED_KEY}`)
+  }),
+)
+
+it.effect("prefers the stored api_key over an account token and reads it fresh per request", () =>
+  Effect.gen(function* () {
+    MuseDirectAuth.invalidate()
+    const files = [
+      storedKeyWithAccountFile,
+      authFile('{"access_token":"dca:updated-account-token","api_key":"LLM|updated-stored-key"}'),
+    ]
+    const exchange = fakeExchange(() => parseJson(`{"api_key":"${MINTED_KEY}"}`))
+    const direct = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: { readFile: () => files.shift(), fetchFn: exchange.fetchFn },
+    })
+    const calls: Array<Call> = []
+    const handler = (input: HandlerInput) =>
+      observe(calls, input).pipe(
+        Effect.map(() => input.respond(textStream("Direct"), { headers: { "content-type": "text/event-stream" } })),
+      )
+    const model = direct.model("muse-spark-1.3-contributor")
+
+    yield* generate(model, { prompt: "First" }, handler)
+    yield* generate(model, { prompt: "Second" }, handler)
+
+    expect(exchange.calls).toHaveLength(0)
+    expect(calls.map((call) => call.headers.get("authorization"))).toEqual([
+      `Bearer ${STORED_KEY}`,
+      "Bearer LLM|updated-stored-key",
+    ])
+  }),
+)
+
+it.effect("prefers a newly stored api_key over a cached bootstrap key", () =>
+  Effect.gen(function* () {
+    MuseDirectAuth.invalidate()
+    const files = [accountFile, storedKeyWithAccountFile]
+    const exchange = fakeExchange(() => parseJson(`{"api_key":"${MINTED_KEY}"}`))
+    const direct = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: { readFile: () => files.shift(), fetchFn: exchange.fetchFn },
+    })
+    const calls: Array<Call> = []
+    const handler = (input: HandlerInput) =>
+      observe(calls, input).pipe(
+        Effect.map(() => input.respond(textStream("Direct"), { headers: { "content-type": "text/event-stream" } })),
+      )
+    const model = direct.model("muse-spark-1.3-contributor")
+
+    yield* generate(model, { prompt: "Bootstrap" }, handler)
+    yield* generate(model, { prompt: "Stored key" }, handler)
+
+    expect(exchange.calls).toHaveLength(1)
+    expect(calls.map((call) => call.headers.get("authorization"))).toEqual([
+      `Bearer ${MINTED_KEY}`,
+      `Bearer ${STORED_KEY}`,
+    ])
+  }),
+)
+
+it.effect("surfaces a named re-auth message when the key exchange returns 401", () =>
+  Effect.gen(function* () {
+    MuseDirectAuth.invalidate()
+    const direct = MuseDirect.configure({
+      baseURL: "https://meta.test/v1",
+      sources: {
+        readFile: () => accountFile,
+        fetchFn: (async () => new Response("unauthorized", { status: 401 })) as typeof fetch,
+      },
+    })
+    const calls: Array<Call> = []
+    const handler = (input: HandlerInput) =>
+      observe(calls, input).pipe(Effect.map(() => input.respond(textStream("unreachable"))))
+    const error = yield* generate(direct.model("muse-spark-1.3-contributor"), { prompt: "Hello" }, handler).pipe(
+      Effect.flip,
+    )
+
+    expect(MuseDirectAuth.REAUTH_REQUIRED_MESSAGE).toBe(
+      "Muse account credential was rejected; sign in again with the Muse app",
+    )
+    expect(String(error)).toContain(MuseDirectAuth.REAUTH_REQUIRED_MESSAGE)
+    expect(String(error)).not.toContain("HTTP 401")
+    expect(calls).toHaveLength(0)
   }),
 )
 

@@ -12,7 +12,7 @@
 //   { "providers": { "meta": { "access_token": "dca:...",
 //                              "api_key": "LLM|..." } } }
 // The access_token is the ACCOUNT token; it is never sent to the
-// inference endpoint. It is exchanged at
+// inference endpoint. When the file has no stored api_key, it is exchanged at
 // POST https://api.meta.ai/muse-code/key (Authorization: Bearer
 // <account token>, x-api-version: 1.0.0, body {"onboard": false}) for
 // the plan's minted inference key (the response's api_key field), and
@@ -22,14 +22,15 @@
 //
 //   - the minted key is cached in memory for 10 minutes (the door's
 //     DIRECT_KEY_TTL_MS);
-//   - an upstream 401 invalidates the cache; the route's transport
-//     re-prepares once, so auth re-exchanges and the request retries
-//     exactly once (see protocols/muse-direct-responses.ts);
+//   - on the bootstrap path, an upstream 401 invalidates the minted-key
+//     cache; the route's transport re-prepares and re-exchanges once
+//     (see protocols/muse-direct-responses.ts);
 //   - an exchange reporting is_subs_active === false or
 //     require_payment === true is a HARD error carrying the door's own
 //     messages — never a silent fallback to another route or key;
-//   - an auth file holding only api_key (no account token) is used
-//     directly, without an exchange, read fresh per request.
+//   - a stored api_key is the primary inference credential, even when an
+//     account token is also present; it is read fresh per request;
+//   - the account token is exchanged only when no api_key is stored.
 //
 // The credential is read IN PLACE, never copied into the fork's
 // credential store, and never logged. Values are trimmed before use:
@@ -61,6 +62,7 @@ export const SUBSCRIPTION_INACTIVE_MESSAGE =
   "Direct Meta route unavailable: Muse Code subscription is not active (is_subs_active=false)"
 export const PAYMENT_REQUIRED_MESSAGE =
   "Direct Meta route unavailable: Muse Code subscription requires payment (require_payment=true)"
+export const REAUTH_REQUIRED_MESSAGE = "Muse account credential was rejected; sign in again with the Muse app"
 
 /** Injectable credential sources (tests); every field defaults to the real machine source. */
 export interface CredentialSources {
@@ -134,9 +136,9 @@ const readCredential = async (sources: CredentialSources): Promise<MuseCredentia
 
 /**
  * One exchange against /muse-code/key: the account token for the
- * plan's minted inference key. Every failure is a thrown Error with a
- * named, token-free message; the subscription states are hard errors
- * with the door's own wording.
+ * plan's minted inference key. A rejected account token has a named
+ * re-auth message; subscription states are hard errors with the door's
+ * own wording.
  */
 export const exchangeMintedKey = async (accountToken: string, sources: CredentialSources = {}): Promise<string> => {
   const base = (sources.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, "")
@@ -156,6 +158,7 @@ export const exchangeMintedKey = async (accountToken: string, sources: Credentia
     KEY_EXCHANGE_RESPONSE_MAX_BYTES,
     () => new Error(`Muse key exchange response exceeded ${KEY_EXCHANGE_RESPONSE_MAX_BYTES} bytes`),
   )
+  if (response.status === 401) throw new Error(REAUTH_REQUIRED_MESSAGE)
   if (!response.ok) throw new Error(`Muse key exchange failed: HTTP ${response.status}: ${text.slice(0, 200)}`)
   let body: unknown
   try {
@@ -190,7 +193,7 @@ const defaultSources: CredentialSources = {}
 const cacheBySources = new WeakMap<CredentialSources, SourceState>()
 let cacheGeneration = 0
 
-/** Drop the in-memory minted key (upstream 401: re-exchange on next use). */
+/** Drop the cached bootstrap key after an upstream 401. */
 export const invalidate = () => {
   cacheGeneration++
 }
@@ -201,21 +204,21 @@ const loadKey = (sources: CredentialSources = defaultSources): Promise<string> =
   const previous = cacheBySources.get(sources)
   const state = previous?.generation === cacheGeneration ? previous : { generation: cacheGeneration }
   if (state !== previous) cacheBySources.set(sources, state)
-  if (state.cached && now(sources) - state.cached.cachedAt < MINTED_KEY_TTL_MS) return Promise.resolve(state.cached.key)
   if (state.inflight) return state.inflight
   const inflight = (async () => {
     try {
       const credential = await readCredential(sources)
-      if (!credential) throw new Error(NOT_SIGNED_IN_MESSAGE)
-      if (credential.accountToken) {
-        const key = await exchangeMintedKey(credential.accountToken, sources)
-        state.cached = { key, cachedAt: now(sources) }
-        return key
+      if (credential?.inferenceKey) {
+        // A stored minted key is the stable inference credential; re-read it
+        // on every request so the Muse app can rotate it in place.
+        return credential.inferenceKey
       }
-      // api_key-only file: the stored key IS the inference credential;
-      // no exchange, and no TTL cache — it is re-read per request so an
-      // externally refreshed file takes effect immediately.
-      return credential.inferenceKey!
+      if (state.cached && now(sources) - state.cached.cachedAt < MINTED_KEY_TTL_MS) return state.cached.key
+      if (!credential) throw new Error(NOT_SIGNED_IN_MESSAGE)
+      if (!credential.accountToken) throw new Error(NOT_SIGNED_IN_MESSAGE)
+      const key = await exchangeMintedKey(credential.accountToken, sources)
+      state.cached = { key, cachedAt: now(sources) }
+      return key
     } finally {
       state.inflight = undefined
     }
