@@ -40,7 +40,7 @@ jobs:
     # can run; masking just this leg lets compute-hash-darwin-fallback
     # (below) recover at the workflow level. If the fallback also fails,
     # the run still fails visibly. Linux legs keep failing the job as before.
-    continue-on-error: ${{ matrix.system == aarch64-darwin }}
+    continue-on-error: ${{ matrix.system == 'aarch64-darwin' }}
     strategy:
       fail-fast: false
       matrix:
