@@ -300,7 +300,12 @@ export const projectAuth = (ctx: QuotaContext): Record<string, QuotaAuthEntry> =
 
 export const getAuthEntry = (auth: Record<string, QuotaAuthEntry>, aliases: string[]): QuotaAuthEntry | null => {
   for (const alias of aliases) {
-    if (auth[alias]) return auth[alias]
+    // Own-property read (#2189, #865 doctrine): a bare auth[alias] walks
+    // the prototype chain, so a prototype-named alias ("toString",
+    // "constructor", "valueOf", ...) returns an inherited member instead
+    // of null. An own prototype-named entry stored by projectAuth still
+    // round-trips, because defineProperty creates an own property.
+    if (Object.hasOwn(auth, alias)) return auth[alias]
   }
   return null
 }
