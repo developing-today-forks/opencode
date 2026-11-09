@@ -175,7 +175,15 @@ export const Plugin = {
 export const toModelContent = (path: string, offset: number | undefined, output: typeof Output.Type) => {
   if (output.type === "file" && output.encoding === "base64")
     return [
-      { type: "text", text: output.mime === "application/pdf" ? "PDF read successfully" : "Image read successfully" },
+      {
+        type: "text",
+        text:
+          output.mime === "application/pdf"
+            ? "PDF read successfully"
+            : output.mime.startsWith("audio/")
+              ? "Audio read successfully"
+              : "Image read successfully",
+      },
       {
         type: "file",
         uri: `data:${output.mime};base64,${output.content}`,

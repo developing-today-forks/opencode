@@ -20,6 +20,8 @@ const fixture = Effect.gen(function* () {
   return { environment: Environment.makeFiles(Environment.makeLocalDriver(spawner)), files, directory }
 })
 const absolute = (value: string) => AbsolutePath.make(value)
+const ftyp = (brand: string) =>
+  Buffer.concat([Buffer.from([0, 0, 0, 16]), Buffer.from("ftyp"), Buffer.from(brand), Buffer.alloc(4)])
 
 describe("ReadTool text serialization", () => {
   const cases = [
@@ -112,6 +114,48 @@ describe("ReadTool text serialization", () => {
 })
 
 describe("ReadToolFileSystem", () => {
+  it.live("ingests detected image and audio media", () =>
+    Effect.gen(function* () {
+      const current = yield* fixture
+      const cases = [
+        { name: "avif", bytes: ftyp("avif"), mime: "image/avif", label: "Image read successfully" },
+        { name: "heic", bytes: ftyp("heic"), mime: "image/heic", label: "Image read successfully" },
+        { name: "heif", bytes: ftyp("mif1"), mime: "image/heif", label: "Image read successfully" },
+        { name: "m4a", bytes: ftyp("M4A "), mime: "audio/mp4", label: "Audio read successfully" },
+        { name: "m4b", bytes: ftyp("M4B "), mime: "audio/mp4", label: "Audio read successfully" },
+        {
+          name: "bmp",
+          // A structurally plausible BMP header (#2149): bare "BM" bytes are prose, not a bitmap.
+          bytes: (() => {
+            const bytes = Buffer.alloc(58)
+            bytes.set([0x42, 0x4d], 0)
+            bytes.writeUInt32LE(bytes.length, 2)
+            bytes.writeUInt32LE(54, 10)
+            bytes.writeUInt32LE(40, 14)
+            bytes.writeInt32LE(1, 18)
+            bytes.writeInt32LE(1, 22)
+            return bytes
+          })(),
+          mime: "image/bmp",
+          label: "Image read successfully",
+        },
+      ]
+
+      for (const item of cases) {
+        const file = path.join(current.directory, `${item.name}.bin`)
+        yield* current.files.writeFile(file, item.bytes)
+        const result = yield* ReadToolFileSystem.read(current.environment, absolute(file), `${item.name}.bin`)
+        const base64 = item.bytes.toString("base64")
+
+        expect(result).toMatchObject({ type: "file", encoding: "base64", content: base64, mime: item.mime })
+        expect(ReadTool.toModelContent(`${item.name}.bin`, undefined, result)).toMatchObject([
+          { type: "text", text: item.label },
+          { type: "file", uri: `data:${item.mime};base64,${base64}`, mime: item.mime },
+        ])
+      }
+    }),
+  )
+
   it.effect("preserves the environment not-found error", () =>
     Effect.gen(function* () {
       const { environment, directory } = yield* fixture
