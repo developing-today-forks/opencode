@@ -160,3 +160,55 @@ describe("tool history normalization", () => {
     expect(normalizeToolHistory(input)).toBe(input)
   })
 })
+
+describe("tool history normalization — duplicate tool-call ids (#2178)", () => {
+  const dupCalls = () => Message.assistant([toolCall("dup", "a"), toolCall("dup", "b")])
+  const missing = (name: string) => ({
+    type: "tool-result",
+    id: "dup",
+    name,
+    result: { type: "error", value: "Tool result missing" },
+  })
+
+  test("synthesizes one missing result per occurrence when no results arrive", () => {
+    const normalized = normalizeToolHistory([dupCalls()])
+
+    expect(normalized).toHaveLength(2)
+    expect(normalized[1]?.content).toEqual([missing("a"), missing("b")])
+  })
+
+  test("attributes a single result to the first occurrence and synthesizes the second", () => {
+    const normalized = normalizeToolHistory([dupCalls(), toolResult("dup", "result-for-a", "wrong", "text")])
+
+    expect(normalized).toHaveLength(3)
+    expect(normalized[1]?.content[0]).toMatchObject({
+      type: "tool-result",
+      id: "dup",
+      name: "a",
+      result: { type: "text", value: "result-for-a" },
+    })
+    expect(normalized[2]?.content).toEqual([missing("b")])
+  })
+
+  test("attributes two results to their own occurrences in order, renaming neither", () => {
+    const normalized = normalizeToolHistory([
+      dupCalls(),
+      toolResult("dup", "result-for-a", "wrong", "text"),
+      toolResult("dup", "result-for-b", "wrong", "text"),
+    ])
+
+    expect(normalized).toHaveLength(3)
+    expect(normalized[1]?.content[0]).toMatchObject({ name: "a", result: { type: "text", value: "result-for-a" } })
+    expect(normalized[2]?.content[0]).toMatchObject({ name: "b", result: { type: "text", value: "result-for-b" } })
+  })
+
+  test("distinct-id control: missing results keep their own identities", () => {
+    const normalized = normalizeToolHistory([Message.assistant([toolCall("x", "a"), toolCall("y", "b")])])
+
+    expect(normalized).toHaveLength(2)
+    expect(normalized[1]?.content).toEqual([
+      { type: "tool-result", id: "x", name: "a", result: { type: "error", value: "Tool result missing" } },
+      { type: "tool-result", id: "y", name: "b", result: { type: "error", value: "Tool result missing" } },
+    ])
+  })
+})

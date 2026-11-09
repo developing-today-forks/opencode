@@ -435,7 +435,11 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
       throw new ClaudeCodeSignInError(
         "Malformed sign-in code: paste the full code#state value from the authorize page.",
       )
-    if (pastedState !== undefined && pastedState !== state)
+    if (pastedState === undefined)
+      throw new ClaudeCodeSignInError(
+        "Malformed sign-in code: paste the full code#state value from the authorize page.",
+      )
+    if (pastedState !== state)
       throw new ClaudeCodeSignInError("OAuth state mismatch: the pasted code was not issued for this sign-in attempt.")
     const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
       method: "POST",
@@ -447,7 +451,7 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
         code,
         code_verifier: pkce.verifier,
         redirect_uri: OAUTH_REDIRECT_URI,
-        state: pastedState ?? state,
+        state: pastedState,
       }).toString(),
     }).catch((cause: unknown) => {
       throw new ClaudeCodeSignInError(

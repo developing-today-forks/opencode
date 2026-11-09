@@ -5,17 +5,22 @@ const MISSING_TOOL_RESULT = "Tool result missing"
 
 export function normalizeToolHistory(messages: ReadonlyArray<Message>) {
   const normalized: Message[] = []
-  const pending = new Map<string, ToolCallPart>()
+  // Pending calls are tracked per occurrence, not per id: two calls can share an id
+  // (fork/merge histories, provider id reuse), and keying by id collapsed the second
+  // call over the first — its missing result was never synthesized and a real result
+  // was renamed to the surviving call's identity. The list keeps occurrence order;
+  // a result answers the earliest still-pending occurrence with its id.
+  const pending: ToolCallPart[] = []
   // System updates cannot sit between a tool call and its results, so they wait until every pending call is answered.
   const held: Message[] = []
   const releaseHeld = () => {
-    if (pending.size > 0) return
+    if (pending.length > 0) return
     normalized.push(...held)
     held.length = 0
   }
   const appendMissingResults = () => {
-    if (pending.size > 0) normalized.push(missingToolResults(pending.values()))
-    pending.clear()
+    if (pending.length > 0) normalized.push(missingToolResults(pending))
+    pending.length = 0
     releaseHeld()
   }
 
@@ -29,7 +34,7 @@ export function normalizeToolHistory(messages: ReadonlyArray<Message>) {
       continue
     }
 
-    if (message.role === "system" && pending.size > 0) {
+    if (message.role === "system" && pending.length > 0) {
       held.push(message)
       continue
     }
@@ -37,7 +42,7 @@ export function normalizeToolHistory(messages: ReadonlyArray<Message>) {
     normalized.push(message)
     if (message.role !== "assistant") continue
     for (const part of message.content) {
-      if (part.type === "tool-call" && part.providerExecuted !== true) pending.set(part.id, part)
+      if (part.type === "tool-call" && part.providerExecuted !== true) pending.push(part)
     }
   }
   appendMissingResults()
@@ -62,11 +67,12 @@ function missingToolResults(calls: Iterable<ToolCallPart>) {
   })
 }
 
-function normalizeToolMessage(message: Message, pending: Map<string, ToolCallPart>): Message | undefined {
+function normalizeToolMessage(message: Message, pending: ToolCallPart[]): Message | undefined {
   const content = message.content.map((part) => {
     if (part.type !== "tool-result" || part.providerExecuted === true) return part
-    const call = pending.get(part.id)
-    if (call) pending.delete(part.id)
+    const index = pending.findIndex((call) => call.id === part.id)
+    const call = index >= 0 ? pending[index] : undefined
+    if (index >= 0) pending.splice(index, 1)
     return normalizeToolResult(part, call)
   })
   if (content.length === 0) return undefined

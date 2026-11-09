@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { TestClock } from "effect/testing"
 import { Deferred, Effect, Exit, Fiber } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -815,6 +816,57 @@ describe("Form", () => {
       yield* unsubscribe
       yield* service.reply({ id: formID, answer: { name: "Ava" } })
       expect(yield* service.state(formID)).toEqual({ status: "answered", answer: { name: "Ava" } })
+    }),
+  )
+})
+
+describe("Form ask bounds (#1883)", () => {
+  it.effect("ask with a timeout resolves cancelled with the timeout message instead of pending forever", () =>
+    Effect.gen(function* () {
+      const service = yield* Form.Service
+      const fiber = yield* service
+        .ask(input, { timeout: "5 minutes", timeoutMessage: "too slow" })
+        .pipe(Effect.forkScoped)
+      yield* TestClock.adjust("5 minutes")
+      // Oracle: the form's own state (the session-store record the form endpoints serve).
+      expect(yield* Fiber.join(fiber)).toEqual({ status: "cancelled", message: "too slow" })
+      expect(yield* service.state(formID)).toEqual({ status: "cancelled", message: "too slow" })
+    }),
+  )
+
+  it.live("an identical deduped ask joins the pending form instead of creating a second question", () =>
+    Effect.gen(function* () {
+      const service = yield* Form.Service
+      const bus = yield* Bus.Service
+      const createdForms: Form.Info[] = []
+      const unsubscribe = yield* bus.listen((event) =>
+        event.type === Form.Event.Created.type
+          ? Effect.sync(() => {
+              createdForms.push((event.data as { readonly form: Form.Info }).form)
+            })
+          : Effect.void,
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+      const askInput = {
+        sessionID: SessionSchema.ID.make("ses_test"),
+        title: "Test form",
+        fields: [{ key: "name", type: "string", required: true }],
+      } satisfies Form.CreateInput
+      const first = yield* service.ask(askInput, { dedupePending: true }).pipe(Effect.forkScoped)
+      // Let the first ask create its form, then re-issue the identical ask (the
+      // forced-error + resume shape): it must join, not create a second form.
+      for (let i = 0; i < 50 && createdForms.length === 0; i++) yield* Effect.sleep("10 millis")
+      expect(createdForms).toHaveLength(1)
+      const second = yield* service.ask(askInput, { dedupePending: true }).pipe(Effect.forkScoped)
+      yield* Effect.sleep("50 millis")
+      // Oracle: exactly one pending form exists for the session (Form.list is what the
+      // form endpoints serve), and no second Created event was published.
+      expect(createdForms).toHaveLength(1)
+      const pending = yield* service.list({ sessionID: askInput.sessionID })
+      expect(pending.map((form) => form.id)).toEqual([createdForms[0]?.id])
+      yield* service.reply({ id: createdForms[0]!.id, answer: { name: "Ava" } })
+      expect(yield* Fiber.join(first)).toEqual({ status: "answered", answer: { name: "Ava" } })
+      expect(yield* Fiber.join(second)).toEqual({ status: "answered", answer: { name: "Ava" } })
     }),
   )
 })

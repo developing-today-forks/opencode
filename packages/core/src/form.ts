@@ -82,10 +82,19 @@ export interface ListInput {
   readonly sessionID?: Form.Info["sessionID"]
 }
 
+export interface AskOptions {
+  readonly timeout?: Duration.Input
+  readonly timeoutMessage?: string
+  readonly dedupePending?: boolean
+}
+
 export interface Interface {
   readonly close: Effect.Effect<void>
   readonly create: (input: CreateInput) => Effect.Effect<Info, AlreadyExistsError | InvalidFormError>
-  readonly ask: (input: CreateInput) => Effect.Effect<TerminalState, AlreadyExistsError | InvalidFormError>
+  readonly ask: (
+    input: CreateInput,
+    options?: AskOptions,
+  ) => Effect.Effect<TerminalState, AlreadyExistsError | InvalidFormError>
   readonly get: (id: ID) => Effect.Effect<Info, NotFoundError>
   readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<Info>>
   readonly state: (id: ID) => Effect.Effect<State, NotFoundError>
@@ -149,14 +158,45 @@ export const layer = Layer.effect(
       ),
     )
 
-    const ask = Effect.fn("Form.ask")((input: CreateInput) =>
+    const ask = Effect.fn("Form.ask")((input: CreateInput, options?: AskOptions) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const form = yield* create(input)
+          // Dedupe (#1883): an ask identical to a still-pending form (same session, title,
+          // and fields) joins that form instead of creating a second one, so a session
+          // resumed after a forced error cannot re-issue an identical unanswered
+          // question — the re-ask waits on the same form a watcher can already see.
+          const existing =
+            options?.dedupePending && input.id === undefined
+              ? Array.from(yield* Cache.values(forms)).find(
+                  (entry) =>
+                    entry.state.status === "pending" &&
+                    entry.form.sessionID === input.sessionID &&
+                    entry.form.title === input.title &&
+                    JSON.stringify(entry.form.fields) === JSON.stringify(input.fields),
+                )
+              : undefined
+          const form = existing?.form ?? (yield* create(input))
           const entry = yield* requireEntry(form.id).pipe(Effect.orDie)
-          return yield* restore(Deferred.await(entry.deferred)).pipe(
-            Effect.onInterrupt(() => Effect.ignore(cancel(form.id))),
+          // A joined ask does not own the form: interrupting it must not cancel the
+          // original asker's pending question.
+          const awaited = existing
+            ? Deferred.await(entry.deferred)
+            : Deferred.await(entry.deferred).pipe(Effect.onInterrupt(() => Effect.ignore(cancel(form.id))))
+          const timeout = options?.timeout
+          if (timeout === undefined) return yield* restore(awaited)
+          // Bounded wait (#1883): when the timeout fires the form is cancelled with a
+          // visible message and the ask resolves with that terminal state, instead of
+          // pending forever (a pending form's cache entry never expires). The cancel
+          // settles the shared deferred, so the race returns that same state either way.
+          const timedOut = Effect.sleep(timeout).pipe(
+            Effect.andThen(
+              cancel(form.id, {
+                message: options?.timeoutMessage ?? "Form timed out without being answered",
+              }).pipe(Effect.ignore),
+            ),
+            Effect.andThen(Deferred.await(entry.deferred)),
           )
+          return yield* restore(awaited.pipe(Effect.race(timedOut)))
         }),
       ),
     )

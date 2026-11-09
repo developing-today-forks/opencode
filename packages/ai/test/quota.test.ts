@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
-import { tursoWindows } from "../src/quota/providers/turso.js"
+import { resolveTursoLimits, tursoWindows } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
 import { formatResetAfter, normalizeTimestamp, QUOTA_RESPONSE_MAX_BYTES, readQuotaJson, toNumber, toTimestamp, toUsageWindow } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
@@ -569,6 +569,33 @@ describe("turso org usage mapping", () => {
     const unknown = tursoWindows(usage, { plan: "enterprise-unknown" })
     expect(unknown?.windows["rows-read"]?.usedPercent).toBe(50)
     expect(unknown?.windows.storage?.valueLabel).toBe("2.5 GB / 5 GB")
+  })
+
+  test("padded plan labels resolve the same limits as clean ones (#2154)", () => {
+    // Oracle: normalization is trim+lowercase on both sides of both
+    // matches; a padded label must never regress Scaler to Starter.
+    expect(resolveTursoLimits(" scaler ", null).rowsRead).toBe(100_000_000_000)
+    expect(resolveTursoLimits("Scaler", null).rowsRead).toBe(100_000_000_000)
+    const dynamic = { plans: [{ name: "Scaler", quotas: { rowsRead: 42_000_000_000 } }] }
+    expect(resolveTursoLimits(" scaler ", dynamic).rowsRead).toBe(42_000_000_000)
+    // A padded plans-doc name still matches dynamically.
+    const paddedDoc = { plans: [{ name: " Scaler ", quotas: { rowsRead: 42_000_000_000 } }] }
+    expect(resolveTursoLimits("scaler", paddedDoc).rowsRead).toBe(42_000_000_000)
+    // Through tursoWindows: the published label is trimmed and the
+    // denominators are Scaler's, not Starter's false 236% figure.
+    const usage = { organization: { usage: { rows_read: 1_180_000_000, storage_bytes: 10_800_000_000 } } }
+    const mapped = tursoWindows(usage, { plan: " scaler " })
+    expect(mapped?.planLabel).toBe("scaler")
+    expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
+    expect(mapped?.windows.storage?.usedPercent).toBe(45)
+  })
+
+  test("a whitespace-only plan label behaves as no label (#2154)", () => {
+    expect(resolveTursoLimits("   ", null).rowsRead).toBe(500_000_000)
+    const usage = { organization: { usage: { rows_read: 250_000_000 } } }
+    const mapped = tursoWindows(usage, { plan: "   " })
+    expect(mapped?.planLabel).toBeUndefined()
+    expect(mapped?.windows["rows-read"]?.usedPercent).toBe(50)
   })
 })
 

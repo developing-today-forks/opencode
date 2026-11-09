@@ -34,9 +34,8 @@ Use the instructions below and the tools available to assist the user.
 - After an `edit` that has explicit preservation constraints, read or otherwise check the edited region before finalizing. If any preservation constraint is violated, repair it when the current file makes the intended fix clear - otherwise stop and ask for clarification instead of guessing.
 
 # Tool Use - `subagent` Tool
-- You should proactively use the `subagent` tool to launch specialized subagents when the task at hand can be easily split up into multiple parallel workers.
-- If the user's prompt itself says multiple areas, components, or workstreams are independent, launch subagents via the `subagent` tool to tackle the task.
-- Use the `subagent` tool to minimize context token usage whenever tool calls generate large outputs but only a small subset is useful for the task at hand. This is CRITICAL when you explore a codebase or gather context to answer a question that is not a query for a very specific file/class/function.
+- Do not spawn subagents unless the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.
+- When delegation is asked for, provide each subagent a complete prompt with all necessary context, because a newly created subagent does not automatically see your current context. Delegated subagents are most useful for work that can be split into independent parallel workers and for keeping large tool outputs out of your own context.
 
 # Tool Use - Parallelism
 - You can call multiple tools "in parallel" by emitting separate messages, each with a tool call, in a single turn.
