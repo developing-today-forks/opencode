@@ -90,4 +90,17 @@ describe("githubActionsJWKSet (#1112)", () => {
       server.stop()
     }
   })
+
+  test("does not silently reuse a set built with different options for the same URL (#1898)", () => {
+    // Set construction is lazy (nothing is fetched until a verification), so an
+    // unroutable URL is safe here. Oracle: set identity — jose sets are opaque,
+    // so identity is exactly what decides whose options govern a verification.
+    const url = new URL("http://127.0.0.1:9/.well-known/jwks")
+    const first = githubActionsJWKSet(url, { cooldownDuration: 0 })
+    expect(githubActionsJWKSet(url, { cooldownDuration: 0 })).toBe(first)
+    expect(githubActionsJWKSet(url, { cooldownDuration: 30_000 })).not.toBe(first)
+    const noOptions = githubActionsJWKSet(url)
+    expect(noOptions).not.toBe(first)
+    expect(githubActionsJWKSet(url)).toBe(noOptions)
+  })
 })
