@@ -160,6 +160,12 @@ jobs:
         working-directory: script
         run: bun test gate-harness.test.ts
 
+      - name: Test raw-changelog classification
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#2206).
+        working-directory: script
+        run: bun test raw-changelog.test.ts
+
       - name: Test mcpx-cleanup script
         # script/ is not a workspace, so turbo test never picks up
         # script/mcpx-cleanup.test.ts, and the root bunfig test root
