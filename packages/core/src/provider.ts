@@ -193,7 +193,36 @@ const CORE_KEYS = ["chunkTimeout", "compaction", "encoding", "fetch", "headerTim
 const PROVIDER_ONLY_KEYS = ["chunkTimeout", "headerTimeout", "timeout", "transport"] as const
 
 export function nativeSettings(settings: Settings): Settings {
-  return Struct.omit(settings, CORE_KEYS)
+  const base = Struct.omit(settings, CORE_KEYS)
+  // #2203: the v1 config dialect spells effort `reasoning_effort`, and
+  // model/variant overlays nest it under an `options` key. Native
+  // providers (and their protocol option schemas, which strip unknown
+  // keys) accept only the camel `reasoningEffort`, so the v1 spellings
+  // were silently dropped and sessions ran at the default effort.
+  // Normalize once here — the single choke point every native
+  // provider's settings pass through — with muse-direct's precedence
+  // (#1872): top-level camel wins, then top-level snake, then the
+  // nested spellings. muse-direct's local normalization stays and is
+  // idempotent against this output.
+  const options = isRecord(base.options) ? base.options : undefined
+  const effort = [
+    base.reasoningEffort,
+    base.reasoning_effort,
+    options?.reasoningEffort,
+    options?.reasoning_effort,
+  ].find((value): value is string => typeof value === "string" && value !== "")
+  if (effort === undefined && !("reasoning_effort" in base) && options === undefined) return base
+  const result: Record<string, unknown> = { ...base }
+  delete result.reasoning_effort
+  if (options !== undefined) {
+    const nested: Record<string, unknown> = { ...options }
+    delete nested.reasoningEffort
+    delete nested.reasoning_effort
+    if (Object.keys(nested).length > 0) result.options = nested
+    else delete result.options
+  }
+  if (effort !== undefined) result.reasoningEffort = effort
+  return result as Settings
 }
 
 export function modelSettings(settings: Settings | undefined) {

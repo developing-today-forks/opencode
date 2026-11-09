@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { Effect } from "effect"
 import { Provider } from "@opencode/core/provider"
+import { LLM } from "@opencode/ai"
+import { compileRequest } from "@opencode/ai/route/client"
 
 describe("Provider timeouts (#972)", () => {
   test("passes valid timeouts through unchanged, including the largest honourable one", () => {
@@ -71,6 +73,68 @@ describe("Provider", () => {
       apiKey: "secret",
       reasoningEffort: "high",
     })
+  })
+
+  test("normalizes every v1-dialect effort spelling to reasoningEffort (#2203)", () => {
+    // Oracle: muse-direct's four spellings (#1872) — each must land as
+    // the native camel key, with the v1 spellings consumed, not copied.
+    expect(Provider.nativeSettings({ reasoningEffort: "medium" })).toEqual({ reasoningEffort: "medium" })
+    expect(Provider.nativeSettings({ reasoning_effort: "low" })).toEqual({ reasoningEffort: "low" })
+    expect(Provider.nativeSettings({ options: { reasoningEffort: "high" } })).toEqual({ reasoningEffort: "high" })
+    expect(Provider.nativeSettings({ options: { reasoning_effort: "xhigh" } })).toEqual({ reasoningEffort: "xhigh" })
+  })
+
+  test("v1 effort normalization keeps muse-direct precedence: native camel wins (#2203)", () => {
+    expect(
+      Provider.nativeSettings({
+        reasoningEffort: "medium",
+        reasoning_effort: "low",
+        options: { reasoningEffort: "high", reasoning_effort: "xhigh" },
+      }),
+    ).toEqual({ reasoningEffort: "medium" })
+    expect(Provider.nativeSettings({ reasoning_effort: "low", options: { reasoningEffort: "high" } })).toEqual({
+      reasoningEffort: "low",
+    })
+    expect(Provider.nativeSettings({ options: { reasoningEffort: "high", reasoning_effort: "xhigh" } })).toEqual({
+      reasoningEffort: "high",
+    })
+  })
+
+  test("v1 effort normalization preserves unrelated settings and nested options (#2203)", () => {
+    expect(
+      Provider.nativeSettings({
+        apiKey: "fixture",
+        chunkTimeout: 1000,
+        options: { reasoning_effort: "low", temperature: 0.5 },
+      }),
+    ).toEqual({ apiKey: "fixture", reasoningEffort: "low", options: { temperature: 0.5 } })
+    expect(Provider.nativeSettings({ options: { temperature: 0.5 } })).toEqual({ options: { temperature: 0.5 } })
+    expect(Provider.nativeSettings({ apiKey: "fixture" })).toEqual({ apiKey: "fixture" })
+  })
+
+  test("a v1-spelled variant effort reaches the Meta Responses wire via nativeSettings (#2203)", async () => {
+    const loaded = await Effect.runPromise(Provider.loadPackage("@opencode/ai/providers/meta"))
+    const model = loaded.model(
+      "muse-spark-1.3",
+      Provider.nativeSettings({ apiKey: "fixture", options: { reasoning_effort: "high" } }),
+    )
+    const compiled = await Effect.runPromise(compileRequest(LLM.request({ model, prompt: "Hi" })))
+    expect((compiled.body as { reasoning?: { effort?: string } }).reasoning?.effort).toBe("high")
+  })
+
+  test("a v1-spelled variant effort reaches the Antigravity wire via nativeSettings (#2203)", async () => {
+    const loaded = await Effect.runPromise(Provider.loadPackage("@opencode/ai/providers/antigravity"))
+    const model = loaded.model(
+      "gemini-3.8-flash",
+      Provider.nativeSettings({ accessToken: "fixture-token", options: { reasoning_effort: "low" } }),
+    )
+    const compiled = await Effect.runPromise(compileRequest(LLM.request({ model, prompt: "Hi" })))
+    const body = compiled.body as {
+      model?: string
+      request?: { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }
+    }
+    expect(body.model).toBe("gemini-3.8-flash-low")
+    expect(body.request?.generationConfig?.thinkingConfig?.thinkingLevel).toBe("LOW")
   })
 
   test("inherits shared and loose settings without provider-only policies", () => {
