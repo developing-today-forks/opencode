@@ -243,4 +243,67 @@ describe("CodexSync", () => {
       expect(refreshes).toBe(1)
     }),
   )
+
+  it.effect("syncs the instance-door credential whose account matches the auth file", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const mainID = Integration.ID.make("openai.main")
+        const alternateID = Integration.ID.make("openai.alternate")
+        const stale = jwt({ iat: 1000, exp: 2000 })
+        const created = yield* credentials.create({
+          integrationID: mainID,
+          value: oauth({ access: stale, expires: 9_999_999_999, metadata: { accountID: "acc-1" } }),
+        })
+        const other = yield* credentials.create({
+          integrationID: alternateID,
+          value: oauth({ access: stale, expires: 9_999_999_999, metadata: { accountID: "acc-2" } }),
+        })
+        const next = jwt({ iat: 3000, exp: 4000 })
+        yield* Effect.promise(() => fs.writeFile(authPath, authFile(tokenFields(next, "refresh-2", "acc-1"))))
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("updated")
+        const saved = yield* credentials.list(mainID)
+        expect(saved).toHaveLength(1)
+        expect(saved[0]?.id).toBe(created.id)
+        expect(saved[0]?.value).toEqual(
+          oauth({
+            access: next,
+            refresh: "refresh-2",
+            expires: 4_000_000,
+            metadata: { accountID: "acc-1", [Credential.externalRefreshMetadataKey]: true },
+          }),
+        )
+        const untouched = yield* credentials.list(alternateID)
+        expect(untouched[0]?.id).toBe(other.id)
+        expect(untouched[0]?.value).toEqual(
+          oauth({ access: stale, expires: 9_999_999_999, metadata: { accountID: "acc-2" } }),
+        )
+        expect(yield* sync.syncOnce()).toBe("unchanged")
+      }),
+    ),
+  )
+
+  it.effect("never writes one account's tokens into another account's credential", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const alternateID = Integration.ID.make("openai.alternate")
+        const stale = jwt({ iat: 1000, exp: 2000 })
+        yield* credentials.create({
+          integrationID: alternateID,
+          value: oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-2" } }),
+        })
+        yield* Effect.promise(() =>
+          fs.writeFile(authPath, authFile(tokenFields(jwt({ iat: 3000, exp: 4000 }), "refresh-2", "acc-1"))),
+        )
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("no-credential")
+        const saved = yield* credentials.list(alternateID)
+        expect(saved[0]?.value).toEqual(oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-2" } }))
+      }),
+    ),
+  )
 })

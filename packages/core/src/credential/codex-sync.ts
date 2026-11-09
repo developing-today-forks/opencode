@@ -14,8 +14,12 @@ import { Integration } from "../integration.js"
  *
  * The Muse is the sole refresher of its ChatGPT token lineage: it owns
  * `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) and refreshes it on its own
- * schedule. This sync periodically copies that file's tokens into the `openai`
- * credential connection resolution selects, so the store tracks the CLI. Two
+ * schedule. This sync periodically copies that file's tokens into the stored
+ * credential for the file's account, so the store tracks the CLI. The target
+ * is selected by account ID (see selectTarget): deployed configurations keep
+ * the ChatGPT credentials on instance doors such as `openai.main`, not on the
+ * base `openai` integration, and a sync that only looks under `openai` finds
+ * nothing and silently leaves the door's credential to expire. Two
  * deliberate differences from the door's sync:
  *
  * - The stored expiry is the access token's TRUE JWT `exp`, never the door's
@@ -139,6 +143,36 @@ export const plan = (current: Credential.OAuth, file: FileTokens): Plan => {
   return same ? { action: "unchanged" } : { action: "update", value }
 }
 
+/**
+ * Selects the stored credential the Muse auth file belongs to.
+ *
+ * The file names its account, and the account is the lineage's identity: the
+ * target is the OAuth credential whose stored account ID equals the file's,
+ * wherever it lives — the base `openai` integration or an instance door such
+ * as `openai.main`. Without an account match (including files that carry no
+ * account ID), selection falls back to the base integration's selected
+ * credential, as before. One account's tokens are never written into another
+ * account's credential.
+ */
+export const selectTarget = (
+  credentials: ReadonlyArray<Credential.Info>,
+  file: FileTokens,
+): Credential.Info | undefined => {
+  const doors = credentials.filter(
+    (credential) =>
+      credential.integrationID === integrationID || String(credential.integrationID).startsWith("openai."),
+  )
+  if (file.accountID) {
+    const match = doors.filter(
+      (credential) => credential.value.type === "oauth" && credential.value.metadata?.accountID === file.accountID,
+    )
+    if (match.length) return match.at(-1)
+  }
+  // Connection resolution projects an integration's saved list in reverse and
+  // selects the first entry, so the selected credential is the list's last.
+  return credentials.filter((credential) => credential.integrationID === integrationID).at(-1)
+}
+
 const metadataEqual = (
   a: Readonly<Record<string, unknown>> | undefined,
   b: Readonly<Record<string, unknown>> | undefined,
@@ -165,10 +199,8 @@ export const make = (authPath: string) =>
           "codex credential sync: the Muse access token has expired and the CLI has not refreshed it yet",
           { authPath, expires: new Date(file.expires).toISOString() },
         )
-      const saved = yield* credentials.list(integrationID)
-      // Connection resolution projects the saved list in reverse and selects the
-      // first entry, so the selected credential is the list's last element.
-      const target = saved.at(-1)
+      const saved = yield* credentials.all()
+      const target = selectTarget(saved, file)
       if (!target) return "no-credential"
       if (target.value.type !== "oauth") return "not-oauth"
       const result = plan(target.value, file)
@@ -176,14 +208,14 @@ export const make = (authPath: string) =>
       if (result.action === "diverged") {
         yield* Effect.logError(
           "codex credential sync skipped: the stored credential is newer than the Muse file; leaving it untouched",
-          { credentialID: target.id, integrationID },
+          { credentialID: target.id, integrationID: target.integrationID },
         )
         return "diverged"
       }
       yield* credentials.update(target.id, { value: result.value })
       yield* Effect.logInfo("codex credential synced from the Muse", {
         credentialID: target.id,
-        integrationID,
+        integrationID: target.integrationID,
         expires: new Date(result.value.expires).toISOString(),
       })
       return "updated"
