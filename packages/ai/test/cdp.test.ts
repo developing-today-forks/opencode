@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cdpPageFetch, connectWs } from "../src/quota/cdp.js"
+import { cdpPageFetch, connectWs, isSessionExpiredStatus } from "../src/quota/cdp.js"
 import type { QuotaContext } from "../src/quota/types.js"
 
 const quotaCtx = (overrides: Partial<QuotaContext>): QuotaContext => ({
@@ -253,5 +253,32 @@ describe("cdp websocket request bounds (#1803)", () => {
     } finally {
       fake.stop()
     }
+  })
+})
+
+describe("isSessionExpiredStatus (#2166)", () => {
+  const outcome = (status: number, url: string) => ({ status, url, text: "" })
+
+  test("401 and 403 classify as session-expired at any URL", () => {
+    expect(isSessionExpiredStatus(outcome(401, "https://console.example.com/api/portal/teams"))).toBe(true)
+    expect(isSessionExpiredStatus(outcome(403, "https://console.example.com/api/portal/teams"))).toBe(true)
+  })
+
+  test("a 200 landed on a login or auth page still classifies (redirect case)", () => {
+    expect(isSessionExpiredStatus(outcome(200, "https://console.example.com/login?next=/billing"))).toBe(true)
+    expect(isSessionExpiredStatus(outcome(200, "https://console.example.com/auth/callback"))).toBe(true)
+  })
+
+  test("a healthy 200 is not classified for auth/login substrings in segments, names, or query", () => {
+    expect(isSessionExpiredStatus(outcome(200, "https://admin.mistral.ai/api/authorizations"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(200, "https://dev.meta.ai/api/login-history"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(200, "https://console.example.com/authors/42"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(200, "https://console.example.com/api/quota?next=/login"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(200, "https://console.example.com/api/portal/teams/t1/subscription-quota"))).toBe(false)
+  })
+
+  test("other statuses at plain URLs do not classify", () => {
+    expect(isSessionExpiredStatus(outcome(500, "https://console.example.com/api/portal/teams"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(200, "not a url"))).toBe(false)
   })
 })

@@ -328,6 +328,25 @@ export const cdpPageFetch = async (
   }
 }
 
-/** Whether an HTTP outcome from a console read is the session-expired class. */
-export const isSessionExpiredStatus = (result: CdpFetchResult): boolean =>
-  result.status === 401 || result.status === 403 || result.url.includes("auth") || result.url.includes("login")
+/**
+ * Whether an HTTP outcome from a console read is the session-expired class.
+ *
+ * 401/403 always classify. The URL test exists to catch a fetch that was
+ * bounced to a login/auth page (which lands with a 200), so it matches whole
+ * path segments only: a segment exactly "login" or "auth". A raw substring
+ * match misclassifies healthy 200 reads whose URL merely contains those
+ * strings inside a longer segment, a resource name, or a query value
+ * (e.g. /api/authorizations, /api/login-history, /authors/42) — see #2166.
+ */
+export const isSessionExpiredStatus = (result: CdpFetchResult): boolean => {
+  if (result.status === 401 || result.status === 403) return true
+  let pathname: string
+  try {
+    pathname = new URL(result.url).pathname
+  } catch {
+    return false
+  }
+  return pathname
+    .split("/")
+    .some((segment) => segment.toLowerCase() === "login" || segment.toLowerCase() === "auth")
+}
