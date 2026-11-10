@@ -2184,18 +2184,33 @@ export const reconcileQuotaGate = (providerID: string, livePlanIDs: ReadonlySet<
 
 // A feed covers only one route's providers; keep its TTL independent per provider and location.
 const lastQuotaFeedAtByProvider = new Map<string, number>()
+// The gathered-snapshot pass (release + plant, #1974/#8086) keeps its OWN feed stamps,
+// keyed apart from the plan-derived gate's above (code#8086): the two passes run back to
+// back in one resolution with the same `now`, so a stamp shared between them is always
+// consumed by the gate first and the snapshot pass is never due in production.
+const lastGatheredFeedAtByProvider = new Map<string, number>()
 
 export const resetQuotaFeed = () => {
   lastQuotaFeedAtByProvider.clear()
+  lastGatheredFeedAtByProvider.clear()
 }
 
-export const shouldFeedQuota = (now = Date.now(), location?: string, providerID?: string) => {
+const feedDue = (stamps: Map<string, number>, now: number, location?: string, providerID?: string) => {
   const key = JSON.stringify([location ?? null, providerID ?? null])
-  const lastQuotaFeedAt = lastQuotaFeedAtByProvider.get(key) ?? 0
-  if (now - lastQuotaFeedAt < currentConstants(location).quotaGate.feedTtlMs) return false
-  lastQuotaFeedAtByProvider.set(key, now)
+  const lastFeedAt = stamps.get(key) ?? 0
+  if (now - lastFeedAt < currentConstants(location).quotaGate.feedTtlMs) return false
+  stamps.set(key, now)
   return true
 }
+
+export const shouldFeedQuota = (now = Date.now(), location?: string, providerID?: string) =>
+  feedDue(lastQuotaFeedAtByProvider, now, location, providerID)
+
+/** The gathered-snapshot pass's own due-ness (code#8086): independent of the gate's
+ * stamps, so the release and plant judgements fire on fresh gathered readings even when
+ * the plan-derived gate fed the same provider in the same resolution. */
+export const shouldFeedGatheredQuota = (now = Date.now(), location?: string, providerID?: string) =>
+  feedDue(lastGatheredFeedAtByProvider, now, location, providerID)
 
 /** The longest a single exhaustion reading may hold a gate: a stated reset further out than
  * this is capped rather than believed. This is the single source of truth for the quota-reset
@@ -2492,6 +2507,7 @@ export const resetHealth = () => {
   continuity.clear()
   recentFailures.length = 0
   lastQuotaFeedAtByProvider.clear()
+  lastGatheredFeedAtByProvider.clear()
   probeClaimSeq = 0
 }
 

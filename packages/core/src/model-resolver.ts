@@ -548,7 +548,9 @@ const refreshQuotaGate = (
  * quota skip is a judgement from one attempt's error, and the fleet's measured quota
  * snapshot — the gatherer's `quota-current.json` (code#1151), rewritten every ~15
  * minutes from the providers' own endpoints — outranks it. On the same feed cadence
- * as the plan-derived gate above, each due target's skips are re-judged against the
+ * as the plan-derived gate above — but on this pass's OWN feed stamps (code#8086: a stamp shared
+ * with the gate is consumed by the gate's earlier run in the same resolution, which
+ * starved this pass in production), each due target's skips are re-judged against the
  * freshest gathered reading for its model: headroom lifts the skip, a full reading
  * leaves it standing, and a provider the snapshot does not carry is left alone.
  * Nothing here spends an attempt to learn the answer; the reading is the evidence.
@@ -563,7 +565,7 @@ const refreshQuotaGate = (
  * selection falls back to attempt + bench exactly as before. */
 const refreshQuotaSkips = (targets: readonly Model.Ref[], now: number, location?: string) =>
   Effect.sync(() => {
-    const due = targets.filter((target) => ModelRoute.shouldFeedQuota(now, location, target.providerID))
+    const due = targets.filter((target) => ModelRoute.shouldFeedGatheredQuota(now, location, target.providerID))
     if (due.length === 0) return
     const readings = QuotaCurrent.readSnapshot(Global.Path.state)
     if (readings.length === 0) return
