@@ -39,7 +39,10 @@ export const incumbent = Effect.fn("service.incumbent")(function* (
   const found = (yield* Effect.promise(() => probeResult({ ...info, url: options.url }))).service
   if (!found?.compatible) return undefined
   if (!matchesVersion(found.version, options)) return undefined
-  return { endpoint: found.endpoint, state: found.state }
+  // Version and pid ride along so a caller that probed without a version
+  // requirement can still name the incumbent it found (e.g. a service-mode
+  // process deciding whether it is already current or must take over).
+  return { endpoint: found.endpoint, state: found.state, version: found.version, pid: found.info.pid }
 })
 
 // Idempotent ensure-running: reuses a healthy compatible server, replaces a

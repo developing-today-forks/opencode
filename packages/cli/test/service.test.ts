@@ -782,6 +782,93 @@ test("a failed service stays registered and owns the selected port until stopped
   }
 }, 30_000)
 
+test("same-version contender logs that this build is already current and leaves the incumbent alone", async () => {
+  const service = await startManagedService("opencode-service-already-current-")
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: serviceEnv(service.root),
+    stderr: "pipe",
+    stdout: "pipe",
+  })
+  try {
+    expect(await Promise.race([contender.exited, Bun.sleep(20_000).then(() => undefined)])).toBe(0)
+    const output = (await new Response(contender.stdout).text()) + (await new Response(contender.stderr).text())
+    expect(output).toContain(
+      `managed service version ${service.info.version} (pid ${service.info.pid}) is already running; this build is already current`,
+    )
+    expect((await waitForInfo(service.registration)).id).toBe(service.info.id)
+    expect(service.owner.exitCode).toBe(null)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
+    await stopManagedService(service)
+  }
+}, 45_000)
+
+test("a deliberate serve --service on a different version takes over the incumbent (code#8255)", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-takeover-"))
+  const port = await availablePort()
+  // The starter's own channel registration file, resolved the way ServiceConfig resolves it
+  // (service-local.json under the test channel; service-prod.json for a prod-channel build).
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
+  const env = serviceEnv(root)
+  const entry = path.join(import.meta.dir, "../src/index.ts")
+  const old = Bun.spawn([process.execPath, "--define", 'OPENCODE_VERSION:"2.0.0-old"', entry, "serve", "--service"], {
+    env,
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  let contender: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined
+  try {
+    const before = await waitForInfo(registration, (info) => info.version === "2.0.0-old")
+    contender = Bun.spawn([process.execPath, entry, "serve", "--service"], { env, stderr: "pipe", stdout: "pipe" })
+    const after = await waitForInfo(registration, (info) => info.version === OPENCODE_VERSION && info.id !== before.id)
+    expect(after.pid).toBe(contender.pid)
+    expect(after.pid).not.toBe(before.pid)
+    expect(await waitForExit(old)).toBe(true)
+    expect(contender.exitCode).toBe(null)
+
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+    const output = await new Response(contender.stdout).text()
+    expect(output).toContain("2.0.0-old")
+    expect(output).toContain(`taking over with version ${OPENCODE_VERSION}`)
+  } finally {
+    old.kill("SIGTERM")
+    await old.exited
+    contender?.kill("SIGTERM")
+    if (contender) await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
+
+test("an unreadable registration is not an incumbent: a service start proceeds to bind", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-unreadable-registration-"))
+  const port = await availablePort()
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
+  await fs.mkdir(path.dirname(registration), { recursive: true })
+  await fs.writeFile(registration, "{")
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: serviceEnv(root),
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  try {
+    const info = await waitForInfo(registration, (found) => found.version === OPENCODE_VERSION)
+    expect(info.pid).toBe(contender.pid)
+    expect(contender.exitCode).toBe(null)
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
+
 async function waitForInfo(file: string, accept: (info: Info) => boolean = () => true) {
   for (let attempt = 0; attempt < 400; attempt++) {
     const value = await Bun.file(file)
