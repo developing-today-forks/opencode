@@ -1,3 +1,5 @@
+import { Text } from "./text.js"
+
 export function getFilename(path: string | undefined) {
   if (!path) return ""
   const trimmed = path.replace(/[/\\]+$/, "")
@@ -21,8 +23,8 @@ export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
   const lastDot = filename.lastIndexOf(".")
   const extension = lastDot <= 0 ? "" : filename.slice(lastDot)
   const available = maxLength - extension.length - 1
-  if (available <= 0) return filename.slice(0, maxLength - 1) + "…"
-  return filename.slice(0, available) + "…" + extension
+  if (available <= 0) return Text.truncate(filename, maxLength - 1) + "…"
+  return Text.truncate(filename, available) + "…" + extension
 }
 
 export function truncateMiddle(text: string, maxLength = 20) {
@@ -33,7 +35,7 @@ export function truncateMiddle(text: string, maxLength = 20) {
   const end = Math.floor(available / 2)
   // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
   // slicing with it would return the whole string.
-  return text.slice(0, start) + "…" + (end > 0 ? text.slice(-end) : "")
+  return Text.truncate(text, start) + "…" + (end > 0 ? Text.truncateTail(text, end) : "")
 }
 
 const isDrive = (value: string) => {

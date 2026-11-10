@@ -69,6 +69,10 @@ export * as Text from "./text.js"
  * - core/src/model-route-log.ts — error body via `Text.truncate`
  *   (#1973)
  * - core/src/ripgrep.ts — match text via `Text.truncate` (#1973)
+ * - util/src/path.ts `getFilenameTruncated` / `truncateMiddle` and
+ *   tui/src/util/locale.ts `truncate` / `truncateLeft` /
+ *   `truncateMiddle` — composing helpers (ellipsis + extension) over
+ *   this primitive (#2133)
  *
  * Width contract (grapheme/terminal-width budgets, pair-safe, rule 4):
  * - tui/src/util/locale.ts `takeWidth` / `truncateWidth`
@@ -97,10 +101,6 @@ export * as Text from "./text.js"
  *   excerpt; core/src/mcp/stdio.ts stderr tail accumulator;
  *   core/src/messaging/embedding.ts and core/src/embeddings.ts error
  *   excerpts and llama-server stderr tails
- * - #2133 (design #2208 phase 3, five display helpers):
- *   util/src/path.ts `getFilenameTruncated` and `truncateMiddle`;
- *   tui/src/util/locale.ts `truncate`, `truncateLeft` and
- *   `truncateMiddle`
  *
  * Neighbour, not a truncation: ai's `sanitizeSurrogates` governs lone
  * surrogates in map keys (write-side, #2152) — a different failure
