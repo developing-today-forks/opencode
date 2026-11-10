@@ -266,6 +266,14 @@ jobs:
         working-directory: script
         run: bun test check-gates.test.ts
 
+      - name: Test native-arch release gate
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly. The test pins
+        # NativeArch.verify, the release arch gate behind the #2211
+        # universal-Mach-O rejection, which otherwise runs in no
+        # workflow (#2222).
+        working-directory: script
+        run: bun test native-arch.test.ts
       - name: Test repo-sweeper token contract
         # The #1972 guard (script/github/token.test.ts) asserts every
         # script/github script the repo-sweeper invokes resolves its
