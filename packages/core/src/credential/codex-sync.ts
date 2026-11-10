@@ -31,12 +31,15 @@ import { Integration } from "../integration.js"
  *   token's life, and fork and CLI would race to rotate one shared refresh-token
  *   lineage — whichever lost would hold a dead token.
  *
- * The self-contained `_openai` door (developing-today/code#8163) is never a
- * sync target: it holds its own ChatGPT credential and refreshes it
+ * The self-contained `_openai` doors (developing-today/code#8163) are never
+ * sync targets: each holds its own ChatGPT credential and refreshes it
  * in-process, exactly so this file is not in its serving path. The exclusion
  * is explicit in selectTarget rather than a side effect of the `openai.*`
  * name filter, so a future widening of the door search cannot silently put
- * the Muse back in that door's path.
+ * the Muse back in those doors' path. It covers the whole `_openai`
+ * family — the bare id and the named instances (`_openai.main`,
+ * `_openai.alt`) the doors were renamed to on 2026-11-10 — so a rename
+ * cannot silently re-admit a door either.
  *
  * The sync updates the selected credential in place (same row) and skips the
  * write when nothing changed. If the stored access token is NEWER than the
@@ -47,9 +50,23 @@ import { Integration } from "../integration.js"
 
 const integrationID = Integration.ID.make("openai")
 
-/** The self-contained OpenAI door (code#8163): owns and refreshes its own
- * credential in-process; the Muse sync must never feed it. */
+/** The original self-contained OpenAI door (code#8163): owns and refreshes its
+ * own credential in-process; the Muse sync must never feed it. Kept for
+ * compatibility with existing imports; the operative exclusion is the family
+ * predicate below. */
 export const selfContainedIntegrationID = Integration.ID.make("_openai")
+
+/**
+ * Every self-contained OpenAI door (code#8163): the bare `_openai` id and its
+ * named instances (`_openai.main`, `_openai.alt`, ...). These doors own and
+ * refresh their own credentials in-process, so the Muse sync must never
+ * target any of them — including by account match. The exclusion is the whole
+ * `_openai` family, not just the original door's id: the 2026-11-10 rename to
+ * `_openai.main` / `_openai.alt` must not quietly re-admit a door whose only
+ * protection was its old spelling.
+ */
+export const isSelfContainedIntegration = (id: Integration.ID) =>
+  String(id) === "_openai" || String(id).startsWith("_openai.")
 
 export type Status =
   | "updated"
@@ -171,7 +188,7 @@ export const selectTarget = (
 ): Credential.Info | undefined => {
   const doors = credentials.filter(
     (credential) =>
-      credential.integrationID !== selfContainedIntegrationID &&
+      !isSelfContainedIntegration(credential.integrationID) &&
       (credential.integrationID === integrationID || String(credential.integrationID).startsWith("openai.")),
   )
   if (file.accountID) {

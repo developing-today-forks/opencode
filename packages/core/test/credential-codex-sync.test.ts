@@ -310,6 +310,56 @@ describe("CodexSync", () => {
     ),
   )
 
+  it.effect("never syncs the renamed _openai.main door, even when its account matches the auth file", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const mainID = Integration.ID.make("_openai.main")
+        const stale = jwt({ iat: 1000, exp: 2000 })
+        const created = yield* credentials.create({
+          integrationID: mainID,
+          value: oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-1" } }),
+        })
+        yield* Effect.promise(() =>
+          fs.writeFile(authPath, authFile(tokenFields(jwt({ iat: 3000, exp: 4000 }), "refresh-2", "acc-1"))),
+        )
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("no-credential")
+        const saved = yield* credentials.list(mainID)
+        expect(saved).toHaveLength(1)
+        expect(saved[0]?.id).toBe(created.id)
+        // Untouched: same tokens, and no externalRefresh stamp was added.
+        expect(saved[0]?.value).toEqual(oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-1" } }))
+      }),
+    ),
+  )
+
+  it.effect("never syncs the renamed _openai.alt door, even when its account matches the auth file", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const altID = Integration.ID.make("_openai.alt")
+        const stale = jwt({ iat: 1000, exp: 2000 })
+        const created = yield* credentials.create({
+          integrationID: altID,
+          value: oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-2" } }),
+        })
+        yield* Effect.promise(() =>
+          fs.writeFile(authPath, authFile(tokenFields(jwt({ iat: 3000, exp: 4000 }), "refresh-2", "acc-2"))),
+        )
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("no-credential")
+        const saved = yield* credentials.list(altID)
+        expect(saved).toHaveLength(1)
+        expect(saved[0]?.id).toBe(created.id)
+        // Untouched: same tokens, and no externalRefresh stamp was added.
+        expect(saved[0]?.value).toEqual(oauth({ access: stale, expires: 2_000_000, metadata: { accountID: "acc-2" } }))
+      }),
+    ),
+  )
+
   it.effect("never writes one account's tokens into another account's credential", () =>
     withTempDir((tmp) =>
       Effect.gen(function* () {
