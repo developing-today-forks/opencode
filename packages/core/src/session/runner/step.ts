@@ -556,7 +556,17 @@ export const make = Effect.gen(function* () {
           (llmFailure.reason._tag === "Timeout" ||
             llmFailure.reason._tag === "UnsupportedOperation" ||
             llmFailure.reason._tag === "NoRoute" ||
-            (llmFailure.reason._tag === "InvalidRequest" && llmFailure.reason.classification === undefined))
+            (llmFailure.reason._tag === "InvalidRequest" &&
+              (llmFailure.reason.classification === undefined ||
+                // An InvalidRequest whose text carries the provider's own
+                // exhaustion wording (code#8086): the failureHint quota
+                // evidence indicts the TARGET, not this request, so the
+                // session walks to the next candidate instead of dying on a
+                // leg that has already answered 100%. The classified
+                // shapes (context overflow, payload too large) state no
+                // quota in their text and stay out, as before: they indict
+                // the request, and size recovery owns them.
+                failureHint(llmFailure).quota)))
         // A content-filter finish is the same refusal delivered as a finish reason rather
         // than an error: the attempt is recorded as a policy rejection (below), never as a
         // success or a general failure (#1084).

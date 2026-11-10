@@ -551,14 +551,26 @@ const refreshQuotaGate = (
  * as the plan-derived gate above, each due target's skips are re-judged against the
  * freshest gathered reading for its model: headroom lifts the skip, a full reading
  * leaves it standing, and a provider the snapshot does not carry is left alone.
- * Nothing here spends an attempt to learn the answer; the reading is the evidence. */
+ * Nothing here spends an attempt to learn the answer; the reading is the evidence.
+ *
+ * The plant half rides the same pass (code#8086): the re-judgement above only
+ * ever LIFTS holds, so a leg whose window the gatherer already reads at 100%
+ * kept absorbing attempts until one of its own failures happened to plant a
+ * reactive skip — the plant now comes from the reading itself, before any
+ * attempt: `plantGatheredQuotaWall` holds the target out while the freshest
+ * reading shows its window full, and lifts the plant on the first later
+ * reading that shows room. A stale or missing snapshot plants nothing, and
+ * selection falls back to attempt + bench exactly as before. */
 const refreshQuotaSkips = (targets: readonly Model.Ref[], now: number, location?: string) =>
   Effect.sync(() => {
     const due = targets.filter((target) => ModelRoute.shouldFeedQuota(now, location, target.providerID))
     if (due.length === 0) return
     const readings = QuotaCurrent.readSnapshot(Global.Path.state)
     if (readings.length === 0) return
-    for (const target of due) ModelRoute.releaseQuotaSkipsForCurrent(target, readings, now, location)
+    for (const target of due) {
+      ModelRoute.releaseQuotaSkipsForCurrent(target, readings, now, location)
+      ModelRoute.plantGatheredQuotaWall(target, readings, now, location)
+    }
   })
 
 /** Resolves catalog selections into runtime models for the current Location. */

@@ -167,6 +167,12 @@ const CONTENT_POLICY_CODES = new Set([
 const GATEWAY_CODE_LABEL = /^[^:\n]+: \[([A-Za-z0-9_.-]+)\]/
 // xAI reports an invalid API key as HTTP 400 with the generic `invalid-argument` code.
 const AUTH_TEXT = /incorrect api key provided/i
+// Text that explicitly reports credits or a balance spent — the only wording
+// (besides a quota code or a 402) that may classify a failure as quota at ANY
+// status. Mirrors the session runner's balance-exhaustion evidence (#1380):
+// one definition of what a spend wall sounds like, in both classifiers.
+const BALANCE_EXHAUSTION_TEXT =
+  /insufficient credits|insufficient balance|insufficient funds|out of credits|credits? exhausted|balance exhausted|credit balance is too low|no credits (?:left|remaining)/i
 const RATE_LIMIT_TEXT = /rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
 // Only consulted on 429, where throttles and account caps share a status.
 // Z.ai reports balance, plan expiry, plan limits, and plan model access on 429.
@@ -265,7 +271,17 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
   if (
     input.status === 402 ||
     codes.some((code) => QUOTA_CODES.has(code)) ||
-    (input.status === 429 && QUOTA_TEXT.test(text))
+    (input.status === 429 && QUOTA_TEXT.test(text)) ||
+    // A spend wall stated only in the provider's own words, at any status:
+    // Command Code's monthly-credits refusal arrives as a bare 400 whose text
+    // says "insufficient credits" (code#8086) — without this it fell through
+    // to a plain InvalidRequest, which neither gates the pool nor (in its
+    // text-bearing shape) cascades in the session runner, so sessions kept
+    // spending attempts on a door that had already answered 100%. The
+    // balance-specific wording is the same evidence #1380 requires before a
+    // failure may install a balance hold; generic limit wording stays a
+    // rate limit, never a quota.
+    BALANCE_EXHAUSTION_TEXT.test(text)
   )
     return new QuotaExceededError(details)
   if (

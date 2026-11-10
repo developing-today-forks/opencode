@@ -646,3 +646,40 @@ describe("isRetryable ignores the wire x-should-retry header (#2225)", () => {
     expect(isRetryable(new AIError({ reason: new InvalidProviderOutputError({ message: "other" }) }))).toBe(false)
   })
 })
+
+describe("provider error classification: spend walls stated in text (code#8086)", () => {
+  test("insufficient-credits wording is a quota wall at any status, including a bare 400", () => {
+    // Command Code's monthly-credits refusal: a 400 whose only quota evidence
+    // is the provider's own sentence. Before this it classified as a plain
+    // InvalidRequest — no quota gate, and no cascade in the session runner.
+    expect(
+      classifyProviderFailure({
+        message: "You have insufficient credits to make this request. Please purchase more credits to continue using the service",
+        status: 400,
+      }),
+    ).toMatchObject({ _tag: "QuotaExceeded" })
+    expect(
+      classifyProviderFailure({ message: "Your credit balance is too low", status: undefined }),
+    ).toMatchObject({ _tag: "QuotaExceeded" })
+    // A quota wall is not retryable on the same leg: the session walks on.
+    expect(
+      isRetryable(
+        new AIError({
+          reason: classifyProviderFailure({ message: "insufficient credits", status: 400 }),
+        }),
+      ),
+    ).toBe(false)
+  })
+
+  test("generic limit wording at a 400 stays an InvalidRequest, never a quota", () => {
+    expect(classifyProviderFailure({ message: "usage limit exceeded", status: 400 })).toMatchObject({
+      _tag: "InvalidRequest",
+    })
+    expect(classifyProviderFailure({ message: "quota exhausted", status: 400 })).toMatchObject({
+      _tag: "InvalidRequest",
+    })
+    expect(classifyProviderFailure({ message: "You have reached your rate limit", status: 400 })).toMatchObject({
+      _tag: "RateLimit",
+    })
+  })
+})
