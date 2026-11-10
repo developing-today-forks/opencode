@@ -5,6 +5,7 @@ import { Cause, Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "ef
 import { ChildProcess } from "effect/process"
 import type { ChildProcessHandle } from "effect/process/ChildProcessSpawner"
 import { Environment } from "../environment/index.js"
+import { Text } from "../util/text.js"
 
 /** Mirrors StdioClientTransport: wait this long for a graceful exit after stdin closes. */
 const CLOSE_GRACE = Duration.seconds(2)
@@ -147,7 +148,7 @@ export const make = Effect.fnUntraced(function* (options: Options) {
       const drain = yield* Effect.forkScoped(
         handle.stderr.pipe(
           Stream.decodeText(),
-          Stream.tap((output) => Effect.sync(() => (stderr = (stderr + output).slice(-STDERR_TAIL)))),
+          Stream.tap((output) => Effect.sync(() => (stderr = Text.truncateTail(stderr + output, STDERR_TAIL)))),
           Stream.runForEach((output) =>
             output.trim() === ""
               ? Effect.void

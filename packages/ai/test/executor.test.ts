@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { providerMessage } from "../src/route/executor.js"
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect"
 import { Headers, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Socket } from "effect/socket"
@@ -1127,4 +1128,22 @@ describe("WebSocket channel execution", () => {
       expect(yield* Ref.get(commits)).toBe(0)
     }),
   )
+})
+
+describe("providerMessage well-formedness (#1977)", () => {
+  const astral = "\u{1F600}"
+  test("drops a straddling pair whole at the 2000 excerpt cut", () => {
+    const out = providerMessage(500, "a".repeat(1999) + astral + "b".repeat(100))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.includes(astral)).toBe(false)
+    expect(out.endsWith("\u2026")).toBe(true)
+  })
+  test("keeps a pair that ends exactly at the cut", () => {
+    const out = providerMessage(500, "a".repeat(1998) + astral + "b".repeat(100))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.includes(astral)).toBe(true)
+  })
+  test("leaves short bodies untouched", () => {
+    expect(providerMessage(500, "boom " + astral)).toContain("boom " + astral)
+  })
 })

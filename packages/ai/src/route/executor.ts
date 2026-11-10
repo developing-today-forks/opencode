@@ -1,4 +1,5 @@
 import { Cause, Effect, Layer, Option, Schema, Stream } from "effect"
+import { Text } from "@opencode/util/text"
 import {
   FetchHttpClient,
   Headers,
@@ -157,14 +158,14 @@ const MAX_BODY_CHARS = 2000
 const MAX_ERROR_BODY_BYTES = 64 * 1024
 
 // Without a recognized message, show the raw body so the provider's explanation is never dropped.
-const providerMessage = (status: number, body: string | void) => {
+export const providerMessage = (status: number, body: string | void) => {
   const fallback = `Provider request failed with HTTP ${status}`
   const text = body?.trim() ?? ""
   const message = providerErrorMessage(text)
   if (message) return message
   // Gateway and proxy HTML error pages are markup, not an explanation.
   if (!text || /^<(?:!doctype|html)/i.test(text)) return fallback
-  return `${fallback}: ${text.length > MAX_BODY_CHARS ? `${text.slice(0, MAX_BODY_CHARS)}…` : text}`
+  return `${fallback}: ${text.length > MAX_BODY_CHARS ? `${Text.truncate(text, MAX_BODY_CHARS)}…` : text}`
 }
 
 const statusError = (response: HttpClientResponse.HttpClientResponse) =>
