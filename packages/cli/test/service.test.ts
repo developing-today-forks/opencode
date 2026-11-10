@@ -807,9 +807,11 @@ test("same-version contender logs that this build is already current and leaves 
 test("a deliberate serve --service on a different version takes over the incumbent (code#8255)", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-takeover-"))
   const port = await availablePort()
-  const registration = path.join(root, "state", "opencode", "service-local.json")
+  // The starter's own channel registration file, resolved the way ServiceConfig resolves it
+  // (service-local.json under the test channel; service-prod.json for a prod-channel build).
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
   await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
-  await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
   const env = serviceEnv(root)
   const entry = path.join(import.meta.dir, "../src/index.ts")
   const old = Bun.spawn([process.execPath, "--define", 'OPENCODE_VERSION:"2.0.0-old"', entry, "serve", "--service"], {
@@ -837,6 +839,32 @@ test("a deliberate serve --service on a different version takes over the incumbe
     await old.exited
     contender?.kill("SIGTERM")
     if (contender) await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
+
+test("an unreadable registration is not an incumbent: a service start proceeds to bind", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-unreadable-registration-"))
+  const port = await availablePort()
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
+  await fs.mkdir(path.dirname(registration), { recursive: true })
+  await fs.writeFile(registration, "{")
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: serviceEnv(root),
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  try {
+    const info = await waitForInfo(registration, (found) => found.version === OPENCODE_VERSION)
+    expect(info.pid).toBe(contender.pid)
+    expect(contender.exitCode).toBe(null)
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
     await fs.rm(root, { recursive: true, force: true })
   }
 }, 45_000)

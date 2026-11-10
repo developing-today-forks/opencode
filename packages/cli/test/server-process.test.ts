@@ -41,6 +41,14 @@ describe("incumbentDecision", () => {
     expect(ServerProcess.incumbentDecision(undefined, "2.0.0-new")).toEqual({ _tag: "proceed" })
   })
 
+  // Service.incumbent returns undefined when the registration is missing or unreadable and
+  // when the probe cannot classify the registered process. That is "no incumbent", not a
+  // takeover and not a defer: the start proceeds to bind and the addressInUse retry loop in
+  // server-process remains the backstop if something else actually owns the port.
+  test("an unreadable registration or unclassifiable probe proceeds to bind", () => {
+    expect(ServerProcess.incumbentDecision(undefined, "2.0.0-new")).toEqual({ _tag: "proceed" })
+  })
+
   test("same-version incumbent is an explicit already-current return", () => {
     expect(ServerProcess.incumbentDecision({ version: "2.0.0-new", pid: 4242 }, "2.0.0-new")).toEqual({
       _tag: "already-current",
