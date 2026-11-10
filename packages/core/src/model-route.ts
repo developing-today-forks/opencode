@@ -680,6 +680,37 @@ export const releaseBenchProbe = (
   return true
 }
 
+/** Whether a health state is a quota-class bench still in force whose half-open probe is
+ * not due: the provider has answered exhaustion, so the scope is quota-dead until the bench
+ * expires or a fresher reading releases it. A probe-due bench does not count: the probe
+ * is the bench’s own servable moment, the window it was bounded by has rolled. */
+const quotaBenched = (state: HealthState | undefined, now: number) =>
+  state !== undefined &&
+  state.cooldownUntil > now &&
+  (state.benchReason === "quota" || state.benchReason === "quota retry-after") &&
+  !probeDueState(state, now)
+
+/** Whether the target itself is quota-dead under its own bench right now (code#8086): a
+ * credential-less target’s only exhaustion signal is this bench — it has no credential
+ * whose known-full state a last-resort preference could consult - so without this read
+ * a quota-benched leaf is indistinguishable from a merely cooling one to selection. */
+export const quotaCoolingDown = (target: Model.Ref, now = Date.now()) => {
+  const state = health.get(key(target))
+  if (state) recover(target, state, now)
+  return quotaBenched(state, now)
+}
+
+/** Whether one credential of the target is quota-dead under a quota-class bench right now
+ * (code#8086), mirroring quotaCoolingDown at credential scope. Callers judge the credential
+ * that would actually serve: when a sibling credential can serve, the effective-credential
+ * choice has already passed this one over, so a standing bench here names a target whose
+ * every credential is held out. */
+export const credentialQuotaCoolingDown = (target: Model.Ref, credentialID: string, now = Date.now()) => {
+  const state = credentialHealth.get(credentialKey(target, credentialID))
+  if (state) recover(target, state, now, credentialID)
+  return quotaBenched(state, now)
+}
+
 /** The durable record id for one model target's reactive quota skip (#1976): keyed to the
  * answering target, so one model family's exhaustion record names only that family. */
 const quotaModelSkipID = (target: Model.Ref) => `quota-model:${target.providerID}:${target.id}`
