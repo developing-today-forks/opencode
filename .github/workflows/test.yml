@@ -274,6 +274,15 @@ jobs:
         # workflow (#2222).
         working-directory: script
         run: bun test native-arch.test.ts
+      - name: Test repo-sweeper token contract
+        # The #1972 guard (script/github/token.test.ts) asserts every
+        # script/github script the repo-sweeper invokes resolves its
+        # token through the shared helper, in the name the workflow
+        # supplies. It lives in script/github/, which the steps above
+        # do not cover — run it explicitly or the guard itself is
+        # verified nowhere (the #2222 failure mode).
+        working-directory: script/github
+        run: bun test token.test.ts close-issues.test.ts
 
       - name: Check gate registry and wiring
         # Every promised gate must be registered, invoked by its owning

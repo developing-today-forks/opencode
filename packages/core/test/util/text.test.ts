@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Text } from "@opencode/core/util/text"
+import { Text as UtilText } from "@opencode/util/text"
 import { MessagingLog } from "@opencode/core/messaging/log"
 
 const ASTRAL = "\u{1F600}"
@@ -51,5 +52,25 @@ describe("Text.truncate surrogate-pair guard (#1973)", () => {
 
   test("MessagingLog.splitsPair is the shared guard, not a copy", () => {
     expect(MessagingLog.splitsPair).toBe(Text.splitsPair)
+  })
+})
+
+describe("core Text is the @opencode/util primitive, re-exported (#2209)", () => {
+  test("the seam is identity, not a copy", () => {
+    expect(Text.splitsPair).toBe(UtilText.splitsPair)
+    expect(Text.truncate).toBe(UtilText.truncate)
+    expect(Text.truncateTail).toBe(UtilText.truncateTail)
+    expect(Text.truncateMiddle).toBe(UtilText.truncateMiddle)
+  })
+
+  test("core and util agree on the straddle matrix", () => {
+    const inputs = ["aaaa" + ASTRAL + "bbbb", "xx" + ASTRAL + "aaaa", "aa" + ASTRAL + "bbbb" + ASTRAL + "yz", "abcdefghij"]
+    for (const input of inputs) {
+      for (let budget = 0; budget <= 10; budget++) {
+        expect(Text.truncate(input, budget)).toBe(UtilText.truncate(input, budget))
+        expect(Text.truncateTail(input, budget)).toBe(UtilText.truncateTail(input, budget))
+        expect(Text.truncateMiddle(input, budget)).toBe(UtilText.truncateMiddle(input, budget))
+      }
+    }
   })
 })
