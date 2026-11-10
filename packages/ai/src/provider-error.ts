@@ -79,9 +79,13 @@ export const isContextOverflowFailure = (failure: unknown) =>
  * not deliver an accepted write, and unrecognized failures. Callers decide which calls are safe to repeat.
  */
 export const isRetryable = (error: AIError) => {
-  const override = error.reason.http?.headers["x-should-retry"]
-  if (override === "true") return true
-  if (override === "false") return false
+  // Classification only — a wire-supplied `x-should-retry` header is
+  // never consulted (#2225): the header arrives verbatim from the
+  // failing provider or any proxy on the wire, and retry policy is a
+  // client-side decision the failing party must not dictate (it could
+  // force retries of auth/quota failures, or suppress retries of
+  // transient ones). Local callers that need to stop or force a retry
+  // use the session retry hook / policy, not a response header.
   switch (error.reason._tag) {
     case "RateLimit":
     case "ProviderInternal":

@@ -79,13 +79,14 @@ const setup = Effect.fnUntraced(function* (options: { endpoint?: boolean } = {})
             Deferred.doneUnsafe(blocked, Effect.void)
             return hanging.promise
           }
-          // Persistent failures opt out of retries so the schedule's backoff stays out of these tests.
+          // Persistent failures fail fast via the setup retry hook below, so the
+          // schedule's backoff stays out of these tests (#2225 removed the
+          // x-should-retry opt-out this response used to carry).
           if (state.failure || state.flaky) {
-            const retry = state.flaky
             state.flaky = false
             return Response.json(
               { error: { message: "fixture rate limit", type: "rate_limit_error" } },
-              { status: 429, headers: retry ? {} : { "x-should-retry": "false" } },
+              { status: 429 },
             )
           }
           const trigger = JSON.stringify(bodies.at(-1)).includes("compaction_trigger")
@@ -179,6 +180,15 @@ const setup = Effect.fnUntraced(function* (options: { endpoint?: boolean } = {})
   )
   yield* hooks.register("session", "http.request", (event) =>
     Effect.sync(() => event.request.headers.set("x-http-hook", event.kind)),
+  )
+  yield* hooks.register("session", "retry", (event) =>
+    Effect.sync(() => {
+      // Trusted local opt-out (#2225): while the fixture server is in
+      // persistent-failure mode, stop retries at the hook — the
+      // classification (rate limit) is retryable and the wire header
+      // that used to suppress it is no longer honored.
+      if (state.failure) event.decision = { retry: false }
+    }),
   )
   const prompt = Effect.fnUntraced(function* (text: string, synthetic = false) {
     const id = SessionMessage.ID.create()
