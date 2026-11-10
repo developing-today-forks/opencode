@@ -17,7 +17,7 @@ import {
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
 import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
-import { provider as codexProvider } from "../src/quota/providers/codex.js"
+import { provider as codexProvider } from "../src/quota/providers/openai.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
 import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
@@ -1796,7 +1796,7 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       antigravity: "_antigravity",
       claude: "_claude",
       clinePass: "cline-pass",
-      codex: "codex",
+      openai: "_openai",
       commandCode: "_commandcode",
       deepseek: "deepseek",
       groq: "groq",
@@ -1816,7 +1816,7 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       "_antigravity",
       "_claude",
       "cline-pass",
-      "codex",
+      "_openai",
       "_commandcode",
       "deepseek",
       "groq",

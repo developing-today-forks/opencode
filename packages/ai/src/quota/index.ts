@@ -3,7 +3,7 @@ import { buildResult, credentialRows } from "./utils.js"
 import { provider as antigravity } from "./providers/antigravity.js"
 import { provider as claude } from "./providers/claude.js"
 import { provider as clinePass } from "./providers/cline-pass.js"
-import { provider as codex } from "./providers/codex.js"
+import { provider as openai } from "./providers/openai.js"
 import { provider as commandCode } from "./providers/command-code.js"
 import { provider as deepseek } from "./providers/deepseek.js"
 import { provider as groq } from "./providers/groq.js"
@@ -35,7 +35,7 @@ export const quotaProviders: QuotaProvider[] = [
   antigravity,
   claude,
   clinePass,
-  codex,
+  openai,
   commandCode,
   deepseek,
   groq,

@@ -131,7 +131,7 @@
  *   cline-pass — percent only (percentUsed, clampPercent; no
  *     money, balance or count label). Disposition: the percent is
  *     the only figure, clamped whole.
- *   codex — percent (used_percent, clampPercent), a credits
+ *   _openai — percent (used_percent, clampPercent), a credits
  *     balance count label, and a spend count pair (used / limit).
  *     Dispositions: a negative balance reads as absent — no
  *     credits_balance window, and alone it is the no-data contract
@@ -197,7 +197,7 @@
  *     #1949, respectively.
  *   cline-pass — fetch-only: limit parsing is inline in the fetch
  *     path; no exported pure parser. Conforming (keep-first, #1769).
- *   codex — fetch-only: window mapping is inline in the fetch path;
+ *   _openai — fetch-only: window mapping is inline in the fetch path;
  *     no exported pure parser. Conforming (a negative
  *     credits.balance reads as absent, #1924). Rate-limit windows
  *     retain the collision qualifiers and phantom-window guard
@@ -233,7 +233,7 @@
  *     parseConsoleBillingBalance (all exported). Conforming: a
  *     percent-bearing entry keeps its window with an absent reset as
  *     an honest null resetAt (rule 3, #1725), and an entry with no
- *     usable percent publishes no window (rule 4) — matching codex's
+ *     usable percent publishes no window (rule 4) — matching _openai's
  *     percent-less case. Pinned by the OpenCode Go API-key usage
  *     mapping describe in quota.test.ts.
  *   opendesign — parseCodingPlanWindows (exported);
@@ -386,7 +386,7 @@ export interface QuotaProvider {
   credentialAliases?: string[]
   /** Config ids that disable this row in the default listing (defaults to id + aliases + credential aliases). */
   disabledBy?: string[]
-  /** The base provider folds its instances' credential rows into its own answer (Codex/OpenAI). */
+  /** The base provider folds its instances' credential rows into its own answer (OpenAI). */
   foldInstanceCredentials?: boolean
   isConfigured: (ctx: QuotaContext) => boolean | Promise<boolean>
   fetchQuota: (ctx: QuotaContext) => Promise<QuotaResult>
