@@ -1,4 +1,5 @@
 import { stringWidth } from "./string-width"
+import { Text } from "@opencode/util/text"
 
 export function titlecase(str: string) {
   return str.replace(/\b\w/g, (c) => c.toUpperCase())
@@ -51,7 +52,7 @@ export function duration(input: number) {
 export function truncate(str: string, len: number): string {
   if (str.length <= len) return str
   if (len <= 0) return ""
-  return str.slice(0, len - 1) + "…"
+  return Text.truncate(str, len - 1) + "…"
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
@@ -86,7 +87,7 @@ export function truncateLeft(str: string, len: number): string {
   if (str.length <= len) return str
   if (len <= 0) return ""
   if (len === 1) return "…"
-  return "…" + str.slice(-(len - 1))
+  return "…" + Text.truncateTail(str, len - 1)
 }
 
 export function truncateMiddle(str: string, maxLength: number = 35): string {
@@ -100,7 +101,7 @@ export function truncateMiddle(str: string, maxLength: number = 35): string {
 
   // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
   // slicing with it would return the whole string.
-  return str.slice(0, keepStart) + ellipsis + (keepEnd > 0 ? str.slice(-keepEnd) : "")
+  return Text.truncate(str, keepStart) + ellipsis + (keepEnd > 0 ? Text.truncateTail(str, keepEnd) : "")
 }
 
 export * as Locale from "./locale"

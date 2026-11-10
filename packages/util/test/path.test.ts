@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isLineRangeHash, parsePathLineSuffix } from "../src/path.js"
+import { getFilenameTruncated, isLineRangeHash, parsePathLineSuffix, truncateMiddle } from "../src/path.js"
 
 describe("parsePathLineSuffix", () => {
   test("parses valid colon forms: single line, line:column, and ranges", () => {
@@ -78,5 +78,34 @@ describe("isLineRangeHash", () => {
     expect(isLineRangeHash("#L")).toBe(false)
     expect(isLineRangeHash("#L42-")).toBe(false)
     expect(isLineRangeHash("")).toBe(false)
+  })
+})
+
+// Oracle (design #2208): display truncations never split a surrogate
+// pair — output is well-formed and within budget. Sweep salvaged from
+// PR #2167, re-pointed at the shared @opencode/util primitive (#2209).
+describe("display truncations never split a surrogate pair (#2133)", () => {
+  test("truncateMiddle sweeps offsets x budgets", () => {
+    for (let offset = 0; offset < 8; offset++) {
+      const str = "x".repeat(offset) + "\u{1F600}" + "y".repeat(12)
+      for (let max = 1; max <= 14; max++) {
+        const result = truncateMiddle(str, max)
+        expect(result.isWellFormed()).toBe(true)
+        expect(result.length).toBeLessThanOrEqual(max)
+      }
+    }
+    expect(truncateMiddle("a\u{1F600}bcdefgh", 4)).toBe("a…h")
+  })
+
+  test("getFilenameTruncated sweeps offsets x budgets and preserves the extension", () => {
+    for (let offset = 0; offset < 8; offset++) {
+      const str = "a".repeat(offset) + "\u{1F600}" + "b".repeat(12) + ".txt"
+      for (let max = 1; max <= 18; max++) {
+        const result = getFilenameTruncated(str, max)
+        expect(result.isWellFormed()).toBe(true)
+        expect(result.length).toBeLessThanOrEqual(max)
+      }
+    }
+    expect(getFilenameTruncated("\u{1F600}".repeat(5) + ".txt", 10)).toBe("\u{1F600}\u{1F600}….txt")
   })
 })

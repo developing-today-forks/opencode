@@ -35,3 +35,22 @@ test("rolls the compact form over at the rounding boundary", () => {
   expect(Locale.number(999950)).toBe("1.0M")
   expect(Locale.number(1000000)).toBe("1.0M")
 })
+
+// Oracle (design #2208): the Locale length truncators never split a
+// surrogate pair — output is well-formed and within budget. Sweep
+// salvaged from PR #2167, re-pointed at the shared @opencode/util
+// primitive (#2209).
+test("length truncators never split a surrogate pair (#2133)", () => {
+  for (let offset = 0; offset < 8; offset++) {
+    const str = "x".repeat(offset) + "\u{1F600}" + "y".repeat(12)
+    for (let len = 1; len <= 14; len++) {
+      for (const result of [Locale.truncate(str, len), Locale.truncateLeft(str, len), Locale.truncateMiddle(str, len)]) {
+        expect(result.isWellFormed()).toBe(true)
+        expect(result.length).toBeLessThanOrEqual(len)
+      }
+    }
+  }
+  expect(Locale.truncate("ab\u{1F600}cdef", 4)).toBe("ab…")
+  expect(Locale.truncateLeft("abcd\u{1F600}ef", 4)).toBe("…ef")
+  expect(Locale.truncateMiddle("a\u{1F600}bcdefgh", 4)).toBe("a…h")
+})
