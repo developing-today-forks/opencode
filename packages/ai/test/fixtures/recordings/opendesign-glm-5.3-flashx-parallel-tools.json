@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "metadata": {
+    "tags": [
+      "prefix:openai-compatible-chat",
+      "provider:opendesign",
+      "protocol:openai-chat",
+      "tool",
+      "tool-loop",
+      "continuation"
+    ],
+    "name": "opendesign-glm-5.3-flashx-parallel-tools",
+    "recordedAt": "2026-11-10T22:20:04.641Z"
+  },
+  "interactions": [
+    {
+      "transport": "http",
+      "request": {
+        "method": "POST",
+        "url": "https://amr-link.open-design.ai/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"model\":\"glm-5.3-flashx\",\"messages\":[{\"role\":\"system\",\"content\":\"Call get_weather for every requested city in parallel, then answer in one short sentence.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris and in Tokyo?\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"store\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "body": "data: {\"id\":\"202611110619595423e355042443d1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"id\":\"call_03deb36a9c494c97a2ac2ad7\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]}}],\"created\":1794349199,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110619595423e355042443d1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"type\":\"function\",\"id\":\"call_ab7ea27f2424454db622ee68\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]}}],\"created\":1794349199,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110619595423e355042443d1\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"created\":1794349199,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":188,\"prompt_tokens_details\":{\"cached_read_tokens\":0,\"cached_tokens\":0},\"completion_tokens\":23,\"completion_tokens_details\":{},\"total_tokens\":211},\"model\":\"glm-5.3-flashx\"}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "transport": "http",
+      "request": {
+        "method": "POST",
+        "url": "https://amr-link.open-design.ai/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"model\":\"glm-5.3-flashx\",\"messages\":[{\"role\":\"system\",\"content\":\"Call get_weather for every requested city in parallel, then answer in one short sentence.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris and in Tokyo?\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_03deb36a9c494c97a2ac2ad7\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}},{\"id\":\"call_ab7ea27f2424454db622ee68\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_03deb36a9c494c97a2ac2ad7\",\"content\":\"{\\\"temperature\\\":22,\\\"condition\\\":\\\"sunny\\\"}\"},{\"role\":\"tool\",\"tool_call_id\":\"call_ab7ea27f2424454db622ee68\",\"content\":\"{\\\"temperature\\\":0,\\\"condition\\\":\\\"unknown\\\"}\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"store\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "body": "data: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Paris\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" is\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" sunny\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" at\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" \"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"22\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"°C\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\",\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" while\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" Tokyo\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" is\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" at\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" \"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"0\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"°C\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" with\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" unknown\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\" conditions.\"}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"glm-5.3-flashx\"}\n\ndata: {\"id\":\"202611110620030c3da9b7d8254caf\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{}}],\"created\":1794349203,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":236,\"prompt_tokens_details\":{\"cached_read_tokens\":0,\"cached_tokens\":0},\"completion_tokens\":21,\"completion_tokens_details\":{},\"total_tokens\":257},\"model\":\"glm-5.3-flashx\"}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

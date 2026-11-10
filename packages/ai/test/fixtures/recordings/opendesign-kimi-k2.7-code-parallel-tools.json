@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "metadata": {
+    "tags": [
+      "prefix:openai-compatible-chat",
+      "provider:opendesign",
+      "protocol:openai-chat",
+      "tool",
+      "tool-loop",
+      "continuation"
+    ],
+    "name": "opendesign-kimi-k2.7-code-parallel-tools",
+    "recordedAt": "2026-11-10T22:20:08.789Z"
+  },
+  "interactions": [
+    {
+      "transport": "http",
+      "request": {
+        "method": "POST",
+        "url": "https://amr-link.open-design.ai/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"model\":\"kimi-k2.7-code\",\"messages\":[{\"role\":\"system\",\"content\":\"Call get_weather for every requested city in parallel, then answer in one short sentence.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris and in Tokyo?\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"store\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "body": "data: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"\"}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"User\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"User\"}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" asks\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" asks\"}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" for weather\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" for weather\"}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" in Paris and Tokyo. Use get_weather in parallel.\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" in Paris and Tokyo. Use get_weather in parallel.\"}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"id\":\"call_99dc76035cc048fc8db7df5c\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"{\\\"city\\\": \\\"Paris\\\"}\"}},{\"index\":1,\"type\":\"function\",\"id\":\"call_f893190b00f94685ad0e0cba\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Tokyo\\\"}\"}}]}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-08bae379-6958-45a4-9ae4-7d6a60518035\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"created\":1794349205,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":89,\"prompt_tokens_details\":{\"text_tokens\":89,\"cached_read_tokens\":0,\"cached_tokens\":0},\"completion_tokens\":49,\"completion_tokens_details\":{\"text_tokens\":33,\"reasoning_tokens\":16},\"total_tokens\":138},\"model\":\"kimi-k2.7-code\"}\n\ndata: [DONE]\n\n"
+      }
+    },
+    {
+      "transport": "http",
+      "request": {
+        "method": "POST",
+        "url": "https://amr-link.open-design.ai/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"model\":\"kimi-k2.7-code\",\"messages\":[{\"role\":\"system\",\"content\":\"Call get_weather for every requested city in parallel, then answer in one short sentence.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris and in Tokyo?\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_99dc76035cc048fc8db7df5c\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}},{\"id\":\"call_f893190b00f94685ad0e0cba\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}],\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"User asks for weather in Paris and Tokyo. Use get_weather in parallel.\",\"index\":0}],\"reasoning\":\"User asks for weather in Paris and Tokyo. Use get_weather in parallel.\"},{\"role\":\"tool\",\"tool_call_id\":\"call_99dc76035cc048fc8db7df5c\",\"content\":\"{\\\"temperature\\\":22,\\\"condition\\\":\\\"sunny\\\"}\"},{\"role\":\"tool\",\"tool_call_id\":\"call_f893190b00f94685ad0e0cba\",\"content\":\"{\\\"temperature\\\":0,\\\"condition\\\":\\\"unknown\\\"}\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false},\"strict\":false}}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"store\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/event-stream"
+        },
+        "body": "data: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"We\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"We\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" have two\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" have two\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" results: Paris is 22 degrees and sunny, Tokyo is 0 degrees with unknown condition. We\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" results: Paris is 22 degrees and sunny, Tokyo is 0 degrees with unknown condition. We\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"It is sunny and 22°C in\",\"reasoning\":\" need answer in one short sentence. Combine both.\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\" need answer in one short sentence. Combine both.\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Paris, while Tokyo is 0°C with unknown conditions.\",\"reasoning\":\"\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"content\":\"\",\"reasoning\":\"\",\"reasoning_details\":[{\"index\":0,\"type\":\"reasoning.text\",\"text\":\"\"}]}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":null,\"model\":\"kimi-k2.7-code\"}\n\ndata: {\"id\":\"chatcmpl-64784f7c-8296-485b-a391-b2233c6a632d\",\"choices\":[{\"index\":0,\"delta\":{}}],\"created\":1794349207,\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":175,\"prompt_tokens_details\":{\"text_tokens\":175,\"cached_read_tokens\":0,\"cached_tokens\":0},\"completion_tokens\":53,\"completion_tokens_details\":{\"text_tokens\":20,\"reasoning_tokens\":33},\"total_tokens\":228},\"model\":\"kimi-k2.7-code\"}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}
