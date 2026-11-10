@@ -448,7 +448,7 @@ export const layer = Layer.effect(
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
         if (!(cause instanceof AIError)) return yield* Effect.fail(cause)
-        const error = toSessionError(cause)
+        const error = toSessionError(cause, { model: context.model.ref })
         const tooLarge = cause.reason._tag === "InvalidRequest" && cause.reason.classification === "payload-too-large"
 
         if (tooLarge && request === prepared.request) {

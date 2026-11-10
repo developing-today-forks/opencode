@@ -483,7 +483,7 @@ export const make = Effect.gen(function* () {
               ? new AIError({ reason: new UnknownProviderError({ message: providerFailure.message }) })
               : unknownFinish
         const failureError = llmFailure
-          ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID })
+          ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID, model: input.model.ref })
           : undefined
         const llmError = failureError && !recorded.providerFailed ? failureError : undefined
         // Usage and rate-limit state are recorded where the outcome is first known. The attempt
