@@ -22,7 +22,10 @@ import {
  * not interchangeable with a key). Per-credential: one stored Console
  * sign-in per workspace, so each usable row answers its own result —
  * including rows stored under the instance integrations
- * (opencode-go.drewrypope, opencode-go.popesdrew).
+ * (opencode-go.drewrypope, opencode-go.popesdrew): the instance rows are
+ * judged and fetched as the Console sign-in they are (see
+ * isCredentialUsable / fetchQuotaForCredential below), and the base
+ * answer folds them in (foldInstanceCredentials).
  */
 
 export const providerId = "opencode-go"
@@ -245,8 +248,33 @@ export const provider: QuotaProvider = {
   providerName,
   aliases,
   credentialAliases: ["opencode", "opencode-go"],
+  // Go accounts live under instance integrations (opencode-go.drewrypope,
+  // opencode-go.popesdrew, ...), so the base row folds its configured
+  // instances' rows into its answer — otherwise an instance whose credential
+  // the base walk cannot see (a Console sign-in stored under its own
+  // instance integration) never gets a labelled row.
+  foldInstanceCredentials: true,
   isConfigured: (ctx) => Boolean(getConsoleCredential(ctx) || getApiKey(ctx)),
   fetchQuota: fetchCombined,
+  // A row stored under an instance integration (opencode-go.<account>)
+  // is judged on its own shape, not by re-keying it under the base id:
+  // an API key reads as configured directly; a Console sign-in reads
+  // through the Console path. The base provider's isConfigured against a
+  // single re-keyed row cannot see the instance Console row — its
+  // credential lives under neither the base id nor the shared `opencode`
+  // integration — so the dispatcher judges these rows here instead.
+  isCredentialUsable: (_ctx, row) => {
+    if (!row.value) return false
+    const value: typeof row.value = { ...row.value }
+    const single: QuotaContext = {
+      credentials: [{ ...row, integrationID: CONSOLE_INTEGRATION_ID, active: true }],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+    }
+    if (getConsoleCredential(single)) return true
+    return asNonEmptyString(value.key) !== undefined
+  },
   fetchQuotaForCredential: async (ctx, row) => {
     const integrationID = asNonEmptyString(row.integrationID)
     if (!integrationID || !row.value) {

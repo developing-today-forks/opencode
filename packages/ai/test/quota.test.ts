@@ -2811,3 +2811,109 @@ describe("getAuthEntry reads own properties only (#2189)", () => {
     expect(getAuthEntry(auth, ["toString"])).toEqual({ type: "api", key: "sk-fixture" })
   })
 })
+
+
+describe("opencode-go instance fold (popesdrew labelled row)", () => {
+  // The popesdrew account's credential is a Console sign-in stored under its
+  // OWN instance integration (opencode-go.popesdrew), not under the shared
+  // `opencode` integration the base per-credential walk reads. Without the
+  // fold, the base answer carries that account's Console measurement as one
+  // unlabelled row and the instance ask reports "Not configured".
+  const consoleRow = {
+    id: "cred_popesdrew",
+    integrationID: "opencode-go.popesdrew",
+    label: "OpenCode Go (popesdrew)",
+    active: true,
+    value: {
+      type: "oauth",
+      methodID: "device",
+      access: "console-access",
+      refresh: "console-refresh",
+      expires: Date.now() + 3_600_000,
+      metadata: { server: "https://opencode.ai/console", orgID: "org_POPESDREW1" },
+    },
+  } as never
+  const keyRow = {
+    id: "cred_dev0",
+    integrationID: "opencode-go.developing-today-0",
+    label: "OpenCode Go (developing-today-0)",
+    active: true,
+    value: { type: "key", key: "go-key" },
+  } as never
+
+  const fakeResponse = (payload: unknown) =>
+    new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } })
+
+  const goCtx = () =>
+    ({
+      credentials: [consoleRow, keyRow],
+      disabledProviders: new Set<string>(),
+      instances: new Map([
+        ["opencode-go.popesdrew", { base: "opencode-go", name: "OpenCode Go (popesdrew)" }],
+        ["opencode-go.developing-today-0", { base: "opencode-go", name: "OpenCode Go (developing-today-0)" }],
+      ]),
+      providerConfig: {},
+      fetchImpl: async (url: string) => {
+        if (String(url).includes("opencode.ai/console/api/go/status")) {
+          return fakeResponse({
+            product: "go",
+            access: {
+              meters: {
+                fiveHour: { resetsAt: "2026-12-01T00:00:00.000Z", limitMicroCents: "1000", usedMicroCents: "250" },
+                week: { resetsAt: "2026-12-07T00:00:00.000Z", limitMicroCents: "1000", usedMicroCents: "1000" },
+                month: { resetsAt: "2027-01-01T00:00:00.000Z", limitMicroCents: "1000", usedMicroCents: "500" },
+              },
+            },
+          })
+        }
+        if (String(url).includes("opencode.ai/console/api/billing/status")) {
+          return fakeResponse({ availableMicroCents: "0" })
+        }
+        if (String(url).includes("opencode.ai/zen/go/v1/usage")) {
+          return fakeResponse({
+            usage: {
+              rolling: { percent: 10, resetsAt: "2026-12-01T00:00:00.000Z" },
+              weekly: { percent: 20, resetsAt: "2026-12-07T00:00:00.000Z" },
+              monthly: { percent: 30, resetsAt: "2027-01-01T00:00:00.000Z" },
+            },
+          })
+        }
+        return new Response("{}", { status: 404 })
+      },
+    }) as never
+
+  test("the base answer folds instance rows in, labelled per account", async () => {
+    const { fetchQuotaForProviderInstances } = await import("../src/quota/index.js")
+    const results = await fetchQuotaForProviderInstances(goCtx(), "opencode-go")
+    const popesdrew = results.find((result) => result.credentialId === "cred_popesdrew")
+    expect(popesdrew).toBeDefined()
+    expect(popesdrew?.providerId).toBe("opencode-go")
+    expect(popesdrew?.providerName).toBe("OpenCode Go (popesdrew)")
+    expect(popesdrew?.credentialLabel).toBe("OpenCode Go (popesdrew)")
+    expect(popesdrew?.ok).toBe(true)
+    expect(popesdrew?.usage?.windows["5h"]?.usedPercent).toBe(25)
+    expect(popesdrew?.usage?.windows.weekly?.usedPercent).toBe(100)
+    expect(popesdrew?.usage?.windows.monthly?.usedPercent).toBe(50)
+    expect(popesdrew?.usage?.windows.credits_balance?.valueLabel).toBe("$0.00")
+    const dev0 = results.find((result) => result.credentialId === "cred_dev0")
+    expect(dev0).toBeDefined()
+    expect(dev0?.providerName).toBe("OpenCode Go (developing-today-0)")
+    expect(dev0?.usage?.windows["5h"]?.usedPercent).toBe(10)
+  })
+
+  test("the instance ask answers for the console row stored under the instance integration", async () => {
+    const { fetchQuotaForProviderInstances } = await import("../src/quota/index.js")
+    const results = await fetchQuotaForProviderInstances(goCtx(), "opencode-go.popesdrew")
+    expect(results).toHaveLength(1)
+    expect(results[0]?.ok).toBe(true)
+    expect(results[0]?.credentialId).toBe("cred_popesdrew")
+    expect(results[0]?.usage?.windows.weekly?.usedPercent).toBe(100)
+  })
+
+  test("the listing carries the instance id", async () => {
+    const { listConfiguredQuotaProviders } = await import("../src/quota/index.js")
+    const listing = await listConfiguredQuotaProviders(goCtx())
+    expect(listing).toContain("opencode-go.popesdrew")
+    expect(listing).toContain("opencode-go.developing-today-0")
+  })
+})
