@@ -955,6 +955,17 @@ const toolIndexByID = (
   return entry ? Number(entry[0]) : undefined
 }
 
+const isCompleteToolInput = (input: string): boolean => {
+  const text = input.trim()
+  if (!text) return false
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
 const reasoningDelta = (
   delta: Schema.Schema.Type<typeof OpenAIChatDelta> | null | undefined,
   configuredField?: string,
@@ -1143,8 +1154,21 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
       const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
       const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
       const fallbackTool = tools[fallback] ?? pendingTools[fallback]
-      const index =
-        tool.index ?? matched ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
+      // Some gateways (OpenDesign GLM-5.3-Flash, #1708) reuse index 0 for a
+      // second parallel call, distinguishing calls only by id. A delta that
+      // carries a new id while its stated index is occupied by a different
+      // call starts a new call at the next free index instead of merging
+      // its arguments into the occupying call.
+      const statedTool = tool.index == null ? undefined : (tools[tool.index] ?? pendingTools[tool.index])
+      const latestTool = latestToolIndex === undefined ? undefined : tools[latestToolIndex]
+      const sparseIndex =
+        !tool.id && tool.index !== undefined && latestToolIndex !== undefined && latestToolIndex !== tool.index && statedTool !== undefined && "input" in statedTool && isCompleteToolInput(statedTool.input) && latestTool !== undefined && !isCompleteToolInput(latestTool.input) ? latestToolIndex : undefined
+      const statedIndex =
+        matched ??
+        (tool.id && statedTool?.id && statedTool.id !== tool.id
+          ? nextToolIndex
+          : (tool.index ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)))
+      const index = sparseIndex !== undefined && statedIndex === tool.index ? sparseIndex : statedIndex
       const current = tools[index]
       const pending = pendingTools[index]
       const id = current?.id ?? pending?.id ?? (tool.id || undefined)
