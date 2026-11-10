@@ -6,8 +6,8 @@
 //
 // The CLI (verified on the fleet laptop, Claude Code 2.1.306) stores its
 // claude.ai OAuth login in ~/.claude/.credentials.json (0600) as
-//   { "claudeAiOauth": { "accessToken": "sk-ant-oat01-...",
-//                        "refreshToken": "sk-ant-ort01-...",
+//   { "claudeAiOauth": { "accessToken": "sk-ant-oat01-…",
+//                        "refreshToken": "sk-ant-ort01-…",
 //                        "expiresAt": <epoch ms>, "subscriptionType": ... } }
 // and sends the access token as `Authorization: Bearer <token>` — never
 // x-api-key (an API key would bill the pay-as-you-go API instead of the
@@ -38,19 +38,24 @@
 // + rename, 0600) through the single write helper, preserving unrelated
 // fields, so a provider sign-in and a CLI sign-in stay interchangeable.
 //
-// An expired credentials-file credential carrying a refresh token is
-// renewed in place (#1818): one form-encoded refresh-token exchange with
-// the Claude Code client identity, and the rotated pair is written back
-// BEFORE the new access token is used — Anthropic rotates the refresh
-// token on every exchange, so an unpersisted rotated token would burn the
-// login. A failed write discards the rotated pair and leaves the file
-// untouched; a failed exchange keeps the fail-loud floor. The env token
-// (#1752) and an expired file with no refresh token still fail LOUDLY
-// (see claudeCodeAuth) instead of silently degrading.
+// A credentials-file credential carrying a refresh token is renewed in
+// place BY THE SERVER ITSELF (#1818, #6120) — never by invoking the CLI:
+// renewal starts WELL BEFORE expiry, inside the renewal lead window
+// (RENEWAL_LEAD_MS), and the rotated pair is written back through the
+// write helper BEFORE the new access token is used — Anthropic rotates
+// the refresh token on every exchange, so an unpersisted rotated token
+// would burn the login. A failed write discards the rotated pair and
+// leaves the file untouched. A rate-limited exchange (HTTP 429) is
+// waited out — the response's Retry-After when it states one, otherwise
+// the capped backoff — and retried until the renewal lands; while it
+// waits, the door's requests fail as rate limits (the router's
+// rate-limit hold), never as authentication failures. The env token
+// (#1752) and a file credential with no refresh token still fail LOUDLY
+// once expired (see claudeCodeAuth) instead of silently degrading.
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { deadlineSignal, readBoundedResponseText } from "@opencode/util/http-body"
-import { AIError, AuthenticationError } from "../schema/index.js"
+import { AIError, AuthenticationError, RateLimitError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
 import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
 
@@ -64,7 +69,7 @@ export const NOT_SIGNED_IN_MESSAGE =
 
 export const expiredMessage = (expiresAt: number) =>
   "The Claude Code OAuth credential in ~/.claude/.credentials.json expired at " +
-  `${new Date(expiresAt).toISOString()} and this provider does not refresh the CLI's login. ` +
+  `${new Date(expiresAt).toISOString()} and carries no refresh token the server can renew with. ` +
   "Renew it with the claude-code provider's in-product sign-in; until then claude-code requests fail closed " +
   "rather than falling back to the CLI or an API key."
 
@@ -113,6 +118,10 @@ export interface CredentialSources {
   readonly fetchFn?: typeof fetch
   /** Override for the token-exchange deadline (tests); defaults to 15 seconds. */
   readonly tokenExchangeTimeoutMs?: number
+  /** Sleep used between rate-limited renewal attempts (tests); defaults to a real timer. */
+  readonly sleep?: (ms: number) => Promise<void>
+  /** Total wait budget for one renewal's rate-limit retries (tests); defaults to RENEWAL_WAIT_BUDGET_MS. */
+  readonly renewalWaitBudgetMs?: number
   /** Random bytes for PKCE/state/temp names (tests); defaults to crypto.getRandomValues. */
   readonly randomValues?: (length: number) => Uint8Array
   readonly now?: () => number
@@ -297,9 +306,49 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
   }
 }
 
+// Renewal timing (#6120). The access token this door spends lives ~8
+// hours; renewal starts when less than RENEWAL_LEAD_MS of it remains —
+// a quarter of the lifetime, two hours — instead of at expiry. The
+// incident this fixes: on 2026-11-10 the first refresh attempt ran 22
+// seconds AFTER the token expired, met the token endpoint's rate limit
+// from the first try, and the failure was misreported as a dead login.
+// Renewing inside a two-hour lead leaves room to wait a rate limit out
+// while the current token still serves.
+export const RENEWAL_LEAD_MS = 2 * 60 * 60 * 1000
+/** One renewal waits out rate limiting for at most this long before the
+ * door's requests surface the wait as a rate-limit failure; the next
+ * request starts a fresh renewal wait (the exchange is single-flight). */
+export const RENEWAL_WAIT_BUDGET_MS = 15 * 60 * 1000
+const RENEWAL_BACKOFF_BASE_MS = 5_000
+const RENEWAL_BACKOFF_CAP_MS = 5 * 60 * 1000
+
 /** A refresh failure with a named, token-free message (#1818). */
 export class ClaudeCodeRefreshError extends Error {
   override readonly name = "ClaudeCodeRefreshError"
+}
+
+/**
+ * The token endpoint answered a renewal with HTTP 429 (#6120): a
+ * rate-limit wait, not a refusal. Carries the endpoint's own
+ * Retry-After when it stated one. Renewal retries through this error
+ * until the wait budget ends; a request that surfaces it fails as a
+ * rate limit, never as an authentication failure — the login is not
+ * dead, its renewal is merely waiting.
+ */
+export class ClaudeCodeRefreshRateLimited extends Error {
+  override readonly name = "ClaudeCodeRefreshRateLimited"
+  constructor(readonly retryAfterMs: number | undefined) {
+    super("Claude Code OAuth refresh is rate limited (HTTP 429); renewal is waiting to retry.")
+  }
+}
+
+/** The endpoint's stated wait: `Retry-After` delay-seconds or HTTP-date (RFC 9110). */
+const retryAfterHeaderMs = (response: Response, now: number): number | undefined => {
+  const raw = response.headers.get("retry-after")?.trim()
+  if (!raw) return undefined
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000
+  const date = Date.parse(raw)
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now)
 }
 
 /**
@@ -311,7 +360,7 @@ export class ClaudeCodeRefreshError extends Error {
  * in-memory-only credential exists (an unpersisted rotated token is a
  * burned login). Tokens are never logged.
  */
-const refreshAndPersist = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
+const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
   const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -327,10 +376,12 @@ const refreshAndPersist = async (sources: CredentialSources, refreshToken: strin
         "Re-run the claude-code provider's in-product sign-in if this persists.",
     )
   })
+  if (response.status === 429)
+    throw new ClaudeCodeRefreshRateLimited(retryAfterHeaderMs(response, sources.now ? sources.now() : Date.now()))
   if (!response.ok)
     throw new ClaudeCodeRefreshError(
-      `Claude Code OAuth refresh was rejected with HTTP ${response.status}: the CLI's login is no longer renewable. ` +
-        "Re-run the claude-code provider's in-product sign-in.",
+      `Claude Code OAuth refresh was rejected with HTTP ${response.status}. ` +
+        "Re-run the claude-code provider's in-product sign-in if this persists.",
     )
   let data: unknown
   try {
@@ -368,7 +419,7 @@ const refreshAndPersist = async (sources: CredentialSources, refreshToken: strin
     accessToken,
     // A refresh response that omits the refresh token leaves the prior
     // one in place (buildCredentialsFileContents merges over the blob).
-    refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : refreshToken,
+    refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token.trim() : undefined,
     expiresAt:
       typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in)
         ? now + tokens.expires_in * 1000
@@ -490,7 +541,7 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     const now = sources.now ? sources.now() : Date.now()
     const oauth: ClaudeCodeOAuthBlob = {
       accessToken,
-      refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : undefined,
+      refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token.trim() : undefined,
       expiresAt:
         typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in)
           ? now + tokens.expires_in * 1000
@@ -533,7 +584,39 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
   }
 }
 
-/** Concurrent expired requests share exactly one inflight refresh exchange (#1818). */
+/** Default timer for the renewal wait; tests inject an instant sleep. */
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Renew with waiting (#6120): run the exchange, and when the endpoint
+ * rate-limits it, WAIT — the response's Retry-After when it stated one,
+ * otherwise an exponential backoff (5s doubling, capped at 5 minutes) —
+ * and retry, until the renewal lands or the wait budget
+ * (RENEWAL_WAIT_BUDGET_MS) is spent. The rotated pair is persisted by
+ * the exchange itself before the new token is used. Any other failure
+ * (a rejected grant, a network error, a malformed response) propagates
+ * at once: only a 429 is a wait.
+ */
+const refreshAndPersist = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
+  const sleep = sources.sleep ?? defaultSleep
+  const budget = sources.renewalWaitBudgetMs ?? RENEWAL_WAIT_BUDGET_MS
+  let waited = 0
+  let backoff = RENEWAL_BACKOFF_BASE_MS
+  for (;;) {
+    try {
+      return await exchangeRefreshToken(sources, refreshToken)
+    } catch (cause) {
+      if (!(cause instanceof ClaudeCodeRefreshRateLimited)) throw cause
+      const wait = Math.max(cause.retryAfterMs ?? backoff, 1_000)
+      backoff = Math.min(backoff * 2, RENEWAL_BACKOFF_CAP_MS)
+      if (waited >= budget || wait > budget - waited) throw cause
+      waited += wait
+      await sleep(wait)
+    }
+  }
+}
+
+/** Concurrent renewal-needing requests share exactly one inflight renewal (#1818, #6120). */
 const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
 
 const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
@@ -559,27 +642,50 @@ const loadCredentialEffect = (sources: CredentialSources) =>
       return yield* new AIError({ reason: new AuthenticationError({ message: NOT_SIGNED_IN_MESSAGE }) })
     const now = sources.now ? sources.now() : Date.now()
     const expired = credential.expiresAt !== undefined && credential.expiresAt <= now
-    if (!expired) return credential
-    // An expired credentials-file credential with a refresh token renews
-    // (#1818); the env tier (#1752) and a file with no refresh token keep
-    // the fail-loud floor.
-    if (credential.source !== "credentials-file" || credential.refreshToken === undefined)
+    // Renewal is due inside the lead window (#6120), not at expiry: a
+    // credentials-file credential with a refresh token renews while its
+    // current token still serves, so a rate-limited renewal can be
+    // waited out without the door ever presenting an expired token.
+    const renewalDue =
+      credential.expiresAt !== undefined && credential.expiresAt - now <= RENEWAL_LEAD_MS
+    if (!renewalDue) return credential
+    // The env tier (#1752) never renews; a file credential with no
+    // refresh token serves until expiry and then keeps the fail-loud
+    // floor — there is nothing the server can renew it with.
+    if (credential.source !== "credentials-file" || credential.refreshToken === undefined) {
+      if (!expired) return credential
       return yield* new AIError({
         reason: new AuthenticationError({ message: expiredMessage(credential.expiresAt as number) }),
       })
+    }
     return yield* Effect.tryPromise({
       try: () => refreshCredential(sources, credential),
-      catch: (cause) =>
-        new AIError({
+      catch: (cause) => {
+        // A renewal still waiting out the endpoint's rate limit when
+        // its budget ends surfaces as a rate limit (#6120): the router
+        // holds the door on the rate-limit bench and fails the session
+        // over — the request never reads as an authentication failure,
+        // and the next request starts a fresh renewal wait.
+        if (cause instanceof ClaudeCodeRefreshRateLimited)
+          return new AIError({
+            reason: new RateLimitError({
+              message:
+                "Claude Code OAuth renewal is waiting out the token endpoint's rate limit (HTTP 429); " +
+                "the door reopens when the renewal lands.",
+              ...(cause.retryAfterMs !== undefined ? { retryAfterMs: cause.retryAfterMs } : {}),
+            }),
+          })
+        return new AIError({
           reason: new AuthenticationError({
             message: cause instanceof ClaudeCodeRefreshError ? cause.message : "Claude Code OAuth refresh failed.",
           }),
-        }),
+        })
+      },
     })
   })
 
 /**
- * The provider's auth: the CLI's OAuth access token as a Bearer header,
+ * The provider's auth: the CLI's OAuth access token as a Bearer credential,
  * plus the CLI's User-Agent re-stamped over whatever the caller carried.
  * The load-bearing OAuth beta flags ride on the route's static headers
  * (see protocols/claude-code-messages.ts); this layer owns the credential
