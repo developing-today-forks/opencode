@@ -2155,6 +2155,40 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("last resort prefers a merely cooling target over a quota-benched one (code#8086)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // pa answers quota exhaustion: the bench is the only signal it has, and it
+        // is quota-dead. pb fails ordinarily and is merely cooling. Both fall out
+        // of the ready set, but the last resort serves pb despite the order -
+        // seating pa would spend the turn on a leg that has already answered 100%.
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pa", model: a.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pb", model: b.id }), ModelRoute.policy(), Date.now())
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+      }),
+    )
+  })
+
+  it.effect("last resort still serves a quota-benched target when nothing undead remains (code#8086)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // Every target quota-dead: the preference has nothing to prefer, and the
+        // pool still cannot run out - the usable set itself answers, in order.
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pa", model: a.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pb", model: b.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+      }),
+    )
+  })
+
   it.live("admits exactly one half-open probe when a quota window reset learned after the bench passes (#1123)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

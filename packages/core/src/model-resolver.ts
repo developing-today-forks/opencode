@@ -882,13 +882,24 @@ export const layer = Layer.effect(
           // known-full-but-fitting target as the last resort.
           const usable = indexes.filter((index) => !overLimit.has(index))
           const nonFull = usable.filter((index) => {
-            const credentialID = effectiveCredential(definition.targets[index], now)?.id
-            return credentialID === undefined || ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
+            const target = definition.targets[index]
+            const credentialID = effectiveCredential(target, now)?.id
+            // Quota-dead in any scope counts as full for this preference (code#8086):
+            // a credential-less leaf’s exhaustion lives only in its target bench, and
+            // a provider gate or a quota bench on the serving credential is the same
+            // answer in another scope. Consulting the credential gate alone let the
+            // last resort seat legs whose quota was exhausted for weeks over legs
+            // that were merely benched and about to serve again.
+            if (ModelRoute.quotaCoolingDown(target, now)) return false
+            if (ModelRoute.providerQuotaBlocked(target, now, locationDirectory) !== undefined) return false
+            if (credentialID === undefined) return true
+            if (ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) !== undefined) return false
+            return !ModelRoute.credentialQuotaCoolingDown(target, credentialID, now)
           })
           // No pool-level hard exclusion (Drew, 2026-11-07): a pool cannot run out —
-          // only a leaf's own model, credential, or provider can — so the last resort
-          // is the usable set itself, preferring targets whose credential is not
-          // known-full while any such target remains.
+          // only a leaf’s own model, credential, or provider can — so the last resort
+          // is the usable set itself, preferring targets that are not quota-dead in
+          // any scope while any such target remains.
           const lastResort = nonFull.length > 0 ? nonFull : usable
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
           const index = ModelRoute.nextTarget(
