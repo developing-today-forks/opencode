@@ -641,6 +641,7 @@ const layer = Layer.effectDiscard(
             ? {
                 id: input.id,
                 type: "user",
+                delivery: input.delivery,
                 metadata: input.payload.metadata,
                 text: input.payload.text,
                 files: input.payload.files,
@@ -651,6 +652,7 @@ const layer = Layer.effectDiscard(
             : {
                 id: input.id,
                 type: "synthetic",
+                delivery: input.delivery,
                 text: input.payload.text,
                 description: input.payload.description,
                 metadata: input.payload.metadata,

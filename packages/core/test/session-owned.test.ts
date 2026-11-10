@@ -329,6 +329,38 @@ describe("Session-owned handles", () => {
     }),
   )
 
+  it.live("preserves the first admission's delivery mode on delivered retries", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup()
+      const first = fixture.sessions.forSession(sessionID)
+      const second = fixture.sessions.forSession(sessionID)
+
+      const steered = yield* first.prompt({ text: "Steer first", resume: false })
+      expect(steered.delivery).toBe("steer")
+      expect(yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "steer")).toBe(1)
+      const steeredRetry = yield* second.prompt({
+        id: steered.id,
+        text: "Ignore this",
+        delivery: "queue",
+        resume: false,
+      })
+      expect(steeredRetry.delivery).toBe("steer")
+      expect(steeredRetry.payload).toEqual(steered.payload)
+
+      const queued = yield* first.prompt({ text: "Queue first", delivery: "queue", resume: false })
+      expect(queued.delivery).toBe("queue")
+      expect(yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input")).toBe(1)
+      const queuedRetry = yield* second.prompt({
+        id: queued.id,
+        text: "Ignore this too",
+        delivery: "steer",
+        resume: false,
+      })
+      expect(queuedRetry.delivery).toBe("queue")
+      expect(queuedRetry.payload).toEqual(queued.payload)
+    }),
+  )
+
   it.live("reads fresh placement through an existing handle after a projected move", () =>
     Effect.gen(function* () {
       const fixture = yield* setup()
