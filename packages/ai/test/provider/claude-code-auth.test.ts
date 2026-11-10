@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
+  ClaudeCodeRefreshRateLimited,
   ClaudeCodeSignInError,
   ClaudeCodeCredentialWriteError,
   NOT_SIGNED_IN_MESSAGE,
+  RENEWAL_LEAD_MS,
   OAUTH_AUTHORIZE_URL,
   OAUTH_CLIENT_ID,
   OAUTH_REDIRECT_URI,
@@ -148,7 +150,7 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
     )
 
   test("a live credential becomes the Bearer header (never x-api-key)", async () => {
-    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + 3_600_000), env: {} })
+    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} })
     expect(headers.authorization).toBe("Bearer " + "tok-live")
     expect(headers["x-api-key"]).toBeUndefined()
   })
@@ -217,7 +219,7 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
 
   test("the credentials-file path stamps the CLI UA over the session UA", async () => {
     const headers = await Effect.runPromise(
-      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + 3_600_000), env: {} } }).apply({
+      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} } }).apply({
         request: {},
         method: "POST",
         url: "https://api.anthropic.com/v1/messages",
@@ -250,6 +252,8 @@ describe("messages — no message instructs running the `claude` binary (#1852)"
     expect(NOT_SIGNED_IN_MESSAGE).toContain("in-product")
     expect(expiredMessage(1_000)).not.toContain("Run `claude`")
     expect(expiredMessage(1_000)).toContain("in-product sign-in")
+    expect(expiredMessage(1_000)).toContain("no refresh token")
+    expect(expiredMessage(1_000)).not.toContain("does not refresh")
   })
 })
 
@@ -682,6 +686,177 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     }
     expect(logged.join(" ")).not.toContain("tok-signed-in")
     expect(logged.join(" ")).not.toContain("ref-signed-in")
+  })
+})
+
+describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", () => {
+  const apply = (sources: CredentialSources) =>
+    Effect.runPromise(
+      claudeCodeAuth({ sources }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: Headers.empty,
+      }),
+    )
+
+  const NOW = 10_000_000_000
+  const HOUR = 3_600_000
+
+  const blobWith = (expiresAt: number) =>
+    JSON.stringify({
+      claudeAiOauth: { accessToken: "tok-old", refreshToken: "ref-old", expiresAt, subscriptionType: "max" },
+    })
+
+  const harness = (
+    response: (call: number) => Response | Promise<Response>,
+    overrides: Partial<CredentialSources> = {},
+    expiresAt = NOW - 1_000,
+  ) => {
+    const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", blobWith(expiresAt)]])
+    const calls: Array<{ url: string; body: string }> = []
+    const sleeps: Array<number> = []
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (path) => store.get(path),
+      writeFile: async (path, contents) => {
+        store.set(path, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      fetchFn: async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), body: String(init?.body ?? "") })
+        return response(calls.length)
+      },
+      ...overrides,
+    }
+    return { sources, store, calls, sleeps }
+  }
+
+  const rotated = () =>
+    new Response(
+      JSON.stringify({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 28_800, scope: "user:inference" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+
+  test("renews inside the lead window while the current token is still valid", async () => {
+    const { sources, store, calls, sleeps } = harness(rotated, {}, NOW + RENEWAL_LEAD_MS - 60_000)
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-new")
+    expect(calls).toHaveLength(1)
+    expect(sleeps).toEqual([])
+    const persisted = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    expect(persisted.claudeAiOauth).toMatchObject({ accessToken: "tok-new", refreshToken: "ref-new" })
+  })
+
+  test("a valid token outside the lead window is served without any exchange", async () => {
+    const { sources, calls } = harness(rotated, {}, NOW + RENEWAL_LEAD_MS + HOUR)
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-old")
+    expect(calls).toHaveLength(0)
+  })
+
+  test("a 429 with Retry-After is waited out and the renewal then lands", async () => {
+    const { sources, store, calls, sleeps } = harness((call) =>
+      call < 3
+        ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } })
+        : rotated(),
+    )
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-new")
+    expect(calls).toHaveLength(3)
+    expect(sleeps).toEqual([7_000, 7_000])
+    const persisted = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    expect(persisted.claudeAiOauth.accessToken).toBe("tok-new")
+  })
+
+  test("a 429 with an HTTP-date Retry-After waits until that date", async () => {
+    const date = new Date(NOW + 42_000).toUTCString()
+    const { sources, calls, sleeps } = harness((call) =>
+      call < 2 ? new Response("rate limited", { status: 429, headers: { "Retry-After": date } }) : rotated(),
+    )
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-new")
+    expect(calls).toHaveLength(2)
+    expect(sleeps).toEqual([42_000])
+  })
+
+  test("a 429 without Retry-After backs off exponentially", async () => {
+    const { sources, calls, sleeps } = harness((call) =>
+      call < 3 ? new Response("rate limited", { status: 429 }) : rotated(),
+    )
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-new")
+    expect(calls).toHaveLength(3)
+    expect(sleeps).toEqual([5_000, 10_000])
+  })
+
+  test("a renewal wait that outlasts its budget surfaces RateLimit — never Authentication", async () => {
+    const { sources, calls, sleeps } = harness((call) =>
+      call <= 25 ? new Response("rate limited", { status: 429 }) : rotated(),
+    )
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    const text = JSON.stringify(error)
+    expect(text).toContain("RateLimit")
+    expect(text).toContain("rate limit")
+    expect(text).not.toContain("Authentication")
+    expect(text).not.toContain("no longer renewable")
+    expect(calls.length).toBeGreaterThan(1)
+    expect(calls.length).toBeLessThan(25)
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(15 * 60_000)
+  })
+
+  test("a custom wait budget bounds the retries", async () => {
+    const { sources, calls } = harness(
+      () => new Response("rate limited", { status: 429 }),
+      { renewalWaitBudgetMs: 16_000 },
+    )
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("RateLimit")
+    expect(calls).toHaveLength(3)
+  })
+
+  test("a non-429 rejection is not retried and keeps the fail-loud floor", async () => {
+    const { sources, store, calls, sleeps } = harness(
+      () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+    )
+    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(calls).toHaveLength(1)
+    expect(sleeps).toEqual([])
+    const text = JSON.stringify(error)
+    expect(text).toContain("HTTP 400")
+    expect(text).not.toContain("no longer renewable")
+    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+  })
+
+  test("concurrent requests share one waiting renewal", async () => {
+    const { sources, calls, sleeps } = harness((call) =>
+      call < 3 ? new Response("rate limited", { status: 429, headers: { "Retry-After": "3" } }) : rotated(),
+    )
+    const results = await Promise.all([apply(sources), apply(sources), apply(sources)])
+    expect(results.map((headers) => headers.authorization)).toEqual([
+      "Bearer tok-new",
+      "Bearer tok-new",
+      "Bearer tok-new",
+    ])
+    expect(calls).toHaveLength(3)
+    expect(sleeps).toEqual([3_000, 3_000])
+  })
+
+  test("ClaudeCodeRefreshRateLimited carries the stated wait and no dead-login wording", () => {
+    const error = new ClaudeCodeRefreshRateLimited(9_000)
+    expect(error.retryAfterMs).toBe(9_000)
+    expect(error.message).not.toContain("renewable")
   })
 })
 
