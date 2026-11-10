@@ -55,7 +55,8 @@ describe("toSessionError", () => {
           }),
         ),
       ),
-    ).toEqual({ type: "provider.unsupported-operation", message: "no compact endpoint" })
+      // code#7073 step 4: the outcome also records the provider the reason names.
+    ).toEqual({ type: "provider.unsupported-operation", message: "no compact endpoint", provider: "provider" })
     expect(
       toSessionError(
         llm(

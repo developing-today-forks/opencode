@@ -31,6 +31,11 @@ export interface SessionErrorContext {
    * Method-specific error classification is gated on it: without it, a diagnosis that
    * names a credential method is never asserted from an error body alone. */
   readonly credentialMethodID?: string
+  /** The model that served the failed request, when the caller knows it (the session
+   * runner does, via the resolved model). Recorded on the outcome for provider
+   * errors whose reason does not name a provider/model itself (auth, invalid
+   * request), so a startup provider death names its endpoint/model (code#7073). */
+  readonly model?: { readonly providerID: string; readonly id: string }
 }
 
 export function toSessionError(cause: unknown, context?: SessionErrorContext): SessionError.Error {
@@ -125,6 +130,12 @@ function credentialMethodMismatchMessage(body: string | undefined, status: numbe
 
 function providerError(type: string, reason: AIError["reason"], context?: SessionErrorContext): SessionError.Error {
   const status = reason.http?.status
+  // Facts the reason itself carries win (no-route names provider+model); the
+  // caller's serving model fills the rest. The HTTP context URL stays unexposed:
+  // it is a runtime diagnostic, not outcome state (see the HTTP-status test).
+  const named = reason as { provider?: unknown; model?: unknown }
+  const provider = typeof named.provider === "string" ? named.provider : context?.model?.providerID
+  const model = typeof named.model === "string" ? named.model : context?.model?.id
   return {
     type,
     message:
@@ -134,6 +145,8 @@ function providerError(type: string, reason: AIError["reason"], context?: Sessio
       Object.entries(tokenSharingMessages).find(([code]) => reason.body?.includes(code))?.[1] ??
       reason.message,
     ...(status === undefined ? {} : { status }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     ...(reason.body === undefined ? {} : { response: { body: reason.body } }),
   }
 }
