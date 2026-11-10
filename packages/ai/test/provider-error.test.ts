@@ -1,6 +1,19 @@
 import { describe, expect, test } from "bun:test"
-import { isContextOverflow } from "../src/index.js"
-import { classifyProviderFailure, providerErrorMessage } from "../src/provider-error.js"
+import {
+  AIError,
+  AuthenticationError,
+  ContentPolicyError,
+  HttpContext,
+  InvalidProviderOutputError,
+  InvalidRequestError,
+  ProviderInternalError,
+  QuotaExceededError,
+  RateLimitError,
+  TransportError,
+  UnknownProviderError,
+  isRetryable,
+} from "../src/index.js"
+import { classifyProviderFailure, isContextOverflow, providerErrorMessage } from "../src/provider-error.js"
 
 describe("provider error classification", () => {
   test("classifies provider token limit messages as context overflow", () => {
@@ -580,5 +593,56 @@ describe("provider error messages", () => {
         "invalid parameter",
       ].map(providerErrorMessage),
     ).toEqual([undefined, undefined, undefined, undefined])
+  })
+})
+
+// Oracle (#2225): retry policy is the failure classification alone. A
+// wire-supplied `x-should-retry` header — set by the failing provider
+// or any proxy — must neither force a never-retry class to retry nor
+// suppress a retryable one, in either header direction, for any class.
+describe("isRetryable ignores the wire x-should-retry header (#2225)", () => {
+  const http = (value: string) =>
+    new HttpContext({ url: "https://example.com", status: 500, headers: { "x-should-retry": value } })
+  type Make = (http?: HttpContext) => AIError["reason"]
+  const neverRetry: Make[] = [
+    (h) => new AuthenticationError({ message: "auth", http: h }),
+    (h) => new QuotaExceededError({ message: "quota", http: h }),
+    (h) => new ContentPolicyError({ message: "policy", http: h }),
+    (h) => new InvalidRequestError({ message: "invalid", http: h }),
+  ]
+  const retryable: Make[] = [
+    (h) => new RateLimitError({ message: "rate limit", http: h }),
+    (h) => new ProviderInternalError({ message: "internal", http: h }),
+    (h) => new UnknownProviderError({ message: "unknown", http: h }),
+    (h) => new TransportError({ message: "read failed", transport: "http", operation: "read", http: h }),
+    (h) => new InvalidProviderOutputError({ message: "incomplete", classification: "incomplete-stream", http: h }),
+  ]
+
+  test("x-should-retry: true cannot force a never-retry class to retry", () => {
+    for (const make of neverRetry) expect(isRetryable(new AIError({ reason: make(http("true")) }))).toBe(false)
+  })
+
+  test("x-should-retry: false cannot suppress a retryable class", () => {
+    for (const make of retryable) expect(isRetryable(new AIError({ reason: make(http("false")) }))).toBe(true)
+  })
+
+  test("the header changes nothing in either direction for any class", () => {
+    for (const make of [...neverRetry, ...retryable]) {
+      const expected = isRetryable(new AIError({ reason: make() }))
+      expect(isRetryable(new AIError({ reason: make(http("true")) }))).toBe(expected)
+      expect(isRetryable(new AIError({ reason: make(http("false")) }))).toBe(expected)
+    }
+  })
+
+  test("classification still decides the conditional classes", () => {
+    const rejected = new TransportError({
+      message: "write rejected",
+      transport: "http",
+      operation: "write",
+      delivery: "rejected",
+      http: http("true"),
+    })
+    expect(isRetryable(new AIError({ reason: rejected }))).toBe(false)
+    expect(isRetryable(new AIError({ reason: new InvalidProviderOutputError({ message: "other" }) }))).toBe(false)
   })
 })

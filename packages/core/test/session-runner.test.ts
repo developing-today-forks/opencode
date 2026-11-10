@@ -3,7 +3,6 @@ import {
   AIError,
   CompactionPart,
   CompactionCheckpointResponse,
-  HttpContext,
   LLMEvent,
   LLMRequest,
   Message,
@@ -3142,31 +3141,27 @@ describe("SessionRunnerLLM", () => {
     })
   })
 
-  for (const header of [false, true]) {
-    scenario(`stops compaction retries through the ${header ? "provider header" : "retry hook"}`, function* (s) {
+  for (const rejected of [false, true]) {
+    scenario(`stops compaction retries through the ${rejected ? "classification" : "retry hook"}`, function* (s) {
       yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
       yield* s.runPrompt("Earlier question")
       s.requests.length = 0
       const hooks = yield* PluginHooks.Service
       yield* hooks.register("session", "retry", (event) =>
         Effect.sync(() => {
-          expect(event.decision.retry).toBe(!header)
+          expect(event.decision.retry).toBe(!rejected)
           event.decision = { retry: false }
         }),
       )
       yield* s.llm.push(
         Stream.fail(
-          header
+          rejected
             ? new AIError({
                 reason: new TransportError({
                   message: "Connection closed",
                   transport: "http",
                   operation: "read",
-                  http: new HttpContext({
-                    url: "https://example.com",
-                    status: 200,
-                    headers: { "x-should-retry": "false" },
-                  }),
+                  delivery: "rejected",
                 }),
               })
             : incompleteStream(),
@@ -3178,7 +3173,7 @@ describe("SessionRunnerLLM", () => {
       expect(s.requests).toHaveLength(1)
       expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
         status: "failed",
-        error: { type: header ? "provider.transport" : "provider.invalid-output" },
+        error: { type: rejected ? "provider.transport" : "provider.invalid-output" },
       })
     })
   }
