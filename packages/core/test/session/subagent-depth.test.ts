@@ -114,3 +114,59 @@ describe("SubagentDepth.assertWithinLimit", () => {
     expect(message).toContain("(1)")
   })
 })
+
+describe("SubagentDepth.readout / formatDepthLine (#2245)", () => {
+  const runReadout = (
+    all: SessionSchema.Info[],
+    session: SessionSchema.Info,
+    configInput: Record<string, unknown> = {},
+  ) => Effect.runPromise(SubagentDepth.readout(sessions(all), config(configInput), session))
+
+  const runReadoutDenied = async (
+    all: SessionSchema.Info[],
+    session: SessionSchema.Info,
+    configInput: Record<string, unknown> = {},
+  ) => {
+    const error = await Effect.runPromise(
+      SubagentDepth.readout(sessions(all), config(configInput), session).pipe(Effect.flip),
+    )
+    expect(error).toBeInstanceOf(SubagentDepth.LimitError)
+    return (error as SubagentDepth.LimitError).message
+  }
+
+  test("top-level session: depth 0, global cap, all levels remain", async () => {
+    const root = info("ses_root")
+    const readout = await runReadout([root], root)
+    expect(readout).toEqual({ depth: 0, cap: 5, remaining: 5 })
+    expect(SubagentDepth.formatDepthLine(readout)).toBe(
+      "Your session is at depth 0 of the subagent depth cap 5: 5 nesting level(s) remain from here.",
+    )
+  })
+
+  test("nested session: depth counts ancestors, remaining shrinks", async () => {
+    const readout = await runReadout(chain, chain[2])
+    expect(readout).toEqual({ depth: 2, cap: 5, remaining: 3 })
+    expect(SubagentDepth.formatDepthLine(readout)).toContain("depth 2 of the subagent depth cap 5: 3 nesting")
+  })
+
+  test("max_depth-bound subtree: depth-1 child of a max_depth 1 root has 0 remaining, not 4", async () => {
+    const rooted = [info("ses_root", { agent: "shallow" }), info("ses_child", { parentID: "ses_root" })]
+    const configInput = { agents: { shallow: { max_depth: 1 } } }
+    expect(await runReadout(rooted, rooted[0], configInput)).toEqual({ depth: 0, cap: 1, remaining: 1 })
+    const child = await runReadout(rooted, rooted[1], configInput)
+    expect(child).toEqual({ depth: 1, cap: 1, remaining: 0 })
+    expect(SubagentDepth.formatDepthLine(child)).toContain("cap 1: 0 nesting level(s) remain")
+  })
+
+  test("parent cycle: readout fails so the caller omits the line", async () => {
+    const cyclic = [info("ses_a", { parentID: "ses_b" }), info("ses_b", { parentID: "ses_a" })]
+    const message = await runReadoutDenied(cyclic, cyclic[0])
+    expect(message).toContain("Session parent cycle")
+  })
+
+  test("session-lookup failure: readout fails so the caller omits the line", async () => {
+    const orphan = info("ses_child", { parentID: "ses_missing" })
+    const message = await runReadoutDenied([orphan], orphan)
+    expect(message).toContain("Parent session not found: ses_missing")
+  })
+})

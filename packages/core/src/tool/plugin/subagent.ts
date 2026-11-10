@@ -354,19 +354,8 @@ export const Plugin = {
           .toSorted((a, b) => a.id.localeCompare(b.id))
         if (available.length === 0) return
         const depthLine = yield* Effect.gen(function* () {
-          const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 5
-          let current = yield* sessions.get(event.sessionID)
-          let depth = 0
-          const seen = new Set([current.id])
-          let parentID = current.parentID ?? current.fork?.sessionID
-          while (parentID) {
-            if (seen.has(parentID)) break
-            seen.add(parentID)
-            depth++
-            current = yield* sessions.get(parentID)
-            parentID = current.parentID ?? current.fork?.sessionID
-          }
-          return `Your session is at depth ${depth} of the subagent depth cap ${limit}: ${Math.max(0, limit - depth)} nesting level(s) remain from here (a max_depth on an agent definition may lower this).`
+          const current = yield* sessions.get(event.sessionID)
+          return SubagentDepth.formatDepthLine(yield* SubagentDepth.readout(sessions, config, current, fs))
         }).pipe(Effect.catch(() => Effect.succeed(undefined)))
         tool.description = [
           tool.description,
