@@ -743,12 +743,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.form.list",
         Effect.fn(function* (ctx) {
           const form = yield* Form.Service
-          const own = yield* form.list({ sessionID: ctx.params.sessionID })
-          const descendants = yield* descendantIDs(ctx.params.sessionID)
-          const inherited = yield* Effect.forEach(descendants, (id) => form.list({ sessionID: id }), {
-            concurrency: 1,
-          })
-          return { data: [...own, ...inherited.flat()] }
+          const ids = [ctx.params.sessionID, ...(yield* descendantIDs(ctx.params.sessionID))]
+          const grouped = new Map<string, Form.Info[]>()
+          for (const id of ids) grouped.set(id, [])
+          for (const entry of yield* form.list()) grouped.get(entry.sessionID)?.push(entry)
+          return { data: ids.flatMap((id) => grouped.get(id) ?? []) }
         }),
       )
       .handle(

@@ -67,6 +67,7 @@ it.live("a parent can list, get, reply to, and cancel forms owned by its descend
     expect(yield* listFormIDs(root.id)).not.toContain(unrelatedForm.id)
     expect(yield* listFormIDs(child.id)).toEqual(expect.arrayContaining([childForm.id, grandchildForm.id]))
     expect(yield* listFormIDs(child.id)).not.toContain(rootForm.id)
+    expect(yield* listFormIDs(grandchild.id)).toEqual([grandchildForm.id])
     expect(yield* listFormIDs(unrelated.id)).toEqual([unrelatedForm.id])
 
     // Parent-answer path: the root can get a grandchild's form and reply with
