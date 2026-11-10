@@ -678,6 +678,11 @@ export const layer = Layer.effect(
       sessionID: string | undefined,
       requestTokens: number | undefined,
       cascade: CascadeState,
+      // Whether the last-resort set may seat a quota-dead target when nothing
+      // undead remains. Initial resolution allows it (code#8086); the fallback
+      // cascade's last-resort pass does not — a quota-dead target stays
+      // unseated there so a walled route still stops cleanly (#1806, #7073).
+      allowQuotaDeadLastResort = true,
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
@@ -813,6 +818,42 @@ export const layer = Layer.effect(
                     ? Effect.succeed(next)
                     : cascadeToParent(definition, branchTried, requestedVariant, sessionID, requestTokens, branchState),
                 ),
+                // Last resort, last (#7073): when no ready candidate remains
+                // anywhere in the cascade — every untried target cooling or
+                // quota-walled — seat the least-bad remaining target of this
+                // route instead of refusing, exactly as initial resolution
+                // does (allowCooling). Case (b) died here: the 404's fallback
+                // found popesdrew credential-cooling and the luna credential
+                // ~57s from recovery, and the turn ended even though the
+                // cascade still had candidates. The pass runs only after the
+                // parents' ready candidates, so a healthy parent seat always
+                // wins over a cooling in-route one; the tried set keeps
+                // progression terminating through the usable set. The pass
+                // seats only targets that are not quota-dead in any scope:
+                // cooling targets (a credential bench minutes or hours
+                // deep, like the incident's) are seatable, quota-dead ones
+                // stay unseated so a quota-walled route still stops
+                // cleanly (#1806).
+                Effect.flatMap((resolved) =>
+                  resolved
+                    ? Effect.succeed(resolved)
+                    : resolveRouteWithin(
+                        selected,
+                        definition,
+                        requestedVariant,
+                        new Set(branchTried),
+                        true,
+                        sessionID,
+                        requestTokens,
+                        branchState,
+                        false,
+                      ).pipe(
+                        Effect.catch((error) => {
+                          branchState.loadErrors.push(error)
+                          return Effect.succeed(undefined)
+                        }),
+                      ),
+                ),
                 Effect.flatMap((resolved) =>
                   resolved
                     ? Effect.succeed(resolved)
@@ -914,7 +955,7 @@ export const layer = Layer.effect(
           // only a leaf’s own model, credential, or provider can — so the last resort
           // is the usable set itself, preferring targets that are not quota-dead in
           // any scope while any such target remains.
-          const lastResort = nonFull.length > 0 ? nonFull : usable
+          const lastResort = allowQuotaDeadLastResort ? (nonFull.length > 0 ? nonFull : usable) : nonFull
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
           const index = ModelRoute.nextTarget(
             definition,
