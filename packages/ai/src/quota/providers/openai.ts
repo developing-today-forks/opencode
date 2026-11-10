@@ -18,18 +18,22 @@ import {
 } from "../utils.js"
 
 /**
- * Codex / ChatGPT quota — ported from the OpenChamber quota module
+ * OpenAI / ChatGPT quota — ported from the OpenChamber quota module
  * (providers/codex.js). The wire is ChatGPT's own usage read:
  * GET https://chatgpt.com/backend-api/wham/usage with the account's
  * OAuth access token (and ChatGPT-Account-Id when the credential names
- * one). The ChatGPT accounts live under instance integrations
- * (openai.main, openai.alternate), so the base provider folds instance
- * credentials into its per-credential answer.
+ * one). The ChatGPT accounts live under the self-contained instance
+ * integrations (_openai.main, _openai.alt), so the base provider folds
+ * instance credentials into its per-credential answer. The quota id is
+ * `_openai` (renamed from `codex`, code#8163): no Codex surface remains
+ * in the measurement path; `codex` survives only in `disabledBy`, the
+ * #1823-pattern pin keeping a legacy config's `codex` entry in
+ * disabled_providers from hiding these rows.
  */
 
-export const providerId = "codex"
-export const providerName = "Codex"
-export const aliases = ["openai", "codex", "chatgpt"]
+export const providerId = "_openai"
+export const providerName = "OpenAI"
+export const aliases = ["openai", "_openai", "chatgpt"]
 
 const fetchQuotaForEntry = async (
   ctx: QuotaContext,
@@ -72,7 +76,7 @@ const fetchQuotaForEntry = async (
             ok: false,
             configured: true,
             error:
-              "OpenAI shows usage for Sign in with ChatGPT only at chatgpt.com/settings/usage. The legacy Codex sign-ins show it here.",
+              "OpenAI shows usage for Sign in with ChatGPT only at chatgpt.com/settings/usage. The legacy sign-ins show it here.",
           })
         }
         return buildResult({
@@ -230,7 +234,8 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
-  credentialAliases: ["openai", "codex", "chatgpt"],
+  credentialAliases: ["openai", "_openai", "chatgpt"],
+  disabledBy: ["codex"],
   foldInstanceCredentials: true,
   isConfigured: (ctx) => {
     const auth = projectAuth(ctx)
