@@ -126,7 +126,11 @@ const promotedFromMessage = Effect.fn("SessionInbox.promotedFromMessage")(functi
   if (row.session_id !== sessionID || (row.type !== "user" && row.type !== "synthetic"))
     return yield* new LifecycleConflict({ id })
   const message = decodeMessage({ ...row.data, id: row.id, type: row.type })
-  const base = { id, sessionID, time: { created: message.time.created }, delivery }
+  // The projected message carries the first admission's delivery (#2244); the
+  // retry-supplied delivery is only a fallback for messages projected before
+  // that field existed.
+  const stored = message.type === "user" || message.type === "synthetic" ? message.delivery : undefined
+  const base = { id, sessionID, time: { created: message.time.created }, delivery: stored ?? delivery }
   if (message.type === "user")
     return User.make({
       ...base,

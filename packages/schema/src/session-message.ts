@@ -74,6 +74,9 @@ export const LocationSwitched = Schema.Struct({
 export interface User extends Schema.Schema.Type<typeof User> {}
 export const User = Schema.Struct({
   ...Base,
+  // First-admission inbox delivery, persisted at delivery time so a delivered
+  // prompt retry can recover it after the enqueue history is gone (#2244).
+  delivery: Schema.Literals(["steer", "queue"]).pipe(optional),
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
@@ -84,6 +87,8 @@ export const User = Schema.Struct({
 export interface Synthetic extends Schema.Schema.Type<typeof Synthetic> {}
 export const Synthetic = Schema.Struct({
   ...Base,
+  // See User: first-admission inbox delivery for delivered retries (#2244).
+  delivery: Schema.Literals(["steer", "queue"]).pipe(optional),
   text: Schema.String,
   description: Schema.String.pipe(optional),
   type: Schema.tag("synthetic"),
