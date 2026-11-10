@@ -153,12 +153,21 @@ export const listConfiguredQuotaProvidersDetailed = async (
     const resolved = resolveInstanceProvider(ctx, instanceId)
     if (!resolved?.provider.fetchQuotaForCredential) continue
     const rows = credentialRows(ctx, [instanceId])
-    // A row is usable when the base provider, given that row alone
-    // under its base integration id, reads as configured (the module's
-    // isCredentialUsable rule).
+    // A row is usable when the provider's row-scoped hook judges it
+    // usable, else when the base provider, given that row alone under
+    // its base integration id, reads as configured (the module's
+    // isCredentialUsable rule — the same verdict fetchPerCredential
+    // awaits, so the listing and the fetch agree).
     let usable = false
     for (const row of rows) {
       try {
+        if (resolved.provider.isCredentialUsable) {
+          if (await resolved.provider.isCredentialUsable(ctx, row)) {
+            usable = true
+            break
+          }
+          continue
+        }
         const single: QuotaContext = {
           ...ctx,
           credentials: [{ ...row, integrationID: resolved.instance.base, active: true }],
