@@ -36,10 +36,49 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
   Effect.gen(function* () {
     const session = yield* Session.Service
     const transfer = yield* SessionTransfer.Service
+    // Question escalation (#1884): a session may see and answer pending forms
+    // owned by itself or any descendant, so a subsession's question is
+    // answerable by its parent and passes up the ancestry to the root/client.
+    // Form stays tree-agnostic; the ancestry walk lives here in the server
+    // handler, resolved through the Session service's parent chain.
+    const descendantIDs = Effect.fnUntraced(function* (rootID: string) {
+      // Non-session ids (e.g. the "global" location pseudo-session) have no subtree.
+      if (!rootID.startsWith("ses")) return [] as Session.ID[]
+      const ids: Session.ID[] = []
+      const seen = new Set<string>([rootID])
+      const queue: Session.ID[] = [Session.ID.make(rootID)]
+      while (queue.length > 0) {
+        const current = queue.shift() as Session.ID
+        const children = yield* session
+          .list({ parentID: current })
+          .pipe(Effect.catch(() => Effect.succeed({ data: [] as const })))
+        for (const child of children.data) {
+          if (seen.has(child.id)) continue
+          seen.add(child.id)
+          ids.push(child.id)
+          queue.push(child.id)
+        }
+      }
+      return ids
+    })
+    const ownsForm = Effect.fnUntraced(function* (sessionID: string, ownerID: Form.Info["sessionID"]) {
+      if (ownerID === sessionID) return true
+      if (!sessionID.startsWith("ses") || !ownerID.startsWith("ses")) return false
+      const seen = new Set<string>([ownerID])
+      let current = ownerID
+      while (true) {
+        const info = yield* session.get(Session.ID.make(current)).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (!info?.parentID) return false
+        if (info.parentID === sessionID) return true
+        if (seen.has(info.parentID)) return false
+        seen.add(info.parentID)
+        current = info.parentID
+      }
+    })
     const requireOwnedForm = Effect.fnUntraced(function* (sessionID: Form.Info["sessionID"], formID: Form.ID) {
       const form = yield* Form.Service
       const info = yield* form.get(formID).pipe(Effect.catchTag("Form.NotFoundError", () => missingForm(formID)))
-      if (info.sessionID !== sessionID) return yield* missingForm(formID)
+      if (!(yield* ownsForm(sessionID, info.sessionID))) return yield* missingForm(formID)
       return { form, info }
     })
     const busySession = (error: Session.BusyError) =>
@@ -704,7 +743,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.form.list",
         Effect.fn(function* (ctx) {
           const form = yield* Form.Service
-          return { data: yield* form.list({ sessionID: ctx.params.sessionID }) }
+          const ids = [ctx.params.sessionID, ...(yield* descendantIDs(ctx.params.sessionID))]
+          const grouped = new Map<string, Form.Info[]>()
+          for (const id of ids) grouped.set(id, [])
+          for (const entry of yield* form.list()) grouped.get(entry.sessionID)?.push(entry)
+          return { data: ids.flatMap((id) => grouped.get(id) ?? []) }
         }),
       )
       .handle(
