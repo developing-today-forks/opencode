@@ -1884,6 +1884,188 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  // #7073 case (b): the session's route nests a leaf group (a provider route with
+  // two members) and a sibling leaf outside the group. The first target fails with
+  // an Authentication error and fails over inside the group; the second fails with
+  // an unclassified InvalidRequest (HTTP 404). The cascade must continue to the
+  // sibling leaf in the same route — in the incident it stopped at the 404 even
+  // though candidates remained, and the session died.
+  const groupAndSibling = (selection: "ordered" | "weighted") => {
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const d = leaf("pd")
+    const sub = routeAs("sub", [a, b, c], {
+      nodes: [
+        { selection, weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "leafgroup", selection, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    const parent = routeAs("parent", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 3 }] },
+        {
+          routeID: "sub",
+          selection: "ordered",
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    })
+    return { a, b, c, d, sub, parent }
+  }
+
+  it.effect("case (b): a failover inside a nested group continues to the sibling leaf in the same route (#7073)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, d, sub, parent } = groupAndSibling("ordered")
+    return withCascadeResolver([a, b, c, d], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        // First target fails (Authentication): failover stays inside the group.
+        const second = yield* first.routing!.fallback()
+        expect(String(second?.routing?.routeID)).toBe("sub")
+        expect(targetOf(second!)).toBe("pb")
+        // Second target fails (unclassified InvalidRequest 404): the group is
+        // exhausted, but the route's sibling leaf outside the group must serve.
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("sub")
+        expect(targetOf(third!)).toBe("pc")
+        // Only once the whole route is exhausted does the cascade climb to the parent.
+        const fourth = yield* third!.routing!.fallback()
+        expect(String(fourth?.routing?.routeID)).toBe("parent")
+        expect(targetOf(fourth!)).toBe("pd")
+        const fifth = yield* fourth!.routing!.fallback()
+        expect(fifth).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("case (b) weighted: a failover inside a nested weighted group continues to the sibling leaf (#7073)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, d, sub, parent } = groupAndSibling("weighted")
+    return withCascadeResolver([a, b, c, d], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        const seen = new Set<string>([targetOf(first)])
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        seen.add(targetOf(second!))
+        // After both group members are tried, the sibling leaf must be produced
+        // by the next fallback regardless of weighted draw order inside the group.
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeDefined()
+        expect(seen.has(targetOf(third!))).toBe(false)
+        expect(["pa", "pb", "pc"]).toContain(targetOf(third!))
+        expect(targetOf(third!)).toBe("pc")
+      }),
+    )
+  })
+
+  // #7073 case (b), incident order: the route's first child is a plain leaf
+  // (the _claude target), then a provider-route group with two members
+  // (opencode-go.drewrypope, opencode-go.popesdrew), then a sibling leaf.
+  // Auth failover leaf -> group member 1 worked in the incident; the 404 on
+  // group member 1 then had to continue to group member 2 — it did not.
+  it.effect("case (b) incident order: leaf -> provider group member 1 -> member 2 -> sibling (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const d = leaf("pd")
+    const sub = routeAs("sub", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { node: 1 }, { leaf: 3 }] },
+        {
+          providerRoute: "opencode-go-plans",
+          selection: "ordered",
+          weights: [1, 1],
+          children: [{ leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    })
+    return withCascadeResolver([a, b, c, d], [sub], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(targetOf(second!)).toBe("pb")
+        const third = yield* second!.routing!.fallback()
+        expect(targetOf(third!)).toBe("pc")
+        const fourth = yield* third!.routing!.fallback()
+        expect(targetOf(fourth!)).toBe("pd")
+        const fifth = yield* fourth!.routing!.fallback()
+        expect(fifth).toBeUndefined()
+      }),
+    )
+  })
+
+  // #7073 case (b), route-store verdict: at the 404's fallback every untried
+  // target in the route was cooling or quota-walled (popesdrew's credential
+  // benched ~7.8h, the luna credential ~57s out), so the ready-only fallback
+  // returned undefined and the turn died — while initial resolution would
+  // have seated a last-resort candidate rather than refuse. The fallback
+  // cascade now ends with the same last-resort pass.
+  it.effect("case (b): fallback seats a last-resort candidate when every remaining target is walled (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const walled = routeAs("pool", [a, b, c], {
+      nodes: [{ selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+    })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withCascadeResolver([a, b, c], [walled], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(walled)
+        expect(targetOf(first)).toBe("pa")
+        // Both remaining targets wall off with failure benches (the incident's
+        // walls were credential/target cooldowns, not quota verdicts): no
+        // ready candidate remains anywhere.
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now())
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        // The fallback seats a last-resort candidate instead of refusing.
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        expect(["pb", "pc"]).toContain(targetOf(second!))
+        // Progression continues through the usable set and then terminates.
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeDefined()
+        expect(targetOf(third!)).not.toBe(targetOf(second!))
+        const fourth = yield* third!.routing!.fallback()
+        expect(fourth).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("case (b): the last resort prefers a merely-cooling target over a quota-dead one (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const walled = routeAs("pool", [a, b, c], {
+      nodes: [{ selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+    })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withCascadeResolver([a, b, c], [walled], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(walled)
+        expect(targetOf(first)).toBe("pa")
+        // pb is quota-dead; pc is only failure-cooling. The last resort must
+        // seat pc — quota-dead targets are de-preferred in every scope.
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        expect(targetOf(second!)).toBe("pc")
+      }),
+    )
+  })
+
   // Ported from model-route-mock-provider.test.ts (#1806): the incident's fatal
   // resolution happened one altitude up — a wall inside the nested route, then the
   // chain re-resolving the parent. The route-level driver deliberately does not
