@@ -776,30 +776,58 @@ export const releaseQuotaSkipsForSnapshot = (
   return released
 }
 
-/** The freshest measured reading of one model's quota window in the gatherer's
- * snapshot (#1974): among the provider's entries, the latest reading that carries a
- * window for this model (a model entry, or a window literally named for the model).
- * Undefined when the snapshot carries nothing for the model — no reading is no
- * evidence, in either direction. */
+/** The freshest measured reading of one model's quota windows in the gatherer's
+ * snapshot (#1974, #2036): among the provider's entries, the windows the freshest
+ * measurement carries for this model (a model entry, or windows literally named
+ * for the model), aggregated the way the provider-wide branch below aggregates —
+ * the reading's percent is the MAXIMUM over its windows, so one window still at
+ * its limit holds the judgement full whatever order the snapshot serializes the
+ * windows in, and `complete` reports whether every window in that measurement
+ * carried a percent at all: a percent-less window is missing evidence, not
+ * headroom, so an incomplete reading can plant a wall (a window it does show
+ * full is positive evidence) but can never lift one. The reset carried is the
+ * fullest window's own. Undefined when the snapshot carries no measured window
+ * for the model — no reading is no evidence, in either direction. */
 const modelWindowReading = (
   readings: readonly QuotaCurrent.ProviderReading[],
   providerID: string,
   modelID: string,
-): { readonly percent: number; readonly resetAt: number | null; readonly observedAt: number } | undefined => {
-  let best: { percent: number; resetAt: number | null; observedAt: number } | undefined
+): {
+  readonly percent: number
+  readonly resetAt: number | null
+  readonly observedAt: number
+  readonly complete: boolean
+} | undefined => {
+  const candidatesOf = (reading: QuotaCurrent.ProviderReading): QuotaCurrent.Window[] => [
+    ...(reading.models[modelID] ?? []),
+    ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
+  ]
+  let freshest: number | undefined
   for (const reading of readings) {
     if (reading.providerID !== providerID) continue
-    const candidates: QuotaCurrent.Window[] = [
-      ...(reading.models[modelID] ?? []),
-      ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
-    ]
-    for (const window of candidates) {
-      if (window.usedPercent === null) continue
-      if (!best || window.measuredAt >= best.observedAt)
-        best = { percent: window.usedPercent, resetAt: window.resetAt, observedAt: window.measuredAt }
+    for (const window of candidatesOf(reading))
+      if (freshest === undefined || window.measuredAt > freshest) freshest = window.measuredAt
+  }
+  if (freshest === undefined) return undefined
+  let percent: number | undefined
+  let resetAt: number | null = null
+  let complete = true
+  for (const reading of readings) {
+    if (reading.providerID !== providerID) continue
+    for (const window of candidatesOf(reading)) {
+      if (window.measuredAt !== freshest) continue
+      if (window.usedPercent === null) {
+        complete = false
+        continue
+      }
+      if (percent === undefined || window.usedPercent >= percent) {
+        percent = window.usedPercent
+        resetAt = window.resetAt
+      }
     }
   }
-  return best
+  if (percent === undefined) return undefined
+  return { percent, resetAt, observedAt: freshest, complete }
 }
 
 /** Re-judges this provider's attempt-reported quota skips against the fleet gatherer's
@@ -813,6 +841,150 @@ const modelWindowReading = (
  * attempt is ever spent to test the door: re-admission is a judgement over measured
  * quota, never a probe. A provider the snapshot does not carry keeps its skips — no
  * record is no judgement. Returns the records removed. */
+/** How long a gathered reading may hold a planted wall (code#8086): the gatherer
+ * rewrites `quota-current.json` every ~15 minutes, so a reading older than twice
+ * that cadence is not evidence — a stale file must never idle a healthy leg, and
+ * when the gatherer stops reporting, planted walls lapse on their own `until`
+ * and selection falls back to attempt + bench, as before. */
+const GATHERED_WALL_MAX_AGE_MS = 30 * 60_000
+
+/** The wall the fleet gatherer's snapshot states for one target (code#8086,
+ * Drew 2026-11-10: "if it's failing for quota and quota shows 100% it should be
+ * skipped until it's not walled"): the target is walled while a fresh gathered
+ * reading shows its window full, and eligible again the moment a later reading
+ * shows room — no attempt is spent to learn either state, and no probe is ever
+ * sent. Two reading shapes carry a wall, at the scope the reading itself names:
+ *
+ * - the model's own windows (a model entry, or windows named for the model):
+ *   the aggregated freshest reading (see `modelWindowReading`) at 100% with its
+ *   reset still ahead walls this model until that reset;
+ * - the provider's own windows, when the snapshot carries exactly ONE entry
+ *   for the provider and no per-model reading for this target at all (the
+ *   cline-pass shape: the provider's weekly window IS the wall every model on
+ *   it shares). Several entries for one provider are per-account readings —
+ *   the codex doors — and no pool verdict is synthesized from them (Drew,
+ *   2026-11-07): each account's own gate and benches govern those.
+ *
+ * A window at 100% whose stated reset has already passed is not a wall: the
+ * window has rolled, whatever the percent still says. A full window stating no
+ * reset walls for the gate's bounded fallback hold, re-judged at every feed.
+ * Returns the instant the wall holds until and the reading that stated it. */
+export const gatheredQuotaWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): { readonly until: number; readonly observedAt: number } | undefined => {
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  if (entries.length === 0) return undefined
+  const gate = currentConstants(location).quotaGate
+  const threshold = gate.balanceDeadThreshold
+  const fresh = (observedAt: number) => now - observedAt <= GATHERED_WALL_MAX_AGE_MS
+  const wall = (percent: number, resetAt: number | null, observedAt: number) => {
+    if (!fresh(observedAt)) return undefined
+    const snapshot = {
+      planID: "quota-current",
+      window: "gathered",
+      providerID: target.providerID,
+      percent,
+      remaining: null,
+      resetAt,
+      observedAt,
+      stale: false,
+    }
+    if (!QuotaSnapshot.isKnownFull(snapshot, now, threshold)) return undefined
+    return { until: Math.min(resetAt ?? now + gate.fallbackMs, now + gate.maxMs), observedAt }
+  }
+  const own = modelWindowReading(entries, target.providerID, target.id as string)
+  if (own) return wall(own.percent, own.resetAt, own.observedAt)
+  if (entries.length !== 1) return undefined
+  const entry = entries[0]
+  let percent: number | undefined
+  let resetAt: number | null = null
+  for (const window of entry.windows) {
+    if (window.usedPercent === null) continue
+    if (percent === undefined || window.usedPercent >= percent) {
+      percent = window.usedPercent
+      resetAt = window.resetAt
+    }
+  }
+  if (percent === undefined) return undefined
+  return wall(percent, resetAt, entry.measuredAt)
+}
+
+/** Plants — or, on a later reading's word, lifts — the gathered-quota wall for
+ * one target (code#8086): while `gatheredQuotaWall` states a wall, a
+ * model-scoped skip record (the reactive skip's own record shape, of proactive
+ * origin) holds the target out of selection, until the reading's reset; the
+ * record is re-planted at every feed while the wall stands, so its `until`
+ * tracks the freshest reading. When a fresh, complete reading at the same
+ * scope shows room instead, a standing record OF THIS PLANT'S OWN ORIGIN comes
+ * off — re-admission is the snapshot's word alone, never an attempt and never
+ * a probe. Attempt-reported records are another path's business (#1974): this
+ * plant neither lifts nor overwrites one. A stale, missing, or incomplete
+ * reading judges nothing: a standing planted record simply lapses at its own
+ * `until`. Returns the record id when one was planted or lifted. */
+export const plantGatheredQuotaWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): string | undefined => {
+  const id = quotaModelSkipID(target)
+  const wall = gatheredQuotaWall(target, readings, now, location)
+  if (wall) {
+    addAdjustment({
+      id,
+      match: `${target.providerID}/${target.id}`,
+      action: "skip",
+      until: wall.until,
+      quotaSkipOrigin: "proactive",
+      note: "quota exhausted (gathered snapshot); held until the gathered window resets",
+    })
+    return id
+  }
+  const standing = adjustments.find((item) => item.id === id)
+  if (!standing || standing.quotaSkipOrigin !== "proactive") return undefined
+  // Lift only on whole evidence at the scope that planted: the model's own
+  // aggregated reading, complete and below full — or, for a provider-window
+  // wall, the provider's single entry reading below full on every window it
+  // prices. Anything less (stale, partial, absent) leaves the record to lapse
+  // at its own `until`.
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  const threshold = currentConstants(location).quotaGate.balanceDeadThreshold
+  const headroom = (percent: number, observedAt: number) =>
+    now - observedAt <= GATHERED_WALL_MAX_AGE_MS &&
+    !QuotaSnapshot.isKnownFull(
+      {
+        planID: "quota-current",
+        window: "gathered",
+        providerID: target.providerID,
+        percent,
+        remaining: null,
+        resetAt: null,
+        observedAt,
+        stale: false,
+      },
+      now,
+      threshold,
+    )
+  const own = modelWindowReading(entries, target.providerID, target.id as string)
+  if (own) {
+    if (!own.complete || !headroom(own.percent, own.observedAt)) return undefined
+  } else {
+    if (entries.length !== 1) return undefined
+    const entry = entries[0]
+    if (entry.windows.length === 0 || entry.windows.some((window) => window.usedPercent === null)) return undefined
+    const percent = Math.max(...entry.windows.map((window) => window.usedPercent ?? 0))
+    if (!headroom(percent, entry.measuredAt)) return undefined
+  }
+  if (removeAdjustment(id)) {
+    logHealth(target, "quota-readmitted", "gathered quota reading re-admitted the planted wall")
+    return id
+  }
+  return undefined
+}
+
 export const releaseQuotaSkipsForCurrent = (
   target: Model.Ref,
   readings: readonly QuotaCurrent.ProviderReading[],
@@ -835,6 +1007,10 @@ export const releaseQuotaSkipsForCurrent = (
     stale: now - reading.observedAt > QuotaSnapshot.DEFAULT_MAX_AGE_MS,
   })
   const ownSnapshot = asSnapshot(own)
+  // An incomplete freshest reading — some window of the model's measurement
+  // carries no percent — is not whole evidence of headroom (#2036): it lifts
+  // nothing, exactly as a stale or full reading lifts nothing.
+  if (!own.complete) return []
   if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
   const modelSkipID = quotaModelSkipID(target)
   const providerStanding = adjustments.some(

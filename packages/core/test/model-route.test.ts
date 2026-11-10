@@ -2784,6 +2784,246 @@ describe("ModelRoute per-leg quota state (pool verdict abolished)", () => {
   })
 })
 
+describe("ModelRoute gathered quota wall: plant side and window aggregation (code#8086, #2036)", () => {
+  const hour = 3_600_000
+
+  const gathered = (opts: {
+    providerID: string
+    at: number
+    windows?: Array<{ name: string; usedPercent: number | null; resetAt?: number | null }>
+    models?: Record<string, Array<{ name: string; usedPercent: number | null; resetAt?: number | null }>>
+  }) => [
+    {
+      providerID: opts.providerID,
+      measuredAt: opts.at,
+      windows: (opts.windows ?? []).map((window) => ({
+        name: window.name,
+        usedPercent: window.usedPercent,
+        resetAt: window.resetAt ?? null,
+        measuredAt: opts.at,
+      })),
+      models: Object.fromEntries(
+        Object.entries(opts.models ?? {}).map(([modelID, windows]) => [
+          modelID,
+          windows.map((window) => ({
+            name: window.name,
+            usedPercent: window.usedPercent,
+            resetAt: window.resetAt ?? null,
+            measuredAt: opts.at,
+          })),
+        ]),
+      ),
+    },
+  ]
+
+  test("a still-full window holds the skip in either serialization order (#2036)", () => {
+    const now = 800_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    // The #2036 probe case: one measurement, two windows, the short window
+    // still at 100%. Whichever window the snapshot serializes last, the skip
+    // must stand — the judgement aggregates the measurement, it does not take
+    // whichever window iterated last.
+    for (const windows of [
+      [
+        { name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 },
+        { name: "5h", usedPercent: 100, resetAt: judgedAt + 5 * hour },
+      ],
+      [
+        { name: "5h", usedPercent: 100, resetAt: judgedAt + 5 * hour },
+        { name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 },
+      ],
+    ]) {
+      expect(
+        ModelRoute.releaseQuotaSkipsForCurrent(
+          leaf,
+          gathered({ providerID: "opendesign", at: judgedAt, models: { "claude-haiku-5.5": windows } }),
+          judgedAt,
+        ),
+      ).toEqual([])
+      expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+    }
+    // The both-headroom control still releases, in the same aggregated shape.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gathered({
+          providerID: "opendesign",
+          at: judgedAt + 60_000,
+          models: {
+            "claude-haiku-5.5": [
+              { name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 },
+              { name: "5h", usedPercent: 1, resetAt: judgedAt + 5 * hour },
+            ],
+          },
+        }),
+        judgedAt + 60_000,
+      ),
+    ).toEqual(["quota-model:opendesign:claude-haiku-5.5"])
+    expect(ModelRoute.skipped(leaf, judgedAt + 60_001)).toBe(false)
+  })
+
+  test("a percent-less window in the freshest reading voids the release judgement (#2036)", () => {
+    const now = 810_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    const judgedAt = now + 15 * 60_000
+    // One window reads headroom; the other carries no percent at all. The
+    // percent-less window is missing evidence, not headroom: nothing lifts.
+    expect(
+      ModelRoute.releaseQuotaSkipsForCurrent(
+        leaf,
+        gathered({
+          providerID: "opendesign",
+          at: judgedAt,
+          models: {
+            "claude-haiku-5.5": [
+              { name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 },
+              { name: "5h", usedPercent: null },
+            ],
+          },
+        }),
+        judgedAt,
+      ),
+    ).toEqual([])
+    expect(ModelRoute.skipped(leaf, judgedAt + 1)).toBe(true)
+  })
+
+  test("a gathered 100% reading plants the wall pre-attempt, and a later room reading lifts it (code#8086)", () => {
+    const now = 820_000_000
+    // The antigravity shape: per-model windows in the gathered snapshot.
+    const leaf = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    ModelRoute.resetHealth()
+    // No attempt has failed — nothing is skipped before the plant.
+    expect(ModelRoute.skipped(leaf, now)).toBe(false)
+    const resetAt = now + 3 * 86_400_000
+    const planted = ModelRoute.plantGatheredQuotaWall(
+      leaf,
+      gathered({
+        providerID: "antigravity-direct",
+        at: now,
+        models: { "gemini-3.8-flash": [{ name: "weekly", usedPercent: 100, resetAt }] },
+      }),
+      now,
+    )
+    expect(planted).toBe("quota-model:antigravity-direct:gemini-3.8-flash")
+    // The wall holds the leg out of selection until the gathered reset...
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(leaf, resetAt - 1)).toBe(true)
+    // ...and the moment a later snapshot shows the window below full, the leg
+    // is eligible again — no attempt spent, no probe sent, no record surgery.
+    const lifted = ModelRoute.plantGatheredQuotaWall(
+      leaf,
+      gathered({
+        providerID: "antigravity-direct",
+        at: now + 15 * 60_000,
+        models: { "gemini-3.8-flash": [{ name: "weekly", usedPercent: 12, resetAt: resetAt + 7 * 86_400_000 }] },
+      }),
+      now + 15 * 60_000,
+    )
+    expect(lifted).toBe("quota-model:antigravity-direct:gemini-3.8-flash")
+    expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
+  })
+
+  test("a provider-window wall plants from the provider's single entry (the cline-pass shape, code#8086)", () => {
+    const now = 830_000_000
+    // The cline-pass shape: no per-model readings at all — the provider's own
+    // windows are the wall. The first lane's residual: the weekly window read
+    // 100% for days while fresh sessions kept drawing the leg.
+    const leaf = ModelRoute.ref({ providerID: "cline-pass", model: "deepseek-v4.1-flash" })
+    const sibling = ModelRoute.ref({ providerID: "cline-pass", model: "another-model" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 3 * 86_400_000
+    const reading = (weekly: number, at: number) =>
+      gathered({
+        providerID: "cline-pass",
+        at,
+        windows: [
+          { name: "5h", usedPercent: 0, resetAt: at + 5 * hour },
+          { name: "weekly", usedPercent: weekly, resetAt },
+          { name: "monthly", usedPercent: 50, resetAt: now + 26 * 86_400_000 },
+        ],
+      })
+    expect(ModelRoute.plantGatheredQuotaWall(leaf, reading(100, now), now)).toBe(
+      "quota-model:cline-pass:deepseek-v4.1-flash",
+    )
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    expect(ModelRoute.skipped(leaf, resetAt - 1)).toBe(true)
+    // The plant is per target: the sibling model is planted by its own feed,
+    // not by a synthesized provider-wide verdict.
+    expect(ModelRoute.skipped(sibling, now + 1)).toBe(false)
+    // Room on every window lifts the plant on the reading's word alone.
+    expect(ModelRoute.plantGatheredQuotaWall(leaf, reading(40, now + 15 * 60_000), now + 15 * 60_000)).toBe(
+      "quota-model:cline-pass:deepseek-v4.1-flash",
+    )
+    expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
+  })
+
+  test("a stale or missing gathered reading plants nothing and lifts nothing (code#8086)", () => {
+    const now = 840_000_000
+    const leaf = ModelRoute.ref({ providerID: "cline-pass", model: "deepseek-v4.1-flash" })
+    ModelRoute.resetHealth()
+    const stale = gathered({
+      providerID: "cline-pass",
+      at: now - 31 * 60_000,
+      windows: [{ name: "weekly", usedPercent: 100, resetAt: now + 86_400_000 }],
+    })
+    // A reading older than the gatherer's own cadence is not evidence: the
+    // leg stays exactly as attempt + bench left it — attempted, not idled.
+    expect(ModelRoute.gatheredQuotaWall(leaf, stale, now)).toBeUndefined()
+    expect(ModelRoute.plantGatheredQuotaWall(leaf, stale, now)).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(false)
+    // No reading for the provider at all: no judgement either.
+    expect(ModelRoute.plantGatheredQuotaWall(leaf, [], now)).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(false)
+  })
+
+  test("several gathered entries for one provider plant no pool verdict (code#8086)", () => {
+    const now = 850_000_000
+    // The codex shape: several per-account entries share one provider id, and
+    // they disagree — one account's weekly window is full, another's is not.
+    // No provider-wide wall is synthesized from per-account readings; each
+    // account's own gate and benches govern it.
+    const leaf = ModelRoute.ref({ providerID: "codex", model: "gpt-6-luna" })
+    ModelRoute.resetHealth()
+    const entry = (weekly: number) => ({
+      providerID: "codex",
+      measuredAt: now,
+      windows: [{ name: "weekly", usedPercent: weekly, resetAt: now + 3 * 86_400_000, measuredAt: now }],
+      models: {},
+    })
+    expect(ModelRoute.plantGatheredQuotaWall(leaf, [entry(100), entry(65), entry(100)], now)).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(false)
+  })
+
+  test("the gathered plant never touches an attempt-reported skip (code#8086, #1974)", () => {
+    const now = 860_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    // A headroom reading arrives at the plant path: the attempt-reported
+    // record is the re-admission path's business (#1974), not the plant's —
+    // it stands until that path or its own stated reset releases it.
+    expect(
+      ModelRoute.plantGatheredQuotaWall(
+        leaf,
+        gathered({
+          providerID: "opendesign",
+          at: now + 60_000,
+          models: { "claude-haiku-5.5": [{ name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 }] },
+        }),
+        now + 60_000,
+      ),
+    ).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 60_001)).toBe(true)
+  })
+})
+
 describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (#1974, #1976)", () => {
   const hour = 3_600_000
 
