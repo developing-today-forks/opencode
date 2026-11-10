@@ -31,6 +31,13 @@ import { Integration } from "../integration.js"
  *   token's life, and fork and CLI would race to rotate one shared refresh-token
  *   lineage — whichever lost would hold a dead token.
  *
+ * The self-contained `_openai` door (developing-today/code#8163) is never a
+ * sync target: it holds its own ChatGPT credential and refreshes it
+ * in-process, exactly so this file is not in its serving path. The exclusion
+ * is explicit in selectTarget rather than a side effect of the `openai.*`
+ * name filter, so a future widening of the door search cannot silently put
+ * the Muse back in that door's path.
+ *
  * The sync updates the selected credential in place (same row) and skips the
  * write when nothing changed. If the stored access token is NEWER than the
  * file's (by JWT expiry), some other writer has advanced the lineage past the
@@ -39,6 +46,10 @@ import { Integration } from "../integration.js"
  */
 
 const integrationID = Integration.ID.make("openai")
+
+/** The self-contained OpenAI door (code#8163): owns and refreshes its own
+ * credential in-process; the Muse sync must never feed it. */
+export const selfContainedIntegrationID = Integration.ID.make("_openai")
 
 export type Status =
   | "updated"
@@ -160,7 +171,8 @@ export const selectTarget = (
 ): Credential.Info | undefined => {
   const doors = credentials.filter(
     (credential) =>
-      credential.integrationID === integrationID || String(credential.integrationID).startsWith("openai."),
+      credential.integrationID !== selfContainedIntegrationID &&
+      (credential.integrationID === integrationID || String(credential.integrationID).startsWith("openai.")),
   )
   if (file.accountID) {
     const match = doors.filter(
