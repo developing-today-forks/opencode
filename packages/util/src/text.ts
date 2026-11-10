@@ -90,17 +90,27 @@ export * as Text from "./text.js"
  *   antigravity-auth latin1 binary scans — ASCII-sanitised / latin1,
  *   per #1977's classification
  *
- * Known-unguarded — NOT conforming, do not assert otherwise:
- * - #1977 (design #2208 phase 2, twelve core+ai sites):
- *   core/src/tool/read-filesystem.ts `clampLine` (line shown to the
- *   model); core/src/session/title.ts title-generation prompt head
- *   and tail cuts; ai/src/route/executor.ts provider error excerpt;
- *   ai/src/quota/cdp.ts page-eval exception excerpt;
- *   ai/src/providers/antigravity-auth.ts and muse-direct-auth.ts
- *   error excerpts; core/src/messaging/search.ts regex-worker error
- *   excerpt; core/src/mcp/stdio.ts stderr tail accumulator;
- *   core/src/messaging/embedding.ts and core/src/embeddings.ts error
- *   excerpts and llama-server stderr tails
+ * Routes through this primitive (#1977, design #2208 phase 2):
+ * - core/src/tool/read-filesystem.ts `clampLine` — head via
+ *   `Text.truncate` (line shown to the model)
+ * - core/src/session/title.ts — title-generation prompt head via
+ *   `Text.truncate` and tail via `Text.truncateTail`
+ * - ai/src/route/executor.ts `providerMessage` — provider error
+ *   excerpt via `Text.truncate`
+ * - ai/src/quota/cdp.ts — page-eval exception excerpt via
+ *   `Text.truncate`
+ * - ai/src/providers/muse-direct-auth.ts — key-exchange error
+ *   excerpt via `Text.truncate`
+ * - core/src/messaging/search.ts — regex-worker error excerpt via
+ *   `Text.truncate`
+ * - core/src/mcp/stdio.ts — stderr tail accumulator via
+ *   `Text.truncateTail`
+ * - core/src/messaging/embedding.ts — HTTP error excerpt via
+ *   `Text.truncate`; llama-server stderr tail and excerpts via
+ *   `Text.truncateTail`
+ * - The #1977 sites in ai/src/providers/antigravity-auth.ts and
+ *   core/src/embeddings.ts no longer exist on main (both files were
+ *   refactored and the raw excerpts removed) — nothing to guard.
  *
  * Neighbour, not a truncation: ai's `sanitizeSurrogates` governs lone
  * surrogates in map keys (write-side, #2152) — a different failure

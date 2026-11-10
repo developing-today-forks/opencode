@@ -35,6 +35,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 
 const truncate = (value: string) =>
   value.length <= MAX_LENGTH ? value : `${Text.truncate(value, MAX_LENGTH - 3)}...`
+
+/** Head cut for the title prompt's first user message (#1977): never splits a surrogate pair. */
+export const truncateFirstMessageText = (text: string) => Text.truncate(text, MAX_FIRST_MESSAGE_LENGTH)
+
+/** Tail cut for the title prompt's recent-context window (#1977): never splits a surrogate pair. */
+export const truncateRecentContextText = (recent: string, budget: number) => Text.truncateTail(recent, budget)
 export const isUntitled = (session: SessionSchema.Info) =>
   isExactRootFallback({
     title: session.title,
@@ -221,7 +227,7 @@ export const layer = Layer.effect(
       const text = !isUntitled(session)
         ? yield* store.context(session.id).pipe(
             Effect.map((messages) => {
-              const original = `Original request:\n${firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)}`
+              const original = `Original request:\n${truncateFirstMessageText(firstUser.text)}`
               const recent = messages
                 .flatMap((message) => {
                   if (message.type === "user" && message.id !== firstUser.id) return [`User: ${message.text.trim()}`]
@@ -235,7 +241,7 @@ export const layer = Layer.effect(
                 .join("\n\n")
               if (!recent) return original
               const prefix = `${original}\n\nRecent conversation:\n`
-              return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length))}`
+              return `${prefix}${truncateRecentContextText(recent, MAX_CONTEXT_LENGTH - prefix.length)}`
             }),
             Effect.orElseSucceed(() => firstUser.text),
           )

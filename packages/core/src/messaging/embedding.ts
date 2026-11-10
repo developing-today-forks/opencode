@@ -732,7 +732,7 @@ const layer = (options: Options) =>
               Effect.orElseSucceed(() => ""),
             )
             return yield* Effect.fail(
-              new Error(`HTTP ${response.status} from ${target.url}/embeddings: ${text.slice(0, 500)}`),
+              new Error(`HTTP ${response.status} from ${target.url}/embeddings: ${Text.truncate(text, 500)}`),
             )
           }
           // Bounded read (#1079): collect the body under the cap first (declared-length pre-check plus
@@ -796,13 +796,13 @@ const layer = (options: Options) =>
           const tail = { text: "" }
           yield* Stream.runForEach(Stream.decodeText(handle.stderr), (text) =>
             Effect.sync(() => {
-              tail.text = (tail.text + text).slice(-4096)
+              tail.text = Text.truncateTail(tail.text + text, 4096)
             }),
           ).pipe(Effect.ignore, Effect.forkScoped)
           const exited = handle.exitCode.pipe(
             Effect.mapError(toError),
             Effect.flatMap((code) =>
-              Effect.fail(new Error(`llama-server exited with code ${code}: ${tail.text.trim().slice(-1000)}`)),
+              Effect.fail(new Error(`llama-server exited with code ${code}: ${Text.truncateTail(tail.text.trim(), 1000)}`)),
             ),
           )
           const endpoint = `http://127.0.0.1:${port}`
@@ -814,7 +814,7 @@ const layer = (options: Options) =>
             Effect.timeoutOrElse({
               duration: "180 seconds",
               orElse: () =>
-                Effect.fail(new Error(`llama-server did not become healthy: ${tail.text.trim().slice(-1000)}`)),
+                Effect.fail(new Error(`llama-server did not become healthy: ${Text.truncateTail(tail.text.trim(), 1000)}`)),
             }),
           )
           yield* Effect.raceFirst(health, exited)

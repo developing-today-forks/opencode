@@ -39,6 +39,7 @@
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { readBoundedResponseText } from "@opencode/util/http-body"
+import { Text } from "@opencode/util/text"
 import { AIError, AuthenticationError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
 
@@ -159,7 +160,7 @@ export const exchangeMintedKey = async (accountToken: string, sources: Credentia
     () => new Error(`Muse key exchange response exceeded ${KEY_EXCHANGE_RESPONSE_MAX_BYTES} bytes`),
   )
   if (response.status === 401) throw new Error(REAUTH_REQUIRED_MESSAGE)
-  if (!response.ok) throw new Error(`Muse key exchange failed: HTTP ${response.status}: ${text.slice(0, 200)}`)
+  if (!response.ok) throw new Error(`Muse key exchange failed: HTTP ${response.status}: ${Text.truncate(text, 200)}`)
   let body: unknown
   try {
     body = JSON.parse(text)

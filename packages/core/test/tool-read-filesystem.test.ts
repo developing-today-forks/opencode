@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Environment } from "@opencode/core/environment/index"
@@ -552,5 +552,23 @@ describe("ReadToolFileSystem page normalisation", () => {
         expect(result.next).toBe(input.next)
       }),
     )
+  })
+})
+
+describe("clampLine well-formedness (#1977)", () => {
+  const astral = "\u{1F600}"
+  test("drops a straddling pair whole at the 2000 cut", () => {
+    const out = ReadToolFileSystem.clampLine("a".repeat(1999) + astral + "b".repeat(10))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.startsWith("a".repeat(1999))).toBe(true)
+    expect(out.includes(astral)).toBe(false)
+  })
+  test("keeps a pair that ends exactly at the cut", () => {
+    const out = ReadToolFileSystem.clampLine("a".repeat(1998) + astral + "b".repeat(10))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.includes(astral)).toBe(true)
+  })
+  test("leaves short lines untouched", () => {
+    expect(ReadToolFileSystem.clampLine("hello " + astral)).toBe("hello " + astral)
   })
 })

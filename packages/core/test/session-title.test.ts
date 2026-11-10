@@ -1,4 +1,4 @@
-import { beforeEach, expect } from "bun:test"
+import { beforeEach, describe, expect, test } from "bun:test"
 import {
   AIError,
   LLMClient,
@@ -930,3 +930,25 @@ it.effect("preserves a manual rename completed while generation is in flight", (
     expect((yield* store.get(sessionID))?.title).toBe("Manual title")
   }),
 )
+
+describe("title prompt cuts well-formedness (#1977)", () => {
+  const astral = "\u{1F600}"
+  test("head cut drops a straddling pair whole", () => {
+    const out = SessionTitle.truncateFirstMessageText("a".repeat(1999) + astral + "b".repeat(10))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out).toBe("a".repeat(1999))
+  })
+  test("head cut keeps a pair ending exactly at the cut", () => {
+    const out = SessionTitle.truncateFirstMessageText("a".repeat(1998) + astral + "b".repeat(10))
+    expect(out).toBe("a".repeat(1998) + astral)
+  })
+  test("tail cut drops a straddling pair whole", () => {
+    const out = SessionTitle.truncateRecentContextText("zz" + astral + "aaaa", 5)
+    expect(out.isWellFormed()).toBe(true)
+    expect(out).toBe("aaaa")
+  })
+  test("tail cut keeps a non-straddling pair", () => {
+    const out = SessionTitle.truncateRecentContextText("zz" + astral + "aaaa", 6)
+    expect(out).toBe(astral + "aaaa")
+  })
+})

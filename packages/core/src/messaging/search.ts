@@ -2,6 +2,7 @@ export * as MessagingSearch from "./search.js"
 
 import { createHash } from "crypto"
 import { Effect } from "effect"
+import { Text } from "../util/text.js"
 
 /**
  * Text scoring shared by message and log search. Fuzzy matching uses character trigrams, the same
@@ -173,7 +174,7 @@ export function regexFilter<A>(
       worker.once("error", (error) => resume(Effect.die(error)))
       worker.once("close", () => {
         if (progress.checked < items.length)
-          resume(Effect.die(new Error(`Regex worker exited before completing: ${errors.join("").slice(0, 500)}`)))
+          resume(Effect.die(new Error(`Regex worker exited before completing: ${Text.truncate(errors.join(""), 500)}`)))
       })
       worker.stdin.end(JSON.stringify({ query, texts: items.map(text) }))
     }).pipe(Effect.timeoutOrElse({ duration: budget, orElse: () => Effect.void }))

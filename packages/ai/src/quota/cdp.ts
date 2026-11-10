@@ -1,3 +1,4 @@
+import { Text } from "@opencode/util/text"
 import type { JsonObject, JsonValue, QuotaContext } from "./types.js"
 import {
   asObject,
@@ -179,7 +180,7 @@ const evaluate = async (client: WsClient, expression: string): Promise<JsonValue
     awaitPromise: true,
   })
   if (result.exceptionDetails) {
-    throw new Error(`page eval exception: ${JSON.stringify(result.exceptionDetails).slice(0, 300)}`)
+    throw new Error(`page eval exception: ${Text.truncate(JSON.stringify(result.exceptionDetails), 300)}`)
   }
   return asObject(result.result)?.value ?? null
 }

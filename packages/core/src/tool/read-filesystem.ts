@@ -10,6 +10,7 @@ import type { Files } from "../environment/index.js"
 import { FileSystem } from "../filesystem.js"
 import { Mime } from "../mime.js"
 import { AbsolutePath, NonNegativeInt, PositiveInt, RelativePath } from "../schema.js"
+import { Text } from "../util/text.js"
 
 export const MAX_READ_LINES = 2_000
 export const MAX_READ_BYTES = 50 * 1024
@@ -343,8 +344,8 @@ const textPage = (bytes: Uint8Array, eof: boolean, page: PageInput) => {
   return { entries, offset, next, consumed }
 }
 
-const clampLine = (line: string) =>
-  line.length > MAX_LINE_LENGTH ? line.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : line
+export const clampLine = (line: string) =>
+  line.length > MAX_LINE_LENGTH ? Text.truncate(line, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : line
 
 // A trailing newline ends the last line instead of starting an empty one.
 const lineCount = (newlines: number, last: number | undefined) => newlines + (last === undefined || last === 10 ? 0 : 1)
