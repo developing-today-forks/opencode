@@ -1892,6 +1892,28 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.shouldFeedQuota(2_011_000)).toBe(true)
   })
 
+  test("the gathered pass keeps its own feed stamps, independent of the gate's (code#8086)", () => {
+    ModelRoute.resetQuotaFeed()
+    // The production sequence (resolveRouteWithin): the gate feeds first with the
+    // resolution's `now`, the gathered pass runs immediately after with the same
+    // `now`. On a shared stamp the second call was never due — the starved plant.
+    expect(ModelRoute.shouldFeedQuota(5_000_000, "loc", "provider-x")).toBe(true)
+    expect(ModelRoute.shouldFeedGatheredQuota(5_000_000, "loc", "provider-x")).toBe(true)
+    // Each pass then throttles on its OWN stamp for the feed TTL...
+    expect(ModelRoute.shouldFeedQuota(5_030_000, "loc", "provider-x")).toBe(false)
+    expect(ModelRoute.shouldFeedGatheredQuota(5_030_000, "loc", "provider-x")).toBe(false)
+    // ...and comes due again on its own stamp's TTL, independently of the other pass.
+    expect(ModelRoute.shouldFeedGatheredQuota(5_061_000, "loc", "provider-x")).toBe(true)
+    expect(ModelRoute.shouldFeedQuota(5_061_000, "loc", "provider-x")).toBe(true)
+    // Per provider and location, exactly like the gate's stamps.
+    expect(ModelRoute.shouldFeedGatheredQuota(5_061_000, "loc", "provider-y")).toBe(true)
+    expect(ModelRoute.shouldFeedGatheredQuota(5_061_000, "other-loc", "provider-x")).toBe(true)
+    ModelRoute.resetQuotaFeed()
+    // The reset seam clears both stamp sets.
+    expect(ModelRoute.shouldFeedGatheredQuota(5_061_000, "loc", "provider-x")).toBe(true)
+    ModelRoute.resetQuotaFeed()
+  })
+
   test("quota feeds are throttled per provider and location", () => {
     ModelRoute.resetQuotaFeed()
     expect(ModelRoute.shouldFeedQuota(1_000_000, "location-a", "provider-a")).toBe(true)

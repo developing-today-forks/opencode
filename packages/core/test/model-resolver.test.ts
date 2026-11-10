@@ -12,6 +12,9 @@ import { Compatibility, ID, Info, Model, VariantID } from "@opencode/core/model"
 import { ModelPlan } from "@opencode/core/model-plan"
 import { Provider } from "@opencode/core/provider"
 import { Variant } from "@opencode/core/variant"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { ModelResolver } from "@opencode/core/model-resolver"
 import { ModelRoute } from "@opencode/core/model-route"
 import type { QuotaSnapshot } from "@opencode/core/quota-snapshot"
@@ -2935,6 +2938,75 @@ describe("ModelResolver routes", () => {
         )
       }).pipe(Effect.ensuring(Effect.sync(() => ModelRoute.resetHealth()))),
     ),
+  )
+
+  it.effect("the gathered plant fires in a resolution whose gate pass fed first (code#8086)", () =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      ModelRoute.resetQuotaFeed()
+      // The live antigravity shape: one fresh gathered entry, the leaf's own
+      // weekly window at 100% with its reset ahead. The snapshot sits where the
+      // server reads it — the aggregator state dir beside the state root; the
+      // suite's test home (script/test.ts) roots both under os.homedir().
+      const aggregator = path.join(os.homedir(), ".local", "state", "pm-aggregator")
+      const snapshotPath = path.join(aggregator, "quota-current.json")
+      const previous = yield* Effect.tryPromise(() => fs.readFile(snapshotPath, "utf8")).pipe(
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      )
+      try {
+        yield* Effect.tryPromise(() => fs.mkdir(aggregator, { recursive: true }))
+        const now = Date.now()
+        const snapshot = {
+          version: 1,
+          generatedAt: new Date(now).toISOString(),
+          source: "opencode-quota",
+          providers: [
+            {
+              providerId: "planted-grav",
+              state: "ok",
+              measuredAt: new Date(now).toISOString(),
+              windows: [],
+              usage: {
+                windows: {},
+                models: {
+                  "test-model": {
+                    windows: {
+                      weekly: { usedPercent: 100, remainingPercent: 0, resetAt: now + 3 * 86_400_000 },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        }
+        yield* Effect.tryPromise(() => fs.writeFile(snapshotPath, JSON.stringify(snapshot)))
+        const a = leaf("planted-grav")
+        const b = leaf("planted-fallback")
+        const route = routed([a, b], { ...ordered })
+        const targetA = ModelRoute.ref({ providerID: "planted-grav", model: a.id })
+        yield* withResolver([a, b], (resolver) =>
+          Effect.gen(function* () {
+            // Nothing has attempted the walled leaf, so nothing holds it out yet.
+            expect(ModelRoute.skipped(targetA)).toBe(false)
+            // One resolution: the gate pass feeds first (consuming the gate's own
+            // stamps), then the gathered pass must STILL be due — and plant.
+            const resolved = yield* resolver.resolveModel(route)
+            expect(targetOf(resolved)).toBe("planted-fallback")
+            expect(ModelRoute.skipped(targetA)).toBe(true)
+            expect(
+              ModelRoute.activeAdjustments().some(
+                (item) => item.id === "quota-model:planted-grav:test-model" && item.quotaSkipOrigin === "proactive",
+              ),
+            ).toBe(true)
+          }),
+        )
+      } finally {
+        yield* Effect.tryPromise(async () => {
+          if (previous === undefined) await fs.rm(snapshotPath, { force: true })
+          else await fs.writeFile(snapshotPath, previous)
+        }).pipe(Effect.ignore)
+      }
+    }).pipe(Effect.ensuring(Effect.sync(() => ModelRoute.resetHealth()))),
   )
 
   it.effect("a known-full active credential takes its target out of the route until a good read (#6)", () => {
