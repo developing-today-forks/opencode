@@ -606,6 +606,64 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
   }),
 )
 
+it.effect("compaction preserves a hooked prior summary when flattening older exchanges", () =>
+  Effect.gen(function* () {
+    requests = []
+    const hooks = yield* PluginHooks.Service
+    const store = yield* SessionStore.Service
+    const session = yield* insertSession(Session.ID.make("ses_hooked_summary_flatten"))
+    const prior = Schema.decodeUnknownSync(SessionMessage.CompactionCompleted)({
+      id: SessionMessage.ID.create(),
+      type: "compaction",
+      status: "completed",
+      reason: "auto",
+      summary: "Original summary",
+      recent: "Previously summarized recent context",
+      time: { created: 0, completed: 0 },
+    })
+    const user = (text: string) =>
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text,
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+    const messages = [
+      prior,
+      user(`old exchange one ${"x".repeat(400_000)}`),
+      user(`old exchange two ${"x".repeat(400_000)}`),
+      user(`old exchange three ${"x".repeat(400_000)}`),
+      user("latest exchange"),
+    ]
+    yield* hooks.register("session", "compaction", (event) =>
+      Effect.sync(() => {
+        const checkpoint = event.messages[0]
+        if (!checkpoint) return
+        event.messages[0] = {
+          ...checkpoint,
+          content: checkpoint.content.map((part) =>
+            part.type === "text" ? { ...part, text: part.text.replace("Original summary", "Edited summary") } : part,
+          ),
+        }
+      }),
+    )
+
+    expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
+
+    expect(requests).toHaveLength(1)
+    const request = JSON.stringify(requests[0]?.messages)
+    expect(request).toContain("Edited summary")
+    expect(request).not.toContain("Original summary")
+    expect(request).toContain("old exchange three")
+    expect(request).not.toContain("old exchange one")
+    expect(request).not.toContain("old exchange two")
+    expect(request).not.toContain("Previously summarized recent context")
+    expect(yield* store.context(session.id)).toMatchObject([
+      { type: "compaction", summary: "## Objective\n- manual summary", recent: "[User]: latest exchange" },
+    ])
+  }),
+)
+
 it.effect("native compaction fails without a model call on a route that cannot compact", () =>
   Effect.gen(function* () {
     requests = []

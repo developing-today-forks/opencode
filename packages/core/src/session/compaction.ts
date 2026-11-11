@@ -495,10 +495,21 @@ export const layer = Layer.effect(
             message.content.some((part) => part.type === "compaction"),
         ) + 1
       const summary = previous !== undefined && !SessionProviderContext.isCheckpoint(previous) ? previous : undefined
-      // TODO: Read the previous summary from the hooked request once it no longer merges summary and recent into one
-      // message. Until then it is rebuilt from storage, which drops a compaction hook's edits to that message.
+      // The hooked checkpoint combines summary and recent context in one message; split out the latter for dropping.
+      const hookedSummary = summary && request.messages.find((message) => message.id === summary.id)
       const lead = summary
-        ? toLLMMessages([{ ...summary, recent: "" }], context.model.ref)
+        ? hookedSummary
+          ? [
+              {
+                ...hookedSummary,
+                content: hookedSummary.content.map((part) =>
+                  part.type === "text"
+                    ? { ...part, text: part.text.replace(/\n\n<recent-context>\n[\s\S]*?\n<\/recent-context>/, "") }
+                    : part,
+                ),
+              },
+            ]
+          : toLLMMessages([{ ...summary, recent: "" }], context.model.ref)
         : request.messages.slice(0, end)
 
       // A user message and everything after it, up to the next one, is one exchange: kept or dropped whole.
@@ -961,7 +972,10 @@ export const estimateContext = (context: SessionContext.Loaded) => {
  */
 export const estimateHistoryRequest = (input: {
   readonly agent: SessionContext.Loaded["agent"]
-  readonly model: { readonly ref: SessionContext.Loaded["model"]["ref"]; readonly capabilities: Model.Info["capabilities"] }
+  readonly model: {
+    readonly ref: SessionContext.Loaded["model"]["ref"]
+    readonly capabilities: Model.Info["capabilities"]
+  }
   readonly tools: SessionContext.Loaded["tools"]
   readonly initial: string
   readonly messages: ReadonlyArray<SessionMessage.Info>
