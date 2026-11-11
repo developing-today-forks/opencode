@@ -1667,6 +1667,7 @@ describe("ModelResolver routes", () => {
           Layer.mock(Model.Service, {
             get: (providerID, id) =>
               Effect.succeed(leaves.find((item) => item.providerID === providerID && item.id === id)),
+            all: () => Effect.succeed(leaves),
           }),
           Layer.mock(
             Integration.Service,
@@ -1745,6 +1746,31 @@ describe("ModelResolver routes", () => {
         expect(first.routing?.routeID).toBe(ID.make("mistral-plan/luna"))
         const next = yield* first.routing!.fallback()
         expect(next ? targetOf(next) : undefined).toBe("pb")
+      }),
+    )
+  })
+
+  // #7073: a session launched on a bare provider model got no routing, so the
+  // runner's failover cascade never engaged and a startup provider error was
+  // terminal. When a configured route lists the direct model as a target, the
+  // direct resolution carries that route's routing and its fallback enters
+  // the route cascade behind the direct target.
+  it.effect("attaches the containing route to a direct model so startup errors can fail over (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b, c, route], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(a)
+        expect(String(first.ref.providerID)).toBe("pa")
+        expect(first.routing?.routeID).toBe(ID.make("pool"))
+        expect(targetOf(first)).toBe("pa")
+        const next = yield* first.routing!.fallback()
+        expect(next ? targetOf(next) : undefined).toBe("pb")
+        const plain = yield* resolver.resolveModel(c)
+        expect(plain.routing).toBeUndefined()
       }),
     )
   })
