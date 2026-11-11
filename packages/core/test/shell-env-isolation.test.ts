@@ -92,4 +92,92 @@ if (process.platform !== "win32") {
       )
     }),
   )
+  // Regression coverage for #2266: a stored session environment is a partial
+  // overlay, not a complete environment. The server itself stores a two-variable
+  // environment (MCPX_SESSION_ID / MCPX_PARENT_SESSION_ID) for every subagent
+  // child session, and clients may store snapshots carrying an empty HOME or a
+  // broken PATH. Neither may strip HOME/PATH from other sessions shells: a
+  // partial session environment inherits everything it does not set from the
+  // server environment, and an empty HOME/PATH counts as unset.
+  it.live("partial or broken session environments cannot strip HOME/PATH from other shells", () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-env-overlay-")))
+      const home = path.join(base, "home")
+      const bin = path.join(base, "bin")
+      yield* Effect.promise(() => Promise.all([fs.mkdir(home), fs.mkdir(bin)]))
+      yield* Effect.promise(() =>
+        fs.writeFile(path.join(bin, "fleetprobe"), "#!/bin/sh\nprintf probe-ok\n", { mode: 0o755 }),
+      )
+      const pathValue = [bin, "/usr/bin", "/bin"].join(path.delimiter)
+      const previousHome = process.env.HOME
+      const previousPath = process.env.PATH
+      process.env.HOME = home
+      process.env.PATH = pathValue
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => fs.rm(base, { recursive: true, force: true })).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              if (previousHome === undefined) delete process.env.HOME
+              else process.env.HOME = previousHome
+              if (previousPath === undefined) delete process.env.PATH
+              else process.env.PATH = previousPath
+            }),
+          ),
+          Effect.orDie,
+        ),
+      )
+
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const environments = yield* SessionEnvironment.Service
+        const broken = SessionSchema.ID.make("ses_env_broken")
+        const partial = SessionSchema.ID.make("ses_env_partial")
+        yield* environments.set(broken, { PATH: "/no-such-path", HOME: "" })
+        yield* environments.set(partial, { MCPX_SESSION_ID: "mcpx-sub-test" })
+
+        // Partial session env: its own variable is set, HOME/PATH come from the server env.
+        const child = yield* shell.create({
+          shell: "/bin/sh",
+          command: `printf %s "$HOME|$PATH|$MCPX_SESSION_ID"`,
+          timeout: 0,
+          metadata: { sessionID: partial },
+        })
+        expect((yield* shell.result(child)).capture?.output).toBe(`${home}|${pathValue}|mcpx-sub-test`)
+
+        // Basic command availability through the inherited PATH.
+        const probe = yield* shell.create({
+          shell: "/bin/sh",
+          command: `command -v fleetprobe && fleetprobe`,
+          timeout: 0,
+          metadata: { sessionID: partial },
+        })
+        expect((yield* shell.result(probe)).capture?.output).toBe(`${path.join(bin, "fleetprobe")}\nprobe-ok`)
+
+        // The broken session empty HOME counts as unset; its explicit PATH is
+        // its own override and stays confined to that session.
+        const brokenHome = yield* shell.create({
+          shell: "/bin/sh",
+          command: `printf %s "$HOME"`,
+          timeout: 0,
+          metadata: { sessionID: broken },
+        })
+        expect((yield* shell.result(brokenHome)).capture?.output).toBe(home)
+
+        // A fresh shell with no session environment is unaffected by either session.
+        const fresh = yield* shell.create({ shell: "/bin/sh", command: `printf %s "$HOME|$PATH"`, timeout: 0 })
+        expect((yield* shell.result(fresh)).capture?.output).toBe(`${home}|${pathValue}`)
+        expect(process.env.HOME).toBe(home)
+        expect(process.env.PATH).toBe(pathValue)
+      }).pipe(
+        Effect.provide(
+          AppNodeBuilder.build(LayerNode.group([Shell.node, PluginHooks.node, SessionEnvironment.node]), [
+            Location.node.replace(tempLocationLayer),
+            Global.node.replace(tempGlobalLayer),
+            Config.node.replace(Config.testLayer()),
+            Environment.node.replace(hostEnvironmentLayer),
+          ]),
+        ),
+      )
+    }),
+  )
 }

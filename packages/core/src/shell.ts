@@ -293,10 +293,31 @@ const layer = () =>
         before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
       ) {
         const sessionID = input.metadata?.sessionID
+        const sessionEnv =
+          location.workspaceID !== undefined || !Schema.is(SessionSchema.ID)(sessionID)
+            ? undefined
+            : yield* environments.get(sessionID)
+        // A stored session environment is an overlay on the server environment, never a
+        // replacement for it (#2266). Partial session environments are normal: the server
+        // itself stores one holding only MCPX_SESSION_ID / MCPX_PARENT_SESSION_ID for every
+        // subagent child session, and clients may store snapshots that omit or empty out
+        // variables. Treating such a snapshot as the whole environment spawned shells with
+        // no PATH and no HOME — on NixOS bash falls back to a compiled-in PATH of
+        // /no-such-path, so basic commands vanished for every affected child session while
+        // sessions without a stored environment (which inherit process.env) kept working.
+        // Session values win per key; an empty HOME or PATH counts as unset, not as a
+        // deliberate wipe, so the server value shows through instead.
         const baseEnv =
           location.workspaceID !== undefined
             ? undefined
-            : ((Schema.is(SessionSchema.ID)(sessionID) ? yield* environments.get(sessionID) : undefined) ?? process.env)
+            : sessionEnv === undefined
+              ? process.env
+              : {
+                  ...process.env,
+                  ...sessionEnv,
+                  ...(sessionEnv.HOME ? {} : process.env.HOME ? { HOME: process.env.HOME } : {}),
+                  ...(sessionEnv.PATH ? {} : process.env.PATH ? { PATH: process.env.PATH } : {}),
+                }
         const invocation: ShellCreateBefore = {
           command: input.command,
           cwd: input.cwd ?? location.directory,
