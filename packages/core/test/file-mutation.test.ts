@@ -239,6 +239,87 @@ describe("FileMutation", () => {
       }),
     ),
   )
+  it.live("does not let a transaction silently overwrite a concurrent write to the same path", () =>
+    withTempDir(({ path: directory }) =>
+      Effect.gen(function* () {
+        const targetPath = path.join(directory, "shared.txt")
+        yield* Effect.promise(() => fs.writeFile(targetPath, "initial"))
+        const transactionStarted = yield* Deferred.make<void>()
+        const releaseTransaction = yield* Deferred.make<void>()
+        const writeStarted = yield* Deferred.make<void>()
+        let writes = 0
+        const filesystem = instrumentWrites((write) =>
+          Effect.gen(function* () {
+            writes++
+            yield* Deferred.succeed(writeStarted, undefined)
+            yield* write
+          }),
+        )
+
+        yield* Effect.gen(function* () {
+          const access = yield* FileAccess.Service
+          const files = yield* FileMutation.Service
+          const target = yield* access.resolve({ path: "shared.txt" })
+          // An edit-style transaction: hold the transaction lock while preparing,
+          // then store the replacement prepared from the contents read at its start.
+          const transaction = yield* files
+            .withLock([targetPath])(
+              Effect.gen(function* () {
+                yield* Deferred.succeed(transactionStarted, undefined)
+                yield* Deferred.await(releaseTransaction)
+                yield* files.write({ target, content: "stale edit" })
+              }),
+            )
+            .pipe(Effect.forkChild)
+          yield* Deferred.await(transactionStarted)
+          const concurrent = yield* files.write({ target, content: "newer write" }).pipe(Effect.forkChild)
+          // Give an uncoordinated write every chance to reach the filesystem:
+          // it must still be waiting for the transaction lock.
+          yield* Deferred.await(writeStarted).pipe(
+            Effect.raceFirst(Effect.sleep("100 millis")),
+            Effect.catch(() => Effect.void),
+          )
+          expect(writes).toBe(0)
+          expect(yield* Deferred.isDone(writeStarted)).toBe(false)
+
+          yield* Deferred.succeed(releaseTransaction, undefined)
+          yield* Fiber.join(transaction)
+          yield* Fiber.join(concurrent)
+          expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("newer write")
+        }).pipe(provide(directory, filesystem))
+      }),
+    ),
+  )
+
+  it.live("allows a write to a distinct path while a transaction is in progress", () =>
+    withTempDir(({ path: directory }) =>
+      Effect.gen(function* () {
+        const transactionStarted = yield* Deferred.make<void>()
+        const releaseTransaction = yield* Deferred.make<void>()
+        const secondFinished = yield* Deferred.make<void>()
+        const transaction = yield* Effect.gen(function* () {
+          const files = yield* FileMutation.Service
+          yield* files.withLock([path.join(directory, "first.txt")])(
+            Deferred.succeed(transactionStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseTransaction))),
+          )
+        }).pipe(provide(directory), Effect.forkChild)
+        yield* Deferred.await(transactionStarted)
+
+        yield* Effect.gen(function* () {
+          const access = yield* FileAccess.Service
+          const files = yield* FileMutation.Service
+          const target = yield* access.resolve({ path: "second.txt" })
+          yield* files.write({ target, content: "second" })
+          yield* Deferred.succeed(secondFinished, undefined)
+        }).pipe(provide(directory))
+        expect(yield* Deferred.isDone(secondFinished)).toBe(true)
+        expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "second.txt"), "utf8"))).toBe("second")
+
+        yield* Deferred.succeed(releaseTransaction, undefined)
+        yield* Fiber.join(transaction)
+      }),
+    ),
+  )
 })
 
 function instrumentWrites(
