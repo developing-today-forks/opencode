@@ -10,11 +10,11 @@ import {
 import type { Model } from "@opencode/schema/model"
 import type { Content as ToolContent } from "@opencode/schema/tool"
 import { Option, Schema } from "effect"
-import { readFileSync, statSync } from "node:fs"
 import { fileURLToPath } from "url"
 import { SessionMessage } from "../message.js"
 import { SessionProviderContext } from "../provider-context.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
+import { validate as validateToolFile } from "./tool-result-content.js"
 
 const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
@@ -105,46 +105,9 @@ const userAttachmentContent = (files: readonly FileAttachment[]) => {
 
 const decodeToolInput = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 
-const MAX_TOOL_URI_BYTES = 20 * 1024 * 1024
-
-const toolFileFallback = (uri: string, reason: string): ToolContent => ({
-  type: "text",
-  text: `[Tool result file could not be materialized: ${uri.length > 512 ? `${uri.slice(0, 256)}…${uri.slice(-128)} (${uri.length} characters)` : uri} (${reason})]`,
-})
-
-const materializeToolFile = (file: Extract<ToolContent, { type: "file" }>): ToolContent => {
-  const { uri } = file
-  try {
-    let bytes: Buffer
-    let mime = file.mime
-    if (uri.startsWith("data:")) {
-      const comma = uri.indexOf(",")
-      if (comma < 0) return toolFileFallback(uri, "malformed data URI")
-      const metadata = uri.slice(5, comma)
-      mime ??= metadata.split(";")[0] || "application/octet-stream"
-      const payload = uri.slice(comma + 1)
-      if (payload.length > Math.ceil((MAX_TOOL_URI_BYTES * 4) / 3) + 8)
-        return toolFileFallback(uri, `exceeds ${MAX_TOOL_URI_BYTES} byte limit`)
-      bytes = metadata.split(";").includes("base64") ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload))
-    } else if (uri.startsWith("file:")) {
-      const path = fileURLToPath(uri)
-      const size = statSync(path).size
-      if (size > MAX_TOOL_URI_BYTES) return toolFileFallback(uri, `exceeds ${MAX_TOOL_URI_BYTES} byte limit`)
-      bytes = readFileSync(path)
-    } else {
-      return toolFileFallback(uri, "unsupported URI scheme")
-    }
-    if (bytes.byteLength > MAX_TOOL_URI_BYTES) return toolFileFallback(uri, `exceeds ${MAX_TOOL_URI_BYTES} byte limit`)
-    // Keep Tool.Content file parts intact: provider adapters lower these to native media parts.
-    return { ...file, uri: `data:${mime ?? "application/octet-stream"};base64,${bytes.toString("base64")}` }
-  } catch (error) {
-    return toolFileFallback(uri, error instanceof Error ? error.message : "read failed")
-  }
-}
-
 const materializeToolContent = (
   content: Extract<SessionMessage.AssistantTool["state"], { status: "completed" }>["content"],
-): ToolContent[] => content.map((part) => (part.type === "file" ? materializeToolFile(part) : part))
+): ToolContent[] => content.map((part) => (part.type === "file" ? validateToolFile(part) : part))
 
 const providerMetadata = (
   provider: string,

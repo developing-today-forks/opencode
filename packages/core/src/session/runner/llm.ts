@@ -5,6 +5,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm"
 import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
+import { FileAccess } from "../../file-access.js"
 import { LocationLifecycle } from "../../location-lifecycle.js"
 import { InstructionState } from "../instruction-state.js"
 import { SessionCompaction } from "../compaction.js"
@@ -446,6 +447,7 @@ export const node = makeLocationNode({
   layer,
   deps: [
     Bus.node,
+    FileAccess.node,
     LocationLifecycle.node,
     llmClient,
     SessionContext.node,
