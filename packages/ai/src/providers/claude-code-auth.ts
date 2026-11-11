@@ -769,25 +769,31 @@ const standingRenewals = new Map<string, Promise<ClaudeCodeCredential>>()
  */
 /**
  * What a load does when it finds a standing retry already running for
- * its credential: join it — single-flight — if the renewal has landed
- * or lands within the same tick; otherwise fall through to the
- * last-issued credential, whose caller-side mapping names the state
- * (an expired credential fails loudly; a renewable one is returned
- * with the pending-renewal notice). A load is never parked on a retry
- * that could wait for hours, and never starts a competing exchange.
+ * its credential: join it — single-flight — adopting the renewal's
+ * outcome if it has landed or lands within the same tick. If the
+ * renewal is still pending after that bounded probe, the load falls
+ * through to the last-issued credential while that credential is
+ * still valid (it is served with the renewal pending behind it); a
+ * credential that has already expired is NOT served — the load
+ * surfaces the renewal-pending rate limit, the same outcome a request
+ * whose own wait budget ran out gets. A load is never parked on a
+ * retry that could wait for hours, and never starts a competing
+ * exchange. The standing entry is joined, never deleted: deleting it
+ * would not stop its loop (the loop holds no cancellation handle),
+ * and the orphaned loop would keep exchanging the same single-use
+ * refresh token alongside the load's own renewal — the refresh-token
+ * reuse pattern that gets token families revoked (code#8102). A
+ * settled entry needs no recovery either: scheduleStandingRenewal
+ * clears its own slot on settle, so the next load starts fresh.
  */
 const joinStandingRenewal = async (
   sources: CredentialSources,
   standing: Promise<ClaudeCodeCredential>,
   credential: ClaudeCodeCredential,
 ): Promise<ClaudeCodeCredential> => {
-  const now = sources.now ? sources.now() : Date.now()
-  if (credential.expiresAt !== undefined && credential.expiresAt <= now + 1_000) return credential
   // A standing renewal that has already landed resolves at once; one
-  // still pending after a bounded probe falls through to the
-  // credential, whose caller-side mapping names the state: the
-  // renewable credential is served with the pending-renewal notice
-  // until the renewal lands. The probe waits for the joiner's own
+  // still pending after a bounded probe falls through per the expiry
+  // check below. The probe waits for the joiner's own
   // in-flight exchange (if any) to settle, then takes one macrotask
   // turn — enough for a same-window landing, never a wait on the
   // retry's cadence. It must not run on the injected sleep: a test
@@ -802,16 +808,20 @@ const joinStandingRenewal = async (
       return pending
     })(),
   ])
-  return winner === pending ? credential : (winner as ClaudeCodeCredential)
+  if (winner !== pending) return winner as ClaudeCodeCredential
+  // The renewal is still pending. A credential that is still valid is
+  // served as-is (the documented design above); one that has expired —
+  // or expires within the same second, before any request could spend
+  // it — must not be served as a success: the load surfaces the
+  // renewal-pending rate limit instead, exactly like a request whose
+  // own wait budget ran out (#6120). Serving the dead credential would
+  // send the request out holding an expired token and misreport the
+  // door's state as an authentication failure downstream.
+  const now = sources.now ? sources.now() : Date.now()
+  if (credential.expiresAt !== undefined && credential.expiresAt <= now + 1_000)
+    throw new ClaudeCodeRefreshRateLimited(undefined)
+  return credential
 }
-
-/**
- * The exact sources object the standing loop exchanges with, set for
- * the synchronous span in which the loop (re)enters refreshCredential
- * through loadCredentialEffect's join path. Identity, not a flag on the
- * caller's sources, so user-supplied sources can never spoof it.
- */
-let standingExchangeSources: CredentialSources | undefined
 
 /**
  * Set only for the synchronous span around a standing loop's round
@@ -829,17 +839,6 @@ const scheduleStandingRenewal = (
 ): Promise<ClaudeCodeCredential> => {
   const existing = standingRenewals.get(key)
   if (existing !== undefined) return existing
-  // A standing renewal scheduled by an exchange whose own host load
-  // is still settling must remain joinable past the moment its host
-  // promise settles: the settlement of the host promise is what
-  // releases the waiters who have already looked the slot up. The
-  // fresh-scheduling guard (markFreshlyScheduled, below) records
-  // that this slot was scheduled within the current settlement
-  // window, and the join path consults it when deciding whether a
-  // lookahead is safe — a joiner that lets a just-scheduled slot
-  // settle under its feet gets the credential it was served rather
-  // than the renewal's outcome.
-  markFreshlyScheduled(sources, key)
   // The ambient cadence marks its waits unref'd; a caller whose
   // sleep is ambient-aware (the test harness parks ambient waits
   // behind a gate) sees the marker on every cadence call.
@@ -870,14 +869,12 @@ const scheduleStandingRenewal = (
           // harness) gate the loop on exactly that marker.
           sleep: (ms: number) => (sources.sleep === undefined ? sleep(ms) : sources.sleep(ms, true)),
         }
-        standingExchangeSources = roundSources
         const span = { sources: roundSources, key }
         standingRoundSpan.add(span)
         try {
           return await refreshAndPersist(roundSources, refreshToken, { standing: true })
         } finally {
           standingRoundSpan.delete(span)
-          if (standingExchangeSources === roundSources) standingExchangeSources = undefined
         }
       } catch (cause) {
         if (cause instanceof ClaudeCodeRefreshRateLimited) continue
@@ -909,30 +906,6 @@ const scheduleStandingRenewal = (
 /** Concurrent renewal-needing requests share exactly one inflight renewal (#1818, #6120). */
 const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
 
-/**
- * Joining an in-flight renewal whose standing slot was scheduled
- * within the current settlement window: the shared attempt's
- * settlement coincides with the standing slot's own settlement, so a
- * waiter that would adopt the standing outcome is served its own
- * credential instead; every other waiter adopts the attempt as
- * before. The distinction only exists inside the fresh-scheduling
- * window — once it lapses, a waiter on the shared attempt is an
- * ordinary waiter on the renewal itself.
- */
-const joinInflightStandingAware = async (
-  existing: Promise<ClaudeCodeCredential>,
-  key: string,
-  credential: ClaudeCodeCredential,
-  sources: CredentialSources,
-): Promise<ClaudeCodeCredential> => {
-  const standing = standingRenewals.get(key)
-  if (standing !== undefined && isFreshlyScheduled(sources, key)) {
-    await existing.catch(() => {})
-    return credential
-  }
-  return existing
-}
-
 const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
   const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
   // The standing loop's own rounds re-enter here through the join path
@@ -947,7 +920,7 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
     if (span.sources === sources && span.key === key)
       return refreshAndPersist(sources, credential.refreshToken as string, { standing: true })
   const existing = inflightRefresh.get(key)
-  if (existing !== undefined) return joinInflightStandingAware(existing, key, credential, sources)
+  if (existing !== undefined) return existing
   // While a standing retry is working this credential, a fresh load
   // joins it instead of running a competing in-request renewal.
   const standing = standingRenewals.get(key)
@@ -1001,96 +974,16 @@ const mapRenewalFailure = (cause: unknown) => {
   })
 }
 
-/**
- * The refresh a stale-standing load falls back to, sharing the normal
- * path's failure mapping: trust the standing entry when it is already
- * settled, otherwise renew from the file credential in-request. The
- * stale entry was already DELETED by the caller, so nothing here can
- * re-join it — this helper exists only to keep the settled-verdict
- * race out of the main flow.
- */
-const refreshAfterStandingEffect = (sources: CredentialSources, credential: ClaudeCodeCredential) =>
-  Effect.gen(function* () {
-    const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
-    // EXTREMELY defensive: if a standing entry exists here despite
-    // the caller's deletion, trust it only when it has already
-    // settled; a pending one must never be awaited from this branch.
-    const standing = standingRenewals.get(key)
-    if (standing !== undefined) {
-      const verdict = yield* Effect.promise(() =>
-        Promise.race([
-          standing.then(
-            () => "settled" as const,
-            () => "settled" as const,
-          ),
-          new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0)),
-        ]),
-      )
-      if (verdict === "settled")
-        return yield* Effect.tryPromise({
-          try: () => standing,
-          catch: (cause) => mapRenewalFailure(cause),
-        })
-    }
-    return yield* Effect.tryPromise({
-      try: () => refreshCredential(sources, credential),
-      catch: (cause) => mapRenewalFailure(cause),
-    })
-  })
-
-/** Keys whose standing entry was scheduled within the current macrotask window, with their sources. */
-const freshlyScheduledStanding = new Set<{ sources: CredentialSources; key: string }>()
-const markFreshlyScheduled = (sources: CredentialSources, key: string) => {
-  const entry = { sources, key }
-  freshlyScheduledStanding.add(entry)
-  setTimeout(() => freshlyScheduledStanding.delete(entry), 0)
-}
-const isFreshlyScheduled = (sources: CredentialSources, key: string): boolean => {
-  for (const entry of freshlyScheduledStanding) if (entry.sources === sources && entry.key === key) return true
-  return false
-}
-
-
 const loadCredentialEffect = (sources: CredentialSources) =>
   Effect.gen(function* () {
-    let credential = yield* Effect.promise(() => resolveCredential(sources))
+    const credential = yield* Effect.promise(() => resolveCredential(sources))
     if (credential === undefined)
       return yield* new AIError({ reason: new AuthenticationError({ message: NOT_SIGNED_IN_MESSAGE }) })
-    // A standing renewal left behind by an earlier load — one whose
-    // retry loop stopped on a verdict this process will not re-run —
-    // must not swallow this load's own renewal: while the entry is
-    // still pending the load drops it, re-reads the file record, and
-    // renews in-request; an entry that has already settled is left
-    // alone and the normal path below joins it. The probe is a
-    // MACROTASK race, not a microtask count: Effect's promise
-    // resolution hops several queue levels, and a still-pending
-    // standing entry must be distinguishable from a settled one under
-    // any scheduler — one macrotask turn separates them exactly.
-    // The standing loop's own re-entry never takes this branch: it
-    // carries its per-round sources by identity.
-    const standingKey = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
-    let inStandingSpan = false
-    for (const span of standingRoundSpan)
-      if (span.sources === sources && span.key === standingKey) inStandingSpan = true
-    const stale = inStandingSpan ? undefined : standingRenewals.get(standingKey)
-    if (stale !== undefined) {
-      const verdict = yield* Effect.promise(() =>
-        Promise.race([
-          stale.then(
-            () => "settled" as const,
-            () => "settled" as const,
-          ),
-          new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0)),
-        ]),
-      )
-      if (verdict !== "settled") {
-        standingRenewals.delete(standingKey)
-        credential = yield* Effect.promise(() =>
-          Promise.resolve(resolveCredential(sources)).then((fresh) => fresh ?? credential!),
-        )
-        return yield* refreshAfterStandingEffect(sources, credential!)
-      }
-    }
+    // A standing renewal left running by an earlier load is met by
+    // the normal path below: refreshCredential joins it (see
+    // joinStandingRenewal). There is deliberately no recovery branch
+    // here — a pending entry means its loop is alive, and deleting
+    // the entry would orphan the loop rather than stop it.
     const now = sources.now ? sources.now() : Date.now()
     const expired = credential.expiresAt !== undefined && credential.expiresAt <= now
     // Renewal is due inside the lead window (#6120), not at expiry: a
