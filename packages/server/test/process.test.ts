@@ -1,8 +1,15 @@
 import { expect } from "bun:test"
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { OpenCode } from "../../client/src/promise/index"
 import { it } from "../../core/test/lib/effect"
 import { ServerProcess } from "../src/process"
+
+// This process-level case launches /bin/sh in a PTY, which is not available on Windows.
+const livePTY = process.platform === "win32" ? it.live.skip : it.live
 
 it.live("authenticates API requests behind the frontend transform while allowing browser preflight", () =>
   Effect.gen(function* () {
@@ -257,6 +264,54 @@ it.live("server info lists remote URLs alongside local addresses while they are 
     expect((yield* info()).urls).toEqual([base, "https://example.opentunnel.xyz"])
     remote.urls = []
     expect((yield* info()).urls).toEqual([base])
+  }),
+)
+
+livePTY("drains an attached PTY websocket with a controlled close", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-process-pty-shutdown-"))),
+      (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
+    )
+    const server = yield* ServerProcess.start<never, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      app: { version: "test-version" },
+      database: { path: ":memory:" },
+      models: { fetch: false },
+      config: { directory, project: false, content: "{}" },
+      fs: { filewatcher: false },
+    })
+    const base = HttpServer.formatAddress(server.address)
+    const client = OpenCode.make({ baseUrl: base, headers: { authorization: `Basic ${btoa("opencode:secret")}` } })
+    const location = { directory }
+    const terminal = yield* Effect.promise(() =>
+      client.pty.create({ location, command: "/bin/sh", args: ["-c", "sleep 2"], cwd: directory }),
+    )
+    const ticket = yield* Effect.promise(() =>
+      client.pty.connect.token({ location, ptyID: terminal.data.id, "x-opencode-ticket": "1" }),
+    )
+    const url = new URL(`/api/pty/${terminal.data.id}/connect`, base)
+    url.protocol = "ws:"
+    url.searchParams.set("location[directory]", directory)
+    url.searchParams.set("ticket", ticket.data.ticket)
+    const socket = new WebSocket(url)
+    yield* Effect.promise(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          socket.addEventListener("open", () => resolve(), { once: true })
+          socket.addEventListener("error", () => reject(new Error("PTY websocket failed to open")), { once: true })
+        }),
+    )
+    const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve, { once: true }))
+    const started = performance.now()
+    const draining = yield* Effect.forkChild(server.drain("10 seconds", Effect.never), { startImmediately: true })
+    const close = yield* Effect.promise(() => closed)
+    yield* Fiber.join(draining)
+
+    expect(close.code).toBe(1000)
+    expect(performance.now() - started).toBeLessThan(2_000)
   }),
 )
 

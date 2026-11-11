@@ -15,6 +15,7 @@ import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } fro
 import { NetAddress } from "effect/net"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { ListenOptions, Socket } from "node:net"
+import type { Duplex } from "node:stream"
 import { ServerAuth } from "./auth"
 import { isAllowedCorsOrigin } from "./cors"
 import { adoptInheritedSocket } from "./inherited-socket"
@@ -69,10 +70,17 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   // starts may not have sent its request yet, so it is not in inFlight; the drain keeps serving
   // accepted connections briefly instead of resetting a request that was already on its way.
   const accepted = new Set<Socket>()
+  const ptySockets = new Set<Duplex>()
   let draining = false
   bound.server.on("connection", (socket: Socket) => {
     accepted.add(socket)
     socket.once("close", () => accepted.delete(socket))
+  })
+  bound.server.on("upgrade", (request, socket) => {
+    const url = new URL(request.url ?? "/", "http://localhost")
+    if (!hasPtyConnectTicketURL(url)) return
+    ptySockets.add(socket)
+    socket.once("close", () => ptySockets.delete(socket))
   })
   bound.server.on("request", (request: IncomingMessage, response: ServerResponse) => {
     // Event streams are open-ended: the drain does not wait for them, so they must not hold the linger either.
@@ -151,7 +159,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     const execution = Context.get(context, SessionExecution.Service)
     const runningSessions = execution.active.pipe(Effect.map((sessions) => Array.from(sessions)))
     const untilIdle = Effect.gen(function* () {
-      while ((yield* runningSessions).length > 0 || inFlight.size > 0) yield* Effect.sleep("250 millis")
+      while ((yield* runningSessions).length > 0 || inFlight.size > 0 || ptySockets.size > 0)
+        yield* Effect.sleep("250 millis")
     })
     const waitForAccepted = Effect.gen(function* () {
       while (accepted.size > 0) yield* Effect.sleep("10 millis")
@@ -174,17 +183,22 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
           // descriptor; the supervisor keeps the listener, so connections queue for the successor.
           yield* Effect.sync(() => {
             bound.server.close()
+            // Let the PTY handler observe a controlled close and detach before the bounded drain expires.
+            for (const socket of ptySockets) socket.write(Buffer.from([0x88, 0x02, 0x03, 0xe8]))
           })
           const sessions = yield* runningSessions
-          if (sessions.length > 0 || inFlight.size > 0)
+          if (sessions.length > 0 || inFlight.size > 0 || ptySockets.size > 0)
             yield* Effect.logInfo("draining running sessions and requests", {
               sessions,
               requests: inFlight.size,
+              ptySockets: ptySockets.size,
               grace,
             })
           // The interrupt that started this drain must not cancel the wait; a second SIGTERM ends it.
           yield* Effect.gen(function* () {
-            if (sessions.length > 0 || inFlight.size > 0) yield* untilIdle.pipe(Effect.timeoutOption(grace))
+            if (sessions.length > 0 || inFlight.size > 0 || ptySockets.size > 0)
+              yield* untilIdle.pipe(Effect.timeoutOption(grace))
+            if (ptySockets.size > 0) yield* Effect.sync(() => ptySockets.forEach((socket) => socket.destroy()))
             // Keep serving connections the listener accepted before it closed: their requests may not have
             // arrived when the drain began, so inFlight did not see them. Bounded so idle keep-alive
             // connections cannot hold shutdown.
@@ -193,11 +207,13 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
             yield* waitForRequests.pipe(Effect.timeoutOption(grace))
           }).pipe(Effect.raceFirst(cutNow), Effect.uninterruptible)
           const remaining = yield* runningSessions
-          if (remaining.length > 0 || inFlight.size > 0)
+          if (remaining.length > 0 || inFlight.size > 0 || ptySockets.size > 0)
             yield* Effect.logWarning("shutdown ended with sessions or requests still running; interrupting them", {
               sessions: remaining,
               requests: inFlight.size,
+              ptySockets: ptySockets.size,
             })
+          for (const socket of ptySockets) socket.destroy()
         }),
     }
   }).pipe(
