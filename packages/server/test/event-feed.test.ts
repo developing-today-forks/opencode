@@ -175,6 +175,70 @@ describe("EventFeed", () => {
     }),
   )
 
+
+  it.effect("resyncs a reconnect from a pre-failure cursor after an encoding failure with no live subscribers", () =>
+    Effect.gen(function* () {
+      const source = makeSource()
+      const sent: string[] = []
+      const feed = yield* EventFeed.make(source.observe, {
+        encode: (event, id) => {
+          sent.push(id)
+          if (event.id === Event.ID.make("evt_bad")) throw new Error("invalid event")
+          return EventFeed.frame(event, id)
+        },
+      })
+      // No subscriber is connected at any point in this test: the failure
+      // must still invalidate the pre-failure cursor (#2271).
+      yield* source.publish(event("one"))
+      yield* source.publish(event("bad"))
+      yield* source.publish(event("two"))
+
+      const stream = yield* feed.subscribe(sent[0])
+      const received = yield* stream.pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped)
+      yield* source.publish(event("three"))
+      const frames = Array.from(yield* Fiber.join(received)).map(parse)
+
+      // The reconnect gets a resync, not the retained frame for "two",
+      // and live frames follow it with no gap.
+      expect(frames.map((f) => f.type)).toEqual(["server.resync", Agent.Event.Updated.type])
+      // The resync cursor is current: replaying after it is contiguous
+      // (no second resync) and yields only later frames.
+      const resyncID = frames[0].id
+      if (resyncID === undefined) throw new Error("resync frame has no id")
+      const again = yield* feed.subscribe(resyncID)
+      const replayed = yield* again.pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      yield* source.publish(event("four"))
+      expect(Array.from(yield* Fiber.join(replayed)).map(parse).map((f) => f.type)).toEqual([
+        Agent.Event.Updated.type,
+      ])
+    }),
+  )
+
+  it.effect("resyncs a reconnect from a pre-failure cursor after an encoding failure with a live subscriber", () =>
+    Effect.gen(function* () {
+      const source = makeSource()
+      const sent: string[] = []
+      const feed = yield* EventFeed.make(source.observe, {
+        encode: (event, id) => {
+          sent.push(id)
+          if (event.id === Event.ID.make("evt_bad")) throw new Error("invalid event")
+          return EventFeed.frame(event, id)
+        },
+      })
+      const current = yield* feed.subscribe()
+      const failed = yield* current.pipe(Stream.runCollect, Effect.exit, Effect.forkScoped)
+      yield* source.publish(event("one"))
+      yield* source.publish(event("bad"))
+      const exit = yield* Fiber.join(failed)
+      expect(Exit.isFailure(exit)).toBeTrue()
+
+      yield* source.publish(event("two"))
+      const stream = yield* feed.subscribe(sent[0])
+      const first = Array.from(yield* stream.pipe(Stream.take(1), Stream.runCollect))
+      expect(first.map(parse).map((f) => f.type)).toEqual(["server.resync"])
+    }),
+  )
+
   it.effect("disconnects current subscribers after an encoding failure and continues for later subscribers", () =>
     Effect.gen(function* () {
       const source = makeSource()
