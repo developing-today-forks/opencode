@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
 import { Message, Media } from "@opencode/ai"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
@@ -890,6 +892,75 @@ Earlier work
         },
       },
     ])
+  })
+
+  test("materializes tool-result file URIs and explains failures", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "tool-result-uri-"))
+    const filePath = path.join(directory, "hello.txt")
+    writeFileSync(filePath, "from disk")
+    const tool = (uri: string, mime = "text/plain") =>
+      SessionMessage.AssistantTool.make({
+        type: "tool",
+        id: "file-uri",
+        name: "read",
+        state: SessionMessage.ToolStateCompleted.make({
+          status: "completed",
+          input: {},
+          content: [{ type: "file", uri, mime, name: "hello.txt" }],
+        }),
+        time: { created, completed: created },
+      })
+    const assistant = (item: ReturnType<typeof tool>) =>
+      SessionMessage.Assistant.make({
+        id: id("tool-uri"),
+        type: "assistant",
+        agent: build,
+        model: { id: Model.ID.make("model"), providerID: Provider.ID.make("provider") },
+        content: [item],
+        time: { created, completed: created },
+      })
+
+    try {
+      const disk = toLLMMessages([assistant(tool(pathToFileURL(filePath).href))], model)
+      expect(disk.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: {
+          type: "content",
+          value: [{ type: "file", uri: `data:text/plain;base64,${Buffer.from("from disk").toString("base64")}`, mime: "text/plain", name: "hello.txt" }],
+        },
+      })
+
+      const missingUri = pathToFileURL(path.join(directory, "missing.txt")).href
+      const missing = toLLMMessages([assistant(tool(missingUri))], model)
+      expect(missing.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining(`${missingUri} (`) },
+      })
+
+      const unsupportedUri = "ftp://example.com/file.txt"
+      const unsupported = toLLMMessages([assistant(tool(unsupportedUri))], model)
+      expect(unsupported.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining(`${unsupportedUri} (unsupported URI scheme)`) },
+      })
+
+      const oversizedUri = `data:image/png;base64,${"A".repeat(28 * 1024 * 1024)}`
+      const oversized = toLLMMessages([assistant(tool(oversizedUri, "image/png"))], model)
+      expect(oversized.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining("(exceeds 20971520 byte limit)") },
+      })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   test("restores OpenAI encrypted reasoning metadata", () => {
