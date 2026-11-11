@@ -212,6 +212,24 @@ export const MockScenarios = {
     }),
   }),
 
+  /** OpenDesign's membership wall, verbatim from the 2026-11-10 incident (#2253): HTTP 429,
+   * a `tier_limit_exceeded` code, the cap stated in the message text ("11/10"). Classifies as
+   * `RateLimit` on the wire; the runner must additionally recognize it as a tier limit so the
+   * account-wide hold — not an ordinary per-target bench — answers it. */
+  opendesignTierLimit: (kind: "concurrency" | "rpm" = "concurrency"): MockOutcome => ({
+    kind: "http",
+    status: 429,
+    body: JSON.stringify({
+      error: {
+        code: "tier_limit_exceeded",
+        message:
+          kind === "concurrency"
+            ? "membership concurrency limit exceeded: 11/10"
+            : "membership rpm limit exceeded: 101/100",
+      },
+    }),
+  }),
+
   /** A plain throttle with a stated wait in the `retry-after` header. */
   rateLimit: (retryAfterSeconds = 2): MockOutcome => ({
     kind: "http",

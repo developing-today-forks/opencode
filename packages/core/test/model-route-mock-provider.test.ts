@@ -88,6 +88,34 @@ describe("MockProvider wire fidelity", () => {
     expect(isRetryable(error)).toBe(true)
   })
 
+  test("an opendesign tier-limit answer is a rate limit on the wire and a tier limit in the hint (#2253)", async () => {
+    const mock = new MockProvider()
+    const target = ref("opendesign", "mimo-v2.5-pro")
+    mock.set(target, MockScenarios.opendesignTierLimit())
+    const error = await failure(mock, target)
+    expect(error.reason._tag).toBe("RateLimit")
+    expect(SessionStep.isTierLimitFailure(error)).toBe(true)
+    expect(SessionStep.failureHint(error).tierLimit).toBe(true)
+  })
+
+  test("recording a tier-limit answer holds the whole account out, across models (#2253)", async () => {
+    const mock = new MockProvider()
+    const target = ref("opendesign", "mimo-v2.5-pro")
+    mock.set(target, MockScenarios.opendesignTierLimit("rpm"))
+    const error = await failure(mock, target)
+    const now = Date.now()
+    // What the runner's failure path does with the answer: the account-level
+    // hold is what the resolver and the gate consult, so every other model on
+    // the same provider is held out too — the cap is the account's, not the
+    // answering model's.
+    const until = ModelRoute.recordTierLimit(target, error.reason.message, now)
+    expect(until).toBeGreaterThan(now)
+    expect(ModelRoute.membershipHeldUntil("opendesign", undefined, now)).toBe(until)
+    expect(
+      ModelRoute.membershipAcquire("opendesign", undefined, undefined, now),
+    ).toEqual({ granted: false, blockedBy: "hold", waitMs: until - now })
+  })
+
   test("a stated retry-after header lands on the rate-limit reason", async () => {
     const mock = new MockProvider()
     const target = ref("prov", "m")
