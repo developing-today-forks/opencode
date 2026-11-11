@@ -584,6 +584,18 @@ export class Network extends Schema.Class<Network>("Config.ModelRoute.Settings.N
   }).pipe(optional),
 }) {}
 
+/** Membership caps: how a request that finds a provider's declared membership caps
+ * momentarily full waits before it moves to the next leg. The caps themselves are
+ * declared on the provider definition (its `settings.membership` block — 10 concurrent
+ * and 100 requests/minute for the Open Design account, #2253); this group only tunes
+ * the wait the router gives a capped leg before failing over silently. */
+export class Membership extends Schema.Class<Membership>("Config.ModelRoute.Settings.Membership")({
+  waitMs: DayDurationMs.annotate({
+    description:
+      "The longest a request waits for a membership slot to free before failing over to the next leg. The wait is bounded so it can never hold a session on a capped leg; when the bound expires the request moves on. Defaults to 5000.",
+  }).pipe(optional),
+}) {}
+
 /** Continuity: a session that just failed over may hedge back to the target it came from. */
 export class Continuity extends Schema.Class<Continuity>("Config.ModelRoute.Settings.Continuity")({
   hedgeRequests: PositiveInt.annotate({
@@ -613,6 +625,9 @@ export class Settings extends Schema.Class<Settings>("Config.ModelRoute.Settings
   network: Network.annotate({ description: "Telling a provider-wide fault from a local network fault." }).pipe(
     optional,
   ),
+  membership: Membership.annotate({
+    description: "Waiting briefly for a provider's declared membership caps before failing over.",
+  }).pipe(optional),
   continuity: Continuity.annotate({ description: "Hedging back to a failover origin." }).pipe(optional),
   overrides: Overrides.annotate({ description: "Defaults for the user's route preferences." }).pipe(optional),
 }) {}
