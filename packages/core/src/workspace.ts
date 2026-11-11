@@ -3,7 +3,7 @@ export * as Workspace from "./workspace.js"
 import { Workspace } from "@opencode/schema/workspace"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { eq } from "drizzle-orm"
-import { Clock, Context, Deferred, Duration, Effect, Exit, FiberSet, Layer, Ref, Schedule, Schema, Scope } from "effect"
+import { Clock, Context, Deferred, Duration, Effect, Exit, Fiber, FiberSet, Layer, Ref, Schedule, Schema, Scope } from "effect"
 import { systemError } from "effect/PlatformError"
 import { make } from "effect/process/ChildProcessSpawner"
 import type { EnvironmentDriver } from "./environment/driver.js"
@@ -75,6 +75,12 @@ interface Connection {
 
 type ReadinessError = NotFound | WorkspaceDriver.Error | WorkspaceDriver.ProviderNotFound
 
+interface ProvisionAttempt {
+  readonly deferred: Deferred.Deferred<Info, ReadinessError>
+  waiters: number
+  fiber?: Fiber.Fiber<void>
+}
+
 export const configured = (options: Options = {}) =>
   makeGlobalNode({
     service: Service,
@@ -96,7 +102,7 @@ const layer = (options: Options) =>
       const suspendedPersisted = new Set<ID>()
       const unsupportedSnapshotProviders = new Set<string>()
       // Destroy cancels the racing provision body by settling the deferred.
-      const attempts = new Map<ID, Deferred.Deferred<Info, ReadinessError>>()
+      const attempts = new Map<ID, ProvisionAttempt>()
       const locks = KeyedMutex.makeUnsafe<ID>()
       const fork = yield* FiberSet.makeRuntime<never, void, never>()
       const idleThreshold = Duration.toMillis(options.idleThreshold ?? Duration.minutes(20))
@@ -124,36 +130,54 @@ const layer = (options: Options) =>
 
       const provision = Effect.fn("Workspace.provision")((workspaceID: ID) =>
         Effect.suspend(() => {
-          const existing = attempts.get(workspaceID)
-          if (existing) return Deferred.await(existing)
-
-          const attempt = Deferred.makeUnsafe<Info, ReadinessError>()
-          attempts.set(workspaceID, attempt)
-          fork(
-            locks
-              .withLock(workspaceID)(
-                Effect.gen(function* () {
-                  const row = yield* load(workspaceID)
-                  if (row.binding) return info(row, row.binding)
-                  const driver = yield* registry.get(row.provider)
-                  const result = yield* driver.create({ workspaceID })
-                  yield* saveBinding(workspaceID, result.binding)
-                  return info(row, result.binding)
-                }),
-              )
-              .pipe(
-                Effect.raceFirst(Deferred.await(attempt)),
-                Effect.onExit((exit) =>
-                  Effect.sync(() => {
-                    if (attempts.get(workspaceID) === attempt) attempts.delete(workspaceID)
-                    Deferred.doneUnsafe(attempt, exit)
+          let attempt = attempts.get(workspaceID)
+          if (!attempt) {
+            const created: ProvisionAttempt = {
+              deferred: Deferred.makeUnsafe<Info, ReadinessError>(),
+              waiters: 0,
+            }
+            attempts.set(workspaceID, created)
+            created.fiber = fork(
+              locks
+                .withLock(workspaceID)(
+                  Effect.gen(function* () {
+                    const row = yield* load(workspaceID)
+                    if (row.binding) return info(row, row.binding)
+                    const driver = yield* registry.get(row.provider)
+                    const result = yield* driver.create({ workspaceID })
+                    yield* saveBinding(workspaceID, result.binding)
+                    return info(row, result.binding)
                   }),
+                )
+                .pipe(
+                  Effect.raceFirst(Deferred.await(created.deferred)),
+                  Effect.onExit((exit) =>
+                    Effect.sync(() => {
+                      if (attempts.get(workspaceID) === created) attempts.delete(workspaceID)
+                      Deferred.doneUnsafe(created.deferred, exit)
+                    }),
+                  ),
+                  Effect.exit,
+                  Effect.asVoid,
                 ),
-                Effect.exit,
-                Effect.asVoid,
-              ),
+            )
+            attempt = created
+          }
+          attempt.waiters += 1
+          return Deferred.await(attempt.deferred).pipe(
+            Effect.onExit(() =>
+              Effect.sync(() => {
+                attempt.waiters -= 1
+                if (attempt.waiters > 0) return
+                if (attempts.get(workspaceID) !== attempt) return
+                // The last waiter left a live attempt: nobody needs its result,
+                // so cancel the shared provisioning fiber instead of letting it
+                // persist a binding no caller is waiting for (#2287).
+                attempts.delete(workspaceID)
+                if (attempt.fiber) fork(Fiber.interrupt(attempt.fiber))
+              }),
+            ),
           )
-          return Deferred.await(attempt)
         }),
       )
 
@@ -437,7 +461,7 @@ const layer = (options: Options) =>
           const attempt = attempts.get(workspaceID)
           if (attempt) {
             attempts.delete(workspaceID)
-            Deferred.doneUnsafe(attempt, Exit.fail(new NotFound({ workspaceID })))
+            Deferred.doneUnsafe(attempt.deferred, Exit.fail(new NotFound({ workspaceID })))
           }
           return yield* locks.withLock(workspaceID)(
             Effect.gen(function* () {
