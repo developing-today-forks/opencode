@@ -1326,10 +1326,105 @@ export const layer = Layer.effect(
         return undefined
       })
 
+    // Direct-model route attachment (#7073): a session launched on a bare
+    // provider model carries no routing, so the runner's failover cascade —
+    // gated on `model.routing` — can never engage and a startup provider
+    // error (auth 401, routing 404, expired credential) is terminal even
+    // when a configured route already lists that exact model as a target
+    // with candidates behind it. When such a route exists, attach its
+    // routing to the direct resolution: the selected model still serves
+    // first (it is this resolution's target), and `fallback` enters the
+    // route's own cascade with the direct target seeded as tried, then
+    // continues to parent routes exactly like a routed resolution's
+    // fallback. No containing route (or a route whose only target is the
+    // selected model) leaves the resolution unrouted, unchanged.
+    const attachDirectRoute = (
+      selected: Info,
+      variant: VariantID | undefined,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+    ): Effect.Effect<Resolved, Error> =>
+      Effect.gen(function* () {
+        const loaded = yield* load(selected, variant)
+        const available = yield* models.all().pipe(
+          Effect.map((list) => list.filter((model) => model.enabled)),
+          Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+        )
+        const containing = available.flatMap((candidate) => {
+          if (candidate.providerID !== ModelRoute.PROVIDER_ID) return []
+          const route = ModelRoute.definition(candidate)
+          if (!route || route.targets.length < 2) return []
+          const index = route.targets.findIndex(
+            (target) => target.providerID === selected.providerID && target.id === selected.id,
+          )
+          return index < 0 ? [] : [{ candidate, route, index }]
+        })
+        const first = containing[0]
+        if (!first) return loaded.resolved
+        const { candidate, route, index } = first
+        const requestedVariant = variant === "default" ? undefined : variant
+        const cascade: CascadeState = {
+          triedRefs: new Set([cascadeRefKey(route.targets[index])]),
+          visitedRoutes: new Set([String(route.id)]),
+          chain: [],
+          loadErrors: [],
+        }
+        const seed = new Set([index])
+        return {
+          ...loaded.resolved,
+          routing: {
+            routeID: route.id,
+            target: loaded.resolved.ref,
+            ...(route.system ? { system: route.system } : {}),
+            policy: route.health,
+            attempts: route.attempts ?? 2,
+            ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
+            autonomy: route.autonomy,
+            ...(loaded.servingCredentialID ? { credentialID: loaded.servingCredentialID } : {}),
+            fallback: () => {
+              const branchTried = new Set(seed)
+              const branchState: CascadeState = {
+                triedRefs: new Set(cascade.triedRefs),
+                visitedRoutes: new Set(cascade.visitedRoutes),
+                chain: [...cascade.chain],
+                loadErrors: [...cascade.loadErrors],
+              }
+              return resolveRouteWithin(
+                candidate,
+                route,
+                requestedVariant,
+                branchTried,
+                false,
+                sessionID,
+                requestTokens,
+                branchState,
+              ).pipe(
+                Effect.catch((error) => {
+                  branchState.loadErrors.push(error)
+                  return Effect.succeed(undefined)
+                }),
+                Effect.flatMap((next) =>
+                  next
+                    ? Effect.succeed(next)
+                    : cascadeToParent(route, branchTried, requestedVariant, sessionID, requestTokens, branchState),
+                ),
+                Effect.flatMap((resolved) =>
+                  resolved
+                    ? Effect.succeed(resolved)
+                    : branchState.loadErrors.length > 0
+                      ? Effect.fail(branchState.loadErrors[0])
+                      : Effect.succeed(undefined),
+                ),
+              )
+            },
+          },
+        } satisfies Resolved
+      })
+
     const resolveSelected = (selected: Info, variant?: VariantID, sessionID?: string, requestTokens?: number) => {
       const definition = ModelRoute.definition(selected)
       if (selected.providerID !== ModelRoute.PROVIDER_ID && !definition)
-        return load(selected, variant).pipe(Effect.map((loaded) => loaded.resolved))
+        return attachDirectRoute(selected, variant, sessionID, requestTokens)
       if (!definition || definition.targets.length === 0)
         return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
       const requestedVariant = variant === "default" ? undefined : variant
