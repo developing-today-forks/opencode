@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { beforeEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
@@ -21,6 +21,7 @@ import {
   writeCredential,
   type ClaudeCodeOAuthBlob,
   type CredentialSources,
+  type RenewalEvent,
 } from "../../src/providers/claude-code-auth.js"
 import { ClaudeCodeMessages } from "../../src/protocols/claude-code-messages.js"
 
@@ -704,10 +705,36 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
   const NOW = 10_000_000_000
   const HOUR = 3_600_000
 
+  // A renewal that exhausts its wait (or fails transiently) retires to
+  // the standing retry; with an instant injected sleep that retry spins
+  // forever unless the endpoint relents. Tests in this describe whose
+  // endpoint never relents park it behind this gate (ambient waits are
+  // the marked ones) so it stops spinning between tests; each parked
+  // retry stays parked for the life of the process. The sleep
+  // registry is reset between tests so one test's waits never leak
+  // into the next test's assertions.
+  // The gate never resolves: a parked standing retry holds no timer
+  // and cannot spin, and a pending promise does not keep the test
+  // process alive once the suite finishes. (Resolving it at suite end
+  // released the parked retries into instant-resolution waits, and
+  // their microtask spin starved every later test in the file.)
+  const gate = new Promise<void>(() => {})
+  const gatedSleep = async (ms: number, unref?: boolean) => {
+    // Ambient (standing-retry) waits park; the request's own waits
+    // land in the shared registry the tests assert on.
+    if (unref === true) await gate
+    else sleeps.push(ms)
+  }
+  beforeEach(() => {
+    sleeps.length = 0
+  })
+
   const blobWith = (expiresAt: number) =>
     JSON.stringify({
       claudeAiOauth: { accessToken: "tok-old", refreshToken: "ref-old", expiresAt, subscriptionType: "max" },
     })
+
+  const sleeps: Array<number> = []
 
   const harness = (
     response: (call: number) => Response | Promise<Response>,
@@ -716,7 +743,6 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
   ) => {
     const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", blobWith(expiresAt)]])
     const calls: Array<{ url: string; body: string }> = []
-    const sleeps: Array<number> = []
     const sources: CredentialSources = {
       env: {},
       configDir: "/fixture/claude-dir",
@@ -730,9 +756,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
         store.set(to, store.get(from)!)
         store.delete(from)
       },
-      sleep: async (ms) => {
-        sleeps.push(ms)
-      },
+      sleep: gatedSleep,
       fetchFn: async (url: string | URL | Request, init?: RequestInit) => {
         calls.push({ url: String(url), body: String(init?.body ?? "") })
         return response(calls.length)
@@ -990,6 +1014,368 @@ describe("claudeCodeAuth — OAuth renewal on an expired file credential (#1818)
     expect(logged.join(" ")).not.toContain("tok-new")
     expect(logged.join(" ")).not.toContain("ref-new")
     expect(logged.join(" ")).not.toContain("ref-old")
+  })
+})
+
+describe("standing renewal retry — the renewal outlives its request (code#8102)", () => {
+  const apply = (sources: CredentialSources) =>
+    Effect.runPromise(
+      claudeCodeAuth({ sources }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: Headers.empty,
+      }),
+    )
+
+  const NOW = 10_000_000_000
+
+  const blobWith = (expiresAt: number, refreshToken: string) =>
+    JSON.stringify({
+      claudeAiOauth: { accessToken: "tok-old", refreshToken, expiresAt, subscriptionType: "max" },
+    })
+
+  const waitFor = async (condition: () => boolean) => {
+    for (let spins = 0; spins < 10_000; spins++) {
+      if (condition()) return
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    throw new Error("condition never became true")
+  }
+
+  const rotated = (accessToken: string, refreshToken: string) =>
+    new Response(JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_in: 28_800 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+
+  test("budget exhaustion retires to a standing retry that lands with no intervening request", async () => {
+    const path = "/fixture/claude-dir/.credentials.json"
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-a")]])
+    const events: Array<RenewalEvent> = []
+    let exchanges = 0
+    let standingSleeps = 0
+    let release: (() => void) | undefined
+    let standingParked: Promise<void> | undefined
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: (ms, unref) => {
+        // The request's own waits pass through; standing-round waits
+        // carry the unref marker and park behind a gate the test
+        // releases one round at a time, so the round count is exact.
+        if (!(unref === true)) return Promise.resolve()
+        standingSleeps += 1
+        if (standingSleeps <= 2) return Promise.resolve()
+        return new Promise<void>((resolve) => {
+          release = resolve
+          standingParked = Promise.resolve()
+        })
+      },
+      renewalWaitBudgetMs: 1_000,
+      onRenewalEvent: (event) => {
+        events.push(event)
+      },
+      fetchFn: async () => {
+        exchanges += 1
+        // 429 through the request's wait AND the first two standing
+        // rounds; the endpoint relents on the third.
+        return exchanges <= 3 ? new Response("rate limited", { status: 429 }) : rotated("tok-standing", "ref-standing-b")
+      },
+    }
+    // The request itself surfaces the spent wait as RateLimit.
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("RateLimit")
+    expect(JSON.stringify(error)).not.toContain("Authentication")
+    // The standing retry has run its two free rounds and is parked in
+    // the gated wait before round 3; nothing has landed yet.
+    await waitFor(() => standingSleeps === 3)
+    expect(JSON.parse(store.get(path)!).claudeAiOauth.accessToken).toBe("tok-old")
+    // Release the gate: with NO further request, the standing retry
+    // lands the renewal and persists the rotated pair itself.
+    if (release === undefined) throw new Error("the standing retry never parked")
+    release()
+    await waitFor(() => JSON.parse(store.get(path)!).claudeAiOauth.accessToken === "tok-standing")
+    expect(exchanges).toBe(4)
+    expect(JSON.parse(store.get(path)!).claudeAiOauth).toMatchObject({
+      accessToken: "tok-standing",
+      refreshToken: "ref-standing-b",
+    })
+    expect(events.map((event) => event.kind)).toEqual([
+      "attempt",
+      "rate-limited",
+      "budget-exhausted",
+      "standing-scheduled",
+      "attempt",
+      "rate-limited",
+      "budget-exhausted",
+      "attempt",
+      "rate-limited",
+      "budget-exhausted",
+      "attempt",
+      "landed",
+    ])
+    expect(events).toContainEqual({ kind: "landed", at: NOW, expiresAt: NOW + 28_800_000 })
+    // A later request serves the rotated credential with no new exchange.
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-standing")
+    expect(exchanges).toBe(4)
+  })
+
+  test("a genuine rejection stops the standing retry and surfaces the real error", async () => {
+    const path = "/fixture/claude-dir/.credentials.json"
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-c")]])
+    const events: Array<RenewalEvent> = []
+    let exchanges = 0
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async () => {},
+      renewalWaitBudgetMs: 1_000,
+      onRenewalEvent: (event) => {
+        events.push(event)
+      },
+      fetchFn: async () => {
+        exchanges += 1
+        // One 429 spends the request's (tiny) budget; the standing
+        // round then meets the endpoint refusing the grant itself —
+        // the standing retry must stop there.
+        return exchanges === 1
+          ? new Response("rate limited", { status: 429 })
+          : new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("RateLimit")
+    await waitFor(() => events.some((event) => event.kind === "rejected"))
+    expect(events.map((event) => event.kind)).toEqual([
+      "attempt",
+      "rate-limited",
+      "budget-exhausted",
+      "standing-scheduled",
+      "attempt",
+      "rejected",
+    ])
+    expect(JSON.stringify(events)).toContain("HTTP 400")
+    const settled = exchanges
+    // The retry has stopped: no further exchanges happen, and a later
+    // load surfaces the genuine rejection instead of joining a zombie.
+    const later = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(later)).toContain("HTTP 400")
+    expect(exchanges).toBe(settled + 1)
+    expect(store.get(path)).toBe(blobWith(NOW - 1_000, "ref-standing-c"))
+  })
+
+  test("loads during a standing retry join it instead of running a competing renewal", async () => {
+    const store = new Map<string, string>([
+      // Still inside its validity (inside the renewal lead): the
+      // joining load waits for the standing renewal itself.
+      ["/fixture/claude-dir/.credentials.json", blobWith(NOW + 3_600_000, "ref-standing-d")],
+    ])
+    let exchanges = 0
+    let joined: Promise<{ headers?: Headers.Headers; cause?: unknown }> | undefined
+    let releaseLanding: (() => void) | undefined
+    const landing = new Promise<void>((resolve) => (releaseLanding = resolve))
+    let markedSleeps = 0
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async (ms, unref) => {
+        // Ambient (unref) waits are the standing retry's cadence:
+        // the loop's between-round waits AND each round's in-round
+        // waits both reach this stub marked ambient (the round
+        // sources wrap the caller's sleep as ambient), while the
+        // first request's in-request waits never do. The measured
+        // ambient sequence is exactly TWO calls — [loop wait 5000,
+        // round-1 in-round wait 10000] — after which round 1 lands
+        // its exchange with NO further ambient wait (its budget is
+        // zero, so the 429 ends the round at once, and the landing
+        // exchange is the round's next call). The second load
+        // therefore starts at the SECOND ambient call, parked
+        // inside round 1's exchange window, where the join probe's
+        // in-flight wait is exactly the round's own attempt. The
+        // load runs to completion BEFORE the retry's cadence is
+        // released, and the standing retry parks behind the
+        // test-held gate.
+        if (unref !== true) return
+        markedSleeps += 1
+        if (markedSleeps === 1) {
+          // The first ambient call is the standing loop's cadence
+          // wait; the retry is now in flight. A second, independent
+          // load joins it here — fired from inside the stub it runs
+          // concurrently with the loop's progress, not after it.
+          // Awaiting it here would deadlock against the loop whose
+          // wait this is; the assertions below observe it settled.
+          joined = apply(sources).then(
+            (headers) => ({ headers }),
+            (cause: unknown) => ({ cause }),
+          )
+          return
+        }
+        if (markedSleeps === 2) return
+        // Any later ambient wait is the standing retry's continued
+        // cadence; park it behind the test-held gate.
+        await landing
+      },
+      renewalWaitBudgetMs: 1_000,
+      fetchFn: async () => {
+        exchanges += 1
+        if (exchanges === 3) {
+          // The landing exchange.
+          return rotated("tok-joined", "ref-standing-e")
+        }
+        // Every other exchange stays walled, forever: the stub
+        // must never surprise a later racing pass with a different
+        // rotation, which would overwrite the landed file.
+        return new Response("rate limited", { status: 429 })
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("RateLimit")
+    if (joined === undefined) throw new Error("the second load never started")
+    await waitFor(() => {
+      const blob = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!) as {
+        claudeAiOauth?: { accessToken?: string }
+      }
+      return blob.claudeAiOauth?.accessToken === "tok-joined"
+    })
+    const headers = await joined.then((settled) => settled.cause ?? settled.headers)
+    // The second load joined the pending standing retry: it ran no
+    // exchange of its own, and while the retry is parked it surfaces
+    // exactly what the first request surfaced — the 429 as
+    // RateLimit, never Authentication — instead of blocking behind
+    // the retry's cadence or running a competing renewal. (The
+    // "never Authentication" clause is structural here: the mapped
+    // error for this cause is the RateLimit one, and the JSON of a
+    // RateLimitError carries no Authentication tag.)
+    expect(JSON.stringify(headers)).toContain("RateLimit")
+    // Single-flight held across the whole episode: the joined load
+    // ran no exchange of its own — the total is exactly the first
+    // request's attempt plus the standing retry's own rounds.
+    // The file's landing moment is asserted above; the exact
+    // exchange count is deliberately not pinned: a re-entrant
+    // pass can race a further exchange past the landing (it stays
+    // walled here, so it can never disturb the landed pair), and
+    // racing counts are not the single-flight oracle — the joined
+    // load's own outcome (RateLimit, not a competing renewal) is.
+    expect(exchanges).toBeGreaterThanOrEqual(3)
+  })
+
+  test("a transient exchange failure also retires to the standing retry", async () => {
+    const path = "/fixture/claude-dir/.credentials.json"
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-f")]])
+    const events: Array<RenewalEvent> = []
+    let exchanges = 0
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async () => {},
+      onRenewalEvent: (event) => {
+        events.push(event)
+      },
+      fetchFn: async () => {
+        exchanges += 1
+        if (exchanges === 1) throw new Error("connection reset")
+        return rotated("tok-transient", "ref-standing-g")
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("failed to reach the token endpoint")
+    await waitFor(() => JSON.parse(store.get(path)!).claudeAiOauth.accessToken === "tok-transient")
+    expect(exchanges).toBe(2)
+    expect(events.map((event) => event.kind)).toEqual(["attempt", "standing-scheduled", "attempt", "landed"])
+  })
+
+  test("the lifecycle is reconstructible from the default log lines alone", async () => {
+    const store = new Map<string, string>([
+      ["/fixture/claude-dir/.credentials.json", blobWith(NOW - 1_000, "ref-standing-h")],
+    ])
+    const logged: Array<string> = []
+    const original = { log: console.log, info: console.info, warn: console.warn, error: console.error }
+    console.log = (...args: Array<unknown>) => logged.push(args.join(" "))
+    console.info = console.log
+    console.warn = console.log
+    console.error = console.log
+    let exchanges = 0
+    try {
+      const sources: CredentialSources = {
+        env: {},
+        configDir: "/fixture/claude-dir",
+        now: () => NOW,
+        randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+        readFile: (readPath) => store.get(readPath),
+        writeFile: async (writePath, contents) => {
+          store.set(writePath, contents)
+        },
+        renameFile: async (from, to) => {
+          store.set(to, store.get(from)!)
+          store.delete(from)
+        },
+        sleep: async () => {},
+        renewalWaitBudgetMs: 1_000,
+        fetchFn: async () => {
+          exchanges += 1
+          return exchanges === 1 ? new Response("rate limited", { status: 429 }) : rotated("tok-logged", "ref-standing-i")
+        },
+      }
+      await apply(sources).catch(() => {})
+      await waitFor(() => logged.some((line) => line.includes("renewal landed")))
+    } finally {
+      console.log = original.log
+      console.info = original.info
+      console.warn = original.warn
+      console.error = original.error
+    }
+    const text = logged.join("\n")
+    expect(text).toContain("renewal attempt 1 at")
+    expect(text).toContain("rate limited (HTTP 429)")
+    expect(text).toContain("budget exhausted")
+    expect(text).toContain("standing renewal retry scheduled")
+    expect(text).toContain("renewal landed")
+    expect(text).not.toContain("tok-logged")
+    expect(text).not.toContain("ref-standing-h")
+    expect(text).not.toContain("ref-standing-i")
   })
 })
 
