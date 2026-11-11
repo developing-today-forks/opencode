@@ -3,7 +3,7 @@ export * as WebFetchTool from "./webfetch.js"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { ToolFailure } from "@opencode/ai"
 import { Duration, Effect, Schema } from "effect"
-import { HttpClient, type HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Parser } from "htmlparser2"
 import { Permission } from "../../permission.js"
 import { convertHTMLToMarkdown, MAX_MARKDOWN_BYTES } from "../html-markdown.js"
@@ -13,6 +13,7 @@ export const name = "webfetch"
 export const MAX_RESPONSE_BYTES = MAX_MARKDOWN_BYTES
 export const DEFAULT_TIMEOUT_SECONDS = 30
 export const MAX_TIMEOUT_SECONDS = 120
+export const MAX_REDIRECTS = 10
 
 export const description = `Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default.
 
@@ -58,10 +59,14 @@ const headers = (format: Format, userAgent: string) => ({
 const openCodeUserAgent =
   "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OpenCode-User/1.0; +https://opencode.ai"
 
-const isCloudflareChallenge = (error: HttpClientError.HttpClientError) => {
-  if (error.reason._tag !== "StatusCodeError") return false
-  const response = error.reason.response
-  return response.status === 403 && response.headers["cf-mitigated"] === "challenge"
+const isCloudflareChallenge = (error: unknown) => {
+  // Redirect and permission errors also flow through this predicate; only an
+  // HttpClientError carries a `reason` to inspect.
+  const reason = (
+    error as { reason?: { _tag?: string; response?: { status: number; headers: Record<string, string> } } }
+  ).reason
+  if (reason?._tag !== "StatusCodeError" || !reason.response) return false
+  return reason.response.status === 403 && reason.response.headers["cf-mitigated"] === "challenge"
 }
 
 const request = (url: string, format: Format, userAgent = openCodeUserAgent) =>
@@ -71,8 +76,15 @@ const assertHttpUrl = (url: URL) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must use http:// or https://")
 }
 
+// Redirects are followed manually: the transport must not follow them itself,
+// or a permitted URL could redirect to a destination that was never checked.
 const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = openCodeUserAgent) =>
-  http.execute(request(url, format, userAgent)).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
+  http
+    .execute(request(url, format, userAgent))
+    .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }))
+
+const isRedirect = (response: HttpClientResponse.HttpClientResponse) =>
+  response.status >= 300 && response.status < 400 && response.headers["location"] !== undefined
 
 const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
   collectBoundedResponseBody(
@@ -132,8 +144,48 @@ export const Plugin = {
               })
 
               const { body, contentType } = yield* Effect.gen(function* () {
-                const response = yield* execute(http, input.url, input.format).pipe(
-                  Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, "opencode")),
+                // Every redirect destination is resolved, scheme-checked, and
+                // permission-checked before it is fetched. The initial URL was
+                // already asserted above, so it is seeded into the checked set;
+                // a destination is asserted at most once per fetch.
+                const checked = new Set([input.url])
+                const fetchFinal = (userAgent: string) =>
+                  Effect.gen(function* () {
+                    let url = input.url
+                    let redirects = 0
+                    while (true) {
+                      const response = yield* execute(http, url, input.format, userAgent)
+                      if (!isRedirect(response)) return yield* HttpClientResponse.filterStatusOk(response)
+                      if (redirects >= MAX_REDIRECTS)
+                        return yield* Effect.fail(new Error(`Too many redirects: exceeded ${MAX_REDIRECTS} redirects`))
+                      redirects++
+                      const location = response.headers["location"]!
+                      const destination = yield* Effect.try({
+                        try: () => new URL(location, url),
+                        catch: () => new Error(`Invalid redirect Location header: ${location}`),
+                      })
+                      yield* Effect.try({
+                        try: () => assertHttpUrl(destination),
+                        catch: (error) => error,
+                      })
+                      const destinationUrl = destination.toString()
+                      if (!checked.has(destinationUrl)) {
+                        checked.add(destinationUrl)
+                        yield* permission.assert({
+                          action: name,
+                          resources: [destinationUrl],
+                          save: ["*"],
+                          metadata: { ...input, url: destinationUrl },
+                          sessionID: context.sessionID,
+                          agent: context.agent,
+                          source: { type: "tool", messageID: context.messageID, id: context.id },
+                        })
+                      }
+                      url = destinationUrl
+                    }
+                  })
+                const response = yield* fetchFinal(openCodeUserAgent).pipe(
+                  Effect.catchIf(isCloudflareChallenge, () => fetchFinal("opencode")),
                 )
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)
