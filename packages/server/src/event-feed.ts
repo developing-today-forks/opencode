@@ -108,6 +108,16 @@ export const make = Effect.fn("EventFeed.make")(function* (
       for (const subscriber of current) Queue.failCauseUnsafe(subscriber, Cause.fail(error))
     })
 
+  // A lost event consumes its sequence and drops the retained window (#2271): a cursor from
+  // before the failure can no longer be honoured, so a reconnect from one resyncs instead of
+  // replaying across the gap as if nothing was lost. Runs whether or not anyone was subscribed.
+  const invalidate = (lost: number) =>
+    Effect.sync(() => {
+      sequence = lost
+      retained.splice(0)
+      retainedBytes = 0
+    })
+
   const publish = Effect.fnUntraced(function* (event: Event.Payload) {
     if (!isOpenCodeEvent(event)) return
     // Encoding happens with or without subscribers so the replay window stays current.
@@ -122,7 +132,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
           eventID: error.eventID,
           eventType: error.eventType,
           cause: error.cause,
-        }).pipe(Effect.andThen(fail(error)), Effect.as(undefined)),
+        }).pipe(Effect.andThen(fail(error)), Effect.andThen(invalidate(seq)), Effect.as(undefined)),
       ),
     )
     if (encoded === undefined) return
