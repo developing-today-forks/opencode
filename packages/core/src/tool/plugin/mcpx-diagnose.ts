@@ -490,8 +490,17 @@ export async function diagnoseMcpxScript(
           typoHint = hint
           const closest = findClosestTool(calledTool, knownTools)
           if (closest) {
-            repairedSource = source.replace(new RegExp(`\\b${calledTool}\\b`, "g"), closest.tool)
-            repairExplanations.push(`Replaced typo "${calledTool}" with "${closest.tool}".`)
+            // Replace only the exact parsed call-name span. Bracket-notation names are
+            // arbitrary quoted text, so interpolating one into a RegExp throws on
+            // metacharacters like `(` and mis-matches others like `+`; a global replace
+            // also rewrote same-spelled text in comments, strings, and unrelated
+            // identifiers (#2280). The called name is the tail of the match: the dot form
+            // ends with it directly; the bracket form has the closing quote and `]` after it.
+            const nameStart = match.index + match[0].length - calledTool.length - (match[4] !== undefined ? 2 : 0)
+            if (source.slice(nameStart, nameStart + calledTool.length) === calledTool) {
+              repairedSource = source.slice(0, nameStart) + closest.tool + source.slice(nameStart + calledTool.length)
+              repairExplanations.push(`Replaced typo "${calledTool}" with "${closest.tool}".`)
+            }
           }
           break
         }
