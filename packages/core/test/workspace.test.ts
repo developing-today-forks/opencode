@@ -296,6 +296,41 @@ it.effect("keeps shared provisioning alive when a waiter is interrupted", () =>
   }),
 )
 
+it.effect("interrupts shared provisioning when its last waiter is interrupted and retries cleanly", () =>
+  Effect.gen(function* () {
+    const workspace = yield* Workspace.Service
+    const workspaceID = yield* workspace.create({ provider: "fake" })
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    let createInterrupted = false
+    create = ({ workspaceID }) =>
+      Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            createInterrupted = true
+          }),
+        ),
+        Effect.as({ binding: { workspaceID, generation: 0 } }),
+      )
+
+    const sole = yield* workspace.provision(workspaceID).pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(sole)
+    for (let index = 0; index < 100 && !createInterrupted; index++) yield* Effect.yieldNow
+    expect(createInterrupted).toBe(true)
+    expect(
+      yield* Database.Service.use(({ db }) =>
+        db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+      ).pipe(Effect.orDie),
+    ).toMatchObject({ id: workspaceID, binding: null })
+
+    create = ({ workspaceID }) => Effect.succeed({ binding: { workspaceID, generation: 0 } })
+    expect((yield* workspace.provision(workspaceID)).binding).toEqual({ workspaceID, generation: 0 })
+    expect(calls.map((call) => call.operation)).toEqual(["create", "create"])
+  }),
+)
+
 it.effect("interrupts in-flight provisioning on destroy and fails waiters with NotFound", () =>
   Effect.gen(function* () {
     const workspace = yield* Workspace.Service
