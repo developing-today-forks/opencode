@@ -60,6 +60,18 @@ export const syncTextBom = Effect.fn("FileMutation.syncTextBom")(function* (
 const transactionLocks = KeyedMutex.makeUnsafe<string>()
 
 /**
+ * Resolved paths whose transaction lock the current fiber already holds.
+ * A transaction (edit/patch) stores its result through `write` while holding
+ * the lock, and the keyed mutex is not reentrant, so a write must not
+ * re-acquire a key its own fiber already holds — it would deadlock. Fibers
+ * outside the transaction do not carry the held set, so an ordinary write
+ * still waits for the transaction to finish.
+ */
+const HeldTransactionKeys = Context.Reference<ReadonlySet<string>>("@opencode/FileMutation/HeldTransactionKeys", {
+  defaultValue: () => new Set<string>(),
+})
+
+/**
  * Mutation locking is process-local and serializes cooperating OpenCode
  * changes; external writes can still race.
  */
@@ -67,15 +79,27 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const environment = yield* Environment.Service
-    const locks = KeyedMutex.makeUnsafe<string>()
-    const withLock: Interface["withLock"] = (targets) => (effect) =>
-      [...new Set(targets.map(FSUtil.resolve))]
-        .sort()
-        .reduceRight((result, target) => transactionLocks.withLock(target)(result), effect)
+    const withTransactionLocks =
+      (targets: ReadonlyArray<string>) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+        Effect.gen(function* () {
+          const held = yield* HeldTransactionKeys
+          const fresh = [...new Set(targets.map(FSUtil.resolve))].filter((target) => !held.has(target)).sort()
+          const inner = Effect.provideService(effect, HeldTransactionKeys, new Set([...held, ...fresh]))
+          return yield* fresh.reduceRight<Effect.Effect<A, E, R>>(
+            (result, target) => transactionLocks.withLock(target)(result),
+            inner,
+          )
+        })
+    const withLock: Interface["withLock"] = (targets) => (effect) => withTransactionLocks(targets)(effect)
+    // Ordinary writes take the same resolved-path transaction lock the
+    // edit/patch tools hold across their read/prepare/write transaction, so a
+    // write can no longer land mid-transaction and be silently overwritten by
+    // the transaction's stale result (issue #2276).
     const withTargetLock =
       (target: Target) =>
       <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-        locks.withLock(target.absolute)(Effect.uninterruptible(effect))
+        withTransactionLocks([target.absolute])(Effect.uninterruptible(effect))
 
     const writeResult = (target: Target, existed: boolean): WriteResult => ({
       operation: "write",
