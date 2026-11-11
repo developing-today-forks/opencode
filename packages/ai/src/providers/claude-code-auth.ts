@@ -49,7 +49,13 @@
 // waited out — the response's Retry-After when it states one, otherwise
 // the capped backoff — and retried until the renewal lands; while it
 // waits, the door's requests fail as rate limits (the router's
-// rate-limit hold), never as authentication failures. The env token
+// rate-limit hold), never as authentication failures. If one request's
+// wait budget ends first, the renewal retires to a standing,
+// timer-driven retry (see scheduleStandingRenewal) that keeps working
+// with no request pending — a rate limit is a wait, not an outcome,
+// and the retry must not depend on the door's own traffic arriving:
+// on 2026-11-10 the door was quota-walled, the re-triggering traffic
+// was suppressed, and the pair never rotated (code#8102). The env token
 // (#1752) and a file credential with no refresh token still fail LOUDLY
 // once expired (see claudeCodeAuth) instead of silently degrading.
 import { Effect } from "effect"
@@ -119,7 +125,9 @@ export interface CredentialSources {
   /** Override for the token-exchange deadline (tests); defaults to 15 seconds. */
   readonly tokenExchangeTimeoutMs?: number
   /** Sleep used between rate-limited renewal attempts (tests); defaults to a real timer. */
-  readonly sleep?: (ms: number) => Promise<void>
+  readonly sleep?: (ms: number, unref?: boolean) => Promise<void>
+  /** Renewal lifecycle observer (tests); defaults to a console.warn line per event (vibe-auth precedent). */
+  readonly onRenewalEvent?: (event: RenewalEvent) => void
   /** Total wait budget for one renewal's rate-limit retries (tests); defaults to RENEWAL_WAIT_BUDGET_MS. */
   readonly renewalWaitBudgetMs?: number
   /** Random bytes for PKCE/state/temp names (tests); defaults to crypto.getRandomValues. */
@@ -315,12 +323,72 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
 // Renewing inside a two-hour lead leaves room to wait a rate limit out
 // while the current token still serves.
 export const RENEWAL_LEAD_MS = 2 * 60 * 60 * 1000
-/** One renewal waits out rate limiting for at most this long before the
- * door's requests surface the wait as a rate-limit failure; the next
- * request starts a fresh renewal wait (the exchange is single-flight). */
+/** One request's renewal waits out rate limiting for at most this long
+ * before the request surfaces the wait as a rate-limit failure. The
+ * wait itself does NOT end there: exhausting the budget against a
+ * rate limit (or another transient failure) hands the renewal to a
+ * standing, timer-driven retry (see scheduleStandingRenewal) that keeps
+ * retrying until the renewal lands or the refresh token is genuinely
+ * rejected — it never waits for the next request to re-trigger it.
+ * The 2026-11-10 failure: the door was quota-walled, so the traffic
+ * that would have re-triggered the wait was exactly the traffic the
+ * quota plant suppressed, and the pair never rotated (code#8102). */
 export const RENEWAL_WAIT_BUDGET_MS = 15 * 60 * 1000
 const RENEWAL_BACKOFF_BASE_MS = 5_000
 const RENEWAL_BACKOFF_CAP_MS = 5 * 60 * 1000
+
+/**
+ * One step of the renewal lifecycle, emitted through
+ * CredentialSources.onRenewalEvent (default: console.warn, the
+ * vibe-auth diagnostic precedent). Events carry timestamps and waits,
+ * never token values: a renewal incident must be fully reconstructible
+ * from these lines alone — the 2026-11-10 diagnosis had to be rebuilt
+ * from request-failover side effects because the wait loop logged
+ * nothing, not even its own budget exhaustion.
+ */
+export type RenewalEvent =
+  | { readonly kind: "attempt"; readonly at: number; readonly attempt: number; readonly standing: boolean }
+  | { readonly kind: "rate-limited"; readonly at: number; readonly attempt: number; readonly waitMs: number }
+  | { readonly kind: "budget-exhausted"; readonly at: number; readonly waitedMs: number }
+  | { readonly kind: "standing-scheduled"; readonly at: number }
+  | { readonly kind: "transient-failure"; readonly at: number; readonly attempt: number; readonly message: string }
+  | { readonly kind: "landed"; readonly at: number; readonly expiresAt: number | undefined }
+  | { readonly kind: "rejected"; readonly at: number; readonly message: string }
+
+const defaultRenewalEvent = (event: RenewalEvent): void => {
+  const stamp = new Date(event.at).toISOString()
+  switch (event.kind) {
+    case "attempt":
+      console.warn(
+        `claude-code-auth: renewal attempt ${event.attempt}${event.standing ? " (standing retry)" : ""} at ${stamp}`,
+      )
+      return
+    case "rate-limited":
+      console.warn(
+        `claude-code-auth: renewal attempt ${event.attempt} rate limited (HTTP 429); waiting ${event.waitMs}ms`,
+      )
+      return
+    case "budget-exhausted":
+      console.warn(
+        `claude-code-auth: renewal wait budget exhausted after ${event.waitedMs}ms at ${stamp}; the renewal continues as a standing retry`,
+      )
+      return
+    case "standing-scheduled":
+      console.warn(`claude-code-auth: standing renewal retry scheduled at ${stamp}`)
+      return
+    case "transient-failure":
+      console.warn(`claude-code-auth: renewal attempt ${event.attempt} failed transiently: ${event.message}`)
+      return
+    case "landed":
+      console.warn(
+        `claude-code-auth: renewal landed at ${stamp}; new credential expires ${event.expiresAt === undefined ? "at an unstated time" : new Date(event.expiresAt).toISOString()}`,
+      )
+      return
+    case "rejected":
+      console.warn(`claude-code-auth: renewal rejected at ${stamp}: ${event.message}`)
+      return
+  }
+}
 
 /** A refresh failure with a named, token-free message (#1818). */
 export class ClaudeCodeRefreshError extends Error {
@@ -341,6 +409,25 @@ export class ClaudeCodeRefreshRateLimited extends Error {
     super("Claude Code OAuth refresh is rate limited (HTTP 429); renewal is waiting to retry.")
   }
 }
+
+/**
+ * The endpoint refused the refresh grant itself (a non-429 rejection —
+ * HTTP 400 invalid_grant and kin): the one renewal failure that is an
+ * outcome rather than a wait. The standing retry never retries past
+ * this error; the renewal stops and requests keep the fail-loud floor
+ * until the in-product sign-in runs again.
+ */
+export class ClaudeCodeRefreshRejected extends ClaudeCodeRefreshError {}
+
+/**
+ * The endpoint answered 200 but the body was unusable — unparseable,
+ * missing a token, an invalid expiry: the exchange's own verdict that
+ * nothing usable was issued, the same stop class as a rejected grant.
+ * The standing retry never retries past this error either; without
+ * this distinction a malformed-answering endpoint would spin the
+ * standing loop at full speed.
+ */
+export class ClaudeCodeRefreshDiscarded extends ClaudeCodeRefreshError {}
 
 /** The endpoint's stated wait: `Retry-After` delay-seconds or HTTP-date (RFC 9110). */
 const retryAfterHeaderMs = (response: Response, now: number): number | undefined => {
@@ -379,7 +466,7 @@ const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: st
   if (response.status === 429)
     throw new ClaudeCodeRefreshRateLimited(retryAfterHeaderMs(response, sources.now ? sources.now() : Date.now()))
   if (!response.ok)
-    throw new ClaudeCodeRefreshError(
+    throw new ClaudeCodeRefreshRejected(
       `Claude Code OAuth refresh was rejected with HTTP ${response.status}. ` +
         "Re-run the claude-code provider's in-product sign-in if this persists.",
     )
@@ -390,30 +477,34 @@ const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: st
         response,
         OAUTH_TOKEN_RESPONSE_MAX_BYTES,
         () =>
-          new ClaudeCodeRefreshError(
+          new ClaudeCodeRefreshDiscarded(
             `Claude Code OAuth refresh response exceeded ${OAUTH_TOKEN_RESPONSE_MAX_BYTES} bytes; the tokens were discarded.`,
           ),
       ),
     )
   } catch (cause) {
     if (cause instanceof ClaudeCodeRefreshError) throw cause
-    throw new ClaudeCodeRefreshError(
+    throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned a malformed response; the tokens were discarded.",
     )
   }
   const tokens = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {}
   const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
   if (accessToken.length === 0)
-    throw new ClaudeCodeRefreshError("Claude Code OAuth refresh returned no access token; the tokens were discarded.")
+    throw new ClaudeCodeRefreshDiscarded(
+      "Claude Code OAuth refresh returned no access token; the tokens were discarded.",
+    )
   if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
-    throw new ClaudeCodeRefreshError(
+    throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned an empty refresh token; the tokens were discarded.",
     )
   if (
     "expires_in" in tokens &&
     (typeof tokens.expires_in !== "number" || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0)
   )
-    throw new ClaudeCodeRefreshError("Claude Code OAuth refresh returned an invalid expiry; the tokens were discarded.")
+    throw new ClaudeCodeRefreshDiscarded(
+      "Claude Code OAuth refresh returned an invalid expiry; the tokens were discarded.",
+    )
   const now = sources.now ? sources.now() : Date.now()
   const oauth: ClaudeCodeOAuthBlob = {
     accessToken,
@@ -588,6 +679,27 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * The default timer's unref form: the standing retry's waits pass
+ * `unref: true` so the timer does not hold the process open — the
+ * retry is ambient work that nothing awaits unless a later load joins
+ * it, and a process with no other work must still be able to exit
+ * (and a test process to finish). Injected sleeps receive the same
+ * flag: it marks the wait as ambient.
+ */
+const unrefSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    if (typeof timer === "object" && "unref" in timer) (timer as { unref: () => void }).unref()
+  })
+
+/** Lifecycle events are observability only: a throwing observer must never break a renewal. */
+const emitRenewalEvent = (sources: CredentialSources, event: RenewalEvent): void => {
+  try {
+    ;(sources.onRenewalEvent ?? defaultRenewalEvent)(event)
+  } catch {}
+}
+
+/**
  * Renew with waiting (#6120): run the exchange, and when the endpoint
  * rate-limits it, WAIT — the response's Retry-After when it stated one,
  * otherwise an exponential backoff (5s doubling, capped at 5 minutes) —
@@ -595,25 +707,200 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => set
  * (RENEWAL_WAIT_BUDGET_MS) is spent. The rotated pair is persisted by
  * the exchange itself before the new token is used. Any other failure
  * (a rejected grant, a network error, a malformed response) propagates
- * at once: only a 429 is a wait.
+ * at once: only a 429 is a wait WITHIN the request — the standing
+ * retry in refreshCredential owns what happens after the budget.
  */
-const refreshAndPersist = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
-  const sleep = sources.sleep ?? defaultSleep
-  const budget = sources.renewalWaitBudgetMs ?? RENEWAL_WAIT_BUDGET_MS
+const refreshAndPersist = async (
+  sources: CredentialSources,
+  refreshToken: string,
+  options: { readonly standing: boolean },
+): Promise<ClaudeCodeCredential> => {
+  const effective = sources
+  const sleep = effective.sleep ?? defaultSleep
+  const budget = effective.renewalWaitBudgetMs ?? RENEWAL_WAIT_BUDGET_MS
+  const now = () => (effective.now ? effective.now() : Date.now())
   let waited = 0
   let backoff = RENEWAL_BACKOFF_BASE_MS
+  let attempt = 0
   for (;;) {
+    attempt += 1
+    emitRenewalEvent(effective, { kind: "attempt", at: now(), attempt, standing: options.standing })
     try {
-      return await exchangeRefreshToken(sources, refreshToken)
+      const credential = await exchangeRefreshToken(effective, refreshToken)
+      emitRenewalEvent(effective, { kind: "landed", at: now(), expiresAt: credential.expiresAt })
+      return credential
     } catch (cause) {
       if (!(cause instanceof ClaudeCodeRefreshRateLimited)) throw cause
       const wait = Math.max(cause.retryAfterMs ?? backoff, 1_000)
       backoff = Math.min(backoff * 2, RENEWAL_BACKOFF_CAP_MS)
-      if (waited >= budget || wait > budget - waited) throw cause
+      emitRenewalEvent(effective, { kind: "rate-limited", at: now(), attempt, waitMs: wait })
+      if (waited >= budget || wait > budget - waited) {
+        emitRenewalEvent(effective, { kind: "budget-exhausted", at: now(), waitedMs: waited })
+        throw cause
+      }
       waited += wait
       await sleep(wait)
     }
   }
+}
+
+/** Renewal chains already retired to the standing retry, by refresh key: at most one per credential. */
+const standingRenewals = new Map<string, Promise<ClaudeCodeCredential>>()
+
+/**
+ * The standing renewal retry (code#8102): when a request's renewal
+ * exhausts its wait budget against a rate limit — or fails transiently
+ * (the endpoint unreachable, a failed write-back) — the renewal does
+ * not die with the request. It retires here: a timer-driven loop, fed
+ * by the same injected sleep, that keeps renewing on the same
+ * Retry-After/backoff discipline until the renewal lands or the
+ * refresh token is genuinely rejected. A rate limit is a wait, not an
+ * outcome, and the retry must not depend on _claude traffic arriving:
+ * on 2026-11-10 the door was quota-walled, so the requests that would
+ * have re-triggered the renewal were the very requests being
+ * suppressed, and the pair never rotated. A renewal stops for good on
+ * exactly two verdicts: the endpoint refused the grant itself
+ * (ClaudeCodeRefreshRejected — HTTP 400 invalid_grant and kin) or
+ * answered 200 with an unusable body (ClaudeCodeRefreshDiscarded —
+ * the exchange's own verdict that nothing usable was issued; retrying
+ * it would spin the loop at full speed). Concurrent loads join the
+ * standing attempt through refreshCredential instead of starting a
+ * second exchange.
+ */
+/**
+ * What a load does when it finds a standing retry already running for
+ * its credential: join it — single-flight — adopting the renewal's
+ * outcome if it has landed or lands within the same tick. If the
+ * renewal is still pending after that bounded probe, the load falls
+ * through to the last-issued credential while that credential is
+ * still valid (it is served with the renewal pending behind it); a
+ * credential that has already expired is NOT served — the load
+ * surfaces the renewal-pending rate limit, the same outcome a request
+ * whose own wait budget ran out gets. A load is never parked on a
+ * retry that could wait for hours, and never starts a competing
+ * exchange. The standing entry is joined, never deleted: deleting it
+ * would not stop its loop (the loop holds no cancellation handle),
+ * and the orphaned loop would keep exchanging the same single-use
+ * refresh token alongside the load's own renewal — the refresh-token
+ * reuse pattern that gets token families revoked (code#8102). A
+ * settled entry needs no recovery either: scheduleStandingRenewal
+ * clears its own slot on settle, so the next load starts fresh.
+ */
+const joinStandingRenewal = async (
+  sources: CredentialSources,
+  standing: Promise<ClaudeCodeCredential>,
+  credential: ClaudeCodeCredential,
+): Promise<ClaudeCodeCredential> => {
+  // A standing renewal that has already landed resolves at once; one
+  // still pending after a bounded probe falls through per the expiry
+  // check below. The probe waits for the joiner's own
+  // in-flight exchange (if any) to settle, then takes one macrotask
+  // turn — enough for a same-window landing, never a wait on the
+  // retry's cadence. It must not run on the injected sleep: a test
+  // double that parks ambient waits would otherwise park the probe.
+  const inflight = inflightRefresh.get(`${sources.configDir ?? ""}\u0000${credential.refreshToken}`)
+  const pending = Symbol("pending")
+  const winner = await Promise.race([
+    standing,
+    (async () => {
+      if (inflight !== undefined) await inflight.catch(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return pending
+    })(),
+  ])
+  if (winner !== pending) return winner as ClaudeCodeCredential
+  // The renewal is still pending. A credential that is still valid is
+  // served as-is (the documented design above); one that has expired —
+  // or expires within the same second, before any request could spend
+  // it — must not be served as a success: the load surfaces the
+  // renewal-pending rate limit instead, exactly like a request whose
+  // own wait budget ran out (#6120). Serving the dead credential would
+  // send the request out holding an expired token and misreport the
+  // door's state as an authentication failure downstream.
+  const now = sources.now ? sources.now() : Date.now()
+  if (credential.expiresAt !== undefined && credential.expiresAt <= now + 1_000)
+    throw new ClaudeCodeRefreshRateLimited(undefined)
+  return credential
+}
+
+/**
+ * Set only for the synchronous span around a standing loop's round
+ * call into its own exchange path: during that span the set holds the
+ * round's sources object and the key it is renewing, so a re-entrant
+ * refreshCredential for the same key and sources recognizes the loop's
+ * own round and runs the exchange directly instead of joining.
+ */
+const standingRoundSpan = new Set<{ sources: CredentialSources; key: string }>()
+
+const scheduleStandingRenewal = (
+  sources: CredentialSources,
+  key: string,
+  refreshToken: string,
+): Promise<ClaudeCodeCredential> => {
+  const existing = standingRenewals.get(key)
+  if (existing !== undefined) return existing
+  // The ambient cadence marks its waits unref'd; a caller whose
+  // sleep is ambient-aware (the test harness parks ambient waits
+  // behind a gate) sees the marker on every cadence call.
+  const sleep = (ms: number) => (sources.sleep === undefined ? unrefSleep(ms) : sources.sleep(ms, true))
+  const now = () => (sources.now ? sources.now() : Date.now())
+  emitRenewalEvent(sources, { kind: "standing-scheduled", at: now() })
+  const standing = (async (): Promise<ClaudeCodeCredential> => {
+    let backoff = RENEWAL_BACKOFF_BASE_MS
+    let attempt = 0
+    for (;;) {
+      await sleep(backoff)
+      backoff = Math.min(backoff * 2, RENEWAL_BACKOFF_CAP_MS)
+      attempt += 1
+      try {
+        // One exchange per standing round: the rounds themselves are
+        // the retry cadence, so a round runs with a zero in-request
+        // budget — a 429 ends the round at once and the loop applies
+        // the standing backoff before the next, instead of stacking a
+        // full in-request wait budget inside every round. The round's
+        // sources are FRESH each round (a wrapper object per round),
+        // marked as the loop's own for the synchronous re-entry span.
+        const roundSources: CredentialSources = {
+          ...sources,
+          renewalWaitBudgetMs: 0,
+          // The round's in-exchange waits ride the same ambient
+          // marker as the cadence waits: both are the standing
+          // loop's own timing, and ambient-aware callers (the test
+          // harness) gate the loop on exactly that marker.
+          sleep: (ms: number) => (sources.sleep === undefined ? sleep(ms) : sources.sleep(ms, true)),
+        }
+        const span = { sources: roundSources, key }
+        standingRoundSpan.add(span)
+        try {
+          return await refreshAndPersist(roundSources, refreshToken, { standing: true })
+        } finally {
+          standingRoundSpan.delete(span)
+        }
+      } catch (cause) {
+        if (cause instanceof ClaudeCodeRefreshRateLimited) continue
+        if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
+          emitRenewalEvent(sources, { kind: "rejected", at: now(), message: cause.message })
+          throw cause
+        }
+        emitRenewalEvent(sources, {
+          kind: "transient-failure",
+          at: now(),
+          attempt,
+          message: cause instanceof Error ? cause.message : "Claude Code OAuth refresh failed.",
+        })
+      }
+    }
+  })()
+  standingRenewals.set(key, standing)
+  // A landed standing renewal has already persisted the rotated pair;
+  // a rejected one must not be cached — either way the slot clears on
+  // settle so the next expiry starts fresh.
+  standing
+    .catch(() => {})
+    .finally(() => {
+      if (standingRenewals.get(key) === standing) standingRenewals.delete(key)
+    })
+  return standing
 }
 
 /** Concurrent renewal-needing requests share exactly one inflight renewal (#1818, #6120). */
@@ -621,9 +908,43 @@ const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
 
 const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
   const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
+  // The standing loop's own rounds re-enter here through the join path
+  // (its in-flight entry was just cleared as the previous attempt
+  // settled), and the loop must not join standing code from inside
+  // itself: it runs the round's exchange directly, so its per-round
+  // sources (the ambient cadence sleep, the zero wait budget) are the
+  // ones in force. This check precedes the in-flight lookup: a round's
+  // re-entry can coincide with another load's fresh in-flight attempt
+  // for the same key, and the loop must not adopt that attempt either.
+  for (const span of standingRoundSpan)
+    if (span.sources === sources && span.key === key)
+      return refreshAndPersist(sources, credential.refreshToken as string, { standing: true })
   const existing = inflightRefresh.get(key)
   if (existing !== undefined) return existing
-  const attempt = refreshAndPersist(sources, credential.refreshToken as string)
+  // While a standing retry is working this credential, a fresh load
+  // joins it instead of running a competing in-request renewal.
+  const standing = standingRenewals.get(key)
+  if (standing !== undefined) return joinStandingRenewal(sources, standing, credential)
+  const attempt = refreshAndPersist(sources, credential.refreshToken as string, { standing: false }).catch(
+    (cause: unknown) => {
+    // Genuine rejections keep today's fail-loud floor and are never
+    // retried standing. Everything else — a rate limit that outlasted
+    // the wait budget, a transient exchange failure — retires to the
+    // standing retry, and THIS request joins it: the request still
+    // surfaces the original failure (a 429 still surfaces as
+    // RateLimit, never Authentication), and later loads join the
+    // standing attempt until it lands.
+    if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
+      emitRenewalEvent(sources, {
+        kind: "rejected",
+        at: sources.now ? sources.now() : Date.now(),
+        message: cause.message,
+      })
+      throw cause
+    }
+    scheduleStandingRenewal(sources, key, credential.refreshToken as string)
+    throw cause
+  })
   inflightRefresh.set(key, attempt)
   // Clear on settle so a later expiry refreshes again; a rejection must
   // not be cached forever.
@@ -635,11 +956,34 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   return attempt
 }
 
+/** The renewal failure mapping every load shares: a rate-limit wait surfaces as RateLimit, never Authentication (#6120). */
+const mapRenewalFailure = (cause: unknown) => {
+  if (cause instanceof ClaudeCodeRefreshRateLimited)
+    return new AIError({
+      reason: new RateLimitError({
+        message:
+          "Claude Code OAuth renewal is waiting out the token endpoint's rate limit (HTTP 429); " +
+          "the door reopens when the renewal lands.",
+        ...(cause.retryAfterMs !== undefined ? { retryAfterMs: cause.retryAfterMs } : {}),
+      }),
+    })
+  return new AIError({
+    reason: new AuthenticationError({
+      message: cause instanceof ClaudeCodeRefreshError ? cause.message : "Claude Code OAuth refresh failed.",
+    }),
+  })
+}
+
 const loadCredentialEffect = (sources: CredentialSources) =>
   Effect.gen(function* () {
     const credential = yield* Effect.promise(() => resolveCredential(sources))
     if (credential === undefined)
       return yield* new AIError({ reason: new AuthenticationError({ message: NOT_SIGNED_IN_MESSAGE }) })
+    // A standing renewal left running by an earlier load is met by
+    // the normal path below: refreshCredential joins it (see
+    // joinStandingRenewal). There is deliberately no recovery branch
+    // here — a pending entry means its loop is alive, and deleting
+    // the entry would orphan the loop rather than stop it.
     const now = sources.now ? sources.now() : Date.now()
     const expired = credential.expiresAt !== undefined && credential.expiresAt <= now
     // Renewal is due inside the lead window (#6120), not at expiry: a
@@ -660,27 +1004,13 @@ const loadCredentialEffect = (sources: CredentialSources) =>
     }
     return yield* Effect.tryPromise({
       try: () => refreshCredential(sources, credential),
-      catch: (cause) => {
-        // A renewal still waiting out the endpoint's rate limit when
-        // its budget ends surfaces as a rate limit (#6120): the router
-        // holds the door on the rate-limit bench and fails the session
-        // over — the request never reads as an authentication failure,
-        // and the next request starts a fresh renewal wait.
-        if (cause instanceof ClaudeCodeRefreshRateLimited)
-          return new AIError({
-            reason: new RateLimitError({
-              message:
-                "Claude Code OAuth renewal is waiting out the token endpoint's rate limit (HTTP 429); " +
-                "the door reopens when the renewal lands.",
-              ...(cause.retryAfterMs !== undefined ? { retryAfterMs: cause.retryAfterMs } : {}),
-            }),
-          })
-        return new AIError({
-          reason: new AuthenticationError({
-            message: cause instanceof ClaudeCodeRefreshError ? cause.message : "Claude Code OAuth refresh failed.",
-          }),
-        })
-      },
+      // A renewal still waiting out the endpoint's rate limit when its
+      // budget ends surfaces as a rate limit (#6120): the router holds
+      // the door on the rate-limit bench and fails the session over —
+      // the request never reads as an authentication failure. The
+      // renewal itself has retired to the standing retry (code#8102);
+      // later requests join it until it lands.
+      catch: (cause) => mapRenewalFailure(cause),
     })
   })
 
