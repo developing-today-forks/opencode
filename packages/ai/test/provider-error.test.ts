@@ -87,6 +87,29 @@ describe("provider error classification", () => {
     ).toEqual(["RateLimit", "RateLimit", "RateLimit", "RateLimit"])
   })
 
+  test("classifies membership tier limits as rate limits at any status (#2253)", () => {
+    // Open Design's incident shape: the code rides in the gateway's [code] label
+    // and the membership wording in the message. Whatever status serves it, the
+    // answer is a momentary account cap, never a quota wall or a bad request.
+    const failures = [
+      classifyProviderFailure({
+        message:
+          "amr: [tier_limit_exceeded] membership concurrency limit exceeded: 11/10",
+        status: 429,
+      }),
+      classifyProviderFailure({
+        message: '{"error":{"code":"tier_limit_exceeded","message":"membership rpm limit exceeded: 101/100"}}',
+        status: 400,
+      }),
+      classifyProviderFailure({
+        message: "membership concurrency limit exceeded: 11/10",
+        status: 403,
+      }),
+    ]
+    expect(failures.map((failure) => failure._tag)).toEqual(["RateLimit", "RateLimit", "RateLimit"])
+    expect(failures.every((failure) => isRetryable(new AIError({ reason: failure })))).toBe(true)
+  })
+
   test("classifies V1 overloaded provider codes", () => {
     expect(
       ['{"code":"resource_exhausted"}', '{"code":"service_unavailable"}', '{"code":"slow_down"}'].map(
