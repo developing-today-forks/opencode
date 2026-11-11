@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
-import { findClosestTool, levenshteinDistance, analyzeArgumentMismatch, attemptParameterRepair } from "../src/tool/plugin/mcpx-diagnose.js"
+import { findClosestTool, levenshteinDistance, analyzeArgumentMismatch, attemptParameterRepair, diagnoseMcpxScript } from "../src/tool/plugin/mcpx-diagnose.js"
 import {
   generateSubagentSessionID,
   registerLease,
@@ -130,6 +130,32 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
     const match = findClosestTool("navgate_page", candidates)
     expect(match?.tool).toBe("navigate_page")
     expect(match?.distance).toBe(1)
+  })
+
+  it("repairs a bracket-notation typo containing a regex group metacharacter without throwing (#2280)", async () => {
+    // Oracle: diagnosis returns normally and the repaired source is the input
+    // with exactly the bracket-quoted call name replaced by the closest tool.
+    const source = `await tools["search"]["gre(p"]({ q: "x" })`
+    const result = await diagnoseMcpxScript(source, ["grep", "search_files"])
+    expect(result.typoHint).toContain("grep")
+    expect(result.repairedSource).toBe(`await tools["search"]["grep"]({ q: "x" })`)
+  })
+
+  it("repairs only the call-name span for a bracket-notation typo containing a quantifier (#2280)", async () => {
+    // Oracle: same-spelled text in a comment and a string literal is untouched;
+    // only the erroneous tool-call name is rewritten.
+    const source = ["// grep does the thing", "const label = \"grep\"", `await tools["search"]["grep+"]({ q: label })`].join("\n")
+    const result = await diagnoseMcpxScript(source, ["grep"])
+    expect(result.repairedSource).toBe(
+      ["// grep does the thing", "const label = \"grep\"", `await tools["search"]["grep"]({ q: label })`].join("\n"),
+    )
+  })
+
+  it("still repairs an identifier-form typo at the call site (#2280)", async () => {
+    const source = `await tools.search.grepp({ q: "x" })`
+    const result = await diagnoseMcpxScript(source, ["grep"])
+    expect(result.typoHint).toContain("grep")
+    expect(result.repairedSource).toBe(`await tools.search.grep({ q: "x" })`)
   })
 
   it("detects shape mismatches and auto-repairs parameter types", () => {
