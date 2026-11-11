@@ -12,6 +12,7 @@ import { ConfigProvider } from "@opencode/schema/config/provider"
 import { applyModelConfig } from "./provider.js"
 import { Model } from "../../model.js"
 import { ModelRoute } from "../../model-route.js"
+import { ModelRouteMembership } from "../../model-route-membership.js"
 import { ModelRouteExpansion } from "../../model-route-expansion.js"
 import { ModelRouteSchedule } from "../../model-route-schedule.js"
 import { Provider } from "../../provider.js"
@@ -64,6 +65,15 @@ export const Plugin = define({
       ctx.location.directory,
     )
     yield* Effect.addFinalizer(() => Effect.sync(offSettingsConfig))
+
+    // Membership caps (#2253), declared on each provider's own definition
+    // (settings.membership). Registered under this Location's directory like the
+    // settings above, and removed again when this Location's graph closes.
+    const offMembershipLimits = ModelRoute.onMembershipLimits(
+      (providerID) => configuredMembershipLimits(loaded.entries, providerID),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offMembershipLimits))
 
     // Quota demotion policy (#1151), from experimental.model_route_demotion. Registered
     // under this Location's directory so another Location's activation cannot replace it,
@@ -458,6 +468,24 @@ function demotionConfig(
   }
 }
 
+/** The membership caps one provider declares on its own definition (#2253): its
+ * config `options` migrate into `settings` at load (the v1 provider migration), so
+ * the declaration is read from there. Later documents win, as they do for the
+ * provider's other settings. */
+export function configuredMembershipLimits(
+  entries: readonly Entry[],
+  providerID: string,
+): ModelRouteMembership.Limits | undefined {
+  let found: ModelRouteMembership.Limits | undefined
+  entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .forEach((entry) => {
+      const limits = ModelRouteMembership.limitsOf(entry.info.providers?.[providerID]?.settings)
+      if (limits) found = limits
+    })
+  return found
+}
+
 function configuredSettings(entries: readonly Entry[]) {
   return entries
     .filter((entry): entry is Document => entry.type === "document")
@@ -483,15 +511,18 @@ function settingsConfig(
   const quotaGate = group(settings.quotaGate)
   const escalation = group(settings.escalation)
   const network = group(settings.network)
+  const membership = group(settings.membership)
   const continuity = group(settings.continuity)
   const overrides = group(settings.overrides)
-  if (!bench && !demotion && !quotaGate && !escalation && !network && !continuity && !overrides) return undefined
+  if (!bench && !demotion && !quotaGate && !escalation && !network && !membership && !continuity && !overrides)
+    return undefined
   return {
     ...(bench ? { bench } : {}),
     ...(demotion ? { demotion } : {}),
     ...(quotaGate ? { quotaGate } : {}),
     ...(escalation ? { escalation } : {}),
     ...(network ? { network } : {}),
+    ...(membership ? { membership } : {}),
     ...(continuity ? { continuity } : {}),
     ...(overrides ? { overrides } : {}),
   }

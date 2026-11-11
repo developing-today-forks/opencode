@@ -6,6 +6,7 @@ import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
+import { ModelRouteMembership } from "./model-route-membership.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ModelRouteOverrides } from "./model-route-overrides.js"
@@ -479,6 +480,11 @@ export interface FailureHint {
    * API (DNS failure, refused connection): an infra hold, not a provider-health signal —
    * it plants no bench and feeds no quota accounting (#1828). */
   readonly infra?: boolean
+  /** An upstream membership tier-limit answer (`tier_limit_exceeded`, #2253): the
+   * provider's account cap was hit by traffic this process did not meter (a race, or
+   * another client), so the whole account is held out until the stated reset, on top
+   * of the ordinary rate-limit bench this failure also earns. */
+  readonly tierLimit?: boolean
   /** A local transport failure with no provider HTTP response. */
   readonly network?: boolean
   /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
@@ -1478,6 +1484,9 @@ export interface SettingsConfig {
     readonly providers?: number
     readonly providerModels?: number
   }
+  readonly membership?: {
+    readonly waitMs?: number
+  }
   readonly continuity?: {
     readonly hedgeRequests?: number
   }
@@ -1516,6 +1525,107 @@ export const onSettingsConfig = (read: () => SettingsConfig | undefined, locatio
   return () => {
     if (settingsReaders.get(key) === read) settingsReaders.delete(key)
   }
+}
+
+/** Membership caps readers keyed by Location directory (#2253), mirroring the
+ * settings readers: the provider-config plugin registers, per Location, where the
+ * caps each provider declares on its own definition come from. The caps live on the
+ * provider definition (`settings.membership`), so a Location's reader answers per
+ * provider id — the canonical account included, so an alias and its canonical
+ * provider read the same declaration and share one accumulator. */
+export type MembershipLimitsReader = (providerID: string) => ModelRouteMembership.Limits | undefined
+
+const membershipReaders = new Map<string, MembershipLimitsReader>()
+
+/** Registers where one Location's declared membership caps come from (the
+ * model-routes config plugin, keyed by that Location's directory). Read lazily at
+ * every use, so a config reload is honored without re-registering. The empty key
+ * is the unscoped registration (test seam and single-Location hosts). Returns the
+ * function that removes this registration again. */
+export const onMembershipLimits = (read: MembershipLimitsReader, location?: string) => {
+  const key = location ?? ""
+  membershipReaders.set(key, read)
+  return () => {
+    if (membershipReaders.get(key) === read) membershipReaders.delete(key)
+  }
+}
+
+const membershipReaderFor = (location?: string): MembershipLimitsReader | undefined => {
+  if (location !== undefined) return membershipReaders.get(location)
+  const unscoped = membershipReaders.get("")
+  if (unscoped) return unscoped
+  if (membershipReaders.size === 1) return membershipReaders.values().next().value
+  return undefined
+}
+
+/** The membership caps a provider declares, for a Location: read through the
+ * canonical provider first, so an alias whose canonical declares the caps is
+ * capped even when the alias's own definition omits them. */
+export const membershipLimits = (
+  providerID: string,
+  canonical?: string,
+  location?: string,
+): ModelRouteMembership.Limits | undefined => {
+  const read = membershipReaderFor(location)
+  if (!read) return undefined
+  if (canonical !== undefined && canonical !== providerID) {
+    const declared = read(canonical)
+    if (declared) return declared
+  }
+  return read(providerID)
+}
+
+/** The account a provider's requests draw from (#2253): its canonical provider
+ * when it declares one, else itself. Aliases of one account share the accumulator
+ * because they share this key. */
+export const membershipAccount = (providerID: string, canonical?: string): string =>
+  ModelRouteMembership.accountOf(providerID, canonical)
+
+/** Admits one request start against the provider's declared membership caps.
+ * Providers with no declared caps are always admitted. The gate that waits or
+ * fails over lives in the callers (session runner, generation façade); this is
+ * the shared accounting they all draw from. */
+export const membershipAcquire = (
+  providerID: string,
+  canonical?: string,
+  location?: string,
+  now = Date.now(),
+): ModelRouteMembership.Admission =>
+  ModelRouteMembership.acquire(
+    membershipAccount(providerID, canonical),
+    membershipLimits(providerID, canonical, location),
+    now,
+  )
+
+/** Ends one in-flight request against the provider's membership account. */
+export const membershipRelease = (providerID: string, canonical?: string) =>
+  ModelRouteMembership.releaseAccount(membershipAccount(providerID, canonical))
+
+/** The provider account's current membership standing, for ledgers and tests. */
+export const membershipSnapshot = (providerID: string, canonical?: string, now = Date.now()) =>
+  ModelRouteMembership.accountSnapshot(membershipAccount(providerID, canonical), now)
+
+/** Until when an upstream tier-limit answer holds the provider's account out of
+ * rotation (#2253 backstop); 0 when it doesn't. The resolver's ready filter reads
+ * this alongside the per-target rate-limit holds, so a held account's targets are
+ * excluded before any attempt is spent. */
+export const membershipHeldUntil = (providerID: string, canonical?: string, now = Date.now()): number =>
+  ModelRouteMembership.heldUntil(membershipAccount(providerID, canonical), now)
+
+/** Records an upstream `tier_limit_exceeded` answer against the provider's account
+ * (#2253 backstop): the account is held out of rotation until the reset the error
+ * states, and the hold is ledgered on the answering target so a restart restores
+ * it through the ordinary rate-limit-window replay. */
+export const recordTierLimit = (
+  target: Model.Ref,
+  message: string | undefined,
+  now = Date.now(),
+  canonical?: string,
+) => {
+  const until = ModelRouteMembership.recordTierLimit(membershipAccount(target.providerID, canonical), message, now)
+  if (until > now)
+    observeRateLimit(target, ModelRouteLimits.snapshot({ retryAfterMs: until - now }, now), now)
+  return until
 }
 
 /** The settings in force for a Location: what configure() set, with that Location's
@@ -2494,6 +2604,7 @@ export const completed = (
 /** Test seam; health is intentionally process-local and never persists prompts or request contents. */
 export const resetHealth = () => {
   limits.clear()
+  ModelRouteMembership.reset()
   usage.clear()
   adjustments = []
   health.clear()
@@ -3672,6 +3783,7 @@ export interface Constants {
   }
   readonly escalation: { readonly outcomeWindow: number }
   readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
+  readonly membership: { readonly waitMs: number }
   readonly continuity: { readonly hedgeRequests: number }
   readonly overrides: { readonly preferredFactor: number }
 }
@@ -3700,6 +3812,11 @@ export const DEFAULT_CONSTANTS: Constants = {
   },
   escalation: { outcomeWindow: OUTCOME_WINDOW },
   network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },
+  // The bounded wait a request gives a membership-capped leg before it fails over
+  // (#2253): short enough that a capped leg can never hold a session, long enough
+  // that a slot freeing a moment later is worth taking. The caps themselves are
+  // declared on the provider definition, not here.
+  membership: { waitMs: 5_000 },
   continuity: { hedgeRequests: ORIGIN_HEDGE_REQUESTS },
   overrides: { preferredFactor: PREFERRED_FACTOR },
 }
@@ -3710,6 +3827,7 @@ type ConstantsPatch = Partial<{
   quotaGate: Partial<Constants["quotaGate"]>
   escalation: Partial<Constants["escalation"]>
   network: Partial<Constants["network"]>
+  membership: Partial<Constants["membership"]>
   continuity: Partial<Constants["continuity"]>
   overrides: Partial<Constants["overrides"]>
 }>
@@ -3725,6 +3843,7 @@ const mergeConstants = (base: Constants, patch: ConstantsPatch | undefined): Con
         quotaGate: { ...base.quotaGate, ...patch.quotaGate },
         escalation: { ...base.escalation, ...patch.escalation },
         network: { ...base.network, ...patch.network },
+        membership: { ...base.membership, ...patch.membership },
         continuity: { ...base.continuity, ...patch.continuity },
         overrides: { ...base.overrides, ...patch.overrides },
       }
@@ -3750,6 +3869,7 @@ export const currentConstants = (location?: string): Constants => {
       ? { escalation: { outcomeWindow: config.escalation.outcomeWindow } }
       : {}),
     ...(config.network ? { network: config.network } : {}),
+    ...(config.membership ? { membership: config.membership } : {}),
     ...(config.continuity ? { continuity: config.continuity } : {}),
     ...(config.overrides ? { overrides: config.overrides } : {}),
   })

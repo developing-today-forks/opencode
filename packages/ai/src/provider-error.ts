@@ -174,6 +174,11 @@ const AUTH_TEXT = /incorrect api key provided/i
 const BALANCE_EXHAUSTION_TEXT =
   /insufficient credits|insufficient balance|insufficient funds|out of credits|credits? exhausted|balance exhausted|credit balance is too low|no credits (?:left|remaining)/i
 const RATE_LIMIT_TEXT = /rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
+// A membership tier cap (Open Design's `tier_limit_exceeded`, #2253): a momentary
+// concurrency/window limit on the account, whatever status it rides on — never a
+// spend wall, so it classifies as a rate limit even when the gateway serves it as
+// a 4xx that would otherwise fall through to InvalidRequest.
+const TIER_LIMIT_TEXT = /tier[-_\s]?limit|membership (?:concurrency|rpm) limit/i
 // Only consulted on 429, where throttles and account caps share a status.
 // Z.ai reports balance, plan expiry, plan limits, and plan model access on 429.
 const QUOTA_TEXT =
@@ -284,6 +289,17 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
     BALANCE_EXHAUSTION_TEXT.test(text)
   )
     return new QuotaExceededError(details)
+  // A membership tier cap precedes auth (#2253): a gateway may serve the
+  // account cap under ANY status — including a 403 that would otherwise read as
+  // an authentication refusal — and a tier-limit 403 is a momentary cap, not a
+  // dead credential. The code and the exact membership wording are the only
+  // evidence strong enough to outrank a 401/403.
+  if (codes.includes("tier_limit_exceeded") || (clientScoped && TIER_LIMIT_TEXT.test(text)))
+    return new RateLimitError({
+      ...details,
+      retryAfterMs: input.retryAfterMs,
+      rateLimit: input.rateLimit,
+    })
   if (
     input.status === 401 ||
     input.status === 403 ||
@@ -293,9 +309,7 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
     return new AuthenticationError(details)
   if (
     input.status === 429 ||
-    codes.some(
-      (code) => code.includes("rate_limit") || code === "too_many_requests" || code === "throttlingexception",
-    ) ||
+    codes.some((code) => code.includes("rate_limit") || code === "too_many_requests" || code === "throttlingexception") ||
     RATE_LIMIT_TEXT.test(text)
   )
     return new RateLimitError({

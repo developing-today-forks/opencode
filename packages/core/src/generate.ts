@@ -20,6 +20,7 @@ import { llmClient } from "./effect/app-node-platform.js"
 import { ModelResolver } from "./model-resolver.js"
 import { ModelRoute } from "./model-route.js"
 import { ModelRouteLog } from "./model-route-log.js"
+import { SessionMembershipGate } from "./session/runner/membership-gate.js"
 import { MuseAttestation } from "./muse-attestation.js"
 import { Model } from "./model.js"
 import { SessionUsage } from "./session/usage.js"
@@ -66,6 +67,19 @@ export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Ge
   service: Schema.optional(Schema.String),
 }) {}
 
+/** A membership-gate refusal (#2253): the resolved provider's declared membership
+ * caps stayed full past the bounded wait, so this candidate was never attempted.
+ * Kept distinct from `UnavailableError` so the failover walk can tell "never
+ * attempted, move on" from a provider failure — and so callers never mistake it
+ * for the provider's own `tier_limit_exceeded` answer, which it replaces. */
+export class MembershipFullError extends Schema.TaggedError<MembershipFullError>()(
+  "Generate.MembershipFullError",
+  {
+    message: Schema.String,
+    service: Schema.optional(Schema.String),
+  },
+) {}
+
 /**
  * A quota / rate-limit failure from the provider (#1441, design §2):
  * the attempt was refused because a quota is exhausted or a rate limit
@@ -95,7 +109,7 @@ export class AttestationError extends Schema.TaggedError<AttestationError>()("Ge
   service: Schema.optional(Schema.String),
 }) {}
 
-export type Error = ModelSelectionError | UnavailableError | QuotaError | AttestationError
+export type Error = ModelSelectionError | UnavailableError | MembershipFullError | QuotaError | AttestationError
 
 /**
  * The quota/rate-limit classification the routing and demotion
@@ -113,7 +127,7 @@ export const isQuotaFailure = (error: AIError): boolean =>
 export interface Interface {
   readonly text: (input: TextInput) => Effect.Effect<string, Error>
   readonly complete: (input: CompletionInput) => Effect.Effect<LLMResponse, Error>
-  readonly stream: (input: CompletionInput) => Stream.Stream<LLMEvent, Error>
+  readonly stream: (input: CompletionInput) => Stream.Stream<LLMEvent, AIError | Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Generate") {}
@@ -443,10 +457,28 @@ export const layer = Layer.effect(
     /** One ledgered attempt against a resolved model (spec §7): every façade
      * attempt lands in route_attempt with usage accounting, session_id NULL,
      * exactly as a session attempt does — pass-through attempts included. */
-    const attempt = Effect.fn("Generate.attempt")(function* (resolved: ModelResolver.Resolved, request: LLMRequest) {
+    const attempt = Effect.fn("Generate.attempt")(function* (
+      resolved: ModelResolver.Resolved,
+      request: LLMRequest,
+    ): Generator<Effect.Effect<any, any, any>, LLMResponse, any> {
       const observed = observe(resolved)
       const started = Date.now()
-      return yield* llm.generate(request, observed.options({})).pipe(
+      // Membership gate (#2253): a capped provider meters this start against its
+      // shared account; past the bounded wait the attempt fails as unavailable so
+      // the failover walk below moves to the next candidate instead of spending
+      // a request the provider would refuse. The slot releases when the call
+      // settles, on every exit.
+      const gated = yield* SessionMembershipGate.gate({
+        membership: resolved.membership,
+        routeID: resolved.routing?.routeID ?? "",
+        lastResort: false,
+      })
+      if (gated === undefined)
+        return yield* new MembershipFullError({
+          message: `Membership caps reached for ${resolved.ref.providerID}; failing over`,
+          service: resolved.ref.providerID,
+        })
+      const done = llm.generate(request, observed.options({})).pipe(
         Effect.onExit((exit) =>
           Effect.sync(() => {
             const tokens = Exit.isSuccess(exit) ? tokensOf(exit.value.usage) : undefined
@@ -460,6 +492,9 @@ export const layer = Layer.effect(
           }),
         ),
       )
+      return yield* done.pipe(
+        Effect.ensuring(Effect.sync(() => SessionMembershipGate.release(resolved.membership, gated))),
+      ) as typeof done
     })
 
     const runComplete = Effect.fn("Generate.runComplete")(function* (input: CompletionInput) {
@@ -480,24 +515,42 @@ export const layer = Layer.effect(
         // engaged (#1443).
         const unalias = (response: LLMResponse) =>
           attestation ? MuseAttestation.unaliasResponse(response, attestation) : response
-        const first = yield* Effect.result(attempt(resolved, request))
+        const first = yield* Effect.result(attempt(resolved, request) as Effect.Effect<LLMResponse, Error, never>)
         if (Result.isSuccess(first)) return unalias(first.success)
-        let failure = first.failure
+        // A membership-gate refusal is not a provider failure: it must not ride
+        // the shape-rejection retry against the same capped candidate (#2253).
+        if (first.failure instanceof MembershipFullError) {
+          const fallback = resolved.routing?.fallback
+          const next = fallback ? yield* Effect.result(fallback()) : undefined
+          const candidate = next && Result.isSuccess(next) ? next.success : undefined
+          if (!candidate || tried.has(`${candidate.ref.providerID}/${candidate.ref.id}`))
+            return yield* Effect.fail(first.failure)
+          built = buildFor(candidate, input)
+          continue
+        }
+        let failure: Error = first.failure
         // Shape-rejection fallback (spec §3): a supposedly-native provider that
         // rejects the verbatim shape is retried ONCE through translation
         // against the same resolved model. Both tries are separate ledger
         // rows (each `attempt` records its own), so the retry is never a
         // silent second billing. Quota/auth failures never reach this branch.
         if (raw !== undefined && failure instanceof AIError && isShapeRejection(failure)) {
-          const second = yield* Effect.result(attempt(resolved, canonicalRequest(resolved, effective)))
+          const second = yield* Effect.result(
+            attempt(resolved, canonicalRequest(resolved, effective)) as Effect.Effect<LLMResponse, Error, never>,
+          )
           if (Result.isSuccess(second)) return unalias(second.success)
           failure = second.failure
         }
         const fallback = resolved.routing?.fallback
         const next = fallback ? yield* Effect.result(fallback()) : undefined
         const candidate = next && Result.isSuccess(next) ? next.success : undefined
-        if (!candidate || tried.has(`${candidate.ref.providerID}/${candidate.ref.id}`))
-          return yield* Effect.fail(unavailable(resolved, museTarget)(failure))
+        if (!candidate || tried.has(`${candidate.ref.providerID}/${candidate.ref.id}`)) {
+          if (failure instanceof AIError) return yield* Effect.fail(unavailable(resolved, museTarget)(failure))
+          // A gate refusal with candidates exhausted surfaces as the gate's own
+          // error; any other non-AI failure is a defect inside the façade.
+          if (failure instanceof MembershipFullError) return yield* Effect.fail(failure)
+          throw failure
+        }
         built = buildFor(candidate, input)
       }
 
@@ -553,44 +606,78 @@ export const layer = Layer.effect(
           const streamFor = (
             current: ReturnType<typeof buildFor>,
             depth: number,
-          ): Stream.Stream<LLMEvent, AIError> => {
+          ): Stream.Stream<LLMEvent, AIError | Error> => {
             const { resolved, raw, effective, request, attestation } = current
             lastResolved = resolved
             lastMuseTarget = current.museTarget
-            let emitted = 0
-            const primary = attemptStream(resolved, request, () => emitted++)
-            const composed =
-              raw === undefined
-                ? primary
-                : primary.pipe(
-                    Stream.catchCause((cause) => {
-                      const error = Cause.squash(cause)
-                      return emitted === 0 && error instanceof AIError && isShapeRejection(error)
-                        ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
-                        : Stream.failCause(cause)
-                    }),
-                  )
-            // Streamed tool events are translated back under the
-            // caller's own names whenever this candidate's attestation
-            // aliasing engaged (#1443).
-            const renamed = attestation
-              ? composed.pipe(Stream.map((event) => MuseAttestation.unaliasEvent(event, attestation)))
-              : composed
-            return renamed.pipe(
-              Stream.catchCause((cause) => {
-                const fallback = resolved.routing?.fallback
-                if (emitted > 0 || !fallback || depth >= 32) return Stream.failCause(cause)
-                return Stream.unwrap(
-                  Effect.gen(function* () {
-                    const next = yield* Effect.result(fallback())
-                    const candidate = Result.isSuccess(next) ? next.success : undefined
-                    return candidate ? streamFor(buildFor(candidate, input), depth + 1) : Stream.failCause(cause)
+            // Membership gate (#2253): this candidate's start is metered against
+            // its provider's shared account before the stream opens; past the
+            // bounded wait the walk moves to the next candidate without a
+            // request, exactly as a pre-output failure does. The held slot
+            // releases when the stream settles, on every exit.
+            return Stream.unwrap(
+              Effect.gen(function* () {
+                const gated = yield* SessionMembershipGate.gate({
+                  membership: resolved.membership,
+                  routeID: resolved.routing?.routeID ?? "",
+                  lastResort: false,
+                })
+                if (gated === undefined) {
+                  const fallback = resolved.routing?.fallback
+                  const next = fallback && depth < 32 ? yield* Effect.result(fallback()) : undefined
+                  const candidate = next && Result.isSuccess(next) ? next.success : undefined
+                  return candidate
+                    ? streamFor(buildFor(candidate, input), depth + 1)
+                    : Stream.fail(
+                        new MembershipFullError({
+                          message: `Membership caps reached for ${resolved.ref.providerID}; failing over`,
+                          service: resolved.ref.providerID,
+                        }),
+                      )
+                }
+                let emitted = 0
+                const primary = attemptStream(resolved, request, () => emitted++)
+                const composed =
+                  raw === undefined
+                    ? primary
+                    : primary.pipe(
+                        Stream.catchCause((cause) => {
+                          const error = Cause.squash(cause)
+                          return emitted === 0 && error instanceof AIError && isShapeRejection(error)
+                            ? attemptStream(resolved, canonicalRequest(resolved, effective), () => {})
+                            : Stream.failCause(cause)
+                        }),
+                      )
+                // Streamed tool events are translated back under the
+                // caller's own names whenever this candidate's attestation
+                // aliasing engaged (#1443).
+                const renamed = attestation
+                  ? composed.pipe(Stream.map((event) => MuseAttestation.unaliasEvent(event, attestation)))
+                  : composed
+                return renamed.pipe(
+                  Stream.onExit(() =>
+                    Effect.sync(() => SessionMembershipGate.release(resolved.membership, gated)),
+                  ),
+                  Stream.catchCause((cause) => {
+                    const fallback = resolved.routing?.fallback
+                    if (emitted > 0 || !fallback || depth >= 32) return Stream.failCause(cause)
+                    return Stream.unwrap(
+                      Effect.gen(function* () {
+                        const next = yield* Effect.result(fallback())
+                        const candidate = Result.isSuccess(next) ? next.success : undefined
+                        return candidate ? streamFor(buildFor(candidate, input), depth + 1) : Stream.failCause(cause)
+                      }),
+                    )
                   }),
                 )
               }),
             )
           }
-          return streamFor(built, 0).pipe(Stream.mapError((error) => unavailable(lastResolved, lastMuseTarget)(error)))
+          return streamFor(built, 0).pipe(
+            Stream.mapError((error) =>
+              error instanceof AIError ? unavailable(lastResolved, lastMuseTarget)(error) : error,
+            ),
+          )
 
         }).pipe(
           Effect.catchTag("Integration.Authorization", () =>

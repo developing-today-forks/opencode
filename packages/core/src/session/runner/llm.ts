@@ -287,6 +287,7 @@ const layer = Layer.effect(
           ...(continuationOf === undefined ? {} : { continuation: { of: continuationOf, index: continuationIndex } }),
           agent: loaded.agent.id,
           model: loaded.model,
+          ...(loaded.model.membership ? { membership: loaded.model.membership } : {}),
           prepared,
           estimatedInputTokens: SessionCompaction.estimateContext(loaded),
           prepareFor,

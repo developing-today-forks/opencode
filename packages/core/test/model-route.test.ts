@@ -1779,6 +1779,7 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
       },
       escalation: { outcomeWindow: 5 },
       network: { windowMs: 30_000, providers: 3, providerModels: 2 },
+      membership: { waitMs: 5_000 },
       continuity: { hedgeRequests: 2 },
       overrides: { preferredFactor: 3 },
     })

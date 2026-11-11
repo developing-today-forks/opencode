@@ -152,6 +152,12 @@ export interface Resolved {
    * records attribute usage to the credential that actually served (#1106). Absent when an env
    * connection served. For routed resolutions it matches `routing.credentialID`. */
   readonly servingCredentialID?: Credential.ID
+  /** The membership account this resolution draws from (#2253), present only when the
+   * provider declares membership caps on its definition: the provider id and its
+   * canonical provider when it declares one. Every consumer that starts a request
+   * against this resolution — the session runner, the generation façade — meters
+   * the start against the one shared account accumulator before dispatching. */
+  readonly membership?: { readonly providerID: string; readonly canonical?: string }
   /** The integration method that minted the serving credential (#1119), captured from the same
    * active connection as `servingCredentialID`. Error classification uses it to gate
    * method-specific diagnoses on the method that actually served, instead of guessing
@@ -634,6 +640,21 @@ export const layer = Layer.effect(
           compaction: runtimeInfo.settings?.compaction,
           transport: provider?.settings?.transport,
           chunkTimeout: Provider.timeout(provider?.settings?.chunkTimeout),
+          // Membership caps declared on the provider definition (#2253): a direct
+          // resolution meters against the same shared account as a routed one.
+          ...(provider &&
+          ModelRoute.membershipLimits(
+            selected.providerID,
+            provider.canonical === undefined ? undefined : String(provider.canonical),
+            locationDirectory,
+          )
+            ? {
+                membership: {
+                  providerID: selected.providerID,
+                  ...(provider.canonical === undefined ? {} : { canonical: String(provider.canonical) }),
+                },
+              }
+            : {}),
           ...(connection?.type === "credential" ? { servingCredentialID: connection.id } : {}),
           ...(connection?.type === "credential" && connection.methodID !== undefined
             ? { servingMethodID: connection.methodID }
@@ -692,6 +713,10 @@ export const layer = Layer.effect(
         // This snapshot is gate input only — serving attribution comes from load() itself,
         // because the active credential can change between this read and the load.
         const credentialByProvider = new Map<string, Credential.ID>()
+        // Each target provider's canonical provider (#2253): membership caps are
+        // declared on the canonical account and shared by its aliases, so the
+        // ready filter and the Resolved both name it.
+        const canonicalByProvider = new Map<string, string>()
         // Every stored credential per target provider, active first (#1806): the ready
         // filter below gates a leaf on its *effective* credential — the first stored
         // credential that could actually serve it — not on the active one alone. The
@@ -702,6 +727,8 @@ export const layer = Layer.effect(
         for (const target of definition.targets) {
           if (credentialByProvider.has(target.providerID)) continue
           const provider = yield* providers.get(target.providerID)
+          if (provider?.canonical !== undefined)
+            canonicalByProvider.set(target.providerID, String(provider.canonical))
           const integrationID = provider?.integrationID ?? Integration.ID.make(target.providerID)
           const connection = yield* integrations.connection.active(integrationID)
           if (connection?.type === "credential") {
@@ -761,6 +788,19 @@ export const layer = Layer.effect(
           }
           return {
           ...current,
+          // The membership caps the picked target's provider declares (#2253),
+          // resolved at pick time so the runner's gate needs nothing else. An
+          // uncapped provider carries none.
+          ...(ModelRoute.membershipLimits(current.ref.providerID, canonicalByProvider.get(current.ref.providerID), locationDirectory)
+            ? {
+                membership: {
+                  providerID: current.ref.providerID,
+                  ...(canonicalByProvider.get(current.ref.providerID)
+                    ? { canonical: canonicalByProvider.get(current.ref.providerID) }
+                    : {}),
+                },
+              }
+            : {}),
           // The alias advertises the safest shared request shape. Pricing and provider metadata stay
           // tied to the concrete target that answered.
           capabilities: selected.capabilities,
@@ -893,6 +933,14 @@ export const layer = Layer.effect(
             if (isOverLimit) overLimit.add(index)
             const credentialID = effectiveCredential(target, now)?.id
             const limited = rules ? ModelRoute.limitedUntil(target, now, credentialID) : 0
+            // An upstream tier-limit answer holds the provider's whole membership
+            // account out (#2253 backstop): every target of the account is excluded
+            // until the stated reset, whatever its own per-target holds say.
+            const membershipHeld = ModelRoute.membershipHeldUntil(
+              target.providerID,
+              canonicalByProvider.get(target.providerID),
+              now,
+            )
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
               limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
@@ -912,6 +960,7 @@ export const layer = Layer.effect(
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
             else if (providerBlock)
               unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
+            else if (membershipHeld > now) unavailable.set(index, `membership-held-until:${membershipHeld}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, isUserSkipped ? "user-skip" : "quota-skip")
             else if (isOverBudget) unavailable.set(index, "soft-budget")
@@ -921,6 +970,7 @@ export const layer = Layer.effect(
               (credentialUntil <= now || credentialProbe) &&
               quotaBlock === undefined &&
               providerBlock === undefined &&
+              membershipHeld <= now &&
               (limited <= now || kept) &&
               !isSkipped &&
               !isOverBudget &&

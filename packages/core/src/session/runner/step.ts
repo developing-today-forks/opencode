@@ -33,6 +33,7 @@ import { ModelRouteAutonomy } from "../../model-route-autonomy.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
 import { ModelRouteLog } from "../../model-route-log.js"
 import { SessionRunnerModel } from "./model.js"
+import { SessionMembershipGate } from "./membership-gate.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionHedge } from "./hedge.js"
 import { SessionRunnerRetry } from "./retry.js"
@@ -63,6 +64,11 @@ interface Input {
   readonly continuation?: ContinuationLink
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
+  /** The membership account the attempt's model draws from (#2253), when its provider
+   * declares caps: the gate meters the start before any request goes out. Kept off
+   * `model` so failover swaps of the resolved model cannot lose or duplicate it —
+   * the attempt re-reads it from each model it actually runs. */
+  readonly membership?: { readonly providerID: string; readonly canonical?: string }
   /** Prompt-size estimate for budget accounting when a hedge is cancelled before provider usage arrives. */
   readonly estimatedInputTokens?: number
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
@@ -169,6 +175,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     reason.message?.startsWith("No response output within ")
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
+  const tierLimit = reason.code === "tier_limit_exceeded" || TIER_LIMIT_TEXT.test(text)
   // Extraction reads the same combined text classification reads, in the same
   // message-then-body order: a reset stated only in the raw body must bind to
   // the bench exactly as one stated in the message does (#2108). Reading
@@ -186,6 +193,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     // Optional hint fields are omitted when unset, never present-but-undefined — the
     // same convention the route policy follows.
     ...(quotaResetAtMs !== undefined ? { quotaResetAtMs } : {}),
+    ...(tierLimit ? { tierLimit: true } : {}),
     ...(reason._tag === "Transport" &&
     reason.http === undefined &&
     !clientTimeoutMessage &&
@@ -506,6 +514,19 @@ export const make = Effect.gen(function* () {
             Date.now(),
             input.model.routing?.credentialID,
           )
+        // Backstop (#2253): a tier-limit answer that still slips through — a race,
+        // or traffic from another client the local limiter never metered — holds
+        // the provider's whole membership account out of rotation until the reset
+        // the error states, so no further attempt is spent against the cap.
+        if (failed && llmFailure && isTierLimitFailure(llmFailure)) {
+          const reason = llmFailure.reason as { message?: string; body?: string }
+          ModelRoute.recordTierLimit(
+            input.model.ref,
+            `${reason.message ?? ""} ${reason.body ?? ""}`,
+            Date.now(),
+            input.model.membership?.canonical,
+          )
+        }
         // A quota-exhaustion answer gates its pool until the reset it stated (#984): the
         // credential when the attempt carried one, the provider itself otherwise. Selection
         // then stops spending attempts — and collecting 429s — on an exhausted pool. The
@@ -874,9 +895,39 @@ export const make = Effect.gen(function* () {
   }, Effect.scoped)
 
   /** One request, or two when the route hedges: see SessionHedge.race. */
-  const attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
+  const attempt = Effect.fn("SessionStep.attempt")(function* (
+    input: Input,
+  ): Generator<Effect.Effect<any, any, any>, Outcome, any> {
     const routing = input.model.routing
     const prepareFor = input.prepareFor
+    // Membership gate (#2253): a provider that declares caps meters every start
+    // against its one shared account before any request goes out. When the
+    // account is full past the bounded wait, the attempt moves to the route's
+    // next leg without spending a request — the session never sees the
+    // provider's tier-limit refusal. With no next leg the capped target is the
+    // last resort and proceeds unmetered rather than failing the session.
+    const membership = input.model.membership
+    if (membership) {
+      const gated = yield* SessionMembershipGate.gate({
+        membership,
+        routeID: routing?.routeID ?? "",
+        sessionID: input.sessionID,
+        location: locationDirectory,
+        lastResort: routing === undefined,
+      })
+      if (gated === undefined) {
+        const fallback = yield* Effect.result(routing!.fallback())
+        const next = Result.isSuccess(fallback) ? fallback.success : undefined
+        if (next) {
+          if (input.sessionID) ModelRoute.moved(routing!.routeID, input.sessionID, routing!.target)
+          return yield* attempt({ ...input, model: next, ...(prepareFor ? { prepared: yield* prepareFor(next) } : {}) })
+        }
+        return yield* run(input)
+      }
+      return yield* run(input).pipe(
+        Effect.ensuring(Effect.sync(() => SessionMembershipGate.release(membership, gated))),
+      )
+    }
     // A target that keeps giving up is raced at once rather than after the hedge delay, on routes whose
     // autonomy allows it; `fixed` and `rules` routes only fail over.
     const escalate =
@@ -888,6 +939,24 @@ export const make = Effect.gen(function* () {
       return yield* run(input)
     const primaryLimit = captureRateLimit(input.model.ref, routing?.credentialID)
     markHedged(input.assistantMessageID)
+    // Hedge legs against a capped provider take their own slot against its
+    // account here, once, and release when this attempt's outcome settles
+    // (#2253): the primary's slot was taken by the gate above; a hedge leg on
+    // the same account is a second concurrent request and meters separately.
+    const hedgeSlots: Array<{ membership: SessionMembershipGate.MembershipRef; result: SessionMembershipGate.GateResult }> = []
+    const holdHedgeSlot = (model: SessionRunnerModel.Resolved) =>
+      Effect.gen(function* () {
+        if (!model.membership) return
+        const gated = yield* SessionMembershipGate.gate({
+          membership: model.membership,
+          routeID: routing?.routeID ?? "",
+          sessionID: input.sessionID,
+          location: locationDirectory,
+          lastResort: true,
+        })
+        if (gated) hedgeSlots.push({ membership: model.membership, result: gated })
+      })
+    yield* holdHedgeSlot(input.model)
     const raced = yield* SessionHedge.race({
       primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
       afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
@@ -914,6 +983,7 @@ export const make = Effect.gen(function* () {
                           ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
                       }),
                 ),
+                Effect.tap(() => holdHedgeSlot(next)),
                 Effect.map((prepared) => {
                   const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
                   // A hedge has begun: both targets are named before either answers, so the race
@@ -977,11 +1047,30 @@ export const make = Effect.gen(function* () {
       stream: raced.stream,
       startedAt: raced.startedAt,
       ...(raced.outputAt !== undefined ? { outputAt: raced.outputAt } : {}),
-    })
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          for (const slot of hedgeSlots) SessionMembershipGate.release(slot.membership, slot.result)
+        }),
+      ),
+    )
   }, Effect.scoped)
 
   return { attempt }
 })
+
+/** Text and codes that name an upstream membership tier-limit answer (#2253): the
+ * provider's account cap answered despite the local limiter (a race, or traffic
+ * from another client). Detection is deliberately exact — this wording belongs
+ * to membership caps alone — so ordinary rate limits never take the
+ * account-wide hold. */
+const TIER_LIMIT_TEXT = /tier_limit_exceeded|tier[-_\s]?limit|membership (?:concurrency|rpm) limit/i
+
+/** Whether a failure is an upstream membership tier-limit answer (#2253). */
+export const isTierLimitFailure = (failure: AIError): boolean => {
+  const reason = failure.reason as { code?: string; message?: string; body?: string }
+  return reason.code === "tier_limit_exceeded" || TIER_LIMIT_TEXT.test(`${reason.message ?? ""} ${reason.body ?? ""}`)
+}
 
 const isInterruptedStream = (failure: AIError) => {
   if (failure.reason._tag === "InvalidProviderOutput") return failure.reason.classification === "incomplete-stream"
