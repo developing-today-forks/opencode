@@ -33,8 +33,9 @@ const u32le = (bytes: Uint8Array, offset: number) =>
 const DIB_SIZES = new Set([12, 40, 52, 56, 108, 124])
 
 // A bare "BM" prefix is prose ("BM25 is a ranking function..."), not a bitmap (#2149). A real BMP carries a
-// structurally plausible header: reserved fields zero, a known DIB header size, a pixel-data offset inside the
-// file at or past the headers, and a file-size field that is unset or exact.
+// structurally plausible header: reserved fields zero, a known DIB header size, a pixel-data offset at or past
+// the headers and within the declared file, and a file-size field that is unset or at least the available bytes.
+// `detect` is also called on a prefix by the read tool, so these checks must not require the whole file buffer.
 function isBmp(bytes: Uint8Array) {
   if (!startsWith(bytes, [0x42, 0x4d])) return false
   if (bytes.length < 26) return false
@@ -42,9 +43,11 @@ function isBmp(bytes: Uint8Array) {
   const dib = u32le(bytes, 14)
   if (!DIB_SIZES.has(dib)) return false
   const pixelOffset = u32le(bytes, 10)
-  if (pixelOffset < 14 + dib || pixelOffset > bytes.length) return false
   const fileSize = u32le(bytes, 2)
-  return fileSize === 0 || fileSize === bytes.length
+  if (pixelOffset < 14 + dib) return false
+  if (fileSize === 0) return pixelOffset <= bytes.length
+  if (pixelOffset > fileSize) return false
+  return fileSize >= bytes.length
 }
 
 // A bare "GIF8" prefix is prose too (#2149). A real GIF carries the full 6-byte version header, a complete

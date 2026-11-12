@@ -53,6 +53,24 @@ describe("Mime.detect (#2149)", () => {
     expect(Mime.detect(bmp())).toBe("image/bmp")
   })
 
+  test("a BMP prefix may be shorter than its declared file size and pixel offset", () => {
+    const bytes = new Uint8Array(256 * 1024)
+    const view = new DataView(bytes.buffer)
+    bytes.set([0x42, 0x4d], 0)
+    view.setUint32(2, 300 * 1024, true)
+    view.setUint32(10, 270 * 1024, true)
+    view.setUint32(14, 40, true)
+
+    expect(Mime.detect(bytes)).toBe("image/bmp")
+  })
+
+  test("a BMP whose declared file size is smaller than the available bytes is rejected", () => {
+    const bytes = bmp()
+    new DataView(bytes.buffer).setUint32(2, bytes.length - 1, true)
+
+    expect(Mime.detect(bytes)).not.toBe("image/bmp")
+  })
+
   test("a BM header with non-zero reserved bytes is not a bitmap", () => {
     const bytes = bmp()
     bytes[6] = 1
