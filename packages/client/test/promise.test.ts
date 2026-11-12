@@ -99,6 +99,20 @@ test("requests keep a path prefix on baseUrl", async () => {
   expect(request?.url).toBe("http://localhost:8888/ws/abc/api/info")
 })
 
+test("server.connect defaults to an explicit JSON Accept header", async () => {
+  let request: Request | undefined
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async (input, init) => {
+      request = input instanceof Request ? input : new Request(input, init)
+      return Response.json({ token: "session-token" })
+    },
+  })
+
+  expect(await client.server.connect({ code: "pairing-code" })).toEqual({ token: "session-token" })
+  expect(request?.headers.get("accept")).toBe("application/json")
+})
+
 test("requests join against the base URL pathname", async () => {
   let request: Request | undefined
   const client = OpenCode.make({

@@ -85,7 +85,10 @@ export type Redeemed =
 export function redeemPairingLink(link: { urls: ReadonlyArray<string>; code: string }) {
   const attempts = link.urls.map((url) =>
     OpenCode.make({ baseUrl: url })
-      .server.connect({ code: link.code }, { signal: AbortSignal.timeout(5_000) })
+      // Accept: application/json is the explicit API-redemption signal:
+      // unclassified GETs of a pairing link no longer redeem the
+      // one-time code (#2307), so API clients must ask for JSON.
+      .server.connect({ code: link.code }, { signal: AbortSignal.timeout(5_000), headers: { accept: "application/json" } })
       .then((session): Pairing => ({ url, password: session.token })),
   )
 

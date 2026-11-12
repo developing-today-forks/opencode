@@ -38,6 +38,16 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
     ),
   )
   const context = yield* Effect.context()
+  const connect = (input: Parameters<typeof raw.server.connect>[0]) =>
+    Effect.map(CurrentHeaders, (headers) => {
+      const withAccept = new Headers(headers)
+      if (!withAccept.has("accept")) withAccept.set("accept", "application/json")
+      return Object.fromEntries(withAccept)
+    }).pipe(
+      Effect.flatMap((headers) =>
+        raw.server.connect(input).pipe(Effect.provideService(CurrentHeaders, headers)),
+      ),
+    )
   // Same base URL handling as the generated client, which the event stream bypasses to keep SSE ids.
   const eventClient =
     options?.baseUrl === undefined
@@ -76,6 +86,7 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
   }
   return {
     ...raw,
+    server: { ...raw.server, connect },
     event: { ...raw.event, subscribe },
     rpc: Object.assign(
       RpcClientRuntime.make(

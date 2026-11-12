@@ -62,6 +62,20 @@ export const ServerGroup = HttpApiGroup.make("server.server")
     ),
   )
   .add(
+    HttpApiEndpoint.post("server.redeem", PAIRING_CONNECT_PATH, {
+      params: { code: Schema.String },
+      success: PairingSession,
+      error: UnauthorizedError,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "server.redeem",
+        summary: "Confirm pairing code redemption",
+        description:
+          "Redeem a pairing code with an explicit state-changing request. Browsers land on GET first (which never consumes the code) and confirm here; requests that accept JSON receive a session token to use as the password.",
+      }),
+    ),
+  )
+  .add(
     HttpApiEndpoint.get("server.connect", PAIRING_CONNECT_PATH, {
       params: { code: Schema.String },
       success: PairingSession,

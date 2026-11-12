@@ -9,6 +9,7 @@ const TTL = Duration.minutes(5)
 export interface Interface {
   readonly issue: () => Effect.Effect<{ readonly code: string; readonly expires_in: number }>
   readonly consume: (code: string) => Effect.Effect<boolean>
+  readonly peek: (code: string) => Effect.Effect<boolean>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ServerPairing") {}
@@ -28,6 +29,12 @@ const layer = Layer.effect(
       }),
       consume: Effect.fn("ServerPairing.consume")(function* (code) {
         return yield* Cache.invalidateWhen(cache, code, () => true)
+      }),
+      // Non-consuming existence check (#2307): rendering the pairing
+      // landing page must not redeem the one-time code, so link
+      // previews and security scanners can fetch the URL safely.
+      peek: Effect.fn("ServerPairing.peek")(function* (code) {
+        return yield* Cache.has(cache, code)
       }),
     })
   }),

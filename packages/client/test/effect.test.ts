@@ -42,6 +42,19 @@ test("server.info decodes the readiness response", async () => {
   })
 })
 
+test("server.connect defaults to an explicit JSON Accept header", async () => {
+  const httpClient = HttpClient.make((request) => {
+    expect(request.headers.accept).toBe("application/json")
+    return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ token: "session-token" })))
+  })
+  const result = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    return yield* client.server.connect({ code: "pairing-code" })
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+
+  expect(result).toEqual({ token: "session-token" })
+})
+
 test("vcs.base decodes nullable review-base metadata", async () => {
   const location = { directory: "/repo", project: { id: "global", directory: "/repo", canonical: "/repo" } }
   const base = {
