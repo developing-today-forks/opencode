@@ -658,6 +658,29 @@ describe("doStream", () => {
     const finish = parts.find((p) => p.type === "finish") as { finishReason: { unified: string } } | undefined
     expect(finish?.finishReason.unified).toBe("error")
   })
+
+  test("should keep the error state when a terminal chunk follows a malformed chunk", async () => {
+    const terminalChunk = `data: ${JSON.stringify({
+      id: "chatcmpl-err",
+      object: "chat.completion.chunk",
+      created: 1677652289,
+      model: "test-model",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    })}`
+    const mockFetch = createMockFetch([partialToolCallChunk, `data: {not-json`, terminalChunk, `data: [DONE]`])
+    const model = createModel(mockFetch)
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: false,
+    })
+    const parts = await convertReadableStreamToArray(stream)
+
+    expect(parts.some((p) => p.type === "error")).toBe(true)
+    expect(parts.filter((p) => p.type === "tool-call")).toEqual([])
+    const finish = parts.find((p) => p.type === "finish") as { finishReason: { unified: string } } | undefined
+    expect(finish?.finishReason.unified).toBe("error")
+  })
 })
 
 describe("request body", () => {

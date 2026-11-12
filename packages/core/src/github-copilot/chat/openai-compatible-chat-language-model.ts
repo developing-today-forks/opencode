@@ -344,6 +344,9 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
       unified: "other",
       raw: undefined,
     }
+    // Sticky: once the stream has failed, a later chunk's finish reason
+    // must not resurrect the response (or its unfinished tool calls).
+    let hasStreamError = false
     const usage: {
       completionTokens: number | undefined
       completionTokensDetails: {
@@ -391,6 +394,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             // handle failed chunk parsing / validation:
             if (!chunk.success) {
+              hasStreamError = true
               finishReason = {
                 unified: "error",
                 raw: undefined,
@@ -404,6 +408,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             // handle error chunks:
             if ("error" in value) {
+              hasStreamError = true
               finishReason = {
                 unified: "error",
                 raw: undefined,
@@ -451,7 +456,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             const choice = value.choices[0]
 
-            if (choice?.finish_reason != null) {
+            if (choice?.finish_reason != null && !hasStreamError) {
               finishReason = {
                 unified: mapOpenAICompatibleFinishReason(choice.finish_reason),
                 raw: choice.finish_reason ?? undefined,
@@ -658,7 +663,9 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
             // tool-call event (#2311): the error part already reported the
             // failure, and downstream would execute the partial input.
             const unfinishedToolCalls =
-              finishReason.unified === "error" ? [] : toolCalls.filter((toolCall) => !toolCall.hasFinished)
+              hasStreamError || finishReason.unified === "error"
+                ? []
+                : toolCalls.filter((toolCall) => !toolCall.hasFinished)
             for (const toolCall of unfinishedToolCalls) {
               controller.enqueue({
                 type: "tool-input-end",
