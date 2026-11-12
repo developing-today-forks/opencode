@@ -198,16 +198,29 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
 
     const browser = yield* pair
     expect(browser.expires_in).toBe(300)
-    const redirect = yield* request(`/auth/connect/${browser.code}`, { headers: { accept: "text/html" } })
+    const connectUrl = "/auth/connect/" + browser.code
+    // A browser GET is a landing page, never a redemption (#2307): a
+    // link preview fetching the URL first must not consume the code.
+    const preview = yield* request(connectUrl, { headers: { accept: "text/html" } })
+    expect(preview.status).toBe(200)
+    expect(yield* Effect.promise(() => preview.text())).toContain("Pair this browser")
+    const landing = yield* request(connectUrl, { headers: { accept: "text/html" } })
+    expect(landing.status).toBe(200)
+    // The intended browser redeems with the explicit confirmation POST.
+    const redirect = yield* request(connectUrl, { method: "POST", headers: { accept: "text/html" } })
     expect(redirect.status).toBe(302)
     expect(redirect.headers.get("location")).toBe("/")
     const setCookie = redirect.headers.get("set-cookie") ?? ""
-    expect(setCookie).toContain(`opencode_session_${new URL(base).port}=`)
+    expect(setCookie).toContain("opencode_session_" + new URL(base).port + "=")
     expect(setCookie).toContain("HttpOnly")
     expect(setCookie).toContain("SameSite=Lax")
     const cookie = setCookie.split(";")[0]
 
-    const reused = yield* request(`/auth/connect/${browser.code}`, { headers: { accept: "text/html" } })
+    // Redemption stays single-use: neither a POST replay nor a GET
+    // of the spent link signs anyone in again.
+    const replayed = yield* request(connectUrl, { method: "POST", headers: { accept: "text/html" } })
+    expect(replayed.status).toBe(401)
+    const reused = yield* request(connectUrl, { headers: { accept: "text/html" } })
     expect(reused.status).toBe(401)
     expect(yield* Effect.promise(() => reused.text())).toContain("opencode pair")
 

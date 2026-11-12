@@ -8,10 +8,37 @@ import { ServerAuth } from "../auth"
 import { ServerInfo } from "../server-info"
 import { ServerPairing } from "../pairing"
 
+const EXPIRED = "This pairing link expired or was already used. Run `opencode pair` to get a new one."
+
+const LANDING =
+  "<!doctype html><html><head><meta charset='utf-8'><title>Pair with opencode</title></head>" +
+  "<body><h1>Pair this browser with opencode?</h1>" +
+  "<p>Confirming signs this browser in with the pairing link you opened. " +
+  "If you did not run opencode pair, close this page instead.</p>" +
+  "<form method='post'><button type='submit'>Pair this browser</button></form></body></html>"
+
 export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handlers) =>
   Effect.gen(function* () {
     const pairing = yield* ServerPairing.Service
     const auth = yield* ServerAuth.Config
+
+    const redeem = Effect.fn(function* (code: string, browser: boolean) {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const token = (yield* pairing.consume(code)) ? ServerAuth.issueSession(auth) : undefined
+      if (token === undefined) {
+        if (!browser) return yield* new UnauthorizedError({ message: "Pairing link expired or already used" })
+        return HttpServerResponse.text(EXPIRED, { status: 401 })
+      }
+      if (!browser) return { token }
+      return HttpServerResponse.redirect("/").pipe(
+        HttpServerResponse.setCookieUnsafe(ServerAuth.sessionCookieName(request.headers.host), token, {
+          path: "/",
+          httpOnly: true,
+          sameSite: "lax",
+          maxAge: Duration.seconds(ServerAuth.SESSION_TTL_SECONDS),
+        }),
+      )
+    })
 
     return handlers
       .handle("server.info", () =>
@@ -33,23 +60,23 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
           const request = yield* HttpServerRequest.HttpServerRequest
           // Browser navigations ask for HTML; everything else is an API client that wants the token.
           const browser = request.headers.accept?.includes("text/html") === true
-          const token = (yield* pairing.consume(ctx.params.code)) ? ServerAuth.issueSession(auth) : undefined
-          if (token === undefined) {
-            if (!browser) return yield* new UnauthorizedError({ message: "Pairing link expired or already used" })
-            return HttpServerResponse.text(
-              "This pairing link expired or was already used. Run `opencode pair` to get a new one.",
-              { status: 401 },
-            )
-          }
-          if (!browser) return { token }
-          return HttpServerResponse.redirect("/").pipe(
-            HttpServerResponse.setCookieUnsafe(ServerAuth.sessionCookieName(request.headers.host), token, {
-              path: "/",
-              httpOnly: true,
-              sameSite: "lax",
-              maxAge: Duration.seconds(ServerAuth.SESSION_TTL_SECONDS),
-            }),
-          )
+          // A browser GET must never redeem the one-time code (#2307):
+          // link previews and security scanners fetch pairing URLs
+          // with a plain GET, and consuming on fetch strands the
+          // intended user. Browsers get a confirmation landing page
+          // and redeem with the explicit POST (server.redeem);
+          // the API-client flow keeps redeeming on GET, as before.
+          if (!browser) return yield* redeem(ctx.params.code, false)
+          if (!(yield* pairing.peek(ctx.params.code))) return HttpServerResponse.text(EXPIRED, { status: 401 })
+          return HttpServerResponse.html(LANDING)
+        }),
+      )
+      .handle(
+        "server.redeem",
+        Effect.fn(function* (ctx) {
+          const request = yield* HttpServerRequest.HttpServerRequest
+          const browser = request.headers.accept?.includes("text/html") === true
+          return yield* redeem(ctx.params.code, browser)
         }),
       )
   }),
