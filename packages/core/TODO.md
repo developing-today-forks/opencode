@@ -56,7 +56,7 @@ The generated Promise client was regenerated.
 - **Durable replay is not implemented.** Durable events could also be read from `Bus.log({ aggregateID, after })`
   (`packages/core/src/bus.ts`) once the ring has evicted them. That needs the bus configured with `persist`, which retains durable payloads for log reads. Volatile events such
   as deltas are never persisted, so for them only the ring can replay.
-- **Effect reconnect is manual.** See the cursor rules above.
+- **Effect reconnect is automatic** for transient failures and unexpected stream ends (bounded backoff, resuming from the last consumed id, #2321); terminal protocol/decode and non-retryable HTTP errors still end the subscription. See the cursor rules above.
 
 ### Tests
 

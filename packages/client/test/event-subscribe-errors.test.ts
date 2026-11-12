@@ -168,13 +168,13 @@ describe("event.subscribe successful stream", () => {
         OpenCode.make({ baseUrl: server.baseUrl }).pipe(Effect.provide(FetchHttpClient.layer)),
       )
 
-      // server.connected carries no SSE id, so taking two events leaves inst:1 as the cursor.
-      const first = await Effect.runPromise(client.event.subscribe().pipe(Stream.take(2), Stream.runCollect))
-      expect(first.map((event) => event.id)).toEqual(["evt_connected", "evt_a"])
-      const second = await Effect.runPromise(client.event.subscribe().pipe(Stream.runCollect))
-
-      expect(lastEventIDs).toEqual([null, "inst:1"])
-      expect(second.map((event) => event.id)).toEqual(["evt_b"])
+      // One subscription: the first body ends after evt_b, so the subscription
+      // reconnects on its own (#2321) and resumes after the last SSE id a
+      // consumer took (inst:2); the fake server answers the reconnect with a
+      // replay of evt_b, which is why it appears twice.
+      const events = await Effect.runPromise(client.event.subscribe().pipe(Stream.take(4), Stream.runCollect))
+      expect(events.map((event) => event.id)).toEqual(["evt_connected", "evt_a", "evt_b", "evt_b"])
+      expect(lastEventIDs).toEqual([null, "inst:2"])
     } finally {
       server.stop()
     }
