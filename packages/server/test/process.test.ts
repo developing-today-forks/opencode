@@ -257,6 +257,22 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     const scanned = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "*/*" } })
     expect(scanned.status).toBe(200)
     expect(yield* Effect.promise(() => scanned.text())).toContain("Pair this browser")
+    yield* Effect.forEach(
+      [
+        "application/jsonp",
+        "application/*",
+        "application/json;q=0",
+        "*/*;q=1, application/json;q=0",
+        "text/html, Application/JSON",
+      ],
+      (accept) =>
+        Effect.gen(function* () {
+          const preview = yield* request(`/auth/connect/${client.code}`, { headers: { accept } })
+          expect(preview.status).toBe(200)
+          expect(yield* Effect.promise(() => preview.text())).toContain("Pair this browser")
+        }),
+      { concurrency: 1 },
+    )
     // Fetch always supplies Accept: */*, even when headers are omitted.
     // Send raw HTTP to verify a genuinely absent Accept header is safe too.
     const url = new URL(`/auth/connect/${client.code}`, base)
@@ -275,7 +291,16 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     )
     expect(unclassified).toContain("HTTP/1.1 200")
     expect(unclassified).toContain("Pair this browser")
-    const redeemed = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })
+    const caseInsensitive = yield* request(`/auth/connect/${client.code}`, {
+      headers: { accept: "Application/JSON; q=0.5" },
+    })
+    expect(caseInsensitive.status).toBe(200)
+    expect(yield* Effect.promise(() => caseInsensitive.json())).toHaveProperty("token")
+    expect(
+      (yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })).status,
+    ).toBe(401)
+    const apiClient = yield* pair
+    const redeemed = yield* request(`/auth/connect/${apiClient.code}`, { headers: { accept: "application/json" } })
     expect(redeemed.status).toBe(200)
     const session = (yield* Effect.promise(() => redeemed.json())) as { token: string }
     expect(

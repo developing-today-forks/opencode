@@ -17,6 +17,20 @@ const LANDING =
   "If you did not run opencode pair, close this page instead.</p>" +
   "<form method='post'><button type='submit'>Pair this browser</button></form></body></html>"
 
+function acceptsMediaType(accept: string | undefined, expected: string) {
+  return (
+    accept?.split(",").some((range) => {
+      const [mediaType, ...parameters] = range.split(";")
+      if (mediaType.trim().toLowerCase() !== expected) return false
+      const quality = parameters.find((parameter) => /^q\s*=/i.test(parameter.trim()))
+      if (quality === undefined) return true
+      const value = quality.slice(quality.indexOf("=") + 1).trim()
+      if (!/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(value)) return false
+      return Number(value) > 0
+    }) ?? false
+  )
+}
+
 export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handlers) =>
   Effect.gen(function* () {
     const pairing = yield* ServerPairing.Service
@@ -68,7 +82,7 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
           // explicit POST (server.redeem); API clients signal intent
           // with Accept: application/json (what the generated client
           // sends) and keep redeeming on GET, as before.
-          const api = !accept.includes("text/html") && accept.includes("application/json")
+          const api = acceptsMediaType(accept, "application/json") && !acceptsMediaType(accept, "text/html")
           if (api) return yield* redeem(ctx.params.code, false)
           if (!(yield* pairing.peek(ctx.params.code))) return HttpServerResponse.text(EXPIRED, { status: 401 })
           return HttpServerResponse.html(LANDING)
