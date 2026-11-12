@@ -157,3 +157,21 @@ trigger either (#1401); it is dispatch-run only. Scheduled singleton and deploy 
 Never pair `queue: max` with a `cancel-in-progress` expression that
 can evaluate true for `issues`/`pull_request_target` events — GitHub
 rejects that combination and the workflow never runs.
+
+## Backstop guard (#2322)
+
+The `test` workflow's nightly schedule is this repo's full-main
+backstop (see "How the classes map"). It was found `disabled_manually`
+on 2026-11-12 with no recorded decision to disable it, and re-enabled
+the same day. A disabled workflow fails silently — the schedule simply
+never fires — so the state is guarded operationally:
+
+- Check: `gh workflow list --all` must report `test` as `active`.
+  Anything else (`disabled_manually`, `disabled_inactivity`) removes
+  the backstop and is a CI-health bug, not a posture.
+- The repo-health sweep for this repo verifies that state on its
+  regular pass and re-files it against this policy when it drifts;
+  re-enabling is `gh workflow enable test` plus a dispatched
+  verification run on `main` that must reach the build and e2e jobs.
+- Disabling `test` deliberately requires recording the decision and
+  its replacement backstop in this file first.
