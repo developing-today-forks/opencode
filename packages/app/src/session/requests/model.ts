@@ -129,15 +129,21 @@ export function createSessionRequestModel() {
   // A subagent view needs the root's full session family and messages to render running work for the whole tree.
   createEffect(
     on(
-      () => [owner(), params.id, serverSDK.connection.status()] as const,
-      ([rootID, id, status]) => {
-        if (!rootID || rootID === id || status !== "connected") return
-        void Promise.all([
-          data.session.sync(rootID, { children: true }),
-          data.session.message.list(rootID).length === 0 ? data.session.message.sync(rootID) : Promise.resolve(),
-        ]).catch(() => undefined)
+      () => [params.id, serverSDK.connection.status()] as const,
+      ([id, status]) => {
+        if (!id || status !== "connected") return
+        void data.session
+          .sync(id, { children: true })
+          .then(() => {
+            const rootID = owner()
+            if (!rootID || rootID === id) return
+            return data.session
+              .sync(rootID, { children: true })
+              .then(() => data.session.sync(rootID, { children: true }))
+              .then(() => data.session.message.sync(rootID))
+          })
+          .catch(() => undefined)
       },
-      { defer: true },
     ),
   )
 

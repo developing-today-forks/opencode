@@ -12,7 +12,7 @@ import {
   type ToolCall,
 } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Stream } from "effect"
+import { Cause, Clock, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Scope, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
@@ -87,6 +87,8 @@ interface Input {
   /** The runner owns compaction policy; the attempt invokes it only before durable output. */
   readonly recoverOverflow: Effect.Effect<boolean>
 }
+
+type Attempt = (input: Input) => Effect.Effect<Outcome, AIError | StepFailedError, Scope.Scope>
 
 /** Failed attempts per assistant message and target, so a route can retry a target before failing over. */
 const failedAttempts = new Map<string, number>()
@@ -911,9 +913,7 @@ export const make = Effect.gen(function* () {
   }, Effect.scoped)
 
   /** One request, or two when the route hedges: see SessionHedge.race. */
-  const attempt = Effect.fn("SessionStep.attempt")(function* (
-    input: Input,
-  ): Generator<Effect.Effect<any, any, any>, Outcome, any> {
+  const attempt: Attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
     const routing = input.model.routing
     const prepareFor = input.prepareFor
     // Membership gate (#2253): a provider that declares caps meters every start
@@ -1070,7 +1070,7 @@ export const make = Effect.gen(function* () {
         }),
       ),
     )
-  }, Effect.scoped)
+  })
 
   return { attempt }
 })
