@@ -13,6 +13,7 @@ import { SessionMessage } from "./message.js"
 import { Session } from "@opencode/schema/session"
 import { SessionMessageTable, SessionTable } from "./sql.js"
 import { fromRow } from "./info.js"
+import { ModelRouteLog } from "../model-route-log.js"
 
 const ListInputBase = {
   workspaceID: Workspace.ID.pipe(Schema.optional),
@@ -121,7 +122,8 @@ const layer = Layer.effect(
     return Service.of({
       get: Effect.fnUntraced(function* (sessionID) {
         const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
-        return row ? fromRow(row) : undefined
+        if (!row) return undefined
+        return fromRow(row, (yield* ModelRouteLog.authoritativeSessionUsage(db, [row.id]).pipe(Effect.orDie))[0])
       }),
       list: Effect.fn("SessionStore.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"
@@ -161,7 +163,16 @@ const layer = Layer.effect(
           )
         const limit = input.limit === undefined ? undefined : listLimit(input.limit)
         const rows = yield* (limit === undefined ? query.all() : query.limit(limit).all()).pipe(Effect.orDie)
-        return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
+        const ordered = direction === "previous" ? rows.toReversed() : rows
+        if (ordered.length === 0) return []
+        // One grouped success-only rollup for the whole page: the authoritative
+        // cost basis (#7), deliberately separate from the projector's cost fold.
+        const usage = yield* ModelRouteLog.authoritativeSessionUsage(
+          db,
+          ordered.map((row) => row.id),
+        ).pipe(Effect.orDie)
+        const bySession = new Map(usage.map((row) => [String(row.sessionID), row]))
+        return ordered.map((row) => fromRow(row, bySession.get(row.id)))
       }),
       messages: Effect.fn("SessionStore.messages")(function* (input) {
         const direction = input.cursor?.direction ?? "next"

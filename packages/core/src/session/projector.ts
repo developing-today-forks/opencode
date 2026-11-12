@@ -24,6 +24,7 @@ import { Project } from "@opencode/schema/project"
 import { AbsolutePath, RelativePath } from "../schema.js"
 import type { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
+import { ModelRouteLog } from "../model-route-log.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -100,6 +101,10 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
     .get()
     .pipe(Effect.orDie)
   if (!row) return
+  // Refresh the authoritative (success-only route_attempt) totals alongside the
+  // projector fold (#7): attempts are recorded during the step, so by the time a
+  // step's usage is published the ledger already holds the finished attempt.
+  const authoritative = (yield* ModelRouteLog.authoritativeSessionUsage(db, [sessionID]))[0]
   yield* bus.publish(SessionEvent.UsageUpdated, {
     sessionID,
     cost: Money.USD.make(row.cost),
@@ -109,6 +114,18 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
       reasoning: row.reasoning,
       cache: { read: row.cacheRead, write: row.cacheWrite },
     },
+    costAuthoritative: authoritative
+      ? {
+          cost: Money.USD.make(authoritative.costUsd),
+          cacheSavings: Money.USD.make(authoritative.cacheSavedUsd),
+          tokens: {
+            input: authoritative.input,
+            output: authoritative.output,
+            reasoning: authoritative.reasoning,
+            cache: { read: authoritative.cacheRead, write: authoritative.cacheWrite },
+          },
+        }
+      : undefined,
   })
 })
 

@@ -796,6 +796,7 @@ export function createData(config: CreateDataInput) {
           setStore("session", "info", event.data.sessionID, {
             cost: event.data.cost,
             tokens: event.data.tokens,
+            ...(event.data.costAuthoritative ? { costAuthoritative: event.data.costAuthoritative } : {}),
           })
         return
       case "session.agent.selected": {
