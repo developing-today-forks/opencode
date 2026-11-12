@@ -71,11 +71,10 @@ function runtimeRequirePlugin(): Plugin {
  * #1690 flip. Per #1792's triaged contract, native-onnx embeddings are
  * explicitly unsupported in this Node bundle; core checks the build marker
  * and rejects at the embeddings surface before reaching these bindings.
- * The keyring package has the same native-loader shape. Keyring lookup is
- * optional, so the Node artifact treats it as unavailable and uses the
- * provider's remaining credential sources. All three specifiers still
- * resolve to stubs here (the Bun build never sees this config), keeping
- * startup safe and acting as a backstop for accidental direct use.
+ * The keyring package has the same native-loader shape. Its target-specific
+ * addon is extracted as a SEA asset and loaded lazily by a virtual adapter;
+ * Rollup never sees the platform .node file, and Node artifacts retain
+ * Secret Service lookup.
  */
 function nativeStubPlugin(): Plugin {
   const message =
@@ -86,7 +85,7 @@ function nativeStubPlugin(): Plugin {
     resolveId(id) {
       if (id === "onnxruntime-node") return "\0opencode:onnxruntime-node-stub"
       if (id === "sharp") return "\0opencode:sharp-stub"
-      if (id === "@napi-rs/keyring") return "\0opencode:keyring-stub"
+      if (id === "@napi-rs/keyring") return "\0opencode:keyring-runtime"
     },
     transform(code, id) {
       // @huggingface/transformers loads onnxruntime-node through a runtime
@@ -118,16 +117,28 @@ const env = {}
 export { InferenceSession, Tensor, env }
 export default { InferenceSession, Tensor, env }`
       if (id === "\0opencode:sharp-stub") return `export default () => { throw new Error(${JSON.stringify(message)}) }`
-      if (id === "\0opencode:keyring-stub")
-        return `class AsyncEntry { constructor() { throw new Error("OS keyring access is unavailable in the Node bundle") } }
-export { AsyncEntry }`
+      if (id === "\0opencode:keyring-runtime")
+        return `import { createRequire } from "node:module"
+import path from "node:path"
+
+const load = () => {
+  const assets = process.env.OPENCODE_NODE_ASSETS_DIR
+  const addon = process.env.OPENCODE_NODE_KEYRING_PATH
+  if (!assets || !addon) throw new Error("The Node artifact is missing its platform keyring addon")
+  return createRequire(path.join(assets, "keyring-loader.cjs"))(addon)
+}
+
+export class AsyncEntry {
+  constructor(...args) {
+    return new (load().AsyncEntry)(...args)
+  }
+}`
     },
   }
 }
 
-/** Build-time guard for the native stubs: their real packages must never
- * re-enter the Node bundle graph. */
-function nativeStubGraphPlugin(): Plugin {
+/** The target keyring addon must be an extracted asset, never a Rollup input. */
+function nativeStubGraphPlugin(target: NodeTarget): Plugin {
   return {
     name: "opencode:native-stub-graph",
     generateBundle() {
@@ -142,9 +153,12 @@ function nativeStubGraphPlugin(): Plugin {
         this.error(
           `Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`,
         )
-      for (const name of ["onnxruntime-node", "keyring"])
-        if (!ids.some((id) => id.includes(`opencode:${name}-stub`)))
-          this.error(`Node bundle graph is missing the ${name} stub`)
+      if (!ids.some((id) => id.includes("opencode:onnxruntime-node-stub")))
+        this.error("Node bundle graph is missing the onnxruntime-node stub")
+      if (!ids.some((id) => id.includes("opencode:keyring-runtime")))
+        this.error("Node bundle graph is missing the keyring runtime adapter")
+      if (target.platform === "linux" && !target.keyringAsset)
+        this.error("Linux Node bundle target is missing its keyring addon asset")
     },
   }
 }
@@ -322,6 +336,7 @@ if (__ocIsSea()) {
   }
 }
 process.env.OPENCODE_NODE_ASSETS_DIR = __ocAssetRoot
+${input.target.keyringAsset ? `process.env.OPENCODE_NODE_KEYRING_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.keyringAsset)})` : ""}
 process.env.OTUI_ASSET_ROOT = __ocAssetRoot
 process.env.OPENCODE_NODE_PTY_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.nodePtyEntryAsset)})
 process.env.OPENCODE_PARCEL_WATCHER_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.parcelWatcherAsset)})
@@ -356,7 +371,7 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       runtimeRequirePlugin(),
       fffNodePlugin(),
       nativeStubPlugin(),
-      nativeStubGraphPlugin(),
+      nativeStubGraphPlugin(input.target),
       simulationGraphPlugin(),
       solid({
         solid: {
