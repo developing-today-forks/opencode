@@ -73,7 +73,7 @@ export const pcm = (encoding: PcmEncoding, sampleRate: number | undefined, media
 })
 
 export const sampleRate = (mediaType: string | undefined) => {
-  const rate = /rate=(\d+)/i.exec(mediaType ?? "")?.[1]
+  const rate = /(?:^|;)\s*rate=(\d+)/i.exec(mediaType ?? "")?.[1]
   // A non-positive rate can never describe audio, and callers treat undefined
   // as "unknown, use my fallback"; returning 0 for `rate=0` would win over
   // every `??` fallback and be reported as the audio's sample rate.
