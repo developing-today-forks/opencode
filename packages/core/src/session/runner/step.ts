@@ -15,6 +15,7 @@ import type { Agent } from "@opencode/schema/agent"
 import { Cause, Clock, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
+import { FileAccess } from "../../file-access.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
 import { Tool } from "../../tool.js"
@@ -37,6 +38,7 @@ import { SessionMembershipGate } from "./membership-gate.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionHedge } from "./hedge.js"
 import { SessionRunnerRetry } from "./retry.js"
+import { materialize as materializeToolResult } from "./tool-result-content.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
@@ -266,6 +268,7 @@ const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not
 /** Captures Location-scoped dependencies without introducing another service or execution loop. */
 export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
+  const fileAccess = yield* FileAccess.Service
   const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
   const location = yield* Effect.serviceOption(Location.Service)
@@ -316,7 +319,20 @@ export const make = Effect.gen(function* () {
         messageID: input.assistantMessageID,
         call,
         progress: (update) => publisher.progress(call.id, update),
-      })
+      }).pipe(
+        Effect.flatMap((result) =>
+          materializeToolResult(
+            result.content,
+            {
+              sessionID: input.sessionID,
+              agent: input.agent,
+              messageID: input.assistantMessageID,
+              id: Tool.CallID.make(call.id),
+            },
+            fileAccess.authorizeRead,
+          ).pipe(Effect.map((content) => ({ ...result, content }))),
+        ),
+      )
     }
 
     // Provider and tool fibers retain per-source order without a shared writer queue.

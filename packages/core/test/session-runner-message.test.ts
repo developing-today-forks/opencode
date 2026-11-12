@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs"
+import os from "node:os"
 import { Message, Media } from "@opencode/ai"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
@@ -7,6 +9,15 @@ import { AgentAttachment, Base64, FileAttachment, SkillAttachment } from "@openc
 import { Skill } from "@opencode/schema/skill"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { Agent } from "@opencode/core/agent"
+import { FileAccess } from "@opencode/core/file-access"
+import {
+  materialize as materializeToolResult,
+  MAX_TOOL_URI_BYTES,
+} from "@opencode/core/session/runner/tool-result-content"
+import { Permission } from "@opencode/core/permission"
+import { SessionSchema } from "@opencode/core/session/schema"
+import { Effect } from "effect"
+import { Tool } from "@opencode/schema/tool"
 import { Shell } from "@opencode/schema/shell"
 import { Location } from "@opencode/schema/location"
 import { AbsolutePath } from "@opencode/schema/schema"
@@ -890,6 +901,156 @@ Earlier work
         },
       },
     ])
+  })
+
+  test("materializes tool-result file URIs and explains failures", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "tool-result-uri-"))
+    const filePath = path.join(directory, "hello.txt")
+    writeFileSync(filePath, "from disk")
+    const tool = (uri: string, mime = "text/plain") =>
+      SessionMessage.AssistantTool.make({
+        type: "tool",
+        id: "file-uri",
+        name: "read",
+        state: SessionMessage.ToolStateCompleted.make({
+          status: "completed",
+          input: {},
+          content: [{ type: "file", uri, mime, name: "hello.txt" }],
+        }),
+        time: { created, completed: created },
+      })
+    const assistant = (item: ReturnType<typeof tool>) =>
+      SessionMessage.Assistant.make({
+        id: id("tool-uri"),
+        type: "assistant",
+        agent: build,
+        model: { id: Model.ID.make("model"), providerID: Provider.ID.make("provider") },
+        content: [item],
+        time: { created, completed: created },
+      })
+
+    try {
+      const disk = toLLMMessages([assistant(tool(pathToFileURL(filePath).href))], model)
+      expect(disk.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining("not materialized by an authorized tool") },
+      })
+
+      const context: FileAccess.Invocation = {
+        sessionID: SessionSchema.ID.make("ses_tool_uri"),
+        agent: build,
+        messageID: id("tool-uri-call"),
+        id: Tool.CallID.make("call_tool_uri"),
+      }
+      const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) =>
+        Effect.succeed({ absolute: AbsolutePath.make(path), resource: path })
+      const snapshot = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
+          context,
+          authorizeRead,
+        ),
+      )
+      expect(snapshot).toEqual([
+        { type: "file", uri: `data:text/plain;base64,${Buffer.from("from disk").toString("base64")}`, mime: "text/plain", name: "hello.txt" },
+      ])
+
+      const directoryResult = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(directory).href, mime: "text/plain" }],
+          context,
+          authorizeRead,
+        ),
+      )
+      expect(directoryResult[0]).toMatchObject({ type: "text", text: expect.stringContaining("not a regular file") })
+
+      const oversizedPath = path.join(directory, "oversized.bin")
+      writeFileSync(oversizedPath, "")
+      truncateSync(oversizedPath, MAX_TOOL_URI_BYTES + 1)
+      const oversizedFile = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(oversizedPath).href, mime: "application/octet-stream" }],
+          context,
+          authorizeRead,
+        ),
+      )
+      expect(oversizedFile[0]).toMatchObject({ type: "text", text: expect.stringContaining("exceeds 20971520 byte limit") })
+
+      const denied = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain" }],
+          context,
+          () => Effect.fail(new Permission.BlockedError({ rules: [], permission: "read", resources: [filePath] })),
+        ),
+      )
+      expect(denied[0]).toMatchObject({ type: "text", text: expect.stringContaining("Permission denied: read") })
+
+      const missingUri = pathToFileURL(path.join(directory, "missing.txt")).href
+      const missing = toLLMMessages([assistant(tool(missingUri))], model)
+      expect(missing.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining(`${missingUri} (`) },
+      })
+
+      const unsupportedUri = "ftp://example.com/file.txt"
+      const unsupported = toLLMMessages([assistant(tool(unsupportedUri))], model)
+      expect(unsupported.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining(`${unsupportedUri} (unsupported URI scheme or malformed base64)`) },
+      })
+
+      const binary = toLLMMessages([assistant(tool("data:image/png,%89PNG", "image/png"))], model)
+      expect(binary.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "content", value: [{ type: "file", uri: "data:image/png;base64,iVBORw==", mime: "image/png", name: "hello.txt" }] },
+      })
+
+      const httpsUri = "https://example.com/image.png"
+      const https = toLLMMessages([assistant(tool(httpsUri, "image/png"))], model)
+      expect(https.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "content", value: [{ type: "file", uri: httpsUri, mime: "image/png", name: "hello.txt" }] },
+      })
+
+      const rawBase64 = toLLMMessages([assistant(tool("aGVsbG8", "image/png"))], model)
+      expect(rawBase64.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "content", value: [{ type: "file", uri: "aGVsbG8", mime: "image/png", name: "hello.txt" }] },
+      })
+
+      for (const payload of ["!!!!", "a==="]) {
+        const malformed = toLLMMessages([assistant(tool(`data:image/png;base64,${payload}`, "image/png"))], model)
+        expect(malformed.flatMap((message) => message.content)).toContainEqual({
+          type: "tool-result",
+          id: "file-uri",
+          name: "read",
+          result: { type: "text", value: expect.stringContaining("malformed media URI") },
+        })
+      }
+
+      const oversizedUri = `data:image/png;base64,${"A".repeat(28 * 1024 * 1024)}`
+      const oversized = toLLMMessages([assistant(tool(oversizedUri, "image/png"))], model)
+      expect(oversized.flatMap((message) => message.content)).toContainEqual({
+        type: "tool-result",
+        id: "file-uri",
+        name: "read",
+        result: { type: "text", value: expect.stringContaining("(exceeds 20971520 byte limit)") },
+      })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   test("restores OpenAI encrypted reasoning metadata", () => {
