@@ -408,6 +408,11 @@ describe("SpeechStream.sampleRate", () => {
     expect(SpeechStream.sampleRate("audio/pcm;rate=8000")).toBe(8000)
   })
 
+  test("matches the standalone rate parameter, not bitrate", () => {
+    expect(SpeechStream.sampleRate("audio/L16;bitrate=128000")).toBeUndefined()
+    expect(SpeechStream.sampleRate("audio/L16;bitrate=128000;rate=16000")).toBe(16000)
+  })
+
   test("returns undefined when the media type has no usable rate", () => {
     expect(SpeechStream.sampleRate("audio/L16;codec=pcm")).toBeUndefined()
     expect(SpeechStream.sampleRate("audio/pcm;rate=abc")).toBeUndefined()
