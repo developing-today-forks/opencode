@@ -34,6 +34,14 @@ export { Revert }
 export const ForkBoundary = SessionFork.Boundary
 export type ForkBoundary = SessionFork.Boundary
 
+export const AuthoritativeUsage = Schema.Struct({
+  /** Successful route attempts only; does not include projector-only costs such as compaction. */
+  cost: Money.USD,
+  cacheSavings: Money.USD,
+  tokens: TokenUsage.Info,
+}).annotate({ identifier: "Session.AuthoritativeUsage" })
+export interface AuthoritativeUsage extends Schema.Schema.Type<typeof AuthoritativeUsage> {}
+
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
@@ -46,6 +54,8 @@ export const Info = Schema.Struct({
   agent: Agent.ID.pipe(optional),
   model: Model.Ref.pipe(optional),
   cost: Money.USD,
+  /** Successful-attempt usage from route_attempt; kept separate from projector cost for existing consumers. */
+  costAuthoritative: AuthoritativeUsage.pipe(optional),
   tokens: TokenUsage.Info,
   /** Outcome of the last completed execution, recorded at `time.idle`. Absent until a run reaches a terminal transition. */
   outcome: Schema.Literals(["succeeded", "failed", "interrupted"]).pipe(optional),

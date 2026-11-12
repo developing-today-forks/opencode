@@ -86,6 +86,24 @@ const seedSession = (overrides?: Partial<typeof SessionTable.$inferInsert>) =>
   })
 
 describe("SessionProjector", () => {
+  it.effect("keeps compaction spend in projector cost, not authoritative attempt cost", () =>
+    Effect.gen(function* () {
+      yield* seedSession()
+      const bus = yield* Bus.Service
+      const store = yield* SessionStore.Service
+      yield* bus.publish(SessionEvent.UsageRecorded, {
+        sessionID,
+        source: "compaction",
+        cost: Money.USD.make(0.4),
+        tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+
+      const info = yield* store.get(sessionID)
+      expect(info?.cost).toBe(Money.USD.make(0.4))
+      expect(info?.costAuthoritative).toMatchObject({ cost: 0, cacheSavings: 0 })
+    }),
+  )
+
   it.effect("does not settle a pending manual compaction on an auto failure", () =>
     Effect.gen(function* () {
       const db = yield* seedSession()

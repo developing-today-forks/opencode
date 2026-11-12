@@ -184,6 +184,11 @@ export const UsageUpdated = Event.ephemeral({
     ...Base,
     cost: Money.USD,
     tokens: TokenUsage.Info,
+    costAuthoritative: Schema.Struct({
+      cost: Money.USD,
+      cacheSavings: Money.USD,
+      tokens: TokenUsage.Info,
+    }).pipe(optional),
   },
 })
 export type UsageUpdated = typeof UsageUpdated.Type

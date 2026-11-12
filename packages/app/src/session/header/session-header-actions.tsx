@@ -6,8 +6,9 @@ import { Tooltip } from "@opencode/ui/tooltip"
 import { useCommand } from "@/shell/commands/command"
 import { useLanguage } from "@/runtime/i18n/language"
 import { useSessionLayout } from "@/session/session-layout"
+import { Session } from "@opencode/schema/session"
 
-export function SessionReviewToggle() {
+export function SessionReviewToggle(props: { usage?: Session.AuthoritativeUsage }) {
   const command = useCommand()
   const language = useLanguage()
   const { view } = useSessionLayout()
@@ -21,6 +22,7 @@ export function SessionReviewToggle() {
         reviewOpened: view().side.opened(),
         onReviewToggle: () => view().side.toggle(),
       }}
+      usage={props.usage}
     />
   )
 }
@@ -33,9 +35,30 @@ export type SessionHeaderActionsState = {
   onReviewToggle: () => void
 }
 
-export function SessionHeaderActions(props: { state: SessionHeaderActionsState }) {
+export function SessionHeaderActions(props: { state: SessionHeaderActionsState; usage?: Session.AuthoritativeUsage }) {
   return (
     <div class="flex items-center gap-2">
+      <Show when={props.usage}>
+        {(usage) => (
+          <Tooltip
+            class="shrink-0"
+            placement="bottom"
+            value={
+              <div class="flex flex-col gap-1">
+                <div>Total cost: {formatUsageCost(usage().cost)}</div>
+                <div>Cache savings: {formatUsageCost(usage().cacheSavings)}</div>
+                <div>Input tokens: {usage().tokens.input.toLocaleString()}</div>
+                <div>Output tokens: {usage().tokens.output.toLocaleString()}</div>
+                <div>Reasoning tokens: {usage().tokens.reasoning.toLocaleString()}</div>
+                <div>Cache read tokens: {usage().tokens.cache.read.toLocaleString()}</div>
+                <div>Cache write tokens: {usage().tokens.cache.write.toLocaleString()}</div>
+              </div>
+            }
+          >
+            <span class="text-12-regular text-text-weak tabular-nums">{formatHeaderCost(usage().cost)}</span>
+          </Tooltip>
+        )}
+      </Show>
       <Show when={props.state.reviewVisible}>
         <Tooltip
           class="shrink-0"
@@ -71,3 +94,12 @@ export function SessionHeaderActions(props: { state: SessionHeaderActionsState }
     </div>
   )
 }
+
+const formatHeaderCost = (cost: number) => (cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`)
+const formatUsageCost = (cost: number) =>
+  new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(cost)

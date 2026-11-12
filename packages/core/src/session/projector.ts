@@ -19,11 +19,13 @@ import { InstructionEntry } from "./instruction-entry.js"
 import { Slug } from "../util/slug.js"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Money } from "@opencode/schema/money"
+import { TokenUsage } from "@opencode/schema/token-usage"
 import { Worktree } from "@opencode/schema/worktree"
 import { Project } from "@opencode/schema/project"
 import { AbsolutePath, RelativePath } from "../schema.js"
-import type { SessionSchema } from "./schema.js"
+import { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
+import { ModelRouteLog } from "../model-route-log.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -85,6 +87,11 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
   db: DatabaseService,
   bus: Bus.Interface,
   sessionID: SessionSchema.ID,
+  costAuthoritative?: {
+    readonly cost: number
+    readonly cacheSavings: number
+    readonly tokens: TokenUsage.Info
+  },
 ) {
   const row = yield* db
     .select({
@@ -103,6 +110,13 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
   yield* bus.publish(SessionEvent.UsageUpdated, {
     sessionID,
     cost: Money.USD.make(row.cost),
+    costAuthoritative: costAuthoritative
+      ? {
+          cost: Money.USD.make(costAuthoritative.cost),
+          cacheSavings: Money.USD.make(costAuthoritative.cacheSavings),
+          tokens: costAuthoritative.tokens,
+        }
+      : undefined,
     tokens: {
       input: row.input,
       output: row.output,
@@ -446,6 +460,10 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
+    const unregisterSessionUsage = ModelRouteLog.onSessionUsage((sessionID, usage) =>
+      publishSessionUsage(db, bus, SessionSchema.ID.make(sessionID), usage),
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(unregisterSessionUsage))
     yield* bus.project(SessionEvent.Created, (event) =>
       Effect.gen(function* () {
         const stored = yield* db

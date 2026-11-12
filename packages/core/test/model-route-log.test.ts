@@ -241,6 +241,62 @@ describe("usage history", () => {
       expect(session?.cacheRead).toBe(400)
       expect(session?.cacheSavedUsd).toBeCloseTo(0.05)
 
+      yield* db
+        .insert(RouteAttemptTable)
+        .values([
+          attempt({
+            session_id: "ses_authoritative",
+            provider_id: "test-authoritative",
+            model_id: "test-model",
+            cost_usd: 0.12,
+            cache_savings_usd: 0.04,
+            tokens_input: 100,
+            tokens_output: 20,
+            tokens_reasoning: 5,
+            tokens_cache_read: 30,
+            tokens_cache_write: 10,
+          }),
+          attempt({
+            session_id: "ses_authoritative",
+            provider_id: "test-authoritative",
+            model_id: "test-model",
+            cost_usd: 0.03,
+            cache_savings_usd: 0.01,
+          }),
+          attempt({
+            session_id: "ses_authoritative",
+            provider_id: "test-authoritative",
+            model_id: "test-model",
+            outcome: "failure",
+            cost_usd: 5,
+          }),
+          attempt({
+            session_id: "ses_authoritative",
+            provider_id: "test-authoritative",
+            model_id: "test-model",
+            outcome: "timeout",
+            cost_usd: 6,
+          }),
+          attempt({
+            session_id: "ses_authoritative",
+            provider_id: "test-authoritative",
+            model_id: "test-model",
+            outcome: "hedged-out",
+            cost_usd: 7,
+          }),
+        ])
+        .run()
+      const [authoritative] = yield* ModelRouteLog.sessionAuthoritativeUsage(db, ["ses_authoritative"])
+      expect(authoritative).toMatchObject({
+        cost: 0.15,
+        cacheSavings: 0.05,
+        input: 100,
+        output: 20,
+        reasoning: 5,
+        cacheRead: 30,
+        cacheWrite: 10,
+      })
+
       const sessionTargets = yield* ModelRouteLog.sessionTargetUsage(db, 0, ["ses_usage"])
       expect(sessionTargets).toEqual([
         expect.objectContaining({ routeID: "usage-pool", providerID: "openai", modelID: "gpt-6-luna", requests: 2 }),

@@ -379,7 +379,7 @@ function SessionScreenContent(props: {
               onPointerDown={hideTimelineScrollbar}
               onClick={hideTimelineScrollbar}
             >
-              <SessionReviewToggle />
+              <SessionReviewToggle usage={session.data.info()?.costAuthoritative} />
             </div>
           </Show>
           <div

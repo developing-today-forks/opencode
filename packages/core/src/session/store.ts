@@ -13,6 +13,8 @@ import { SessionMessage } from "./message.js"
 import { Session } from "@opencode/schema/session"
 import { SessionMessageTable, SessionTable } from "./sql.js"
 import { fromRow } from "./info.js"
+import { ModelRouteLog } from "../model-route-log.js"
+import { Money } from "@opencode/schema/money"
 
 const ListInputBase = {
   workspaceID: Workspace.ID.pipe(Schema.optional),
@@ -121,7 +123,21 @@ const layer = Layer.effect(
     return Service.of({
       get: Effect.fnUntraced(function* (sessionID) {
         const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
-        return row ? fromRow(row) : undefined
+        if (!row) return undefined
+        const [usage] = yield* ModelRouteLog.sessionAuthoritativeUsage(db, [sessionID]).pipe(Effect.orDie)
+        return {
+          ...fromRow(row),
+          costAuthoritative: Session.AuthoritativeUsage.make({
+            cost: Money.USD.make(usage?.cost ?? 0),
+            cacheSavings: Money.USD.make(usage?.cacheSavings ?? 0),
+            tokens: {
+              input: usage?.input ?? 0,
+              output: usage?.output ?? 0,
+              reasoning: usage?.reasoning ?? 0,
+              cache: { read: usage?.cacheRead ?? 0, write: usage?.cacheWrite ?? 0 },
+            },
+          }),
+        }
       }),
       list: Effect.fn("SessionStore.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"
@@ -161,7 +177,32 @@ const layer = Layer.effect(
           )
         const limit = input.limit === undefined ? undefined : listLimit(input.limit)
         const rows = yield* (limit === undefined ? query.all() : query.limit(limit).all()).pipe(Effect.orDie)
-        return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
+        const ordered = direction === "previous" ? rows.toReversed() : rows
+        const usage = yield* ModelRouteLog.sessionAuthoritativeUsage(
+          db,
+          ordered.map((row) => row.id),
+        ).pipe(Effect.orDie)
+        const usageBySession = new Map(
+          usage
+            .filter((row): row is typeof row & { sessionID: string } => row.sessionID !== null)
+            .map((row) => [row.sessionID, row]),
+        )
+        return ordered.map((row) => {
+          const item = usageBySession.get(row.id)
+          return {
+            ...fromRow(row),
+            costAuthoritative: Session.AuthoritativeUsage.make({
+              cost: Money.USD.make(item?.cost ?? 0),
+              cacheSavings: Money.USD.make(item?.cacheSavings ?? 0),
+              tokens: {
+                input: item?.input ?? 0,
+                output: item?.output ?? 0,
+                reasoning: item?.reasoning ?? 0,
+                cache: { read: item?.cacheRead ?? 0, write: item?.cacheWrite ?? 0 },
+              },
+            }),
+          }
+        })
       }),
       messages: Effect.fn("SessionStore.messages")(function* (input) {
         const direction = input.cursor?.direction ?? "next"

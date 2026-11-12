@@ -560,6 +560,25 @@ export const restoreNotes = (db: Database.Interface["db"]) =>
   })
 
 let activeDb: Database.Interface["db"] | undefined
+type SessionAuthoritativeUsage = {
+  readonly cost: number
+  readonly cacheSavings: number
+  readonly tokens: {
+    readonly input: number
+    readonly output: number
+    readonly reasoning: number
+    readonly cache: { readonly read: number; readonly write: number }
+  }
+}
+let publishSessionUsage: ((sessionID: string, usage: SessionAuthoritativeUsage) => Effect.Effect<void>) | undefined
+
+/** Lets the session projector publish completed route usage without making routing depend on the session bus. */
+export const onSessionUsage = (publish: typeof publishSessionUsage) => {
+  publishSessionUsage = publish
+  return () => {
+    if (publishSessionUsage === publish) publishSessionUsage = undefined
+  }
+}
 
 /** Runs a read against the routing database, or yields nothing when no database is attached. */
 export const withDb = <A, E>(use: (db: Database.Interface["db"]) => Effect.Effect<A, E>) =>
@@ -579,9 +598,30 @@ const layer = Layer.effectDiscard(
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
     yield* Queue.takeAll(queue).pipe(
       Effect.flatMap((events) =>
-        persist(db, events).pipe(
-          Effect.catchCause((cause) => Effect.logWarning("failed to persist model route telemetry", { cause })),
-        ),
+        Effect.gen(function* () {
+          yield* persist(db, events)
+          const sessionIDs = Array.from(
+            new Set(
+              events.flatMap((event) =>
+                event.kind === "attempt" && event.row.session_id ? [event.row.session_id] : [],
+              ),
+            ),
+          )
+          for (const sessionID of sessionIDs) {
+            const [usage] = yield* sessionAuthoritativeUsage(db, [sessionID])
+            if (usage && publishSessionUsage)
+              yield* publishSessionUsage(sessionID, {
+                cost: usage.cost,
+                cacheSavings: usage.cacheSavings,
+                tokens: {
+                  input: usage.input,
+                  output: usage.output,
+                  reasoning: usage.reasoning,
+                  cache: { read: usage.cacheRead, write: usage.cacheWrite },
+                },
+              })
+          }
+        }).pipe(Effect.catchCause((cause) => Effect.logWarning("failed to persist model route telemetry", { cause }))),
       ),
       Effect.forever,
       Effect.forkScoped,
@@ -877,6 +917,26 @@ export const sessionUsage = (db: Database.Interface["db"], since: number, limit:
     .orderBy(desc(sql`max(${RouteAttemptTable.time_ended})`))
     .limit(limit)
     .all()
+
+/** The authoritative session display total: only successful priced attempts count. */
+export const sessionAuthoritativeUsage = (db: Database.Interface["db"], sessionIDs: readonly string[]) =>
+  sessionIDs.length === 0
+    ? Effect.succeed([])
+    : db
+        .select({
+          sessionID: RouteAttemptTable.session_id,
+          cost: sql<number>`coalesce(sum(${RouteAttemptTable.cost_usd}), 0)`,
+          cacheSavings: sql<number>`coalesce(sum(${RouteAttemptTable.cache_savings_usd}), 0)`,
+          input: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
+          output: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
+          reasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,
+          cacheRead: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_read}), 0)`,
+          cacheWrite: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_write}), 0)`,
+        })
+        .from(RouteAttemptTable)
+        .where(and(inArray(RouteAttemptTable.session_id, [...sessionIDs]), eq(RouteAttemptTable.outcome, "success")))
+        .groupBy(RouteAttemptTable.session_id)
+        .all()
 
 /** Totals per session, pool and target, for the sessions named, counting only attempts started at or after `since`. */
 export const sessionTargetUsage = (db: Database.Interface["db"], since: number, sessionIDs: readonly string[]) =>
