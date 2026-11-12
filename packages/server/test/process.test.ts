@@ -311,6 +311,14 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
       (yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })).status,
     ).toBe(401)
     expect((yield* request("/auth/connect/unknown", { headers: { accept: "application/json" } })).status).toBe(401)
+
+    const postClient = yield* pair
+    const postRedeemed = yield* request(`/auth/connect/${postClient.code}`, {
+      method: "POST",
+      headers: { accept: "application/json, text/html;q=0" },
+    })
+    expect(postRedeemed.status).toBe(200)
+    expect(yield* Effect.promise(() => postRedeemed.json())).toHaveProperty("token")
   }),
 )
 

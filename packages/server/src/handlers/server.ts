@@ -80,8 +80,8 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
           // on fetch strands the intended user. Unclassified GETs get
           // the confirmation landing page and redeem with the
           // explicit POST (server.redeem); API clients signal intent
-          // with Accept: application/json (what the generated client
-          // sends) and keep redeeming on GET, as before.
+          // with Accept: application/json (the public SDK sets this for
+          // server.connect) and keep redeeming on GET, as before.
           const api = acceptsMediaType(accept, "application/json") && !acceptsMediaType(accept, "text/html")
           if (api) return yield* redeem(ctx.params.code, false)
           if (!(yield* pairing.peek(ctx.params.code))) return HttpServerResponse.text(EXPIRED, { status: 401 })
@@ -92,7 +92,7 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
         "server.redeem",
         Effect.fn(function* (ctx) {
           const request = yield* HttpServerRequest.HttpServerRequest
-          const browser = request.headers.accept?.includes("text/html") === true
+          const browser = acceptsMediaType(request.headers.accept, "text/html")
           return yield* redeem(ctx.params.code, browser)
         }),
       )
