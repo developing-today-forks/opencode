@@ -256,6 +256,9 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     const scanned = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "*/*" } })
     expect(scanned.status).toBe(200)
     expect(yield* Effect.promise(() => scanned.text())).toContain("Pair this browser")
+    const unclassified = yield* request(`/auth/connect/${client.code}`, { headers: {} })
+    expect(unclassified.status).toBe(200)
+    expect(yield* Effect.promise(() => unclassified.text())).toContain("Pair this browser")
     const redeemed = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })
     expect(redeemed.status).toBe(200)
     const session = (yield* Effect.promise(() => redeemed.json())) as { token: string }
