@@ -41,6 +41,7 @@ export function render(catalog: CodeModeCatalog.Summary) {
     return "No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool."
 
   const tools = catalog.namespaces.flatMap((namespace) => {
+    if (namespace.inline === false) return namespace.entries.filter((entry) => entry.pinned).map((entry) => entry.line)
     return [CodeModeCatalog.namespaceLine(namespace), ...namespace.entries.map((entry) => entry.line)]
   })
 

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { Effect, Schema } from "effect"
+import { CodeMode, Tool } from "@opencode/codemode"
 import { CodeModeCatalog } from "@opencode/core/codemode/catalog"
 import { CodeModeInstructions } from "@opencode/core/codemode/instructions"
 
@@ -38,17 +40,66 @@ describe("CodeModeCatalog.summarize", () => {
     expect(catalog).toEqual({
       total: 10_000,
       shown: 0,
-      namespaces: [{ name: "bulk", count: 10_000, entries: [] }],
+      namespaces: [{ name: "bulk", count: 10_000, entries: [], inline: false }],
     })
   })
 
-  test("retains every namespace when no full tool listing fits", () => {
+  test("retains namespace inventory for discovery when no summaries fit", () => {
     const catalog = CodeModeCatalog.summarize(
       { tools: [entry("alpha.one", "One"), entry("beta.two", "Two"), entry("gamma.three", "Three")] },
       { budget: 0 },
     )
     expect(catalog.namespaces.map((namespace) => namespace.name)).toEqual(["alpha", "beta", "gamma"])
-    expect(catalog.namespaces.every((namespace) => namespace.entries.length === 0)).toBe(true)
+    expect(catalog.namespaces.every((namespace) => namespace.inline === false && namespace.entries.length === 0)).toBe(
+      true,
+    )
+  })
+
+  test("bounds namespace-heavy summaries while keeping omitted tools discoverable", async () => {
+    const tools = Array.from({ length: 400 }, (_, index) =>
+      entry(`namespace${index.toString().padStart(3, "0")}.tool`, "Tool"),
+    )
+    const catalog = CodeModeCatalog.summarize({ tools })
+    const rendered = CodeModeInstructions.render(catalog)
+    const inlineCost = catalog.namespaces
+      .filter((namespace) => namespace.inline)
+      .reduce(
+        (total, namespace) =>
+          total +
+          Math.round(CodeModeCatalog.namespaceLine(namespace).length / 4) +
+          namespace.entries.reduce((cost, item) => cost + Math.round(item.line.length / 4), 0),
+        0,
+      )
+
+    expect(inlineCost).toBeLessThanOrEqual(2_000)
+    expect(catalog.namespaces).toHaveLength(400)
+    expect(catalog.namespaces.find((namespace) => namespace.name === "namespace399")?.count).toBe(1)
+    expect(rendered).toContain("The catalog is partial.")
+    expect(rendered).toContain("use `search(...)")
+    expect(rendered).not.toContain("- namespace399 (1 tool)")
+
+    const runtime = CodeMode.make({
+      tools: Object.fromEntries(
+        tools.map((tool) => [
+          tool.name.split(".")[0]!,
+          {
+            tool: Tool.make({
+              description: tool.description,
+              input: Schema.Struct({}),
+              output: Schema.String,
+              execute: () => Effect.succeed("ok"),
+            }),
+          },
+        ]),
+      ),
+    })
+    const search = await Effect.runPromise(runtime.execute('return search({ query: "", namespace: "namespace399" })'))
+    expect(search.ok).toBe(true)
+    if (search.ok) {
+      expect(search.value).toMatchObject({
+        items: [expect.objectContaining({ path: "tools.namespace399.tool" })],
+      })
+    }
   })
 
   test("always retains pinned tools beyond the inline budget", () => {
@@ -63,6 +114,10 @@ describe("CodeModeCatalog.summarize", () => {
       "alpha.first",
       "beta.second",
     ])
+    const instructions = CodeModeInstructions.render(catalog)
+    expect(instructions).toContain(pinned[0]?.signature)
+    expect(instructions).toContain(pinned[1]?.signature)
+    expect(instructions).not.toContain("tools.alpha.unpinned")
   })
 
   test("spends the budget remaining after pinned tools on unpinned tools", () => {
@@ -102,12 +157,15 @@ describe("CodeModeCatalog.summarize", () => {
   test("always retains namespace descriptions and charges them before tool listings", () => {
     const tool = entry("alpha.one", "One")
     const listingCost = Math.round(`  - ${tool.signature} // One`.length / 4)
-    const namespaceCost = Math.round(CodeModeCatalog.namespaceLine({ name: "alpha", count: 1, entries: [] }).length / 4)
     const description = "A namespace description that stays visible beyond the available tool budget"
     const namespace = { type: "namespace" as const, name: "alpha", description, tools: [tool] }
+    const namespaceCost = Math.round(CodeModeCatalog.namespaceLine({ name: "alpha", count: 1, entries: [] }).length / 4)
+    const describedNamespaceCost = Math.round(
+      CodeModeCatalog.namespaceLine({ name: "alpha", description, count: 1, entries: [] }).length / 4,
+    )
 
     expect(CodeModeCatalog.summarize({ tools: [tool] }, { budget: namespaceCost + listingCost }).shown).toBe(1)
-    const catalog = CodeModeCatalog.summarize({ tools: [namespace] }, { budget: namespaceCost + listingCost })
+    const catalog = CodeModeCatalog.summarize({ tools: [namespace] }, { budget: describedNamespaceCost })
     expect(catalog.shown).toBe(0)
     expect(catalog.namespaces[0]?.description).toBe(description)
     expect(CodeModeInstructions.render(catalog)).toContain(`- alpha (1 tool, none shown) // ${description}`)
@@ -128,7 +186,7 @@ describe("CodeModeInstructions.render", () => {
   test("adds search guidance when the catalog exceeds the budget", () => {
     const partial = render([lookup], 0)
     expect(partial).toContain("## Available tools")
-    expect(partial).toContain("- orders (1 tool, none shown)")
+    expect(partial).not.toContain("- orders (1 tool, none shown)")
     expect(partial).toContain("They cannot be called directly, and neither can `search`.")
     expect(partial).toContain(
       "The catalog is partial. Inside `execute`, use `search(...)` to find a tool, then call it by the `path` in the result. `search` is synchronous. Call it without `await`; it does not return a Promise.",
