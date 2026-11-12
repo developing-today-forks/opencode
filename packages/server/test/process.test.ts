@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { createConnection } from "node:net"
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { it } from "../../core/test/lib/effect"
@@ -256,9 +257,24 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     const scanned = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "*/*" } })
     expect(scanned.status).toBe(200)
     expect(yield* Effect.promise(() => scanned.text())).toContain("Pair this browser")
-    const unclassified = yield* request(`/auth/connect/${client.code}`, { headers: {} })
-    expect(unclassified.status).toBe(200)
-    expect(yield* Effect.promise(() => unclassified.text())).toContain("Pair this browser")
+    // Fetch always supplies Accept: */*, even when headers are omitted.
+    // Send raw HTTP to verify a genuinely absent Accept header is safe too.
+    const url = new URL(`/auth/connect/${client.code}`, base)
+    const unclassified = yield* Effect.promise(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          const socket = createConnection({ host: url.hostname, port: Number(url.port) })
+          let response = ""
+          socket.on("connect", () =>
+            socket.end(`GET ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`),
+          )
+          socket.on("data", (chunk) => (response += chunk.toString()))
+          socket.on("end", () => resolve(response))
+          socket.on("error", reject)
+        }),
+    )
+    expect(unclassified).toContain("HTTP/1.1 200")
+    expect(unclassified).toContain("Pair this browser")
     const redeemed = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })
     expect(redeemed.status).toBe(200)
     const session = (yield* Effect.promise(() => redeemed.json())) as { token: string }
