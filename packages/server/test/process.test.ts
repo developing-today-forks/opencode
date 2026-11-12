@@ -229,16 +229,44 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     expect((yield* request("/api/info", { headers: { cookie, origin: "http://127.0.0.1:1" } })).status).toBe(401)
     expect((yield* request("/api/info", { headers: { cookie: `${cookie}x` } })).status).toBe(401)
 
+    // Concurrent redemption attempts still redeem exactly once:
+    // single-use must hold under races, not just sequentially.
+    const raced = yield* pair
+    const attempts = yield* Effect.promise(() =>
+      Promise.all([
+        fetch(new URL("/auth/connect/" + raced.code, base), {
+          method: "POST",
+          redirect: "manual",
+          headers: { accept: "text/html" },
+        }),
+        fetch(new URL("/auth/connect/" + raced.code, base), {
+          method: "POST",
+          redirect: "manual",
+          headers: { accept: "text/html" },
+        }),
+      ]),
+    )
+    expect(attempts.map((attempt) => attempt.status).sort()).toEqual([302, 401])
+    yield* Effect.promise(() => Promise.all(attempts.map((attempt) => attempt.arrayBuffer())))
+
     const client = yield* pair
-    const redeemed = yield* request(`/auth/connect/${client.code}`)
+    // Unclassified GETs (wildcard Accept, as sent by link previews
+    // and scanners) must not redeem either (#2307): only an explicit
+    // Accept: application/json marks the API-client flow.
+    const scanned = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "*/*" } })
+    expect(scanned.status).toBe(200)
+    expect(yield* Effect.promise(() => scanned.text())).toContain("Pair this browser")
+    const redeemed = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })
     expect(redeemed.status).toBe(200)
     const session = (yield* Effect.promise(() => redeemed.json())) as { token: string }
     expect(
       (yield* request("/api/info", { headers: { authorization: `Basic ${btoa(`opencode:${session.token}`)}` } }))
         .status,
     ).toBe(200)
-    expect((yield* request(`/auth/connect/${client.code}`)).status).toBe(401)
-    expect((yield* request("/auth/connect/unknown")).status).toBe(401)
+    expect(
+      (yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })).status,
+    ).toBe(401)
+    expect((yield* request("/auth/connect/unknown", { headers: { accept: "application/json" } })).status).toBe(401)
   }),
 )
 

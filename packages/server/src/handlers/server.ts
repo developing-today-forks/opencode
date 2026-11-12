@@ -58,15 +58,18 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
         "server.connect",
         Effect.fn(function* (ctx) {
           const request = yield* HttpServerRequest.HttpServerRequest
-          // Browser navigations ask for HTML; everything else is an API client that wants the token.
-          const browser = request.headers.accept?.includes("text/html") === true
-          // A browser GET must never redeem the one-time code (#2307):
-          // link previews and security scanners fetch pairing URLs
-          // with a plain GET, and consuming on fetch strands the
-          // intended user. Browsers get a confirmation landing page
-          // and redeem with the explicit POST (server.redeem);
-          // the API-client flow keeps redeeming on GET, as before.
-          if (!browser) return yield* redeem(ctx.params.code, false)
+          const accept = request.headers.accept ?? ""
+          // A GET must not redeem the one-time code unless the caller
+          // explicitly asks for the API representation (#2307): link
+          // previews and security scanners fetch pairing URLs with a
+          // plain GET (Accept: text/html, */*, or none), and consuming
+          // on fetch strands the intended user. Unclassified GETs get
+          // the confirmation landing page and redeem with the
+          // explicit POST (server.redeem); API clients signal intent
+          // with Accept: application/json (what the generated client
+          // sends) and keep redeeming on GET, as before.
+          const api = !accept.includes("text/html") && accept.includes("application/json")
+          if (api) return yield* redeem(ctx.params.code, false)
           if (!(yield* pairing.peek(ctx.params.code))) return HttpServerResponse.text(EXPIRED, { status: 401 })
           return HttpServerResponse.html(LANDING)
         }),

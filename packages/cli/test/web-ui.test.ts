@@ -124,8 +124,20 @@ describe("web UI", () => {
           headers: { authorization: `Basic ${btoa("opencode:secret")}` },
         }).then((response) => response.json() as Promise<{ code: string }>),
       )
+      // A browser GET renders the pairing confirmation page without
+      // redeeming the one-time code (#2307); the explicit POST redeems.
+      const landing = yield* Effect.promise(() =>
+        fetch(new URL(`/auth/connect/${pairing.code}`, origin), {
+          redirect: "manual",
+          headers: { accept: "text/html" },
+        }),
+      )
+      expect(landing.status).toBe(200)
+      expect(landing.headers.get("set-cookie")).toBeNull()
+      yield* Effect.promise(() => landing.arrayBuffer())
       const redirect = yield* Effect.promise(() =>
         fetch(new URL(`/auth/connect/${pairing.code}`, origin), {
+          method: "POST",
           redirect: "manual",
           headers: { accept: "text/html" },
         }),
