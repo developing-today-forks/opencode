@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, PubSub, Stream } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import fs from "fs/promises"
@@ -458,6 +458,258 @@ describe("ConfigInstructionPlugin.Plugin", () => {
       }),
     ),
   )
+
+  it.live("follows same-origin and public cross-origin redirects for remote instructions", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const sameOriginStart = "https://example.test/start.md"
+        const sameOriginFinal = "https://example.test/final.md"
+        const crossOriginStart = "https://a.example.test/start.md"
+        const crossOriginFinal = "https://b.example.test/final.md"
+        const requests: string[] = []
+        return Effect.gen(function* () {
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          expect(initialized.text).toBe(
+            [
+              `Instructions from: ${sameOriginStart}\nsame-origin`,
+              `Instructions from: ${crossOriginStart}\ncross-origin`,
+            ].join("\n\n"),
+          )
+          expect([...requests].sort()).toEqual([sameOriginStart, sameOriginFinal, crossOriginStart, crossOriginFinal].sort())
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [sameOriginStart, crossOriginStart],
+              http: respond((url) => {
+                requests.push(url)
+                if (url === sameOriginStart) return new Response(null, { status: 302, headers: { location: "/final.md" } })
+                if (url === sameOriginFinal) return new Response("same-origin")
+                if (url === crossOriginStart)
+                  return new Response(null, { status: 302, headers: { location: crossOriginFinal } })
+                if (url === crossOriginFinal) return new Response("cross-origin")
+                return new Response(null, { status: 404 })
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
+  it.live("does not follow a redirect from a public instruction URL to a local destination", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const local = path.join(tmp.path, "local.md")
+        const startUrl = "https://example.test/start.md"
+        const secret = "http://127.0.0.1:65535/secret.md"
+        const requests: string[] = []
+        return Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(local, "local"))
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          // The local/private destination is never requested and its body is
+          // not loaded as instructions; the local file still loads.
+          expect(initialized.text).toBe(`Instructions from: ${local}\nlocal`)
+          expect(requests).toEqual([startUrl])
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [local, startUrl],
+              http: respond((url) => {
+                requests.push(url)
+                if (url === startUrl) return new Response(null, { status: 302, headers: { location: secret } })
+                if (url === secret) return new Response("secret")
+                return new Response(null, { status: 404 })
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
+  it.live("fails closed on malformed and unsupported redirect locations", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const local = path.join(tmp.path, "local.md")
+        const malformed = "https://example.test/malformed.md"
+        const scheme = "https://example.test/scheme.md"
+        const requests: string[] = []
+        return Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(local, "local"))
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          expect(initialized.text).toBe(`Instructions from: ${local}\nlocal`)
+          expect([...requests].sort()).toEqual([malformed, scheme].sort())
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [local, malformed, scheme],
+              http: respond((url) => {
+                requests.push(url)
+                if (url === malformed) return new Response(null, { status: 302, headers: { location: "http://[::1" } })
+                if (url === scheme) return new Response(null, { status: 302, headers: { location: "file:///etc/passwd" } })
+                return new Response(null, { status: 404 })
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
+  it.live("bounds remote instruction redirect loops", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const local = path.join(tmp.path, "local.md")
+        const a = "https://example.test/a.md"
+        const b = "https://example.test/b.md"
+        const requests: string[] = []
+        return Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(local, "local"))
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          expect(initialized.text).toBe(`Instructions from: ${local}\nlocal`)
+          // Initial request plus exactly the bounded number of followed hops.
+          expect(requests).toEqual([a, b, a, b, a, b].slice(0, 1 + ConfigInstructionPlugin.maxRemoteInstructionRedirects))
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [local, a],
+              http: respond((url) => {
+                requests.push(url)
+                if (url === a) return new Response(null, { status: 302, headers: { location: b } })
+                if (url === b) return new Response(null, { status: 302, headers: { location: a } })
+                return new Response(null, { status: 404 })
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
+  it.live("follows redirects for a deliberately configured local instruction source", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const startLocal = "http://127.0.0.1:4011/start.md"
+        const finalLocal = "http://127.0.0.1:4022/final.md"
+        const requests: string[] = []
+        return Effect.gen(function* () {
+          const discovery = yield* start()
+          const initialized = yield* readInitial(yield* discovery.load())
+          // The configured URL is an explicit user choice: a local source
+          // redirecting within the local network stays usable (the policy
+          // on resolveInstructionRedirect).
+          expect(initialized.text).toBe(`Instructions from: ${startLocal}\nlocal-remote`)
+          expect(requests).toEqual([startLocal, finalLocal])
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              instructions: [startLocal],
+              http: respond((url) => {
+                requests.push(url)
+                if (url === startLocal) return new Response(null, { status: 302, headers: { location: finalLocal } })
+                if (url === finalLocal) return new Response("local-remote")
+                return new Response(null, { status: 404 })
+              }),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
+  test("resolveInstructionRedirect applies the documented trust policy", () => {
+    const resolve = ConfigInstructionPlugin.resolveInstructionRedirect
+    // Allowed: same-origin relative, public cross-origin, public IP literal.
+    expect(resolve("https://example.test/a.md", "/b.md")).toBe("https://example.test/b.md")
+    expect(resolve("https://a.example.test/a.md", "https://b.example.test/b.md")).toBe("https://b.example.test/b.md")
+    expect(resolve("https://example.test/a.md", "http://1.1.1.1/b.md")).toBe("http://1.1.1.1/b.md")
+    // Allowed: a deliberately configured local source may redirect within the local network.
+    expect(resolve("http://127.0.0.1:4011/a.md", "http://127.0.0.1:4022/b.md")).toBe("http://127.0.0.1:4022/b.md")
+    expect(resolve("http://localhost:4011/a.md", "/b.md")).toBe("http://localhost:4011/b.md")
+    // Blocked: a public origin redirecting into the local network, in every local/private shape.
+    for (const location of [
+      "http://127.0.0.1:9999/secret.md",
+      "http://localhost:9999/secret.md",
+      "http://10.0.0.5/secret.md",
+      "http://172.16.0.5/secret.md",
+      "http://192.168.1.5/secret.md",
+      "http://169.254.169.254/latest/meta-data",
+      "http://[::1]/secret.md",
+      "http://[fe80::1]/secret.md",
+      "http://[fd00::1]/secret.md",
+      "http://[::ffff:127.0.0.1]/secret.md",
+      "http://0.0.0.0/secret.md",
+    ])
+      expect(() => resolve("https://example.test/a.md", location)).toThrow("local or private")
+    // Fail closed: malformed location, unsupported scheme.
+    expect(() => resolve("https://example.test/a.md", "http://[::1")).toThrow("invalid")
+    expect(() => resolve("https://example.test/a.md", "file:///etc/passwd")).toThrow("unsupported protocol")
+  })
+
+  test("isLocalOrPrivateHost classifies IP literals and the localhost family", () => {
+    const local = ConfigInstructionPlugin.isLocalOrPrivateHost
+    for (const host of [
+      "localhost",
+      "foo.localhost",
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.31.255.255",
+      "192.168.0.1",
+      "169.254.1.1",
+      "100.64.0.1",
+      "0.0.0.0",
+      "[::1]",
+      "[fe80::1]",
+      "[fd00::1]",
+    ])
+      expect(local(host)).toBe(true)
+    for (const host of ["example.com", "example.test", "1.1.1.1", "172.32.0.1", "100.128.0.1", "[2606:4700:4700::1111]"])
+      expect(local(host)).toBe(false)
+  })
 
   it.live("keeps an empty AGENTS.md as available context", () =>
     Effect.acquireRelease(
