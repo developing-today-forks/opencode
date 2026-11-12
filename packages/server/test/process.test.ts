@@ -214,6 +214,12 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     expect((yield* request("/api/info", { headers: { cookie } })).status).toBe(200)
     expect((yield* request("/api/info", { headers: { cookie, origin: base } })).status).toBe(200)
     expect((yield* request("/api/info", { headers: { cookie, origin: "http://127.0.0.1:1" } })).status).toBe(401)
+    const httpsOrigin = `https://${new URL(base).host}`
+    expect((yield* request("/api/info", { headers: { cookie, origin: httpsOrigin } })).status).toBe(401)
+    expect(
+      (yield* request("/api/info", { headers: { cookie, origin: httpsOrigin, "x-forwarded-proto": "https" } }))
+        .status,
+    ).toBe(401)
     expect((yield* request("/api/info", { headers: { cookie: `${cookie}x` } })).status).toBe(401)
 
     const client = yield* pair
