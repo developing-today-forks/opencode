@@ -11,7 +11,7 @@ import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { Agent } from "@opencode/core/agent"
 import { FileAccess } from "@opencode/core/file-access"
 import {
-  materialize as materializeToolResult,
+  materializeToolResult,
   MAX_TOOL_URI_BYTES,
 } from "@opencode/core/session/runner/tool-result-content"
 import { Permission } from "@opencode/core/permission"

@@ -38,7 +38,7 @@ import { SessionMembershipGate } from "./membership-gate.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionHedge } from "./hedge.js"
 import { SessionRunnerRetry } from "./retry.js"
-import { materialize as materializeToolResult } from "./tool-result-content.js"
+import { materializeToolResult } from "./tool-result-content.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
