@@ -102,6 +102,26 @@ describe("CodeModeCatalog.summarize", () => {
     }
   })
 
+  test("bounds namespace-heavy summaries when namespaces hold two tools each", () => {
+    const tools = Array.from({ length: 400 }, (_, index) => {
+      const namespace = `namespace${index.toString().padStart(3, "0")}`
+      return [entry(`${namespace}.first`, "First"), entry(`${namespace}.second`, "Second")]
+    }).flat()
+    const catalog = CodeModeCatalog.summarize({ tools })
+    const inlineCost = catalog.namespaces
+      .filter((namespace) => namespace.inline)
+      .reduce(
+        (total, namespace) =>
+          total +
+          Math.round(CodeModeCatalog.namespaceLine(namespace).length / 4) +
+          namespace.entries.reduce((cost, item) => cost + Math.round(item.line.length / 4), 0),
+        0,
+      )
+
+    expect(inlineCost).toBeLessThanOrEqual(2_000)
+    expect(catalog.namespaces).toHaveLength(400)
+  })
+
   test("always retains pinned tools beyond the inline budget", () => {
     const pinned = [entry("alpha.first", "First", undefined, true), entry("beta.second", "Second", undefined, true)]
     const catalog = CodeModeCatalog.summarize(

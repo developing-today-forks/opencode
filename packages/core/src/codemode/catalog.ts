@@ -105,21 +105,26 @@ export function summarize(inventory: Inventory, options: Options = {}): Summary 
     .reduce((total, listing) => total + cost(listing.line), 0)
   let remaining = Math.max(0, budget - pinnedCost)
   const summaryCandidates = namespaces
-    .map((namespace) => ({
-      namespace,
-      cost: cost(
-        namespaceLine(
-          {
-            name: namespace.name,
-            ...(namespace.description === undefined ? {} : { description: namespace.description }),
-            count: namespace.listings.length,
-            entries: [],
-            inline: true,
-          },
-          Math.max(0, namespace.listings.length - 1),
+    .map((namespace) => {
+      // Reserve the longest header this namespace can render with: the shown count at
+      // render time can be anything from 0 ("none shown") up to the full count, and a
+      // header reserved for a shorter label would let the rendered catalog exceed the
+      // budget when a longer label is used.
+      const header = {
+        name: namespace.name,
+        ...(namespace.description === undefined ? {} : { description: namespace.description }),
+        count: namespace.listings.length,
+        entries: [],
+        inline: true,
+      }
+      return {
+        namespace,
+        cost: Math.max(
+          cost(namespaceLine(header, 0)),
+          cost(namespaceLine(header, Math.max(0, namespace.listings.length - 1))),
         ),
-      ),
-    }))
+      }
+    })
     .toSorted((left, right) => {
       if (left.cost !== right.cost) return left.cost - right.cost
       if (left.namespace.name < right.namespace.name) return -1
