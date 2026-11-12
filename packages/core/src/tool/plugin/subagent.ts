@@ -356,7 +356,7 @@ export const Plugin = {
         const depthLine = yield* Effect.gen(function* () {
           const current = yield* sessions.get(event.sessionID)
           return SubagentDepth.formatDepthLine(yield* SubagentDepth.readout(sessions, config, current, fs))
-        }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        }).pipe(Effect.orElseSucceed(() => undefined))
         tool.description = [
           tool.description,
           "",

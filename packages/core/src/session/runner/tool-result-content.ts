@@ -107,7 +107,7 @@ export const materialize = (
   content: ReadonlyArray<Content>,
   context: FileAccess.Invocation,
   authorizeRead: FileAccess.Interface["authorizeRead"],
-) =>
+): Effect.Effect<ReadonlyArray<Content>, never> =>
   Effect.forEach(content, (item) => {
     if (item.type !== "file") return Effect.succeed(item)
     if (!item.uri.startsWith("file:")) return Effect.succeed(validate(item))

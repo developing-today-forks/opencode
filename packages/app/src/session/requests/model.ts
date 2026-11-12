@@ -126,15 +126,16 @@ export function createSessionRequestModel() {
     return data.session.root(id)
   })
 
-  // The owner's messages name the subagent calls still starting at the root; load them when a subagent
-  // view makes a different session the owner and they have not arrived yet.
+  // A subagent view needs the root's full session family and messages to render running work for the whole tree.
   createEffect(
     on(
       () => [owner(), params.id, serverSDK.connection.status()] as const,
       ([rootID, id, status]) => {
         if (!rootID || rootID === id || status !== "connected") return
-        if (data.session.message.list(rootID).length > 0) return
-        void Promise.all([data.session.sync(rootID), data.session.message.sync(rootID)]).catch(() => undefined)
+        void Promise.all([
+          data.session.sync(rootID, { children: true }),
+          data.session.message.list(rootID).length === 0 ? data.session.message.sync(rootID) : Promise.resolve(),
+        ]).catch(() => undefined)
       },
       { defer: true },
     ),

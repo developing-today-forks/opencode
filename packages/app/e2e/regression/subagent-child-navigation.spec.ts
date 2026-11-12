@@ -140,7 +140,7 @@ test("shows the full ancestor path and navigates to an earlier subagent", async 
 
   await header.getByRole("button", { name: childTitle, exact: true }).click()
   await expect(page).toHaveURL(sessionHref(childID))
-  await expect(page.locator("[data-session-title]").getByRole("heading", { name: childTitle })).toBeVisible()
+  await expect(page.locator("[data-session-title]").getByRole("heading", { name: taskDescription })).toBeVisible()
   await expect(page.locator('[data-slot="titlebar-tabs"] [data-titlebar-tab-slot]')).toHaveCount(1)
 })
 
