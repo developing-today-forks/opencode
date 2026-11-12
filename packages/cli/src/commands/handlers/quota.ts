@@ -475,7 +475,7 @@ const handler = Effect.fn("cli.quota")(function* (input: Runtime.Input<typeof Co
     server: Option.getOrUndefined(input.server),
     standalone: input.standalone,
     mismatch: "ignore",
-  }).pipe(Effect.catch(() => Effect.succeed(null)))
+  }).pipe(Effect.orElseSucceed(() => null))
   const client = server
     ? OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) })
     : null

@@ -51,7 +51,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         const current = queue.shift() as Session.ID
         const children = yield* session
           .list({ parentID: current })
-          .pipe(Effect.catch(() => Effect.succeed({ data: [] as const })))
+          .pipe(Effect.orElseSucceed(() => ({ data: [] as const })))
         for (const child of children.data) {
           if (seen.has(child.id)) continue
           seen.add(child.id)
@@ -67,7 +67,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       const seen = new Set<string>([ownerID])
       let current = ownerID
       while (true) {
-        const info = yield* session.get(Session.ID.make(current)).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        const info = yield* session.get(Session.ID.make(current)).pipe(Effect.orElseSucceed(() => undefined))
         if (!info?.parentID) return false
         if (info.parentID === sessionID) return true
         if (seen.has(info.parentID)) return false

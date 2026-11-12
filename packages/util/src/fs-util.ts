@@ -345,7 +345,20 @@ export namespace FSUtil {
           // clears setuid/setgid bits, so only a last chmod makes the
           // computed mode the file's actual mode.
           yield* fs.chmod(temp, mode)
-          yield* renameWithRetry(temp, target)
+          // Windows refuses to replace a read-only destination with rename,
+          // even when the caller can write its parent directory. Temporarily
+          // clear that bit on the old file; the replacement already has the
+          // final mode, and a failed rename restores the original mode.
+          const readonlyMode =
+            process.platform === "win32" && existingMode !== undefined && (existingMode & 0o200) === 0
+              ? existingMode
+              : undefined
+          if (readonlyMode !== undefined) yield* fs.chmod(target, readonlyMode | 0o200)
+          yield* renameWithRetry(temp, target).pipe(
+            Effect.onError(() =>
+              readonlyMode !== undefined ? fs.chmod(target, readonlyMode).pipe(Effect.ignore) : Effect.void,
+            ),
+          )
           created = false
         })
         yield* write.pipe(

@@ -71,10 +71,11 @@ function runtimeRequirePlugin(): Plugin {
  * #1690 flip. Per #1792's triaged contract, native-onnx embeddings are
  * explicitly unsupported in this Node bundle; core checks the build marker
  * and rejects at the embeddings surface before reaching these bindings.
- * Both specifiers still resolve to stubs here (the Bun build never sees
- * this config), keeping startup safe and acting as a backstop for accidental
- * direct use. The graph guard below fails the build if the real packages
- * re-enter or the onnxruntime-node stub disappears.
+ * The keyring package has the same native-loader shape. Keyring lookup is
+ * optional, so the Node artifact treats it as unavailable and uses the
+ * provider's remaining credential sources. All three specifiers still
+ * resolve to stubs here (the Bun build never sees this config), keeping
+ * startup safe and acting as a backstop for accidental direct use.
  */
 function nativeStubPlugin(): Plugin {
   const message =
@@ -85,6 +86,7 @@ function nativeStubPlugin(): Plugin {
     resolveId(id) {
       if (id === "onnxruntime-node") return "\0opencode:onnxruntime-node-stub"
       if (id === "sharp") return "\0opencode:sharp-stub"
+      if (id === "@napi-rs/keyring") return "\0opencode:keyring-stub"
     },
     transform(code, id) {
       // @huggingface/transformers loads onnxruntime-node through a runtime
@@ -116,30 +118,33 @@ const env = {}
 export { InferenceSession, Tensor, env }
 export default { InferenceSession, Tensor, env }`
       if (id === "\0opencode:sharp-stub") return `export default () => { throw new Error(${JSON.stringify(message)}) }`
+      if (id === "\0opencode:keyring-stub")
+        return `class AsyncEntry { constructor() { throw new Error("OS keyring access is unavailable in the Node bundle") } }
+export { AsyncEntry }`
     },
   }
 }
 
-/** Build-time guard for the stub above (#1615): the real onnxruntime-node /
- * sharp packages must never re-enter the Node bundle graph, and the stubs
- * must be present — a regression fails here in seconds instead of inside
- * the 60-140s serve-handover tests. */
+/** Build-time guard for the native stubs: their real packages must never
+ * re-enter the Node bundle graph. */
 function nativeStubGraphPlugin(): Plugin {
   return {
     name: "opencode:native-stub-graph",
     generateBundle() {
       const ids = Array.from(this.getModuleIds(), (id) => id.replaceAll("\\", "/"))
       const leaked = ids.filter(
-        (id) => id.includes("/node_modules/onnxruntime-node/") || id.includes("/node_modules/sharp/"),
+        (id) =>
+          id.includes("/node_modules/onnxruntime-node/") ||
+          id.includes("/node_modules/sharp/") ||
+          id.includes("/node_modules/@napi-rs/keyring"),
       )
       if (leaked.length > 0)
         this.error(
           `Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`,
         )
-      if (!ids.some((id) => id.includes("opencode:onnxruntime-node-stub")))
-        this.error(
-          "Node bundle graph is missing the onnxruntime-node stub (#1615): embeddings-native left the graph or the stub plugin stopped resolving",
-        )
+      for (const name of ["onnxruntime-node", "keyring"])
+        if (!ids.some((id) => id.includes(`opencode:${name}-stub`)))
+          this.error(`Node bundle graph is missing the ${name} stub`)
     },
   }
 }
