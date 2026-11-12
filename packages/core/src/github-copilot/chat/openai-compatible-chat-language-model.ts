@@ -652,8 +652,14 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
               })
             }
 
-            // go through all tool calls and send the ones that are not finished
-            for (const toolCall of toolCalls.filter((toolCall) => !toolCall.hasFinished)) {
+            // go through all tool calls and send the ones that are not finished.
+            // After a stream error the accumulated arguments are truncated, so
+            // an unfinished tool call must never be flushed as a normal
+            // tool-call event (#2311): the error part already reported the
+            // failure, and downstream would execute the partial input.
+            const unfinishedToolCalls =
+              finishReason.unified === "error" ? [] : toolCalls.filter((toolCall) => !toolCall.hasFinished)
+            for (const toolCall of unfinishedToolCalls) {
               controller.enqueue({
                 type: "tool-input-end",
                 id: toolCall.id,
