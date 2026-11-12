@@ -878,6 +878,28 @@ export const sessionUsage = (db: Database.Interface["db"], since: number, limit:
     .limit(limit)
     .all()
 
+/** Success-only totals per session for the sessions named: the authoritative cost basis (#7).
+ * Unlike `sessionUsage`, attempts that did not succeed (failure, timeout, hedged-out, …)
+ * contribute nothing — a stored cost_usd on such a row prices a request that never completed.
+ * Sessions without a successful attempt produce no row. */
+export const authoritativeSessionUsage = (db: Database.Interface["db"], sessionIDs: readonly string[]) =>
+  db
+    .select({
+      sessionID: RouteAttemptTable.session_id,
+      requests: count(),
+      input: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
+      output: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
+      reasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,
+      cacheRead: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_read}), 0)`,
+      cacheWrite: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_write}), 0)`,
+      costUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cost_usd}), 0)`,
+      cacheSavedUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cache_savings_usd}), 0)`,
+    })
+    .from(RouteAttemptTable)
+    .where(and(eq(RouteAttemptTable.outcome, "success"), inArray(RouteAttemptTable.session_id, [...sessionIDs])))
+    .groupBy(RouteAttemptTable.session_id)
+    .all()
+
 /** Totals per session, pool and target, for the sessions named, counting only attempts started at or after `since`. */
 export const sessionTargetUsage = (db: Database.Interface["db"], since: number, sessionIDs: readonly string[]) =>
   sessionIDs.length === 0

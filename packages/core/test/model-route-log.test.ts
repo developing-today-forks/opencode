@@ -279,6 +279,73 @@ describe("usage history", () => {
   )
 })
 
+describe("authoritative usage (#7)", () => {
+  it.live("sums only successful attempts, with cache savings and tokens by kind", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const seed = (overrides: Partial<ModelRouteLog.Attempt>) =>
+        ModelRouteLog.record({ kind: "attempt", row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }) })
+      seed({
+        time_started: 1_000,
+        time_ended: 2_000,
+        tokens_input: 1_000,
+        tokens_output: 200,
+        tokens_reasoning: 10,
+        tokens_cache_read: 400,
+        tokens_cache_write: 5,
+        cost_usd: 0.25,
+        cache_savings_usd: 0.05,
+      })
+      seed({
+        time_started: 3_000,
+        time_ended: 4_000,
+        tokens_input: 500,
+        tokens_output: 100,
+        tokens_cache_read: 100,
+        cost_usd: 0.1,
+        cache_savings_usd: 0.01,
+      })
+      // Priced but never completed: every non-success outcome is excluded, even
+      // though each row carries a stored cost_usd.
+      for (const [index, outcome] of ["failure", "timeout", "hedged-out"].entries())
+        seed({
+          time_started: 5_000 + index * 2_000,
+          time_ended: 6_000 + index * 2_000,
+          outcome,
+          output_started: false,
+          tokens_input: 9_999,
+          cost_usd: 0.5,
+          cache_savings_usd: 0.5,
+        })
+      yield* Effect.sleep("100 millis")
+
+      const [row] = yield* ModelRouteLog.authoritativeSessionUsage(db, ["ses_auth"])
+      expect(row).toMatchObject({
+        requests: 2,
+        input: 1_500,
+        output: 300,
+        reasoning: 10,
+        cacheRead: 500,
+        cacheWrite: 5,
+      })
+      expect(row?.costUsd).toBeCloseTo(0.35)
+      expect(row?.cacheSavedUsd).toBeCloseTo(0.06)
+
+      // The all-outcomes rollup counts the failed attempts' stored cost too; the
+      // authoritative total deliberately diverges from it (and from the
+      // projector's Session.Info.cost, which also folds in title/compaction
+      // usage that has no route_attempt row at all).
+      const all = (yield* ModelRouteLog.sessionUsage(db, 0, 50)).find((entry) => entry.sessionID === "ses_auth")
+      expect(all?.requests).toBe(5)
+      expect(all?.costUsd).toBeCloseTo(1.85)
+      expect(row?.costUsd).not.toBeCloseTo(all?.costUsd ?? 0)
+
+      // A session with no successful attempt has no authoritative row.
+      expect(yield* ModelRouteLog.authoritativeSessionUsage(db, ["ses_missing"])).toEqual([])
+    }),
+  )
+})
+
 describe("continuation attempts", () => {
   it.live("links each chunk of a continued response to the attempt that started it", () =>
     Effect.gen(function* () {

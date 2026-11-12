@@ -1742,7 +1742,12 @@ export type SessionUsageUpdated = {
   metadata?: { [x: string]: any }
   type: "session.usage.updated"
   location?: LocationRef
-  data: { sessionID: SessionID; cost: MoneyUSD; tokens: TokenUsageInfo }
+  data: {
+    sessionID: SessionID
+    cost: MoneyUSD
+    tokens: TokenUsageInfo
+    costAuthoritative?: { cost: MoneyUSD; cacheSavings: MoneyUSD; tokens: TokenUsageInfo }
+  }
 }
 
 export type SessionTextDelta = {
@@ -2946,6 +2951,7 @@ export type SessionInfo = {
   agent?: AgentID
   model?: ModelRef
   cost: MoneyUSD
+  costAuthoritative?: { cost: MoneyUSD; cacheSavings: MoneyUSD; tokens: TokenUsageInfo }
   tokens: TokenUsageInfo
   outcome?: "succeeded" | "failed" | "interrupted"
   time: { created: number; updated: number; idle?: number; viewed?: number; archived?: number }
