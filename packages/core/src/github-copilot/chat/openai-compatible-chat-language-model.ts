@@ -344,6 +344,9 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
       unified: "other",
       raw: undefined,
     }
+    // Sticky: once the stream has failed, a later chunk's finish reason
+    // must not resurrect the response (or its unfinished tool calls).
+    let hasStreamError = false
     const usage: {
       completionTokens: number | undefined
       completionTokensDetails: {
@@ -391,6 +394,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             // handle failed chunk parsing / validation:
             if (!chunk.success) {
+              hasStreamError = true
               finishReason = {
                 unified: "error",
                 raw: undefined,
@@ -404,6 +408,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             // handle error chunks:
             if ("error" in value) {
+              hasStreamError = true
               finishReason = {
                 unified: "error",
                 raw: undefined,
@@ -451,7 +456,7 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
 
             const choice = value.choices[0]
 
-            if (choice?.finish_reason != null) {
+            if (choice?.finish_reason != null && !hasStreamError) {
               finishReason = {
                 unified: mapOpenAICompatibleFinishReason(choice.finish_reason),
                 raw: choice.finish_reason ?? undefined,
@@ -652,8 +657,16 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
               })
             }
 
-            // go through all tool calls and send the ones that are not finished
-            for (const toolCall of toolCalls.filter((toolCall) => !toolCall.hasFinished)) {
+            // go through all tool calls and send the ones that are not finished.
+            // After a stream error the accumulated arguments are truncated, so
+            // an unfinished tool call must never be flushed as a normal
+            // tool-call event (#2311): the error part already reported the
+            // failure, and downstream would execute the partial input.
+            const unfinishedToolCalls =
+              hasStreamError || finishReason.unified === "error"
+                ? []
+                : toolCalls.filter((toolCall) => !toolCall.hasFinished)
+            for (const toolCall of unfinishedToolCalls) {
               controller.enqueue({
                 type: "tool-input-end",
                 id: toolCall.id,
