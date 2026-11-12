@@ -15,7 +15,11 @@ export function layer(urls: () => ReadonlyArray<string>, tmp: string, app: Serve
   return Layer.succeed(Service, Service.of({ urls, app, paths: { tmp } }))
 }
 
-export function connectionURLs(value: string, requestedHostname?: string) {
+export function connectionURLs(
+  value: string,
+  requestedHostname?: string,
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+) {
   const url = new URL(value)
   const hostname = requestedHostname ?? url.hostname
   const family = hostname === "0.0.0.0" ? "IPv4" : hostname === "::" || hostname === "[::]" ? "IPv6" : undefined
@@ -26,9 +30,14 @@ export function connectionURLs(value: string, requestedHostname?: string) {
   return [
     ...new Set([
       loopback.toString().replace(/\/$/, ""),
-      ...Object.values(networkInterfaces())
+      ...Object.values(interfaces)
         .flatMap((entries) => entries ?? [])
-        .filter((entry) => !entry.internal && entry.family === family)
+        .filter(
+          (entry) =>
+            !entry.internal &&
+            entry.family === family &&
+            !(family === "IPv6" && /^fe[89ab][0-9a-f]:/i.test(entry.address)),
+        )
         .map((entry) => {
           const result = new URL(value)
           result.hostname = family === "IPv6" ? `[${entry.address}]` : entry.address
