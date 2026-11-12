@@ -129,7 +129,7 @@ export const Plugin = define({
         // opencode-go's pin their own per-model `api`, which becomes a model-level baseURL that wins
         // over the provider setting in the runtime merge, so a provider-only override never took
         // effect for them (#434).
-        if (!routeProvider && item.settings?.baseURL !== undefined) {
+        if (!conflict && !routeProvider && item.settings?.baseURL !== undefined) {
           const catalog = providers.get(providerID)
           if (catalog)
             for (const modelID of catalog.models.keys())
