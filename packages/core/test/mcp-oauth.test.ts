@@ -160,6 +160,54 @@ describe("MCP OAuth", () => {
     expect(tokenRequests[0]?.get("resource")).toBe(server.url.href)
   })
 
+  test("does not let an invalid callback prevent a later valid callback", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (request.method !== "POST" || new URL(request.url).pathname !== "/token")
+          return new Response(null, { status: 404 })
+        return Response.json({ access_token: "access", token_type: "Bearer" })
+      },
+    })
+
+    const credential = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { authorization, url } = yield* start(server, { client_id: "client" })
+          const redirect = new URL(url.searchParams.get("redirect_uri")!)
+          redirect.searchParams.set("state", "invalid")
+          redirect.searchParams.set("code", "forged")
+          expect((yield* Effect.promise(() => fetch(redirect))).status).toBe(400)
+
+          redirect.searchParams.set("state", url.searchParams.get("state")!)
+          redirect.searchParams.set("code", "accepted")
+          expect((yield* Effect.promise(() => fetch(redirect))).status).toBe(200)
+          return yield* authorization.callback
+        }),
+      ),
+    ).finally(() => server.stop(true))
+
+    expect(credential.access).toBe("access")
+  })
+
+  test("fails the authorization for a provider error with valid state", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 404 }) })
+    const exit = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { authorization, url } = yield* start(server, { client_id: "client" })
+          const redirect = new URL(url.searchParams.get("redirect_uri")!)
+          redirect.searchParams.set("state", url.searchParams.get("state")!)
+          redirect.searchParams.set("error", "access_denied")
+          expect((yield* Effect.promise(() => fetch(redirect))).status).toBe(400)
+          return yield* Effect.exit(authorization.callback)
+        }),
+      ),
+    ).finally(() => server.stop(true))
+
+    expect(exit._tag).toBe("Failure")
+  })
+
   test("reports a rejected token exchange on the callback page", async () => {
     const server = Bun.serve({
       port: 0,
