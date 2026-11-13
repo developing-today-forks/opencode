@@ -25,6 +25,7 @@ import { AbsolutePath, RelativePath } from "../schema.js"
 import type { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
 import { ModelRouteLog } from "../model-route-log.js"
+import { KeyedMutex } from "../effect/keyed-mutex.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -82,11 +83,19 @@ function touch(db: DatabaseService, event: MessageEvent) {
     .pipe(Effect.orDie)
 }
 
-const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function* (
+// One publish at a time per session (#2408): the step-event stream and the
+// route-log persist listener both publish usage, and the snapshot read must
+// stay inside the same critical section as the publish itself — otherwise an
+// older snapshot can land after a newer one and the client, which applies
+// each event as it arrives, overwrites newer totals with stale ones.
+const usagePublishLocks = KeyedMutex.makeUnsafe<SessionSchema.ID>()
+
+const publishUsageSnapshot = (
   db: DatabaseService,
   bus: Bus.Interface,
   sessionID: SessionSchema.ID,
-) {
+) =>
+  Effect.gen(function* () {
   const row = yield* db
     .select({
       cost: SessionTable.cost,
@@ -132,6 +141,14 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
         }
       : undefined,
   })
+  })
+
+const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function* (
+  db: DatabaseService,
+  bus: Bus.Interface,
+  sessionID: SessionSchema.ID,
+) {
+  yield* usagePublishLocks.withLock(sessionID)(publishUsageSnapshot(db, bus, sessionID))
 })
 
 const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
