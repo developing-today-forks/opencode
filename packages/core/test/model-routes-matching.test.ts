@@ -755,6 +755,16 @@ describe("pool effort levels", () => {
     }
   })
 
+  test("a pool pinned at a level a rule remaps runs the matched model at the mapped variant", () => {
+    const routes = pools({
+      // argon has no max; the rule maps max onto high, so pinned at max it runs at high.
+      inner: { include: ["openai/argon"], variantRules: [{ match: "*argon*", map: { max: "high" } }] },
+      outer: { targets: ["opencode-route/inner#max"] },
+    })
+    expect(refs("outer", routes)).toEqual(["openai/argon#max"])
+    expect(remaps("outer", routes)).toEqual({ "openai/argon": { max: "high" } })
+  })
+
   test("a nested pool pinned at a level it does not declare adds nothing, and says so", () => {
     const routes = pools({
       "low-only": { targets: ["openai/luna-6"], levels: ["low"] },

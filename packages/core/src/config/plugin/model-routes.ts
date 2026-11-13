@@ -1392,13 +1392,24 @@ function expandCollected(
           continue
         const model = candidate(entry.providerID, entry.id)
         if (!model?.enabled) continue
-        if (pin !== undefined && !model.variants.some((item) => item.id === pin.level)) continue
         if (pin !== undefined && sitsOutPin(entry, model)) {
           pin.leftOut.targets.add(key)
           pin.leftOut.models.add(key)
           continue
         }
-        const variantMap = levelMap(entry, model)
+        const levelMapped = levelMap(entry, model)
+        // The pin is resolved through the remaps before the native check: a rule that maps
+        // the pin onto a variant the model has lets it run at that variant (Codex review
+        // 4337111440), instead of the matched model being discarded for lacking the pin.
+        const viaPinRules =
+          pin !== undefined ? effort(model, [...applying(pins.at(-1)?.rules ?? [], entry)])[pin.level] : undefined
+        const mapped = viaPinRules !== undefined ? viaPinRules : pin !== undefined ? levelMapped[pin.level] : undefined
+        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level))
+          continue
+        const variantMap =
+          pin !== undefined && viaPinRules !== undefined && viaPinRules !== false
+            ? { ...levelMapped, [pin.level]: viaPinRules }
+            : levelMapped
         const budget = plainBudget(
           [...nextTrail]
             .filter((rid) => ModelRouteAutonomy.usesRules(routes.get(rid)?.autonomy))
