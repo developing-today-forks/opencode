@@ -219,6 +219,9 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     )
     .add(
       HttpApiEndpoint.post("session.create", "/api/session", {
+        query: Schema.Struct({
+          directory: AbsolutePath.pipe(Schema.optional),
+        }),
         payload: Schema.Struct({
           id: Session.ID.pipe(Schema.optional),
           parentID: Session.ID.pipe(Schema.optional),
@@ -229,6 +232,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           metadata: Session.Metadata.pipe(Schema.optional),
           permissions: Permission.Ruleset.pipe(Schema.optional),
           subagentPolicy: Session.SubagentPolicy.pipe(Schema.optional),
+          detached: Schema.Literal(true).pipe(Schema.optional).annotate({
+            description:
+              "Run in detached (non-interactive) mode. The question tool is unavailable, and every child session inherits this mode.",
+          }),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),
         error: [SessionNotFoundError, InvalidRequestError],
@@ -237,7 +244,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.create",
           summary: "Create session",
           description:
-            "Create a session at the requested location. A parentID creates a linked child session at its parent's location.",
+            "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location. Detached sessions have no interactive question tool, and their child sessions inherit detached mode.",
         }),
       ),
     )
@@ -747,7 +754,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     .add(
       HttpApiEndpoint.post("session.interrupt", "/api/session/:sessionID/interrupt", {
         params: { sessionID: Session.ID },
-        query: { resume: BooleanFromString.pipe(Schema.optional) },
+        query: {
+          resume: BooleanFromString.pipe(Schema.optional),
+          force: BooleanFromString.pipe(Schema.optional),
+        },
         success: Schema.Struct({
           interrupted: Schema.Boolean.annotate({
             description: "Whether an active execution owned by this OpenCode process was interrupted.",
@@ -761,7 +771,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
             identifier: "session.interrupt",
             summary: "Interrupt session execution",
             description:
-              "Interrupt active execution owned by this OpenCode process. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
+              "Interrupt active execution owned by this OpenCode process. Stops cascade background subagents; independent and detached children keep running. When force=true, stops everything under the session regardless of stop policy. Returns interrupted=true when an active execution was interrupted and false for the idle no-op. When resume=true, execution resumes pending steering input and next-in-line control items (manual compaction, moves) while queued prompts remain parked.",
           }),
         ),
     )

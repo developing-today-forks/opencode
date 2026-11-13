@@ -10,6 +10,7 @@ import type { Files } from "../environment/index.js"
 import { FileSystem } from "../filesystem.js"
 import { Mime } from "../mime.js"
 import { AbsolutePath, NonNegativeInt, PositiveInt, RelativePath } from "../schema.js"
+import { Text } from "../util/text.js"
 
 export const MAX_READ_LINES = 2_000
 export const MAX_READ_BYTES = 50 * 1024
@@ -18,7 +19,18 @@ const FIRST_CHUNK = 256 * 1024
 const MAX_LINE_LENGTH = 2_000
 const TREE_BASE = 6
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-export const MEDIA_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"])
+export const MEDIA_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/bmp",
+  "image/webp",
+  "image/avif",
+  "image/heic",
+  "image/heif",
+  "audio/mp4",
+  "application/pdf",
+])
 
 export class BinaryFileError extends Schema.TaggedError<BinaryFileError>()("ReadTool.BinaryFileError", {
   resource: Schema.String,
@@ -119,12 +131,13 @@ export const read = Effect.fn("ReadTool.read")(function* (
   resource: string,
   page: PageInput = {},
 ) {
+  const paging = normalisePage(page)
   const first = yield* files.read(input, { offset: 0, length: FIRST_CHUNK }).pipe(
     Effect.catchTag("Environment.WrongKind", (error) => {
       if (error.actual !== "directory")
         return Effect.fail(new PathKindError({ resource, expected: "a file or directory" }))
       return files.list(input).pipe(
-        Effect.map((entries) => list(entries, page)),
+        Effect.map((entries) => list(entries, paging)),
         Effect.catchTag("Environment.WrongKind", () =>
           Effect.fail(new PathKindError({ resource, expected: "a file or directory" })),
         ),
@@ -162,8 +175,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
   }
 
   if (first.bytes.length >= first.info.size) {
-    const result = textPage(first.bytes, true, page)
-    if (result === undefined) return yield* Effect.die("Read page did not settle for a complete first chunk")
+    const result = textPage(first.bytes, true, paging)
+    if (result === undefined) return yield* Effect.die(new Error("Read page did not settle for a complete first chunk"))
     return yield* makeTextPage(
       input,
       resource,
@@ -173,8 +186,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
     )
   }
 
-  const offset = page.offset || 1
-  const limit = Math.min(page.limit || MAX_READ_LINES, MAX_READ_LINES)
+  const offset = paging.offset
+  const limit = paging.limit
   const leaves = [textLeaf(first.bytes)]
   let bytes = first.bytes.length
   let lines = leaves[0].summary.lines
@@ -221,6 +234,14 @@ export const read = Effect.fn("ReadTool.read")(function* (
     bytes += leaf.summary.bytes
     lines += leaf.summary.lines
   }
+})
+
+const normalisePage = (page: PageInput) => ({
+  offset: page.offset === undefined || !Number.isFinite(page.offset) ? 1 : Math.max(1, Math.trunc(page.offset)),
+  limit:
+    page.limit === undefined || !Number.isFinite(page.limit)
+      ? MAX_READ_LINES
+      : Math.min(Math.max(1, Math.trunc(page.limit)), MAX_READ_LINES),
 })
 
 const readFile = (
@@ -323,8 +344,8 @@ const textPage = (bytes: Uint8Array, eof: boolean, page: PageInput) => {
   return { entries, offset, next, consumed }
 }
 
-const clampLine = (line: string) =>
-  line.length > MAX_LINE_LENGTH ? line.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : line
+export const clampLine = (line: string) =>
+  line.length > MAX_LINE_LENGTH ? Text.truncate(line, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : line
 
 // A trailing newline ends the last line instead of starting an empty one.
 const lineCount = (newlines: number, last: number | undefined) => newlines + (last === undefined || last === 10 ? 0 : 1)

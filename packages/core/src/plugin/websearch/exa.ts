@@ -3,6 +3,7 @@ export * as WebSearchExa from "./exa.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Effect, Schema, Scope } from "effect"
 import { HttpClient } from "effect/http"
+import { ModelRouteLimits } from "../../model-route-limits.js"
 import { WebSearchMcp } from "./mcp.js"
 
 export const endpoint = "https://mcp.exa.ai/mcp"
@@ -68,14 +69,17 @@ function parseResults(text: string) {
     if (!url) return []
     const title = block.match(/^Title:\s*(.+)$/m)?.[1]?.trim()
     const publishedText = block.match(/^Published:\s*(.+)$/m)?.[1]?.trim()
-    const published = publishedText && publishedText !== "N/A" ? Date.parse(publishedText) : undefined
+    // Calendar check via ModelRouteLimits.parseAbsoluteTime (#785): bare Date.parse rolls
+    // calendar-invalid dates (Feb 30 -> Mar 2) into fabricated published instants.
+    const published =
+      publishedText && publishedText !== "N/A" ? ModelRouteLimits.parseAbsoluteTime(publishedText) : undefined
     const content = block.match(/^(?:Highlights|Text):\s*\n?([\s\S]*)$/m)?.[1]?.trim()
     return [
       {
         url,
         ...(title && title !== "N/A" ? { title } : {}),
         ...(content ? { content } : {}),
-        time: { ...(published !== undefined && Number.isFinite(published) ? { published } : {}) },
+        time: { ...(published !== undefined ? { published } : {}) },
       },
     ]
   })

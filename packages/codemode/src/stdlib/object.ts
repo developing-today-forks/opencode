@@ -119,6 +119,9 @@ const restrict = (level: "freeze" | "seal" | "preventExtensions", value: Value):
   return value
 }
 
+/** SetIntegrityLevel(freeze) as a standalone for hosts that install frozen values (library globals). */
+export const freezeValue = (value: Value): Value => restrict("freeze", value)
+
 // TestIntegrityLevel: array elements and `length` answer through `own`, so a non-extensible empty array is sealed
 // but not frozen, as in JS.
 const integrity = (value: Value, frozen: boolean): boolean => {

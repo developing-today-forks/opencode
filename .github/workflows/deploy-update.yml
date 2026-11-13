@@ -1,9 +1,6 @@
 name: deploy-update
 
 on:
-  push:
-    branches:
-      - production
   workflow_dispatch:
 
 concurrency:

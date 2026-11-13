@@ -9,12 +9,23 @@ import { Runtime } from "../../framework/runtime"
 import { ServerConnection } from "../../services/server-connection"
 import { errorMessage } from "../../util/error"
 
+export const MAX_DAYS = 3720
+
+/** The --days ceiling, mirroring the stats service's maximum span
+ * (core SessionStats MaxSpan: 120 x 31-day windows, #959). The flag
+ * schema in commands.ts bounds the same value; this handler check is
+ * the explicit-message path for values that arrive anyway (#1000). */
+export const daysError = (days: number) =>
+  days > MAX_DAYS ? `--days cannot exceed ${MAX_DAYS} (the stats service maximum span); use --all for lifetime statistics` : undefined
+
 const handler = Effect.fn("cli.stats")(function* (input: Runtime.Input<typeof Commands.commands.stats>) {
   const days = Option.getOrUndefined(input.days)
   const year = Option.getOrUndefined(input.year)
   const project = Option.getOrUndefined(input.project)
   if ([days !== undefined, year !== undefined, input.all].filter(Boolean).length > 1)
     yield* Effect.fail(new Error("--days, --year, and --all cannot be combined"))
+  const invalidDays = days === undefined ? undefined : daysError(days)
+  if (invalidDays !== undefined) yield* Effect.fail(new Error(invalidDays))
 
   const server = yield* ServerConnection.resolve({
     server: Option.getOrUndefined(input.server),
@@ -141,7 +152,7 @@ export function renderStats(stats: SessionStatsInfo, options: RenderOptions) {
   return lines.join(EOL)
 }
 
-function statsRange(input: { days?: number; year?: number; all: boolean }) {
+export function statsRange(input: { days?: number; year?: number; all: boolean }) {
   const now = new Date()
   const to = now.getTime() + 1
   if (input.all) return { from: undefined, to, label: "all time" }

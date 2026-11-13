@@ -123,6 +123,82 @@ test("keeps template cost and limits when the proxy omits them", async () => {
   }
 })
 
+test("falls back to template cost for blank and negative pricing", () => {
+  const base = template("hf-base", {
+    cost: [
+      {
+        input: Money.USDPerMillionTokens.make(5),
+        output: Money.USDPerMillionTokens.make(10),
+        cache: { read: Money.USDPerMillionTokens.make(1), write: Money.USDPerMillionTokens.make(2) },
+      },
+    ],
+  })
+
+  const blank = ModalModels.derive(
+    "https://modal.example",
+    [{ id: "blank", hugging_face_id: "hf-base", pricing: { prompt: "", completion: "  ", input_cache_read: "" } }],
+    [base],
+  )
+  expect(blank.get(Model.ID.make("blank"))?.cost[0]).toMatchObject({
+    input: 5,
+    output: 10,
+    cache: { read: 1, write: 2 },
+  })
+
+  const negative = ModalModels.derive(
+    "https://modal.example",
+    [
+      {
+        id: "negative",
+        hugging_face_id: "hf-base",
+        pricing: { prompt: "-0.000003", completion: -0.000004, input_cache_read: "-1" },
+      },
+    ],
+    [base],
+  )
+  expect(negative.get(Model.ID.make("negative"))?.cost[0]).toMatchObject({
+    input: 5,
+    output: 10,
+    cache: { read: 1, write: 2 },
+  })
+
+  const free = ModalModels.derive(
+    "https://modal.example",
+    [{ id: "free", hugging_face_id: "hf-base", pricing: { prompt: "0", completion: 0 } }],
+    [base],
+  )
+  expect(free.get(Model.ID.make("free"))?.cost[0]).toMatchObject({ input: 0, output: 0, cache: { read: 1, write: 2 } })
+})
+
+test("falls back to template cost for radix-spelling pricing", () => {
+  const base = template("hf-base", {
+    cost: [
+      {
+        input: Money.USDPerMillionTokens.make(5),
+        output: Money.USDPerMillionTokens.make(10),
+        cache: { read: Money.USDPerMillionTokens.make(1), write: Money.USDPerMillionTokens.make(2) },
+      },
+    ],
+  })
+
+  const radix = ModalModels.derive(
+    "https://modal.example",
+    [
+      {
+        id: "radix",
+        hugging_face_id: "hf-base",
+        pricing: { prompt: "0x10", completion: "0b101", input_cache_read: "0o17" },
+      },
+    ],
+    [base],
+  )
+  expect(radix.get(Model.ID.make("radix"))?.cost[0]).toMatchObject({
+    input: 5,
+    output: 10,
+    cache: { read: 1, write: 2 },
+  })
+})
+
 test("throws on proxy failure so the plugin can fail soft", async () => {
   const server = Bun.serve({
     port: 0,
@@ -131,6 +207,41 @@ test("throws on proxy failure so the plugin can fail soft", async () => {
 
   try {
     await expect(ModalModels.get(server.url.origin, "test-key", [])).rejects.toThrow()
+  } finally {
+    await server.stop(true)
+  }
+})
+
+
+test("rejects an over-cap Modal models body with a declared length (#1017)", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [], pad: "x".repeat(ModalModels.modelsMaxResponseBytes) }),
+  })
+  try {
+    await expect(ModalModels.load(server.url.origin, "test-key")).rejects.toThrow(
+      `Modal models response from ${server.url.origin}/models exceeded ${ModalModels.modelsMaxResponseBytes} bytes`,
+    )
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test("rejects a streamed over-cap Modal models body in flight (#1017)", async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(120)
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunk)
+    },
+  })
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(stream, { headers: { "content-type": "application/json" } }),
+  })
+  try {
+    await expect(ModalModels.load(server.url.origin, "test-key")).rejects.toThrow(
+      `Modal models response from ${server.url.origin}/models exceeded ${ModalModels.modelsMaxResponseBytes} bytes`,
+    )
   } finally {
     await server.stop(true)
   }

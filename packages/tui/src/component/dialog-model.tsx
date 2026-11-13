@@ -10,6 +10,7 @@ import { useData } from "../context/data"
 import { modelPreferenceKey } from "../model-preference"
 import { useLocation } from "../context/location"
 import { useNewDesigns } from "../config"
+import { isWildcardSearch, matchesWildcardSearch } from "./model-search"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
@@ -69,6 +70,22 @@ export function DialogModel(props: { providerID?: string }) {
       models()
         .filter((model) => model.status !== "deprecated")
         .filter((model) => (props.providerID ? model.providerID === props.providerID : true))
+        // Hidden models (#230) are absent from the picker unless the search is
+        // the model's exact full name or a matching wildcard pattern;
+        // favorites/recents above are explicit user choices and keep working.
+        .filter((model) => {
+          if (!model.hidden) return true
+          const search = needle.toLowerCase()
+          if (!search) return false
+          const provider = providers().get(model.providerID)
+          const values = [
+            model.name,
+            String(model.id),
+            `${model.providerID}/${model.id}`,
+            `${provider?.name ?? model.providerID}/${model.name}`,
+          ]
+          return values.map((value) => value.toLowerCase()).includes(search) || matchesWildcardSearch(needle, values)
+        })
         .map((model) => {
           const provider = providers().get(model.providerID)
           const key = modelPreferenceKey({ providerID: model.providerID, modelID: model.id })
@@ -77,6 +94,11 @@ export function DialogModel(props: { providerID?: string }) {
             value: { providerID: model.providerID, modelID: model.id },
             providerID: model.providerID,
             providerName: provider?.name ?? model.providerID,
+            // The full reference is a fuzzy key too (#230): an exact-name search
+            // for a hidden model (`provider/model`) must survive this stage,
+            // not just the hidden filter above.
+            reference: `${model.providerID}/${model.id}`,
+            qualifiedName: `${provider?.name ?? model.providerID}/${model.name}`,
             title: model.name,
             releaseDate: model.time.released,
             description: favorite ? "(Favorite)" : undefined,
@@ -105,13 +127,16 @@ export function DialogModel(props: { providerID?: string }) {
     )
 
     if (needle) {
-      return prioritizeFavorites(
-        sortModelOptions(
-          fuzzysort.go(needle, modelOptions, { keys: ["title", "category"] }).map((item) => item.obj),
-          false,
-        ),
-        favoritePriority,
-      )
+      // Wildcard searches (#230) match with the shared glob rule instead of
+      // fuzzysort, so app and TUI pickers return the same results.
+      const matched = isWildcardSearch(needle)
+        ? modelOptions.filter((option) =>
+            matchesWildcardSearch(needle, [option.title, option.reference, option.qualifiedName]),
+          )
+        : fuzzysort
+            .go(needle, modelOptions, { keys: ["title", "category", "reference", "qualifiedName"] })
+            .map((item) => item.obj)
+      return prioritizeFavorites(sortModelOptions(matched, false), favoritePriority)
     }
 
     return [...favoriteOptions, ...recentOptions, ...modelOptions]

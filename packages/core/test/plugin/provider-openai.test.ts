@@ -2,7 +2,7 @@ import { Money } from "@opencode/schema/money"
 import { Agent } from "@opencode/schema/agent"
 import { Session } from "@opencode/core/session"
 import { OpenAIResponses } from "@opencode/ai/protocols/openai-responses"
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { DateTime, Effect } from "effect"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
@@ -12,7 +12,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { GithubCopilotPlugin } from "@opencode/core/plugin/provider/github-copilot"
-import { OpenAIPlugin } from "@opencode/core/plugin/provider/openai"
+import { deviceIntervalMs, OpenAIPlugin } from "@opencode/core/plugin/provider/openai"
 import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -65,6 +65,20 @@ const request = Effect.fn(function* (
 })
 
 describe("OpenAIPlugin", () => {
+  test("parses the device interval only as a plain unsigned decimal integer (#771)", () => {
+    expect(deviceIntervalMs("5")).toBe(5000)
+    expect(deviceIntervalMs("10")).toBe(10_000)
+    expect(deviceIntervalMs("1")).toBe(1000)
+    expect(deviceIntervalMs("0")).toBe(5000)
+    // Malformed spellings take the 5-second fallback instead of being
+    // reinterpreted (parseInt("0x10") polled every 16 seconds).
+    for (const spelling of ["1e1", "0x10", "5junk", "2.9"]) expect(deviceIntervalMs(spelling)).toBe(5000)
+    // An oversized or unit-confused interval is clamped to the 60-second
+    // ceiling instead of outlasting the login attempt (#941).
+    expect(deviceIntervalMs("600")).toBe(60_000)
+    expect(deviceIntervalMs("999999")).toBe(60_000)
+  })
+
   it.effect("registers browser and headless ChatGPT OAuth methods", () =>
     Effect.gen(function* () {
       yield* addPlugin()

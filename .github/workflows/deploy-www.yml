@@ -1,10 +1,6 @@
 name: deploy-www
 
 on:
-  push:
-    branches:
-      - dev
-      - production
   workflow_dispatch:
 
 concurrency:

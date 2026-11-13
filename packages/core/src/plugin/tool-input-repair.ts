@@ -76,6 +76,14 @@ function repair(value: unknown, schema: JsonSchema.JsonSchema, root: JsonSchema.
 
   if (schema.type === "number" || schema.type === "integer") {
     if (typeof value !== "string" || value.trim() === "") return value
+    // Only a plain decimal spelling is a stringified decimal: optional leading
+    // "-", digits, and (for number) an optional fraction. Number() alone is too
+    // wide - it reinterprets hex/binary/octal/exponent spellings ("0x10" -> 16,
+    // "1e3" -> 1000) and other spellings ("+42", "5.", " 42 ") the model never
+    // wrote as decimals, so those are left unrepaired for schema validation to
+    // report them.
+    const decimal = schema.type === "integer" ? /^-?\d+$/ : /^-?\d+(?:\.\d+)?$/
+    if (!decimal.test(value)) return value
     const parsed = Number(value)
     return Number.isFinite(parsed) && (schema.type !== "integer" || Number.isSafeInteger(parsed)) ? parsed : value
   }

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { FormFields } from "@opencode/client"
-import { answerForm } from "../src/commands/handlers/auth/form"
+import { formNumberText } from "@opencode/tui/util/form"
+import { answerForm, validateText } from "../src/commands/handlers/auth/form"
 
 test("resolves hidden defaults without an interactive terminal", async () => {
   const fields = [
@@ -20,6 +21,44 @@ test("resolves hidden defaults without an interactive terminal", async () => {
     enabled: false,
     count: 0,
   })
+})
+
+test("validateText applies the strict decimal grammar to numeric answers (#844)", () => {
+  const count = { type: "integer", key: "count", required: true } satisfies FormFields[number]
+  expect(validateText(count, "")).toBe("Required")
+  expect(validateText(count, " ")).toBe("Required")
+  expect(validateText(count, "0x10")).toBe("Expected a number")
+  expect(validateText(count, "0b101")).toBe("Expected a number")
+  expect(validateText(count, "1e3")).toBe("Expected a number")
+  expect(validateText(count, "1.5")).toBe("Expected an integer")
+  expect(validateText(count, "42")).toBeUndefined()
+  expect(validateText(count, "-3")).toBeUndefined()
+  const rate = { type: "number", key: "rate" } satisfies FormFields[number]
+  expect(validateText(rate, " ")).toBeUndefined()
+  expect(validateText(rate, "0o17")).toBe("Expected a number")
+  expect(validateText(rate, "1.5")).toBeUndefined()
+})
+
+test("validateText rejects calendar-invalid named-form date-time answers (#1003)", () => {
+  const when = { type: "string", key: "when", format: "date-time" } satisfies FormFields[number]
+  expect(validateText(when, "Feb 30 2026")).toBe("Expected a date and time")
+  expect(validateText(when, "30 Feb 2026")).toBe("Expected a date and time")
+  expect(validateText(when, "Feb 28 2026 24:00")).toBe("Expected a date and time")
+  expect(validateText(when, "Jan 5 2026")).toBeUndefined()
+  expect(validateText(when, "Wed, 21 Oct 2015 07:28:00 GMT")).toBeUndefined()
+})
+
+test("renders exponent-notation defaults as plain-decimal text validateText accepts (#1065)", () => {
+  // The CLI auth form pre-fills a numeric default with formNumberText, the
+  // shared helper from the TUI form utils; the rendered text must pass the
+  // same validateText the prompt runs, while the raw exponent spelling
+  // a user might type stays rejected.
+  const rate = { type: "number", key: "rate", required: true } satisfies FormFields[number]
+  expect(formNumberText(1e-7)).toBe("0.0000001")
+  expect(formNumberText(1e21)).toBe("1000000000000000000000")
+  expect(validateText(rate, formNumberText(1e-7))).toBeUndefined()
+  expect(validateText(rate, formNumberText(1e21))).toBeUndefined()
+  expect(validateText(rate, "1e-7")).toBe("Expected a number")
 })
 
 test("parses typed answers and evaluates conditions in form order", async () => {
@@ -79,6 +118,21 @@ const invalidAnswers: { fields: FormFields | undefined; supplied: string[]; erro
   { fields: [{ type: "integer", key: "count" }], supplied: ["count=1.5"], error: "Expected an integer" },
   { fields: [{ type: "boolean", key: "enabled" }], supplied: ["enabled=yes"], error: "Expected a JSON value" },
   {
+    fields: [{ type: "string", key: "when", format: "date-time" }],
+    supplied: ["when=2026-02-30T10:00:00Z"],
+    error: "Expected a date and time",
+  },
+  {
+    fields: [{ type: "string", key: "when", format: "date-time" }],
+    supplied: ["when=2025-02-29T10:00:00Z"],
+    error: "Expected a date and time",
+  },
+  {
+    fields: [{ type: "string", key: "when", format: "date-time" }],
+    supplied: ["when=2026-01-01T24:00:00Z"],
+    error: "Expected a date and time",
+  },
+  {
     fields: [{ type: "string", key: "server", format: "uri", hidden: true }],
     supplied: ["server=not a URL"],
     error: "Expected a URL",
@@ -102,4 +156,14 @@ const invalidAnswers: { fields: FormFields | undefined; supplied: string[]; erro
 
 test.each(invalidAnswers)("rejects invalid form answers: $error", async (input) => {
   await expect(Effect.runPromise(answerForm(input.fields, input.supplied))).rejects.toThrow(input.error)
+})
+
+test("accepts valid date-time form answers", async () => {
+  const fields = [{ type: "string", key: "when", format: "date-time" }] satisfies FormFields
+  expect(await Effect.runPromise(answerForm(fields, ["when=2024-02-29T10:00:00Z"]))).toEqual({
+    when: "2024-02-29T10:00:00Z",
+  })
+  expect(await Effect.runPromise(answerForm(fields, ["when=2026-01-01T10:00:00+05:00"]))).toEqual({
+    when: "2026-01-01T10:00:00+05:00",
+  })
 })

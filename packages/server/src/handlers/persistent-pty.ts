@@ -6,13 +6,13 @@ import {
   PTY_CONNECT_TOKEN_HEADER,
   PTY_CONNECT_TOKEN_HEADER_VALUE,
 } from "@opencode/protocol/groups/persistent-pty"
-import { Effect, Queue } from "effect"
+import { Effect } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
-import { type Outbound, runPtySocket } from "./pty-socket"
+import { makePtyOutbox, runPtySocket } from "./pty-socket"
 
 export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experimental", (handlers) =>
   Effect.gen(function* () {
@@ -123,7 +123,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
           if (!Number.isSafeInteger(cursor) || cursor < 0) return HttpServerResponse.empty({ status: 400 })
 
           const socket = yield* Effect.orDie(ctx.request.upgrade)
-          const outbox = yield* Queue.unbounded<Outbound>()
+          const outbox = yield* makePtyOutbox()
           let attachment: PersistentPty.Attachment | undefined
           // Bun's native ws upgrade must start before asynchronous daemon I/O.
           const onOpen = Effect.gen(function* () {
@@ -134,16 +134,14 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 role,
                 takeover: url.searchParams.get("takeover") === "true",
                 onEvent: (event) => {
-                  if (event.type === "output") Queue.offerUnsafe(outbox, event.data)
+                  if (event.type === "output") void outbox.offer(event.data)
                   if (event.type === "resized")
-                    Queue.offerUnsafe(
-                      outbox,
+                    void outbox.offer(
                       JSON.stringify({ ...event, checkpoint: Buffer.from(event.checkpoint).toString("base64") }),
                     )
-                  if (event.type !== "output" && event.type !== "resized")
-                    Queue.offerUnsafe(outbox, JSON.stringify(event))
+                  if (event.type !== "output" && event.type !== "resized") void outbox.offer(JSON.stringify(event))
                 },
-                onEnd: () => Queue.offerUnsafe(outbox, new Socket.CloseEvent(1000)),
+                onEnd: () => void outbox.offer(new Socket.CloseEvent(1000)),
               })
               .pipe(
                 Effect.catchTags({
@@ -152,12 +150,11 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 }),
               )
             if (!attachment) {
-              Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "terminal unavailable"))
+              void outbox.offer(new Socket.CloseEvent(4404, "terminal unavailable"))
               return
             }
 
-            Queue.offerUnsafe(
-              outbox,
+            void outbox.offer(
               JSON.stringify({
                 type: "attached",
                 attachmentID,
@@ -173,17 +170,16 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 },
               }),
             )
-            if (attachment.replay.data.length > 0) Queue.offerUnsafe(outbox, attachment.replay.data)
-            Queue.offerUnsafe(
-              outbox,
-              JSON.stringify({ type: "replay_complete", endOffset: attachment.replay.endOffset }),
-            )
+            if (attachment.replay.data.length > 0) void outbox.offer(attachment.replay.data)
+            void outbox.offer(JSON.stringify({ type: "replay_complete", endOffset: attachment.replay.endOffset }))
             attachment.activate()
           })
 
           yield* runPtySocket({
             socket,
-            outbox,
+            outbox: outbox.queue,
+            onDequeued: outbox.release,
+            onOverflow: outbox.whenOverflowed,
             onOpen,
             onMessage: (message) => {
               if (!attachment) return Effect.void

@@ -8,6 +8,7 @@ import { Context, Effect, FiberMap, Layer, Option, PubSub, Ref, Schema, Semaphor
 import { Directory, Document, Info, type Patch, type Entry, Event } from "@opencode/schema/config"
 import { ephemeral } from "@opencode/schema/event"
 import { Credential } from "./credential.js"
+import { CodexSync } from "./credential/codex-sync.js"
 import { Bus } from "./bus.js"
 import { Watcher } from "./filesystem/watcher.js"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -431,24 +432,39 @@ export const layer = (options?: Options) =>
       )
       yield* reloadLock.withPermit(reconcile(initial))
 
+      const writePatch = Effect.fnUntraced(function* (filepath: string, patch: Patch) {
+        const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
+        const updated = yield* Effect.try({
+          try: () =>
+            applyEdits(
+              text,
+              modify(text, ["shell"], patch.shell ?? undefined, {
+                formattingOptions: { tabSize: 2, insertSpaces: true },
+              }),
+            ),
+          catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
+        })
+        // Atomic replace via the shared #1345 contract: a crash mid-write never
+        // leaves the user config truncated, a symlinked config keeps its link
+        // and its mode, and a fresh file is created at 0o600 (#998).
+        yield* fs.writeAtomic(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+      })
+
       const update = Effect.fn("Config.update")(
         function* (patch: Patch) {
+          // When an explicit config file is configured (OPENCODE_CONFIG), it is
+          // the runtime-writable layer: patches land there, so the global config
+          // file can stay a deliberate, tracked default (developing-today/code#4544).
+          if (initial.explicit) {
+            yield* writePatch(initial.explicit, patch)
+            yield* requestReload
+            return
+          }
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
           const filepath =
             (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
-          const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
-          const updated = yield* Effect.try({
-            try: () =>
-              applyEdits(
-                text,
-                modify(text, ["shell"], patch.shell ?? undefined, {
-                  formattingOptions: { tabSize: 2, insertSpaces: true },
-                }),
-              ),
-            catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
-          })
-          yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
+          yield* writePatch(filepath, patch)
           yield* requestReload
         },
         (effect) => updateLock.withPermit(effect),
@@ -481,6 +497,7 @@ export function configured(options?: Options) {
       Global.node,
       Location.node,
       Credential.node,
+      CodexSync.loopNode,
       WellKnown.node,
       AppProcess.node,
     ],

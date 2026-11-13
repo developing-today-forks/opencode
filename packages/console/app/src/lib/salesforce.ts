@@ -2,6 +2,49 @@ import { Resource } from "@opencode/console-resource"
 import { z } from "zod"
 import { consoleAccountFields, type ConsoleAccount } from "./console-account"
 
+/**
+ * Bounds for the Salesforce login/lead fetches. The 8s timeout matches the
+ * in-file salesforceRequest() precedent; the 1 MiB cap bounds the token and
+ * error body reads below while login()/createLead() consume them
+ * (#1097, outbound-HTTP deadline-and-cap family #1127).
+ */
+export const SALESFORCE_REQUEST_TIMEOUT_MS = 8000
+export const SALESFORCE_MAX_RESPONSE_BYTES = 1024 * 1024
+
+/** Read a Salesforce response body with a hard size cap; an over-cap read cancels the body and throws. */
+async function readCappedBody(response: Response): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > SALESFORCE_MAX_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error(`Salesforce response exceeded ${SALESFORCE_MAX_RESPONSE_BYTES} bytes`)
+  }
+  if (!response.body) throw new Error("Salesforce response had no body")
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > SALESFORCE_MAX_RESPONSE_BYTES) {
+      await reader.cancel().catch(() => undefined)
+      throw new Error(`Salesforce response exceeded ${SALESFORCE_MAX_RESPONSE_BYTES} bytes`)
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
+}
+
+async function readCappedBodyText(response: Response): Promise<string> {
+  return new TextDecoder().decode(await readCappedBody(response))
+}
+
 // Match provider domains exactly; business domains hosted by these providers remain business addresses.
 const personalEmailDomains = new Set([
   "gmail.com",
@@ -65,6 +108,7 @@ async function login() {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params.toString(),
+    signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
   }).catch((err) => {
     console.error("Failed to fetch Salesforce access token:", err)
   })
@@ -72,11 +116,20 @@ async function login() {
   if (!res) return
 
   if (!res.ok) {
-    console.error("Failed to fetch Salesforce access token:", res.status, await res.text())
+    const body = await readCappedBodyText(res).catch((err) => {
+      console.error("Failed to read Salesforce error response body:", err)
+      return "<unreadable response body>"
+    })
+    console.error("Failed to fetch Salesforce access token:", res.status, body)
     return
   }
 
-  const data = (await res.json()) as { access_token?: string; instance_url?: string }
+  const data = await readCappedBodyText(res)
+    .then((text) => JSON.parse(text) as { access_token?: string; instance_url?: string } | undefined)
+    .catch((err) => {
+      console.error("Failed to read Salesforce access token response:", err)
+    })
+  if (!data) return
   if (!data.access_token) {
     console.error("Salesforce auth response did not include an access token")
     return
@@ -125,6 +178,7 @@ export async function createLead(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(SALESFORCE_REQUEST_TIMEOUT_MS),
   }).catch((err) => {
     console.error("Failed to create Salesforce lead:", err)
   })
@@ -132,7 +186,11 @@ export async function createLead(
   if (!res) return false
 
   if (!res.ok) {
-    console.error("Failed to create Salesforce lead:", res.status, await res.text())
+    const body = await readCappedBodyText(res).catch((err) => {
+      console.error("Failed to read Salesforce error response body:", err)
+      return "<unreadable response body>"
+    })
+    console.error("Failed to create Salesforce lead:", res.status, body)
     return false
   }
 

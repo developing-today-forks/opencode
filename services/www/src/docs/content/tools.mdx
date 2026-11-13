@@ -199,8 +199,11 @@ Ask the explore subagent to map the authentication flow and return the key files
 Foreground calls wait for the result. `background: true` returns immediately
 and notifies the parent when the child finishes. Pass the returned `sessionID`
 to continue that same child conversation. Only subagent-mode agents can be
-used. A subagent can launch its own subagents up to five levels deep, always in
-the foreground; [Nested subagents](/agents#nested-subagents) explains the limit.
+used. A subagent can launch its own subagents up to five levels deep, in the
+foreground or the background; [Nested subagents](/agents#nested-subagents) explains the limit.
+Background launches accept `stopPolicy`: `independent` (default), `cascade`, or `detached`.
+Interrupting the parent stops cascade children; detached children need force-stop.
+See [Stop policies](/agents#stop-policies).
 
 Permission: `subagent` with the selected agent ID as its resource.
 

@@ -25,6 +25,45 @@ const CurrentHeaders = Context.Reference<RpcCallOptions["headers"]>("@opencode/c
   defaultValue: () => undefined,
 })
 
+// Async iterators throw a squashed cause; retain the native typed failures and defects intact.
+export class EventFailure {
+  constructor(readonly cause: Cause.Cause<EventFrameError>) {}
+}
+
+/**
+ * Whether a failed event-stream attempt may be retried (#2321). Transport
+ * failures and server-side (5xx) HTTP errors are transient; terminal
+ * protocol/decode failures and the declared non-retryable HTTP errors
+ * (400/401, which arrive as their decoded error objects, not ClientError)
+ * stay visible instead of being retried. Anything unrecognised is
+ * terminal: an unknown failure is reported, never looped on.
+ */
+export function eventErrorRetryable(error: unknown): boolean {
+  if (!(error instanceof EventFailure)) return false
+  const failure = Cause.findErrorOption(error.cause)
+  if (failure._tag === "None") return false
+  const value = failure.value
+  if (!(value instanceof ClientError)) return false
+  const cause: unknown = value.cause
+  if (!HttpClientError.isHttpClientError(cause)) return false
+  switch (cause.reason._tag) {
+    case "TransportError":
+      return true
+    case "StatusCodeError":
+      return cause.reason.response.status >= 500
+    case "DecodeError":
+      // failStatus reports an undeclared status as a DecodeError carrying
+      // the response: a 5xx there is a transient server failure, while a
+      // DecodeError on a 200 response stays a terminal protocol failure.
+      return cause.reason.response.status >= 500
+    default:
+      return false
+  }
+}
+
+// Bounded exponential backoff for event reconnects: 250ms doubling to a 5s cap.
+const eventReconnectDelay = (attempt: number) => Math.min(250 * 2 ** (attempt - 1), 5_000)
+
 export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly baseUrl?: URL | string }) {
   const httpClient = yield* HttpClient.HttpClient
   const raw = yield* OpenCode.make(options).pipe(
@@ -38,25 +77,35 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
     ),
   )
   const context = yield* Effect.context()
+  const connect = (input: Parameters<typeof raw.server.connect>[0]) =>
+    Effect.map(CurrentHeaders, (headers) => {
+      const withAccept = new Headers(headers)
+      if (!withAccept.has("accept")) withAccept.set("accept", "application/json")
+      return Object.fromEntries(withAccept)
+    }).pipe(
+      Effect.flatMap((headers) =>
+        raw.server.connect(input).pipe(Effect.provideService(CurrentHeaders, headers)),
+      ),
+    )
   // Same base URL handling as the generated client, which the event stream bypasses to keep SSE ids.
   const eventClient =
     options?.baseUrl === undefined
       ? httpClient
       : HttpClient.mapRequest(httpClient, HttpClientRequest.prependUrl(options.baseUrl.toString()))
-  // Async iterators throw a squashed cause; retain the native typed failures and defects intact.
-  class EventFailure {
-    constructor(readonly cause: Cause.Cause<EventFrameError>) {}
-  }
   // The cursor outlives any one subscription, so a subscribe after a failure resumes from the last event consumed.
   let lastEventID: string | undefined
-  const shared = SharedEvents.make((signal, onActivity, resume) =>
-    Stream.toAsyncIterableWith(
-      eventFrames(eventClient, { lastEventID: resume.lastEventID, onEventId: resume.onEventId, onActivity }).pipe(
-        Stream.interruptWhen(RpcClientRuntime.aborted(signal)),
-        Stream.catchCause((cause) => Stream.fail(new EventFailure(cause))),
+  const shared = SharedEvents.make(
+    (signal, onActivity, resume) =>
+      Stream.toAsyncIterableWith(
+        eventFrames(eventClient, { lastEventID: resume.lastEventID, onEventId: resume.onEventId, onActivity }).pipe(
+          Stream.interruptWhen(RpcClientRuntime.aborted(signal)),
+          Stream.catchCause((cause) => Stream.fail(new EventFailure(cause))),
+        ),
+        context,
       ),
-      context,
-    ),
+    // Transient failures and unexpected stream ends reconnect automatically
+    // with bounded backoff (#2321); terminal failures complete subscribers.
+    { reconnect: { shouldRetry: eventErrorRetryable, delay: eventReconnectDelay } },
   )
   const subscribe = (input?: EventSubscribeInput) => {
     lastEventID = input?.["last-event-id"] ?? lastEventID
@@ -76,6 +125,7 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
   }
   return {
     ...raw,
+    server: { ...raw.server, connect },
     event: { ...raw.event, subscribe },
     rpc: Object.assign(
       RpcClientRuntime.make(

@@ -3,6 +3,7 @@ import { Project } from "@opencode/core/project"
 import { Worktree } from "@opencode/core/worktree"
 import { Bus } from "@opencode/core/bus"
 import { Plugin } from "@opencode/core/plugin"
+import { PluginVcsBranchList } from "@opencode/core/plugin/vcs/branch-list"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { ConflictError, InvalidRequestError, ServiceUnavailableError } from "@opencode/protocol/errors"
@@ -84,7 +85,7 @@ export const VcsHandler = HttpApiBuilder.group(Api, "server.vcs", (handlers) =>
         response(
           Effect.gen(function* () {
             const vcs = yield* Vcs.Service
-            return yield* vcs.branches({ search: ctx.query.search, limit: Math.min(ctx.query.limit ?? 50, 100) })
+            return yield* vcs.branches({ search: ctx.query.search, limit: PluginVcsBranchList.branchListLimit(ctx.query.limit) })
           }),
         ),
       )

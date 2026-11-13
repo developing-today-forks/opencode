@@ -4,6 +4,7 @@ import { Effect, Ref, Schema } from "effect"
 import { FileSystem } from "effect"
 import { HttpClientRequest } from "effect/http"
 import { AIError, Media, Message } from "../src/index.js"
+import { fileMediaType, mediaTypeExtension } from "../src/utils/media-type.js"
 import { it } from "./lib/effect.js"
 import { dynamicResponse, scriptedResponses } from "./lib/http.js"
 
@@ -67,12 +68,59 @@ describe("Media", () => {
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xfb, 0x90, 0x64]))).toBe("audio/mpeg")
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xf3, 0x90, 0x64]))).toBe("audio/mpeg")
       expect(Media.detectMediaType(Uint8Array.from([0xff, 0xf1, 0x50, 0x80]))).toBe("audio/aac")
+      // UTF-16 BOMs are text, not frame sync (#2151): the LE BOM FF FE passes the two-byte sync test, so both
+      // BOM prefixes are excluded and fileMediaType falls back to the text extension.
+      const utf16le = Uint8Array.from([0xff, 0xfe, 0x48, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f, 0x00])
+      const utf16be = Uint8Array.from([0xfe, 0xff, 0x00, 0x48, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x6f])
+      expect(Media.detectMediaType(utf16le)).toBeUndefined()
+      expect(Media.detectMediaType(utf16be)).toBeUndefined()
+      expect(fileMediaType(utf16le, "notes.txt")).toBe("text/plain")
+      expect(fileMediaType(utf16be, "notes.txt")).toBe("text/plain")
       expect(Media.detectMediaType(new TextEncoder().encode("RIFF\0\0\0\0WAVEfmt "))).toBe("audio/wav")
       expect(Media.detectMediaType(new TextEncoder().encode("OggS\0\x02"))).toBe("audio/ogg")
       expect(Media.detectMediaType(new TextEncoder().encode("fLaC\0\0\0\x22"))).toBe("audio/flac")
       expect(Media.bytes(PNG).mediaType).toBe("image/png")
       expect(Media.bytes(Uint8Array.from([1, 2, 3])).mediaType).toBe("application/octet-stream")
       expect(Media.bytes(Uint8Array.from([1, 2, 3]), "image/x-custom").mediaType).toBe("image/x-custom")
+    }),
+  )
+
+  it.effect("dispatches ISO-BMFF media types on the ftyp major brand (#2127)", () =>
+    Effect.sync(() => {
+      const ftyp = (brand: string) => {
+        const bytes = new Uint8Array(16)
+        bytes.set([0, 0, 0, 24])
+        bytes.set(new TextEncoder().encode("ftyp"), 4)
+        bytes.set(new TextEncoder().encode(brand), 8)
+        return bytes
+      }
+      expect(Media.detectMediaType(ftyp("isom"))).toBe("video/mp4")
+      expect(Media.detectMediaType(ftyp("mp42"))).toBe("video/mp4")
+      expect(Media.detectMediaType(ftyp("M4A "))).toBe("audio/mp4")
+      expect(Media.detectMediaType(ftyp("M4B "))).toBe("audio/mp4")
+      expect(Media.detectMediaType(ftyp("avif"))).toBe("image/avif")
+      expect(Media.detectMediaType(ftyp("avis"))).toBe("image/avif")
+      expect(Media.detectMediaType(ftyp("heic"))).toBe("image/heic")
+      expect(Media.detectMediaType(ftyp("heix"))).toBe("image/heic")
+      expect(Media.detectMediaType(ftyp("mif1"))).toBe("image/heif")
+      expect(Media.detectMediaType(ftyp("zzzz"))).toBeUndefined()
+      expect(fileMediaType(ftyp("M4A "), "song.m4a")).toBe("audio/mp4")
+      expect(fileMediaType(ftyp("avif"), "photo.avif")).toBe("image/avif")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "photo.avif")).toBe("image/avif")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "photo.heic")).toBe("image/heic")
+    }),
+  )
+
+  it.effect("does not read media-type lookups through the prototype chain", () =>
+    Effect.sync(() => {
+      for (const name of ["constructor", "__proto__", "toString"]) {
+        expect(mediaTypeExtension(name)).toBeUndefined()
+        expect(fileMediaType(Uint8Array.from([1, 2, 3]), `file.${name}`)).toBeUndefined()
+      }
+      expect(mediaTypeExtension("audio/mp3")).toBe("mp3")
+      expect(mediaTypeExtension("audio/wav")).toBe("wav")
+      expect(mediaTypeExtension("image/png")).toBe("png")
+      expect(fileMediaType(Uint8Array.from([1, 2, 3]), "notes.txt")).toBe("text/plain")
     }),
   )
 
@@ -208,6 +256,62 @@ describe("Media", () => {
       expect(error.reason.http?.status).toBe(404)
       expect(error.reason.http?.url).toBe("https://cdn.example.test/expired.png")
       expect(error.reason.body).toBe(body)
+    }),
+  )
+
+  it.effect("rejects url downloads over the size cap, declared or streamed", () =>
+    Effect.gen(function* () {
+      const asset = Media.url("https://cdn.example.test/huge.png")
+      // The declared-size rejection must abort the response, not leave it downloading:
+      // the stub body's cancel callback records whether the reader was cancelled.
+      let declaredCancelled = false
+      const declared = yield* asset.bytes().pipe(
+        Effect.flip,
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.succeed(
+              input.respond(
+                new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(new TextEncoder().encode("small"))
+                  },
+                  cancel() {
+                    declaredCancelled = true
+                  },
+                }),
+                {
+                  headers: { "content-length": String(Media.MAX_DOWNLOAD_BYTES + 1) },
+                },
+              ),
+            ),
+          ),
+        ),
+      )
+      expect(declared).toBeInstanceOf(AIError)
+      expect(declaredCancelled).toBe(true)
+      expect(declared.reason._tag).toBe("InvalidProviderOutput")
+      expect(declared.message).toContain("too large")
+
+      const chunk = new Uint8Array(Media.MAX_DOWNLOAD_BYTES + 1)
+      const streamed = yield* asset.bytes().pipe(
+        Effect.flip,
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.succeed(
+              input.respond(
+                new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(chunk)
+                    controller.close()
+                  },
+                }),
+              ),
+            ),
+          ),
+        ),
+      )
+      expect(streamed).toBeInstanceOf(AIError)
+      expect(streamed.message).toContain("too large")
     }),
   )
 

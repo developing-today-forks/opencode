@@ -319,6 +319,7 @@ export class Interpreter<R> {
   /** Template objects by site: a tag sees the same `strings` array every time its literal is evaluated, as in JS. */
   readonly templates = new WeakMap<TaggedTemplateExpression, Arr>()
   private readonly root: Frame<R>
+  private readonly globalScope: Map<string, Binding>
 
   constructor(options: {
     readonly tools: ToolRuntime<R>
@@ -333,11 +334,17 @@ export class Interpreter<R> {
     this.logs = options.logs ?? []
     // Program code has no receiver: top-level `this` is undefined, as in a module.
     const globalScope = new Map<string, Binding>([["this", { mutable: false, value: undefined }]])
+    this.globalScope = globalScope
     // Calling back into the program never reads frame state, so any frame serves; the root is always alive.
     this.root = new Frame(this, new ScopeStack([globalScope]))
     for (const [name, value] of [...globals(this), ...(options.globals?.(this) ?? [])]) {
       globalScope.set(name, { mutable: false, value })
     }
+  }
+
+  /** Binds one frozen library global after construction; library names are validated at `make`. */
+  defineGlobal(name: string, value: Value): void {
+    this.globalScope.set(name, { mutable: false, value })
   }
 
   run(program: Program): Effect.Effect<Value, unknown, R> {

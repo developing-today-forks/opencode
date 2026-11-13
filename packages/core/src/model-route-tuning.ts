@@ -22,10 +22,30 @@ export interface Input {
 
 const median = (values: readonly number[]) => {
   const sorted = values.toSorted((left, right) => left - right)
-  return sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]
+  if (sorted.length === 0) return undefined
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
 }
 
 const targetKey = (providerID: string, modelID: string) => `${providerID}/${modelID}`
+
+/** The furthest out a stated quota reset may skip a target. Provider error text is untrusted
+ * input, and a user note is only a hint: a reset stated further than this — a year-9999
+ * timestamp, "in 100000 days" — is a runaway value, not a schedule, so it is bounded to this
+ * ceiling instead of benching the target effectively forever (or, past the Date range,
+ * throwing when the instant is rendered). Resets within the ceiling are honoured as written.
+ * The default is today's behavior; the value in force follows the quota gate
+ * (ModelRoute.currentConstants().quotaGate.maxMs), so a non-default gate ceiling moves the
+ * tuning predictions with it instead of silently disagreeing. */
+export const MAX_QUOTA_RESET_MS = 30 * 86_400_000
+
+/** The quota-reset ceiling in force: an explicit override wins, otherwise the configured
+ * quota-gate ceiling, which is the single source of truth both the gate and the tuning
+ * predictions bound stated resets by. */
+export const quotaResetCeilingMs = (override?: number, location?: string): number => {
+  if (override !== undefined) return override
+  return ModelRoute.currentConstants(location).quotaGate.maxMs
+}
 
 export const suggest = (input: Input): ModelRoute.Adjustment[] => {
   const minAttempts = input.minAttempts ?? 5
@@ -102,10 +122,17 @@ export const predict = (input: {
   readonly minHourlyAttempts?: number
   readonly hourRatio?: number
   readonly minHourlySamples?: number
+  /** Overrides the quota-reset ceiling; defaults to the configured quota-gate ceiling. */
+  readonly maxResetMs?: number
+  /** The Location directory whose quota gate judges the ceiling (#1461): without it the
+   * unscoped read falls back to the defaults when several Locations are registered,
+   * instead of borrowing whichever Location registered last. */
+  readonly location?: string
 }): Prediction[] => {
   const minAttempts = input.minHourlyAttempts ?? 5
   const ratio = input.hourRatio ?? 2
   const minSamples = input.minHourlySamples ?? 3
+  const maxResetMs = quotaResetCeilingMs(input.maxResetMs, input.location)
   const hour = new Date(input.now).getUTCHours()
   const result: Prediction[] = []
   const byTarget = new Map<string, HourlyStat[]>()
@@ -134,14 +161,23 @@ export const predict = (input: {
   }
   for (const error of input.errors) {
     const target = `${error.providerID}/${error.modelID}`
-    const reset = ModelRouteLimits.resetAtFromMessage(error.lastMessage ?? undefined, input.now)
-    if (!reset) continue
+    const stated = ModelRouteLimits.resetAtFromMessage(error.lastMessage ?? undefined, input.now)
+    if (!stated) continue
+    // Bound before the detail is built: an out-of-Date-range stated reset would throw in
+    // toISOString and void the whole review, and a merely absurd one would bench the target.
+    const ceiling = input.now + maxResetMs
+    const capped = stated > ceiling
+    const reset = capped ? ceiling : stated
     const prior = result.find((entry) => entry.target === target)
     if (prior) continue
     result.push({
       target,
       state: "quota-reset",
-      detail: `provider message says the quota returns ${new Date(reset).toISOString()}`,
+      // Say which it is: route_stats shows this line, so a capped prediction must not read as
+      // the provider's own stated reset.
+      detail: capped
+        ? `provider message states a reset past the ${maxResetMs / 86_400_000}-day ceiling; predicting ${new Date(reset).toISOString()}`
+        : `provider message says the quota returns ${new Date(reset).toISOString()}`,
       until: reset,
     })
   }
@@ -153,28 +189,32 @@ export const predict = (input: {
  * absolute time ("resets at 2026-01-01T00:00:00Z", "back at 2026-01-01") and a relative one
  * ("in 3 hours", "in 30 minutes", "in 45s"). Nothing else is guessed at.
  */
-export const parseQuotaReset = (message: string | undefined, now: number): number | undefined => {
+export const parseQuotaReset = (
+  message: string | undefined,
+  now: number,
+  maxResetMs?: number,
+  location?: string,
+): number | undefined => {
+  const ceilingMs = quotaResetCeilingMs(maxResetMs, location)
   if (!message) return undefined
   const text = message.toLowerCase()
   if (!/(?:quota|limit|rate limit)/.test(text)) return undefined
   // The zone designator stays in the capture so Date.parse honours it instead of reading the
   // timestamp as local time (see ModelRouteLimits.resetAtFromMessage).
-  const absolute =
-    /(?:reset|resume|back|available|return)[a-z ]{0,20}(?:at|on)?\s*(\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?)/.exec(
-      text,
-    )?.[1]
-  if (absolute) {
-    const date = Date.parse(absolute)
-    if (!Number.isNaN(date)) return date
+  // The absolute branch shares ModelRouteLimits.ABSOLUTE_TIME so the two parsers cannot
+  // drift apart on keywords again; the quota gate above stays local to this parser.
+  // Scan every absolute candidate: an unparseable first date (e.g. month 13) must not shadow
+  // a later valid reset stated in the same message.
+  for (const [, absolute] of text.matchAll(new RegExp(ModelRouteLimits.ABSOLUTE_TIME.source, "g"))) {
+    const date = ModelRouteLimits.parseAbsoluteTime(absolute)
+    if (date !== undefined) return Math.min(date, now + ceilingMs)
   }
-  const relative = /in\s+(\d+)\s*(second|minute|hour|day|sec|s)s?(?![a-z])/.exec(text)
-  if (relative) {
-    const unit = { second: 1_000, sec: 1_000, s: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 } as Record<
-      string,
-      number
-    >
-    return now + Number(relative[1]) * (unit[relative[2]] ?? 1_000)
-  }
+  // The relative form shares ModelRouteLimits.relativeMs — grammar and summing live in
+  // one place so the two parsers cannot drift apart on units again (#996): decimal
+  // amounts ("in 1.5 hours"), compound sequences ("in 1 hour 30 minutes", summed), and
+  // the compact units ("in 6d 13h", "in 30m") all read the same here as there.
+  const relative = ModelRouteLimits.relativeMs(text)
+  if (relative !== undefined) return Math.min(now + relative, now + ceilingMs)
   return undefined
 }
 
@@ -206,7 +246,13 @@ export const parseNotes = (notes: readonly string[] | undefined): Note[] =>
   })
 
 /** The adjustments the notes argue for: a stated reset time skips the target until it arrives. */
-export const noteAdjustments = (notes: readonly Note[], now: number, holdMs: number): ModelRoute.Adjustment[] =>
+export const noteAdjustments = (
+  notes: readonly Note[],
+  now: number,
+  holdMs: number,
+  maxResetMs?: number,
+  location?: string,
+): ModelRoute.Adjustment[] =>
   notes.flatMap((note) => {
     const until = ModelRouteLimits.resetAtFromMessage(note.text, now)
     if (until === undefined) return []
@@ -216,7 +262,7 @@ export const noteAdjustments = (notes: readonly Note[], now: number, holdMs: num
         match: note.match,
         action: "skip" as const,
         // A user-stated reset can be days out; only a runaway value is bounded.
-        until: Math.min(until, now + 30 * 86_400_000),
+        until: Math.min(until, now + quotaResetCeilingMs(maxResetMs, location)),
         note: note.text,
       },
     ]
@@ -234,6 +280,8 @@ export const review = (options: {
   readonly withoutPredictions?: boolean
   /** The least autonomy a route needs for the review's adjustments to apply to it. */
   readonly floor: ModelRouteAutonomy.Level
+  /** The Location directory whose quota gate judges this review's ceilings (#1461). */
+  readonly location?: string
 }) =>
   Effect.gen(function* () {
     const now = Date.now()
@@ -247,32 +295,39 @@ export const review = (options: {
     const readHourly = yield* ModelRouteLog.withDb((db) => ModelRouteLog.hourlyStats(db, since).pipe(Effect.orDie))
     const { stats, errors } = Option.getOrElse(read, () => ({ stats: [], errors: [] }))
     const hourly = Option.getOrElse(readHourly, () => [] as ModelRouteLog.HourlyStat[])
-    const predictions = options.withoutPredictions ? [] : predict({ hourly, errors, now })
+    const predictions = options.withoutPredictions ? [] : predict({ hourly, errors, now, location: options.location })
     const suggestions: ModelRoute.Adjustment[] = [
       ...suggest({ stats, errors, now, holdMs: options.holdMs }),
-      ...noteAdjustments(parseNotes(options.notes), now, options.holdMs),
-    ].map((item) => ({ ...item, requires: options.floor }))
+      ...noteAdjustments(parseNotes(options.notes), now, options.holdMs, undefined, options.location),
+    ].map((item) => ({
+      ...item,
+      id: options.location ? `${item.id}:${encodeURIComponent(options.location)}` : item.id,
+      requires: options.floor,
+      ...(options.location === undefined ? {} : { location: options.location }),
+    }))
     // A target that has been unreliable at this hour is down-weighted for a while, and one whose
     // message says when its quota returns is skipped until then. Only `predictive` routes apply these.
     for (const prediction of predictions) {
       if (prediction.state === "busy-hour")
         suggestions.push({
-          id: `auto-hourly:${prediction.target}`,
+          id: `auto-hourly:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "weight",
           factor: 0.5,
           until: now + options.holdMs,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
       else if (prediction.until !== undefined)
         suggestions.push({
-          id: `auto-quota:${prediction.target}`,
+          id: `auto-quota:${prediction.target}${options.location ? `:${encodeURIComponent(options.location)}` : ""}`,
           match: prediction.target,
           action: "skip",
           until: prediction.until,
           note: prediction.detail,
           requires: "predictive",
+          ...(options.location === undefined ? {} : { location: options.location }),
         })
     }
     for (const item of suggestions) ModelRoute.addAdjustment(item, item.note)
@@ -285,6 +340,7 @@ export const review = (options: {
 export const schedule = (
   read: () => Settings | undefined,
   levels: () => readonly (ModelRouteAutonomy.Level | undefined)[] = () => [],
+  location?: string,
 ) =>
   Effect.gen(function* () {
     while (true) {
@@ -300,6 +356,7 @@ export const schedule = (
         windowHours: settings?.windowHours ?? DEFAULT_WINDOW_HOURS,
         // Long enough to bridge to the next review, so an adjustment does not flicker off in between.
         holdMs: Math.max(1, settings?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES) * 2 * 60_000,
+        location,
       }).pipe(Effect.catchCause(() => Effect.succeed([] as ModelRoute.Adjustment[])))
       if (applied.length > 0)
         yield* Effect.logInfo("model route tuning applied adjustments", {

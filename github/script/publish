@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# Get the latest Git tag
-latest_tag=$(git tag --sort=committerdate | grep -E '^github-v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)
+# Get the latest Git tag — or the tag the workflow's main-gate job
+# resolved and pinned ($1), so the gated commit is the published one.
+latest_tag="${1:-$(git tag --sort=committerdate | grep -E '^github-v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)}"
 if [ -z "$latest_tag" ]; then
     echo "No tags found"
     exit 1

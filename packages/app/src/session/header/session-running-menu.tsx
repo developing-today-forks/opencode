@@ -95,11 +95,9 @@ export function SessionRunningMenu(props: {
         // A listed subagent absent from the tree still counts as running until its completion notice arrives.
         return [{ ...item, depth: 0, running: node?.running ?? true }, ...nestedItems(node?.children ?? [], 1)]
       }),
-      // Finished subagents no longer listed above stay as the parents of work they started that still runs.
-      ...nestedItems(
-        tree.filter((node) => !node.running && !listed.has(node.session.id)),
-        0,
-      ),
+      // From a subagent session, the root's running children are not listed in props.tasks; keep them visible
+      // from the tree. Finished unlisted subagents also remain as parents of work they started that still runs.
+      ...nestedItems(tree.filter((node) => !listed.has(node.session.id)), 0),
       ...props.tasks.flatMap((task) =>
         task.type === "shell" ? [{ ...task, key: task.id, target: task.id, depth: 0, running: true }] : [],
       ),

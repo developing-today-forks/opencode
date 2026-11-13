@@ -125,6 +125,7 @@ export type Model = {
   options: Record<string, unknown>
   headers: Record<string, string>
   release_date: string
+  hidden?: boolean
   variants?: Record<string, Record<string, unknown>>
 }
 

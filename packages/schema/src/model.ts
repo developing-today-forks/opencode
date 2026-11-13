@@ -61,10 +61,13 @@ function hasWhitespaceSegment(target: string): boolean {
  * A model selector: a `Model.Ref` string whose model segment may be `*`.
  * `provider/model` matches that model with any variant, `provider/model#variant`
  * matches exactly that variant, and `provider/*` matches every model of the provider.
+ * `*` is a wildcard only as the complete model segment: a `*` in the provider or
+ * variant segment is rejected, since those segments are compared literally and a
+ * selector carrying one could never match a real ref.
  */
 export const Selector = Schema.String.annotate({ identifier: "Model.Selector" })
   .check(
-    Schema.isPattern(/^[^\s/#]+\/(?:\*|[^\s#/*]+(?:\/[^\s#/*]+)*)(?:#[^\s#/]+(?:\/[^\s#/]+)*)?$/u),
+    Schema.isPattern(/^[^\s/#*]+\/(?:\*|[^\s#/*]+(?:\/[^\s#/*]+)*)(?:#[^\s#/*]+(?:\/[^\s#/*]+)*)?$/u),
   )
   .pipe(
     statics((schema) => ({
@@ -105,8 +108,11 @@ function parseSelector(input: string) {
   const variantStart = input.indexOf("#", providerEnd + 1)
   const id = input.slice(providerEnd + 1, variantStart === -1 ? undefined : variantStart)
   const variant = variantStart === -1 ? undefined : input.slice(variantStart + 1)
-  if (!id || (id.includes("*") && id !== "*") || (variant !== undefined && !variant)) return undefined
-  return { providerID: input.slice(0, providerEnd), id, variant }
+  const providerID = input.slice(0, providerEnd)
+  if (providerID.includes("#") || providerID.includes("*")) return undefined
+  if (!id || (id.includes("*") && id !== "*")) return undefined
+  if (variant !== undefined && (!variant || variant.includes("#") || variant.includes("*"))) return undefined
+  return { providerID, id, variant }
 }
 
 export { Compatibility, MaxTokensField, ReasoningField }
@@ -184,6 +190,9 @@ export const Info = Schema.Struct({
   cost: Schema.Array(Cost),
   status: Schema.Literals(["alpha", "beta", "deprecated", "active"]),
   enabled: Schema.Boolean,
+  /** Picker-hidden but still routable (#230): set from the config overlay's
+   * `hidden` flag. Absent means listed normally. */
+  hidden: Schema.Boolean.pipe(optional),
   limit: Schema.Struct({
     context: Schema.Int,
     input: Schema.Int.pipe(optional),

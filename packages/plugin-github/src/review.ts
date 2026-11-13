@@ -1910,6 +1910,11 @@ const respondAll = Effect.fn("GitHubReview.respond")(function* (input: {
     const outcome = yield* Effect.gen(function* (): Effect.fn.Return<Result, GitHubClient.Error> {
       if (response.id.startsWith("alert:")) {
         const alertNumber = Number(response.id.slice("alert:".length))
+        if (!Number.isSafeInteger(alertNumber) || alertNumber <= 0)
+          return yield* new GitHubClient.Error({
+            kind: "validation",
+            message: `Invalid alert id ${response.id}: expected alert:<positive integer>`,
+          })
         const alert = yield* api.json<Alert>("GET", `/repos/${slug}/code-scanning/alerts/${alertNumber}`)
         if (response.resolve === false) {
           yield* api.json("PATCH", `/repos/${slug}/code-scanning/alerts/${alertNumber}`, { body: { state: "open" } })

@@ -32,6 +32,43 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Shell.No
 const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
+export const DEFAULT_OUTPUT_LIMIT = 65536
+
+/**
+ * Paging inputs at the service boundary. Callers reach the service directly (in-process, plugins), so a cursor or
+ * limit may arrive unvalidated even though the HTTP schema restricts both to NonNegativeInt: non-finite or negative
+ * values mean "absent" and take the defaults, anything else is floored to an integer. The limit has no upper clamp —
+ * valid callers page with limits above the default (session shell reads 1 MiB, result() reads the configured
+ * max_bytes) and must stay byte-identical — but 0 clamps up to a 1-byte page so paging always advances, matching the
+ * pageLimit convention in messaging.ts (#949). The returned cursor is therefore always a NonNegativeInt.
+ */
+function outputCursor(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return 0
+  return Math.floor(value)
+}
+
+/** The house timeout bound (#972): no single timer is armed past 2^31-1 ms. */
+export const MAX_TIMEOUT_MS = 2_147_483_647
+
+/**
+ * Timeout durations at the service boundary (#999). Callers reach the service directly
+ * (in-process, plugin hooks mutating the invocation), so a duration may arrive
+ * unvalidated even though the schemas restrict it to NonNegativeInt: a negative or NaN
+ * duration would complete Effect.sleep immediately and kill a just-started command as
+ * "timed out" at ~0 ms, and an infinite one would silently disable a timeout the caller
+ * believes is set. Policy: non-finite or negative durations take the documented
+ * disabled sentinel (0); a finite oversized duration clamps to MAX_TIMEOUT_MS so a set
+ * timeout stays set. Valid durations (0, positive, fractional) pass through untouched.
+ */
+function timeoutDuration(value: number) {
+  if (!Number.isFinite(value) || value < 0) return 0
+  return Math.min(value, MAX_TIMEOUT_MS)
+}
+
+function outputLimit(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return DEFAULT_OUTPUT_LIMIT
+  return Math.max(Math.floor(value), 1)
+}
 
 type Info = Shell.Info
 type CreateInput = Shell.CreateInput & {
@@ -197,10 +234,10 @@ const layer = () =>
 
       const output = Effect.fnUntraced(function* (id: Shell.ID, input?: Shell.OutputInput) {
         const command = yield* require(id)
-        const cursor = input?.cursor ?? 0
-        const limit = input?.limit ?? 65536
+        const cursor = outputCursor(input?.cursor)
+        const limit = outputLimit(input?.limit)
         if (cursor >= command.size) return { output: "", cursor: command.size, size: command.size, truncated: false }
-        const start = Math.max(0, cursor)
+        const start = cursor
         const length = Math.min(limit, command.size - start)
         const buffer = Buffer.alloc(length)
         const bytesRead = yield* Effect.promise(
@@ -256,10 +293,31 @@ const layer = () =>
         before?: (input: ShellCreateBefore) => Effect.Effect<void, E, R>,
       ) {
         const sessionID = input.metadata?.sessionID
+        const sessionEnv =
+          location.workspaceID !== undefined || !Schema.is(SessionSchema.ID)(sessionID)
+            ? undefined
+            : yield* environments.get(sessionID)
+        // A stored session environment is an overlay on the server environment, never a
+        // replacement for it (#2266). Partial session environments are normal: the server
+        // itself stores one holding only MCPX_SESSION_ID / MCPX_PARENT_SESSION_ID for every
+        // subagent child session, and clients may store snapshots that omit or empty out
+        // variables. Treating such a snapshot as the whole environment spawned shells with
+        // no PATH and no HOME — on NixOS bash falls back to a compiled-in PATH of
+        // /no-such-path, so basic commands vanished for every affected child session while
+        // sessions without a stored environment (which inherit process.env) kept working.
+        // Session values win per key; an empty HOME or PATH counts as unset, not as a
+        // deliberate wipe, so the server value shows through instead.
         const baseEnv =
           location.workspaceID !== undefined
             ? undefined
-            : ((Schema.is(SessionSchema.ID)(sessionID) ? yield* environments.get(sessionID) : undefined) ?? process.env)
+            : sessionEnv === undefined
+              ? process.env
+              : {
+                  ...process.env,
+                  ...sessionEnv,
+                  ...(sessionEnv.HOME ? {} : process.env.HOME ? { HOME: process.env.HOME } : {}),
+                  ...(sessionEnv.PATH ? {} : process.env.PATH ? { PATH: process.env.PATH } : {}),
+                }
         const invocation: ShellCreateBefore = {
           command: input.command,
           cwd: input.cwd ?? location.directory,
@@ -391,8 +449,11 @@ const layer = () =>
                   if (timeoutFiber) yield* Fiber.interrupt(timeoutFiber)
                 })
 
-              command.timeout = (duration) =>
+              command.timeout = (input) =>
                 Effect.gen(function* () {
+                  // The one funnel both doors (create's post-hook invocation and
+                  // Shell.timeout) pass through: normalise here (#999).
+                  const duration = timeoutDuration(input)
                   if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
                   command.timeoutFiber = undefined
                   if (duration === 0 || command.info.status !== "running") return

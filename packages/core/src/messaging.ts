@@ -5,7 +5,7 @@ import path from "path"
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm"
 import { Context, Duration, Effect, Layer, PubSub, Schema, Scope } from "effect"
 import type { ConfigMessaging } from "@opencode/schema/config/messaging"
-import { Messaging as Contract } from "@opencode/schema/messaging"
+import { Messaging } from "@opencode/schema/messaging"
 import { TuiEvent } from "@opencode/schema/tui-event"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "./bus.js"
@@ -67,23 +67,23 @@ export interface KindDefinition {
 }
 
 export interface Interface {
-  readonly send: (input: Contract.SendInput, options?: Options) => Effect.Effect<Contract.SendResult, Error>
-  readonly user: (input: Contract.UserInput, options?: Options) => Effect.Effect<Contract.SendResult, Error>
-  readonly query: (input: Contract.Query, options?: Options) => Effect.Effect<Contract.QueryResult, Error>
-  readonly inspect: (input: Contract.InspectInput, options?: Options) => Effect.Effect<Contract.Message, Error>
+  readonly send: (input: Messaging.SendInput, options?: Options) => Effect.Effect<Messaging.SendResult, Error>
+  readonly user: (input: Messaging.UserInput, options?: Options) => Effect.Effect<Messaging.SendResult, Error>
+  readonly query: (input: Messaging.Query, options?: Options) => Effect.Effect<Messaging.QueryResult, Error>
+  readonly inspect: (input: Messaging.InspectInput, options?: Options) => Effect.Effect<Messaging.Message, Error>
   readonly visibility: (
-    input: Contract.VisibilityInput,
+    input: Messaging.VisibilityInput,
     options?: Options,
-  ) => Effect.Effect<Contract.VisibilityResult, Error>
-  readonly settings: (input: Contract.SettingsInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly subscribe: (input: Contract.SubscribeInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly topic: (input: Contract.TopicInput, options?: Options) => Effect.Effect<Contract.Topic, Error>
-  readonly topics: (input: Contract.TopicsInput, options?: Options) => Effect.Effect<Contract.TopicList, Error>
-  readonly chain: (input: Contract.ChainInput) => Effect.Effect<Contract.Chain, Error>
-  readonly sessions: (input: Contract.SessionsInput) => Effect.Effect<Contract.SessionList, Error>
-  readonly log: (input: Contract.LogInput, options?: Options) => Effect.Effect<Contract.Log, Error>
-  readonly vars: (input: Contract.VarsInput, options?: Options) => Effect.Effect<Contract.Vars, Error>
-  readonly setVar: (input: Contract.SetVarInput, options?: Options) => Effect.Effect<void, Error>
+  ) => Effect.Effect<Messaging.VisibilityResult, Error>
+  readonly settings: (input: Messaging.SettingsInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly subscribe: (input: Messaging.SubscribeInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly topic: (input: Messaging.TopicInput, options?: Options) => Effect.Effect<Messaging.Topic, Error>
+  readonly topics: (input: Messaging.TopicsInput, options?: Options) => Effect.Effect<Messaging.TopicList, Error>
+  readonly chain: (input: Messaging.ChainInput) => Effect.Effect<Messaging.Chain, Error>
+  readonly sessions: (input: Messaging.SessionsInput) => Effect.Effect<Messaging.SessionList, Error>
+  readonly log: (input: Messaging.LogInput, options?: Options) => Effect.Effect<Messaging.Log, Error>
+  readonly vars: (input: Messaging.VarsInput, options?: Options) => Effect.Effect<Messaging.Vars, Error>
+  readonly setVar: (input: Messaging.SetVarInput, options?: Options) => Effect.Effect<void, Error>
   readonly kinds: {
     readonly register: (definition: KindDefinition) => Effect.Effect<void, InvalidError, Scope.Scope>
     readonly list: () => Effect.Effect<ReadonlyArray<KindDefinition>>
@@ -112,11 +112,72 @@ const BUILTIN_KINDS: ReadonlyArray<KindDefinition> = [
 
 const DEFAULT_LIMIT = 20
 const MAX_LIMIT = 500
+
 const SCAN_LIMIT = 5000
 const SEMANTIC_EMBED_LIMIT = 512
 const MAX_WAIT_SECONDS = 600
 /** Delivered notices carry at most this much of a message; the full text stays readable in its topic. */
 const DELIVERED_CHARS = 8000
+/** The largest per-entry character budget log() honours; larger requests clamp to it. */
+const MAX_CHARS = 8000
+
+/**
+ * Cuts `text` to at most `chars` code units without splitting a surrogate
+ * pair (#1970). A pair straddling the cut is dropped whole, so the result is
+ * always well-formed; callers that report how much was omitted must measure
+ * from the returned length, not from `chars`.
+ */
+const cutText = (text: string, chars: number) =>
+  MessagingLog.splitsPair(text, chars) ? text.slice(0, chars - 1) : text.slice(0, chars)
+
+/**
+ * Normalises a log chars budget at the service boundary. HTTP payload decode already enforces
+ * the contract PositiveInt, but plugin and tool callers reach the service directly with plain
+ * numbers, so a negative chars would make clip() return the wrong end of an entry and NaN would
+ * replace the entry text with a garbage marker. Fractional chars are floored, negative and
+ * sub-1 values clamp to 1, values above MAX_CHARS clamp to MAX_CHARS, and NaN is treated as
+ * absent (the caller's default). Valid budgets pass through unchanged. Context normalisation
+ * for grep is normalizeContext below; limit (#948) and offset (#953) are out of scope.
+ */
+function normalizeChars(value: number | undefined, fallback: number): number {
+  if (value === undefined || Number.isNaN(value)) return fallback
+  return Math.min(Math.max(Math.floor(value), 1), MAX_CHARS)
+}
+
+/**
+ * Normalises a grep context count at the service boundary: fractional counts are floored and
+ * negative, NaN and non-finite counts clamp to 0, so the selection loop only ever indexes the
+ * entry list with integers. Valid counts (including 0) pass through unchanged.
+ */
+function normalizeContext(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0
+  return Math.max(0, Math.floor(value))
+}
+
+/**
+ * Page size at the service boundary. Callers reach the service directly (plugins, the CLI), so a limit may arrive
+ * unvalidated: NaN and negative values mean "absent" and take the default, anything else is floored to an integer and
+ * clamped to [1, MAX_LIMIT].
+ */
+function pageLimit(value: number | undefined, fallback: number) {
+  if (value === undefined || Number.isNaN(value) || value < 0) return fallback
+  return Math.min(Math.max(Math.floor(value), 1), MAX_LIMIT)
+}
+
+/**
+ * Normalises a paging offset at the service boundary. HTTP payload decode already enforces the
+ * contract NonNegativeInt, but plugin and tool callers reach the service directly with plain
+ * numbers, so a negative offset would wrap JS slice() pages to the wrong end of the transcript
+ * and a negative SQL .offset() would escape the intended page. Fractional offsets are floored and
+ * negative, NaN and non-finite offsets clamp to 0, so an invalid offset never reaches SQL .offset()
+ * or a JS slice(). Valid offsets (including 0 and past-the-end) pass through unchanged. Limit
+ * normalisation is out of scope (#948).
+ */
+function normalizeOffset(value: number | undefined): number {
+  if (value === undefined) return 0
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.floor(value))
+}
 
 type TopicRow = typeof MessagingTopicTable.$inferSelect
 type MessageRow = typeof MessagingMessageTable.$inferSelect
@@ -320,7 +381,7 @@ const layer = Layer.effect(
         .pipe(Effect.orDie)
     })
 
-    const subscribeRow = (topicID: number, session: string, delivery: Contract.Delivery, by: string) =>
+    const subscribeRow = (topicID: number, session: string, delivery: Messaging.Delivery, by: string) =>
       db
         .insert(MessagingSubscriptionTable)
         .values({ topic_id: topicID, session_id: session, delivery, by, time_created: Date.now() })
@@ -333,7 +394,7 @@ const layer = Layer.effect(
       topic: TopicRow,
       writer: string,
       seq: number,
-      override: Contract.Delivery | undefined,
+      override: Messaging.Delivery | undefined,
       config: ConfigMessaging.Info | undefined,
       to?: string,
     ) {
@@ -343,7 +404,7 @@ const layer = Layer.effect(
         .where(eq(MessagingSubscriptionTable.topic_id, topic.id))
         .all()
         .pipe(Effect.orDie)
-      const result = new Map<string, Contract.Delivery>(subscribed.map((row) => [row.session_id, row.delivery]))
+      const result = new Map<string, Messaging.Delivery>(subscribed.map((row) => [row.session_id, row.delivery]))
       const classified = MessagingTemplate.classify(topic.name, config)
       if (classified.kind === "root" && classified.owner && !result.has(classified.owner))
         result.set(classified.owner, config?.delivery?.root ?? "wake")
@@ -404,7 +465,7 @@ const layer = Layer.effect(
       topic: TopicRow,
       message: { readonly seq: number; readonly time: number },
       input: { readonly writer: string; readonly type: string; readonly data: string },
-      targets: ReadonlyArray<{ readonly session: string; readonly delivery: Contract.Delivery }>,
+      targets: ReadonlyArray<{ readonly session: string; readonly delivery: Messaging.Delivery }>,
     ) {
       if (targets.length === 0) return []
       const title = (yield* titles([input.writer])).get(input.writer)
@@ -498,7 +559,7 @@ const layer = Layer.effect(
     ) {
       yield* PubSub.publish(written, { topicID: topic.id, seq: message.seq })
       yield* bus.publish(
-        Contract.Event.Created,
+        Messaging.Event.Created,
         {
           topic: topic.name,
           seq: message.seq,
@@ -506,7 +567,7 @@ const layer = Layer.effect(
           type: input.type,
           writer: input.writer,
           time: message.time,
-          preview: input.data.length > 200 ? `${input.data.slice(0, 197)}...` : input.data,
+          preview: input.data.length > 200 ? `${cutText(input.data, 197)}...` : input.data,
           ...(topic.kind === "user" ? { inbox: true } : {}),
         },
         { global: true },
@@ -564,7 +625,7 @@ const layer = Layer.effect(
         TuiEvent.ToastShow,
         {
           title,
-          message: input.text.length > 400 ? `${input.text.slice(0, 397)}...` : input.text,
+          message: input.text.length > 400 ? `${cutText(input.text, 397)}...` : input.text,
           variant: "info",
           duration: 15_000,
         },
@@ -687,10 +748,10 @@ const layer = Layer.effect(
       return { ids: rows.map((row) => row.id), missing: names.filter((name) => !rows.some((row) => row.name === name)) }
     })
 
-    const read = Effect.fnUntraced(function* (input: Contract.Query, options: Options | undefined) {
+    const read = Effect.fnUntraced(function* (input: Messaging.Query, options: Options | undefined) {
       const viewer = input.as ?? "user"
       const now = Date.now()
-      const limit = Math.min(input.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
+      const limit = pageLimit(input.limit, DEFAULT_LIMIT)
       const topicIDs = yield* Effect.gen(function* () {
         if (input.topics && input.topics.length > 0) return yield* topicIDsFor(input.topics, viewer, options)
         if (input.unread) return { ids: Array.from(yield* followed(viewer, options)), missing: [] }
@@ -756,7 +817,7 @@ const layer = Layer.effect(
 
     /** SQL conditions for every non-text filter, including effective visibility for the viewer. */
     const filters = Effect.fnUntraced(function* (
-      input: Contract.Query,
+      input: Messaging.Query,
       viewer: string,
       now: number,
       topicIDs: ReadonlyArray<number> | undefined,
@@ -809,7 +870,7 @@ const layer = Layer.effect(
         .map((kind) => kind.name)
 
     /** Filters which hidden messages are re-included: hidden by, written by, and when they were hidden. */
-    const hiddenMatch = Effect.fnUntraced(function* (input: Contract.Query, viewer: string, now: number) {
+    const hiddenMatch = Effect.fnUntraced(function* (input: Messaging.Query, viewer: string, now: number) {
       const m = MessagingMessageTable
       const parts: SQL[] = []
       if (input.hiddenFrom && input.hiddenFrom.length > 0) {
@@ -848,7 +909,7 @@ const layer = Layer.effect(
 
     const chronological = Effect.fnUntraced(function* (
       conditions: ReadonlyArray<SQL>,
-      input: Contract.Query,
+      input: Messaging.Query,
       limit: number,
     ) {
       const m = MessagingMessageTable
@@ -884,7 +945,7 @@ const layer = Layer.effect(
 
     const search = Effect.fnUntraced(function* (
       text: string,
-      match: Contract.MatchMode,
+      match: Messaging.MatchMode,
       conditions: ReadonlyArray<SQL>,
       limit: number,
       options: Options | undefined,
@@ -933,7 +994,7 @@ const layer = Layer.effect(
      */
     const rank = <A>(
       text: string,
-      match: Contract.MatchMode,
+      match: Messaging.MatchMode,
       sources: {
         readonly exact: () => Effect.Effect<ReadonlyArray<A>>
         readonly fuzzy: () => Effect.Effect<ReadonlyArray<A>>
@@ -949,7 +1010,7 @@ const layer = Layer.effect(
         const notes: string[] = []
         const take = (
           ordered: ReadonlyArray<{ readonly row: A; readonly score: number }>,
-          used: Contract.MatchMode,
+          used: Messaging.MatchMode,
         ) => ({
           rows: ordered.slice(0, limit).map((item) => item.row),
           scores: new Map(ordered.slice(0, limit).map((item) => [keyOf(item.row), item.score])),
@@ -1016,7 +1077,7 @@ const layer = Layer.effect(
         if (top.length === 0) return take(top, "advanced")
         const order = yield* options.rerank(
           text,
-          top.map((item) => ({ key: keyOf(item.row), text: content(item.row).slice(0, 600) })),
+          top.map((item) => ({ key: keyOf(item.row), text: cutText(content(item.row), 600) })),
         )
         const position = new Map(order.map((key, index) => [key, index]))
         const reranked = top
@@ -1182,7 +1243,7 @@ const layer = Layer.effect(
         .orderBy(asc(MessagingMessageTable.seq))
         .all()
         .pipe(Effect.orDie)
-      return rows.flatMap((row): Contract.Op[] => {
+      return rows.flatMap((row): Messaging.Op[] => {
         const meta = opMeta(row.meta)
         if (seq !== undefined && !meta.default && !meta.targets.includes(seq)) return []
         return [
@@ -1326,7 +1387,7 @@ const layer = Layer.effect(
       const windows = row && expand && expand > 0 ? yield* participantWindows(row, expand) : undefined
       const owner = row?.owner ?? classified.owner
       const preset = row?.preset ?? classified.preset
-      const topic: Contract.Topic = {
+      const topic: Messaging.Topic = {
         name,
         exists: row !== undefined,
         kind: row?.kind ?? classified.kind,
@@ -1363,7 +1424,7 @@ const layer = Layer.effect(
         items: ReadonlyArray<typeof p.$inferSelect>,
         first: (item: typeof p.$inferSelect) => number | null,
         last: (item: typeof p.$inferSelect) => number | null,
-      ): Contract.Window => ({
+      ): Messaging.Window => ({
         total: items.length,
         first: items
           .toSorted((left, right) => (first(left) ?? 0) - (first(right) ?? 0))
@@ -1560,7 +1621,8 @@ const layer = Layer.effect(
       const where = conditions.length > 0 ? and(...conditions) : undefined
       const sort = input.sort === "created" ? t.time_created : t.time_last
       const order = input.order ?? "desc"
-      const limit = Math.min(input.limit ?? 50, MAX_LIMIT)
+      const limit = pageLimit(input.limit, 50)
+      const offset = normalizeOffset(input.offset)
       const rows = yield* db
         .select()
         .from(t)
@@ -1570,7 +1632,7 @@ const layer = Layer.effect(
           order === "asc" ? asc(t.id) : desc(t.id),
         )
         .limit(limit)
-        .offset(input.offset ?? 0)
+        .offset(offset)
         .all()
         .pipe(Effect.orDie)
       const total = yield* db
@@ -1605,7 +1667,7 @@ const layer = Layer.effect(
       expand: number | undefined,
       active: ReadonlySet<string>,
     ) {
-      const base: Contract.SessionNode = {
+      const base: Messaging.SessionNode = {
         id: row.id,
         ...(row.title ? { title: row.title } : {}),
         ...(row.parent_id ? { parentID: row.parent_id } : {}),
@@ -1663,7 +1725,7 @@ const layer = Layer.effect(
 
     const childWindow = Effect.fnUntraced(function* (id: string, size: number, active: ReadonlySet<string>) {
       const all = yield* MessagingGraph.children(db, id)
-      const brief = (row: MessagingGraph.Row): Contract.SessionBrief => ({
+      const brief = (row: MessagingGraph.Row): Messaging.SessionBrief => ({
         id: row.id,
         ...(row.title ? { title: row.title } : {}),
         ...(row.agent ? { agent: row.agent } : {}),
@@ -1755,14 +1817,15 @@ const layer = Layer.effect(
       if (until !== undefined) conditions.push(sql`${sortColumn} <= ${until}`)
       const where = conditions.length > 0 ? and(...conditions) : undefined
       const order = input.order ?? "desc"
+      const offset = normalizeOffset(input.offset)
       const rows = yield* db
         .select()
         .from(s)
         .where(where)
         // Session IDs sort newest first, so ties on time break toward creation order with the opposite ID order.
         .orderBy(order === "asc" ? asc(sortColumn) : desc(sortColumn), order === "asc" ? desc(s.id) : asc(s.id))
-        .limit(Math.min(input.limit ?? 50, MAX_LIMIT))
-        .offset(input.offset ?? 0)
+        .limit(pageLimit(input.limit, 50))
+        .offset(offset)
         .all()
         .pipe(Effect.orDie)
       const total = yield* db
@@ -1830,15 +1893,15 @@ const layer = Layer.effect(
         .filter((entry) => (since === undefined || entry.time >= since) && (until === undefined || entry.time <= until))
         .sort((left, right) => left.time - right.time)
       const op = input.op ?? (input.query ? "search" : "tail")
-      const limit = Math.min(input.limit ?? (op === "pull" ? 50 : DEFAULT_LIMIT), MAX_LIMIT)
-      const offset = input.offset ?? 0
-      const chars = input.chars ?? (op === "pull" ? 4000 : 500)
+      const limit = pageLimit(input.limit, op === "pull" ? 50 : DEFAULT_LIMIT)
+      const offset = normalizeOffset(input.offset)
+      const chars = normalizeChars(input.chars, op === "pull" ? 4000 : 500)
       const keyOf = (entry: MessagingLog.Entry) => `${entry.message}:${entry.index}:${entry.part}`
       const output = (
         entries: ReadonlyArray<MessagingLog.Entry & { readonly match?: boolean; readonly score?: number }>,
       ) =>
         entries.map(
-          (entry): Contract.LogEntry => ({
+          (entry): Messaging.LogEntry => ({
             session: entry.session,
             message: entry.message,
             index: entry.index,
@@ -1871,7 +1934,7 @@ const layer = Layer.effect(
           (item) => item.entry.text,
         )
         const hits = result.matched.map((item) => item.index)
-        const context = input.context ?? 0
+        const context = normalizeContext(input.context)
         const selected = new Map<number, boolean>()
         for (const index of hits.slice(offset, offset + limit)) {
           for (let near = Math.max(0, index - context); near <= Math.min(all.length - 1, index + context); near++)
@@ -2125,8 +2188,8 @@ function opMeta(meta: Record<string, unknown> | null) {
 function toMessage(
   row: MessageRow,
   topic: string,
-  extra: { readonly hidden?: boolean; readonly score?: number; readonly ops?: ReadonlyArray<Contract.Op> },
-): Contract.Message {
+  extra: { readonly hidden?: boolean; readonly score?: number; readonly ops?: ReadonlyArray<Messaging.Op> },
+): Messaging.Message {
   return {
     id: row.id,
     topic,
@@ -2148,11 +2211,11 @@ function jsonRecord(value: Record<string, unknown>): Record<string, Schema.Json>
   return Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(value)
 }
 
-function describeWriter(entry: Contract.Writer) {
+function describeWriter(entry: Messaging.Writer) {
   return `${entry.session}${entry.children ? "+children" : ""}${entry.ancestors ? "+ancestors" : ""}`
 }
 
-function defaultMode(policy: MessagingTemplate.Policy): Contract.WriteMode {
+function defaultMode(policy: MessagingTemplate.Policy): Messaging.WriteMode {
   if (policy === "open") return "open"
   if (policy === "owner") return "readonly"
   return "limited"
@@ -2164,7 +2227,7 @@ function firstLine(text: string) {
       .split("\n")
       .find((item) => item.trim() !== "")
       ?.trim() ?? ""
-  return line.length > 100 ? `${line.slice(0, 97)}...` : line
+  return line.length > 100 ? `${cutText(line, 97)}...` : line
 }
 
 function round(value: number) {
@@ -2193,7 +2256,10 @@ function render(
   ]
   const body =
     message.data.length > DELIVERED_CHARS
-      ? `${message.data.slice(0, DELIVERED_CHARS)}\n…[${message.data.length - DELIVERED_CHARS} more characters; read ${topic}#${message.seq} for the rest]`
+      ? (() => {
+          const kept = cutText(message.data, DELIVERED_CHARS)
+          return `${kept}\n…[${message.data.length - kept.length} more characters; read ${topic}#${message.seq} for the rest]`
+        })()
       : message.data
   return {
     text: `<message ${attributes.join(" ")}>\n${MessagingLog.escapeBody(body)}\n</message>`,

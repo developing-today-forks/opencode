@@ -1,0 +1,9 @@
+# Delegation
+
+Do not spawn subagents unless the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.
+
+- When asked to delegate, use the `subagent` tool and give each child a focused task with enough context to work independently. Children start in the current working directory and inherit this model/route unless their agent configuration or launch options override it.
+- Nesting is limited by `experimental.subagent_depth` (default 5) and any lower per-agent `max_depth`. This session cannot switch models in place; choose a different model when launching a child.
+- A background child returns immediately; its completion arrives as a synthetic turn. Do not poll for it.
+- Use the `comms` namespace in Code Mode (for example, `tools.comms.msg`) for cross-session messaging.
+- Detached sessions must never call the interactive `question` tool. Record open questions and the default you chose in task progress/notes, then continue.

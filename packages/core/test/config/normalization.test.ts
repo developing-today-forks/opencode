@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Arbitrary, Duration, Effect, Schema } from "effect"
 import { ConfigNormalize } from "@opencode/core/config/normalize"
-import { routeWeightRules, weightRulesAcross } from "@opencode/core/config/plugin/model-routes"
 import { ModelRouteMatch } from "@opencode/core/model-route-match"
 import { ModelRouteTuning } from "@opencode/core/model-route-tuning"
 import { Info } from "@opencode/schema/config"
+import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 
 const options = { errors: "all", onExcessProperty: "ignore" } as const
@@ -78,8 +78,44 @@ function withoutEmptyCompatibilityContainers(input: Record<string, unknown>) {
 /** Normalization drops each note line that does not match NOTE_LINE, so the expected config drops it too. */
 function withoutMalformedNotes(input: Record<string, unknown>) {
   const result = structuredClone(input)
-  const tuning = (result.experimental as { model_route_tuning?: { notes?: string[] } } | undefined)?.model_route_tuning
-  if (tuning?.notes) tuning.notes = tuning.notes.filter((line) => ConfigModelRoutes.NOTE_LINE.test(line))
+  const experimental = result.experimental as
+    | {
+        model_route_tuning?: { notes?: string[] }
+        routes?: { tuning?: { notes?: string[] } }
+      }
+    | undefined
+  for (const tuning of [experimental?.model_route_tuning, experimental?.routes?.tuning])
+    if (tuning?.notes) tuning.notes = tuning.notes.filter((line) => ConfigModelRoutes.NOTE_LINE.test(line))
+  return result
+}
+
+/** The flat routing keys are deprecated spellings of `experimental.routes.*` (#1140):
+ * normalization folds them into the nested shape, nested winning per key, so the
+ * expected side of a survival comparison folds the same way. */
+function withFlatRoutesFolded(input: Record<string, unknown>) {
+  const result = structuredClone(input)
+  const experimental = result.experimental as Record<string, unknown> | undefined
+  if (typeof experimental !== "object" || experimental === null || Array.isArray(experimental)) return result
+  const pairs: [string, string][] = [
+    ["model_routes", "models"],
+    ["provider_routes", "providers"],
+    ["model_route_schedules", "schedules"],
+    ["model_route_windows", "windows"],
+    ["model_route_tuning", "tuning"],
+    ["model_route_log", "log"],
+    ["model_route_settings", "settings"],
+  ]
+  if (!pairs.some(([flat]) => flat in experimental)) return result
+  const routes = (
+    typeof experimental.routes === "object" && experimental.routes !== null && !Array.isArray(experimental.routes)
+      ? { ...(experimental.routes as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>
+  for (const [flat, nested] of pairs) {
+    if (flat in experimental && !(nested in routes)) routes[nested] = experimental[flat]
+    delete experimental[flat]
+  }
+  experimental.routes = routes
   return result
 }
 
@@ -169,7 +205,7 @@ describe("ConfigNormalize", () => {
           const result = normalized(source)
           expect(Schema.decodeUnknownSync(Info)(result.encoded)).toEqual(
             Schema.decodeUnknownSync(Info)(
-              withoutSkippedPools(withoutMalformedNotes(withoutEmptyCompatibilityContainers(source))),
+              withFlatRoutesFolded(withoutSkippedPools(withoutMalformedNotes(withoutEmptyCompatibilityContainers(source)))),
             ),
           )
           return true
@@ -564,6 +600,73 @@ describe("ConfigNormalize", () => {
     expect(unknown.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["mcp", "timeout"]]])
   })
 
+  test("bounds MCP timeouts at the setTimeout cap on every decode path (#1077)", () => {
+    const cap = 2_147_483_647
+    // Just under the cap and at the cap pass unchanged on the legacy and structured paths.
+    expect(normalized({ experimental: { mcp_timeout: cap } }).encoded.mcp).toEqual({
+      timeout: { catalog: cap, execution: cap },
+    })
+    expect(normalized({ mcp: { timeout: { startup: cap - 1 } } }).encoded.mcp).toEqual({
+      timeout: { startup: cap - 1 },
+    })
+
+    // Over the cap, the legacy value is rejected with a diagnostic naming the field.
+    const legacy = normalized({ experimental: { mcp_timeout: 2 ** 31 } })
+    expect(legacy.encoded.mcp).toBeUndefined()
+    expect(legacy.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["experimental", "mcp_timeout"]],
+    ])
+    const legacyFar = normalized({ experimental: { mcp_timeout: 10 ** 15 } })
+    expect(legacyFar.encoded.mcp).toBeUndefined()
+    expect(legacyFar.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["experimental", "mcp_timeout"]],
+    ])
+
+    // Structured leaves recover per leaf: only the oversized leaf is dropped.
+    const structured = normalized({ mcp: { timeout: { startup: 2 ** 31, catalog: 2000, execution: 10 ** 15 } } })
+    expect(structured.encoded.mcp).toEqual({ timeout: { catalog: 2000 } })
+    expect(structured.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "timeout", "startup"]],
+      ["invalid", ["mcp", "timeout", "execution"]],
+    ])
+
+    // A bare numeric mcp.timeout expands to every phase, so one oversized value drops all three.
+    const numeric = normalized({ mcp: { timeout: 2 ** 31 } })
+    expect(numeric.encoded.mcp).toBeUndefined()
+    expect(numeric.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "timeout", "startup"]],
+      ["invalid", ["mcp", "timeout", "catalog"]],
+      ["invalid", ["mcp", "timeout", "execution"]],
+    ])
+
+    // Server-level forms: bare numeric and structured timeouts are both bounded.
+    const serverNumeric = normalized({
+      mcp: { servers: { local: { type: "local", command: ["local"], timeout: 2 ** 31 } } },
+    })
+    expect(serverNumeric.encoded.mcp).toBeUndefined()
+    expect(serverNumeric.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "servers", "local"]],
+    ])
+    const serverStructured = normalized({
+      mcp: { servers: { local: { type: "local", command: ["local"], timeout: { execution: 2 ** 31 } } } },
+    })
+    expect(serverStructured.encoded.mcp).toBeUndefined()
+    expect(serverStructured.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["mcp", "servers", "local"]],
+    ])
+
+    // A legacy V1 server timeout is bounded before migration, not after.
+    const v1 = normalized({ mcp: { legacy: { type: "local", command: ["legacy"], timeout: 2 ** 31 } } })
+    expect(v1.encoded.mcp).toBeUndefined()
+    expect(v1.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["mcp", "legacy"]]])
+
+    const v1AtCap = normalized({ mcp: { legacy: { type: "local", command: ["legacy"], timeout: cap } } })
+    expect(v1AtCap.diagnostics).toEqual([])
+    expect(v1AtCap.encoded.mcp).toMatchObject({
+      servers: { legacy: { timeout: { startup: cap, catalog: cap, execution: cap } } },
+    })
+  })
+
   test("merges bounded compaction leaves and omits unsupported leaves", () => {
     const result = normalized({
       compaction: {
@@ -811,8 +914,10 @@ describe("model route tuning and log settings", () => {
   const experimentalOf = (encoded: Readonly<Record<string, unknown>>) =>
     encoded.experimental as
       | {
-          model_route_tuning?: ModelRouteTuning.Settings
-          model_route_log?: { captureErrorBodies?: boolean }
+          routes?: {
+            tuning?: ModelRouteTuning.Settings
+            log?: { captureErrorBodies?: boolean }
+          }
         }
       | undefined
 
@@ -830,7 +935,7 @@ describe("model route tuning and log settings", () => {
     })
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
-    const notes = ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.model_route_tuning?.notes)
+    const notes = ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.routes?.tuning?.notes)
     expect(notes).toEqual([
       { match: "anthropic/claude-opus-5", text: "promo credits, reset at 2026-01-04T00:00:00Z" },
       { match: "openai/gpt-6-luna", text: "out of quota, back in 3 hours" },
@@ -865,7 +970,7 @@ describe("model route tuning and log settings", () => {
           "omitted malformed note: expected match: text, with a non-empty match before the first colon and non-empty text after it",
       },
     ])
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({
       enabled: true,
       notes: ["openai/gpt-6-luna: out of quota, back in 3 hours", "anthropic/claude-opus-5: promo credits"],
     })
@@ -888,7 +993,7 @@ describe("model route tuning and log settings", () => {
         message,
       })),
     )
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({ enabled: true, notes: ["match: text"] })
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({ enabled: true, notes: ["match: text"] })
   })
 
   test("a second colon belongs to the text, so x::y is kept", () => {
@@ -898,7 +1003,7 @@ describe("model route tuning and log settings", () => {
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
     expect(result.diagnostics).toEqual([])
-    expect(ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.model_route_tuning?.notes)).toEqual([
+    expect(ModelRouteTuning.parseNotes(experimentalOf(result.encoded)?.routes?.tuning?.notes)).toEqual([
       { match: "x", text: ":y" },
     ])
   })
@@ -914,7 +1019,7 @@ describe("model route tuning and log settings", () => {
       path: ["experimental", "model_route_tuning", "intervall"],
       message: "omitted unknown setting",
     })
-    expect(experimentalOf(result.encoded)?.model_route_tuning).toEqual({ enabled: true, intervalMinutes: 30 })
+    expect(experimentalOf(result.encoded)?.routes?.tuning).toEqual({ enabled: true, intervalMinutes: 30 })
   })
 
   test("captureErrorBodies is kept through normalization, and an unknown log key is reported", () => {
@@ -923,7 +1028,7 @@ describe("model route tuning and log settings", () => {
     })
     expect(result.type).toBe("normalized")
     if (result.type !== "normalized") return
-    expect(experimentalOf(result.encoded)?.model_route_log).toEqual({ captureErrorBodies: true })
+    expect(experimentalOf(result.encoded)?.routes?.log).toEqual({ captureErrorBodies: true })
     expect(result.diagnostics).toContainEqual({
       kind: "invalid",
       path: ["experimental", "model_route_log", "captureErrorBody"],
@@ -934,7 +1039,7 @@ describe("model route tuning and log settings", () => {
 
 describe("model route pools", () => {
   const routesOf = (encoded: Readonly<Record<string, unknown>>) =>
-    Schema.decodeUnknownSync(Info, options)(encoded).experimental?.model_routes
+    Schema.decodeUnknownSync(Info, options)(encoded).experimental?.routes?.models
 
   test("matching keys, declared levels, variant rules and false remaps survive normalization", () => {
     const small = {
@@ -1008,9 +1113,11 @@ describe("model route pools", () => {
     expect(Object.keys(routesOf(result.encoded) ?? {})).toEqual(["ok", "explicit"])
   })
 
-  // These schedules load and the router then drops them in routeWeightRules and weightRulesAcross, which
-  // log nothing; this is the only place the reason reaches the user.
-  test("a schedule the router would skip is reported at load, naming the pool, the schedule and the field", () => {
+  // Reconciliation note (task 13229): the branch let these schedules load and reported
+  // the router dropping them via scheduleProblems. The schema work on main (#1681, #2041,
+  // #1589) won the merge: the window codecs and the exactly-one-of-factor-and-weight
+  // check reject them at decode, so the whole route is dropped at load instead.
+  test("a route whose schedule the schema rejects is dropped at load", () => {
     const result = normalized({
       experimental: {
         model_routes: {
@@ -1027,38 +1134,36 @@ describe("model route pools", () => {
         model_route_schedules: [{ id: "late", when: { end: "24:00" }, factor: 2 }],
       },
     })
-    const path = (...rest: string[]) => ["experimental", ...rest]
-    const schedule = (index: number, ...rest: string[]) =>
-      path("model_routes", "coding", "schedules", String(index), ...rest)
     expect(result.diagnostics).toEqual([
       {
         kind: "invalid",
-        path: schedule(0, "when", "start"),
-        message: 'skipped schedule peak: start "9am" is not HH:mm',
+        path: ["experimental", "model_routes", "coding"],
+        message: "skipped malformed recognized value",
       },
       {
         kind: "invalid",
-        path: schedule(0, "when", "timezone"),
-        message: 'skipped schedule peak: timezone "America/Chicgo" is not a known IANA timezone',
-      },
-      {
-        kind: "invalid",
-        path: schedule(1, "when", "until"),
-        message: "skipped schedule: until is not after from, so the window never opens",
-      },
-      { kind: "invalid", path: schedule(2), message: "skipped schedule noop: it has neither factor nor weight" },
-      {
-        kind: "invalid",
-        path: path("model_route_schedules", "0", "when", "end"),
-        message: 'skipped schedule late: end "24:00" is not HH:mm',
+        path: ["experimental", "model_route_schedules", "0"],
+        message: "skipped malformed recognized value",
       },
     ])
-    // The schedules still load, and the ones reported are exactly the ones the router drops.
-    const coding = routesOf(result.encoded)?.coding
-    expect(coding?.schedules).toHaveLength(4)
-    expect(routeWeightRules(coding!).map((rule) => rule.id)).toEqual(["daily"])
+    expect(routesOf(result.encoded)).toBeUndefined()
     const experimental = Schema.decodeUnknownSync(Info, options)(result.encoded).experimental
-    expect(weightRulesAcross(experimental?.model_route_schedules ?? [])).toEqual([])
+    expect(experimental?.model_route_schedules ?? []).toEqual([])
+  })
+
+  test("a schedule naming a window loads without a diagnostic; the router resolves the name", () => {
+    const result = normalized({
+      experimental: {
+        model_routes: {
+          coding: {
+            targets: ["deepseek/deepseek-chat"],
+            schedules: [{ id: "named", when: "peak-hours", factor: 2 }],
+          },
+        },
+      },
+    })
+    expect(result.diagnostics).toEqual([])
+    expect(routesOf(result.encoded)?.coding?.schedules).toHaveLength(1)
   })
 
   test("an unknown key anywhere in a pool or a schedule is reported where it was written, and the pool still loads", () => {
@@ -1143,4 +1248,213 @@ describe("model route pools", () => {
     // The pool loads as written.
     expect(routesOf(result.encoded)?.outer.targets).toHaveLength(3)
   })
+})
+describe("model route cache formats", () => {
+  const routesOf = (encoded: Readonly<Record<string, unknown>>) =>
+    (encoded.experimental as { routes?: { models?: Record<string, unknown> } } | undefined)?.routes?.models
+
+  test("a route and a target decode the compatibility cache format values", () => {
+    const value = decoded({
+      experimental: {
+        model_routes: {
+          pool: {
+            cache_format: "anthropic",
+            targets: ["openai/gpt-6-luna", { model: "anthropic/claude-sonnet-5", cache_format: "alibaba" }],
+          },
+        },
+      },
+    })
+    const pool = value.experimental?.routes?.models?.pool
+    expect(pool?.cache_format).toBe("anthropic")
+    expect(JSON.parse(JSON.stringify(pool?.targets))).toEqual([
+      { providerID: "openai", model: "gpt-6-luna" },
+      { model: { providerID: "anthropic", model: "claude-sonnet-5" }, cache_format: "alibaba" },
+    ])
+  })
+
+  test("an unknown cache_format rejects the route at decode instead of being dropped", () => {
+    const result = ConfigNormalize.normalize({
+      experimental: {
+        model_routes: {
+          badRoute: { cache_format: "bedrock-converse", targets: ["openai/gpt-6-luna"] },
+          badTarget: { targets: [{ model: "openai/gpt-6-luna", cache_format: "anthropic-breakpoints" }] },
+          good: { cache_format: "alibaba", targets: ["openai/gpt-6-luna"] },
+        },
+      },
+    })
+    expect(result.type).toBe("normalized")
+    if (result.type !== "normalized") return
+    expect(result.diagnostics.map((diagnostic) => diagnostic.path)).toEqual([
+      ["experimental", "model_routes", "badRoute"],
+      ["experimental", "model_routes", "badTarget"],
+    ])
+    expect(routesOf(result.encoded)).toEqual({
+      good: { cache_format: "alibaba", targets: [{ providerID: "openai", model: "gpt-6-luna" }] },
+    })
+  })
+})
+
+describe("provider routes and route settings survive normalization", () => {
+  test("experimental.provider_routes reaches the decoded config (the 2026-11-01 production collapse shape)", () => {
+    const value = decoded({
+      provider: {
+        openai: {
+          models: {
+            "gpt-6-luna": { limit: { context: 1050000, output: 128000 } },
+            "gpt-6.1-terra": { limit: { context: 1050000, output: 128000 } },
+            "gpt-6.1-sol": { limit: { context: 1050000, output: 128000 } },
+          },
+        },
+        "openai.alternate": { instanceOf: "openai", name: "OpenAI Alternate (Student - popesdrew)" },
+      },
+      experimental: {
+        provider_routes: {
+          "openai-plan": { providers: ["openai.alternate", "openai"], selection: "ordered" },
+        },
+        model_routes: {
+          "luna-plan": {
+            targets: ["openai-plan/gpt-6-luna"],
+            selection: "round-robin",
+            autonomy: "rules",
+            weights: { "openai-plan/gpt-6-luna": 2.5 },
+          },
+        },
+      },
+    })
+    const group = value.experimental?.routes?.providers?.["openai-plan"]
+    expect(group?.providers).toEqual(["openai.alternate", "openai"])
+    expect(group?.selection).toBe("ordered")
+    expect(value.experimental?.routes?.models?.["luna-plan"]?.targets).toHaveLength(1)
+  })
+
+  test("experimental.model_route_settings reaches the decoded config", () => {
+    const value = decoded({
+      experimental: { model_route_settings: { bench: { multiplier: 3 } } },
+    })
+    expect(value.experimental?.routes?.settings?.bench?.multiplier).toBe(3)
+  })
+
+  test("experimental.model_route_demotion reaches the decoded config (#1151)", () => {
+    const value = decoded({
+      experimental: { model_route_demotion: { threshold: 1, window_ms: 60_000 } },
+    })
+    expect(value.experimental?.model_route_demotion).toEqual({ threshold: 1, window_ms: 60_000 })
+    const partial = decoded({ experimental: { model_route_demotion: { threshold: 2 } } })
+    expect(partial.experimental?.model_route_demotion?.threshold).toBe(2)
+    expect(partial.experimental?.model_route_demotion?.window_ms).toBeUndefined()
+    expect(decoded({ experimental: {} }).experimental?.model_route_demotion).toBeUndefined()
+  })
+})
+
+describe("per-field normalization survival guard (#1285)", () => {
+  // Minimal schema-valid value for every field, keyed by field name. The tests
+  // below enumerate the fields from the schema itself — these tables are NOT
+  // the enumeration. If a new schema field has no fixture here, the coverage
+  // tests fail by name, so a future field cannot silently go unguarded the way
+  // experimental.provider_routes (#1134) and experimental.model_route_settings
+  // (#1142) did before #1277.
+  const topLevelFixtures: Record<string, unknown> = {
+    $schema: "https://example.com/opencode-schema.json",
+    shell: "/bin/bash",
+    model: { providerID: "openai", model: "gpt-6-luna" },
+    default_agent: "build",
+    update: "notify",
+    share: "manual",
+    enterprise: { url: "https://example.com" },
+    username: "guard-user",
+    permissions: [{ action: "tool.use", resource: "*", effect: "allow" }],
+    policies: [{ action: "provider.use", resource: "*", effect: "deny" }],
+    agents: { reviewer: { system: "Review carefully" } },
+    snapshots: false,
+    watcher: { ignore: ["node_modules"] },
+    formatter: { prettier: { command: ["prettier", "--write"] } },
+    lsp: { typescript: { command: ["typescript-language-server", "--stdio"] } },
+    media: { image: { max_width: 800 } },
+    tool_output: { max_lines: 100, max_bytes: 1000 },
+    mcp: { servers: { svc: { type: "local", command: ["echo", "hi"] } } },
+    compaction: { auto: true, keep: { tokens: 1000 }, buffer: 500 },
+    skills: ["./skills/guard"],
+    commands: { review: { template: "Review this" } },
+    instructions: ["./guard-instructions.md"],
+    references: { docs: { path: "../docs" } },
+    websearch: { provider: "random" },
+    plugins: ["guard-plugin"],
+    worktree: { directory: "guard-worktrees" },
+    warming: { interval: "4 minutes", duration: "30 minutes" },
+    messaging: { presets: { greeting: "hello" } },
+    providers: { custom: { name: "Custom Provider" } },
+    aliases: { providers: { ds: "deepseek" } },
+    experimental: { portable_shell_scanner: true },
+  }
+
+  const experimentalFixtures: Record<string, unknown> = {
+    aliases: { providers: { ds: "deepseek" } },
+    portable_shell_scanner: true,
+    subagent_depth: 2,
+    shell_timeout: 300000,
+    policies: [{ action: "tool.use", resource: "shell:*", effect: "deny" }],
+    model_routes: { pool: { targets: ["openai/gpt-6-luna"] } },
+    provider_routes: { "openai-plan": { providers: ["openai", "openai.alternate"], selection: "ordered" } },
+    model_route_schedules: [{ when: { start: "01:00", end: "04:00" }, factor: 2 }],
+    model_route_windows: { peak: { start: "01:00", end: "04:00", timezone: "UTC" } },
+    model_route_tuning: { enabled: true, notes: ["match: text"] },
+    model_route_log: { captureErrorBodies: true },
+    model_route_settings: { bench: { multiplier: 3 } },
+    model_route_demotion: { threshold: 1, window_ms: 60_000 },
+    routes: {
+      models: { pool: { targets: ["openai/gpt-6-luna"] } },
+      providers: { "openai-plan": { providers: ["openai", "openai.alternate"], selection: "ordered" } },
+      schedules: [{ when: { start: "01:00", end: "04:00" }, factor: 2 }],
+      windows: { peak: { start: "01:00", end: "04:00", timezone: "UTC" } },
+      tuning: { enabled: true, notes: ["match: text"] },
+      log: { captureErrorBodies: true },
+      settings: { bench: { multiplier: 3 } },
+    },
+  }
+
+  // Same comparison as the Arbitrary round-trip test above: the decoded
+  // normalized config must equal the decoded source, after the adjustments
+  // that encode intentional moves (experimental.policies -> policies,
+  // experimental.aliases -> aliases, empty compatibility containers, and
+  // malformed-note filtering). A field normalization silently drops fails
+  // this comparison, because the expected side still carries it.
+  function expectSurvives(source: Record<string, unknown>) {
+    const result = normalized(structuredClone(source))
+    expect(result.diagnostics).toEqual([])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded)).toEqual(
+      Schema.decodeUnknownSync(Info)(
+        withFlatRoutesFolded(withoutMalformedNotes(withoutEmptyCompatibilityContainers(structuredClone(source)))),
+      ),
+    )
+  }
+
+  test("top-level fixtures cover exactly the Config.Info fields enumerated from the schema", () => {
+    expect(Object.keys(topLevelFixtures).sort()).toEqual(Object.keys(Info.fields).sort())
+  })
+
+  test("experimental fixtures cover exactly the ConfigExperimental.Info fields enumerated from the schema", () => {
+    expect(Object.keys(experimentalFixtures).sort()).toEqual(Object.keys(ConfigExperimental.Info.fields).sort())
+  })
+
+  for (const field of Object.keys(Info.fields)) {
+    test(`top-level field "${field}" survives normalization`, () => {
+      const fixture = topLevelFixtures[field]
+      if (fixture === undefined)
+        throw new Error(
+          `no fixture for Config.Info field "${field}" — add a minimal schema-valid fixture so this field is guarded`,
+        )
+      expectSurvives({ [field]: fixture })
+    })
+  }
+
+  for (const field of Object.keys(ConfigExperimental.Info.fields)) {
+    test(`experimental field "${field}" survives normalization at its documented destination`, () => {
+      const fixture = experimentalFixtures[field]
+      if (fixture === undefined)
+        throw new Error(
+          `no fixture for ConfigExperimental.Info field "${field}" — add a minimal schema-valid fixture so this field is guarded`,
+        )
+      expectSurvives({ experimental: { [field]: fixture } })
+    })
+  }
 })

@@ -15,8 +15,26 @@ export type Resume = {
   readonly onEventId: (id: string) => void
 }
 
+/**
+ * Opt-in automatic reconnect for a shared stream (issue #2321). When a
+ * connection attempt fails with an error `shouldRetry` accepts — or ends
+ * unexpectedly with no error — the shared stream reopens after
+ * `delay(attempt)` (attempt is 1-based and resets once a non-handshake
+ * event is read),
+ * resuming from the last event id the stream read. Subscribers are not
+ * completed while a reconnect is pending or in flight; a terminal error
+ * completes them exactly as an unretried failure does. When the last
+ * subscriber leaves, any pending delay and transport work is cancelled.
+ * Callers that pass no policy keep the fail-and-complete behaviour.
+ */
+export type ReconnectPolicy = {
+  readonly shouldRetry: (error: unknown) => boolean
+  readonly delay: (attempt: number) => number
+}
+
 export function make<A extends { readonly type: string }>(
   connect: (signal: AbortSignal, onActivity: () => void, resume: Resume) => AsyncIterable<A>,
+  options?: { readonly reconnect?: ReconnectPolicy },
 ) {
   type Completion = { readonly error: unknown } | Record<string, never>
   type Delivery = { readonly value: A; readonly id?: string }
@@ -32,52 +50,119 @@ export function make<A extends { readonly type: string }>(
     lastEventID?: string
     // Set by the transport just before it yields the event that the loop is about to read.
     eventID?: string
+    // Consecutive failed attempts since the last event read; drives the reconnect delay.
+    attempt: number
+    // Set by stop(): the connection is torn down and must not reconnect or complete anyone again.
+    stopped: boolean
+    // Wakes a pending reconnect delay early (with `false`) when stop() cancels it.
+    retryWake?: () => void
   }
 
+  const reconnect = options?.reconnect
   let current: Connection | undefined
   const capacity = 4_096
 
   function stop(connection: Connection) {
+    connection.stopped = true
+    connection.retryWake?.()
     connection.connected = undefined
     connection.controller.abort()
     if (current === connection) current = undefined
   }
 
-  async function run(connection: Connection) {
-    let iterator: AsyncIterator<A> | undefined
-    let completion: Completion = {}
-    try {
-      if (connection.controller.signal.aborted) return
-      iterator = connect(
-        connection.controller.signal,
-        () => {
-          connection.subscribers.forEach((subscriber) => subscriber.activity?.())
-        },
-        {
-          lastEventID: connection.lastEventID,
-          onEventId: (id) => {
-            connection.eventID = id
-          },
-        },
-      )[Symbol.asyncIterator]()
-      while (!connection.controller.signal.aborted) {
-        connection.eventID = undefined
-        const item = await iterator.next()
-        if (item.done || connection.controller.signal.aborted) break
-        if (item.value.type === "server.connected") connection.connected = item.value
-        const id = connection.eventID
-        connection.subscribers.forEach((subscriber) => subscriber.push(item.value, id))
+  function waitForRetry(connection: Connection, ms: number): Promise<boolean> {
+    if (ms <= 0) return Promise.resolve(!connection.stopped)
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        connection.retryWake = undefined
+        resolve(true)
+      }, ms)
+      connection.retryWake = () => {
+        clearTimeout(timer)
+        connection.retryWake = undefined
+        resolve(false)
       }
-    } catch (error) {
-      completion = { error }
-    } finally {
-      stop(connection)
+    })
+  }
+
+  async function run(connection: Connection) {
+    while (!connection.stopped) {
+      let iterator: AsyncIterator<A> | undefined
+      let completion: Completion = {}
+      let failed = false
+      try {
+        if (connection.controller.signal.aborted) return
+        iterator = connect(
+          connection.controller.signal,
+          () => {
+            connection.subscribers.forEach((subscriber) => subscriber.activity?.())
+          },
+          {
+            lastEventID: connection.lastEventID,
+            onEventId: (id) => {
+              connection.eventID = id
+            },
+          },
+        )[Symbol.asyncIterator]()
+        while (!connection.controller.signal.aborted) {
+          connection.eventID = undefined
+          const item = await iterator.next()
+          if (item.done || connection.controller.signal.aborted) break
+          if (item.value.type === "server.connected") connection.connected = item.value
+          const id = connection.eventID
+          if (id !== undefined) connection.lastEventID = id
+          // The server.connected handshake alone is not progress: a stream
+          // that handshakes and then ends must keep growing its backoff.
+          if (item.value.type !== "server.connected") connection.attempt = 0
+          connection.subscribers.forEach((subscriber) => subscriber.push(item.value, id))
+        }
+      } catch (error) {
+        failed = true
+        completion = { error }
+      }
+      // The attempt is over either way; aborting settles the transport's own cleanup.
+      connection.controller.abort()
       try {
         await iterator?.return?.()
       } catch (error) {
-        if (!("error" in completion)) completion = { error }
+        if (!failed) {
+          failed = true
+          completion = { error }
+        }
       }
-      connection.subscribers.forEach((subscriber) => subscriber.finish(completion))
+      if (connection.stopped) return
+      // A clean end is an unexpected end for a long-lived subscription: it
+      // reconnects under a policy just like a retryable failure. A terminal
+      // failure (or no policy) completes every subscriber as before.
+      // A throwing policy must not strand subscribers on a rejected run:
+      // the thrown error completes them exactly as a terminal failure does.
+      let retryable = false
+      let delayMs = 0
+      try {
+        if (
+          reconnect !== undefined &&
+          connection.subscribers.size > 0 &&
+          (!failed || reconnect.shouldRetry((completion as { readonly error: unknown }).error))
+        ) {
+          retryable = true
+          connection.attempt += 1
+          delayMs = reconnect.delay(connection.attempt)
+        }
+      } catch (error) {
+        stop(connection)
+        const policyFailure: Completion = { error }
+        connection.subscribers.forEach((subscriber) => subscriber.finish(policyFailure))
+        return
+      }
+      if (!retryable) {
+        stop(connection)
+        connection.subscribers.forEach((subscriber) => subscriber.finish(completion))
+        return
+      }
+      connection.connected = undefined
+      if (!(await waitForRetry(connection, delayMs))) return
+      if (connection.stopped) return
+      connection.controller = new AbortController()
     }
   }
 
@@ -139,6 +224,8 @@ export function make<A extends { readonly type: string }>(
               controller: new AbortController(),
               subscribers: new Set<Subscriber>(),
               lastEventID: options?.lastEventID,
+              attempt: 0,
+              stopped: false,
             }
             current = connection
             connection.subscribers.add(subscriber)

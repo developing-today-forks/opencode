@@ -16,7 +16,9 @@ export function activityCalendar(input: {
   const count = Math.min(total, 53, Math.max(1, Math.floor(input.maxWeeks)))
   const start = monday + Math.max(0, total - count) * 7
   const values = new Map(input.activity.map((day) => [day.date, day.steps]))
-  const levels = [...new Set([...values.values()].filter((steps) => steps > 0))].sort((a, b) => a - b)
+  const fromKey = new Date(from * 86_400_000).toISOString().slice(0, 10)
+  const toKey = new Date(to * 86_400_000).toISOString().slice(0, 10)
+  const levels = [...new Set([...values.entries()].filter(([date, steps]) => steps > 0 && date >= fromKey && date <= toKey).map(([, steps]) => steps))].sort((a, b) => a - b)
   const weeks = Array.from({ length: count }, (_, week) =>
     Array.from({ length: 7 }, (_, day) => {
       const date = start + week * 7 + day

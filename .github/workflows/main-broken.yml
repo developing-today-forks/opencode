@@ -1,0 +1,302 @@
+name: main-broken
+# CI tier policy: .github/ci-policy.md (fast PR tier, full main tier).
+#
+# Phase 3 remediation chain (developing-today/code#1782, design
+# ci-fast-pr-full-main section 5): when a main-tier workflow fails on
+# main, file (or append to) exactly one `main-broken` issue per
+# Breakage-ID so the fleet queue owns the breakage at top priority.
+#
+# Breakage-ID = first 12 hex of
+#   sha256("developing-today-forks/opencode|<workflow>|<sorted failing job names>")
+#
+# DISPATCH HANDOFF: the Jules leg is retired fleet-wide (this repo
+# never had a Jules API key secret, so the Jules-first step of the
+# chain never fired here). Breakages are handed to the fleet queue
+# via pm-dispatch (the pm-dispatch-queue reusable action from
+# developing-today/code) at filing time: a new Breakage-ID files one
+# issue plus a queued task, and repeat failures with the same ID
+# attach a fresh task to the existing issue instead of filing anew.
+
+on:
+  workflow_run:
+    # The main-tier workflows only -- watching "*" is the #304 fan-out
+    # trap (a skipped no-op run for every workflow completion).
+    workflows: ["test", "check", "nix-eval"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID of a failed main run to process (blank = latest failed main run)"
+        required: false
+        type: string
+      dry_run:
+        description: "Compute and print the filing decision without writing any issue"
+        required: false
+        type: boolean
+        default: true
+
+# Per-run group: a watcher run must never displace another watcher run.
+# cancel-in-progress stays false, and this workflow never triggers on
+# issues/pull_request_target, so queue: max is valid here.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  watch:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # The remote action download can fail with the runner's
+      # `_staging/.../archive` error (#1418; #1519), before this job files
+      # the issue. Load it from a plain checkout; pm-dispatch-queue has no nested uses.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - name: Compute the main-broken filing decision
+        id: filing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WR_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          REPO="developing-today-forks/opencode"
+          DRY="$INPUT_DRY_RUN"
+          RUN_ID="$INPUT_RUN_ID"
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            RUN_ID="$WR_RUN_ID"
+            DRY="false"
+          fi
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh run list --repo "$REPO" --branch main --status failure --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          echo "processing run $RUN_ID (dry_run=$DRY)"
+
+          gh api "repos/$REPO/actions/runs/$RUN_ID" > run.json
+          WF=$(jq -r '.name' run.json)
+          SHA=$(jq -r '.head_sha' run.json)
+          URL=$(jq -r '.html_url' run.json)
+          BRANCH=$(jq -r '.head_branch' run.json)
+          if [ "$BRANCH" != "main" ]; then
+            echo "run $RUN_ID is on branch '$BRANCH', not main -- skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HEAD_REPO=$(jq -r '.head_repository.full_name' run.json)
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "run $RUN_ID is from repository '$HEAD_REPO', not $REPO -- skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          FAILING=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.conclusion=="failure") | .name] | sort | join(",")')
+          if [ -z "$FAILING" ]; then
+            echo "run $RUN_ID has no failed jobs -- skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FIRST=$(printf '%s' "$FAILING" | cut -d, -f1)
+          SHORT="${SHA:0:7}"
+          BID=$(printf '%s' "$REPO|$WF|$FAILING" | sha256sum | cut -c1-12)
+          echo "workflow=$WF sha=$SHORT failing=[$FAILING] Breakage-ID=$BID"
+
+          EXISTING=$(gh issue list --repo "$REPO" --state open --label main-broken \
+            --search "$BID" --json number --jq '.[0].number // empty')
+
+          if [ "$DRY" = "true" ]; then
+            if [ -n "$EXISTING" ]; then
+              echo "DRY RUN: would append run $URL to existing issue #$EXISTING"
+            else
+              echo "DRY RUN: would file a new main-broken issue for Breakage-ID $BID"
+            fi
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Coin the chain labels if missing (idempotent: --force updates).
+          gh label create "kind/ci" --repo "$REPO" --color fbca04 --description "CI/CD pipelines, workflows, and build automation" --force
+          gh label create "priority/critical" --repo "$REPO" --color b60205 --description "Drop everything: main broken, security exposure, repo-wide outage" --force
+          gh label create "main-broken" --repo "$REPO" --color B60205 --description "main branch full-suite (main tier) is red; remediation chain owns this" --force
+          gh label create "queue/queued" --repo "$REPO" --color 7057ff --description "Has a queued task in the Supabase agent queue" --force
+          gh label create "status/needs-triage" --repo "$REPO" --color fbca04 --description "Not yet triaged; needs a first look" --force
+
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ -n "$EXISTING" ]; then
+            cat > prompt.md <<BODY
+          <!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken chain (append, $NOW)
+          - same Breakage-ID \`$BID\` failed again: $URL
+          - failing jobs: $FAILING
+          - holder: unchanged (see the filing note on this issue); a fresh task is attached to this issue via pm-dispatch -- no duplicate filing
+          BODY
+          else
+            cat > prompt.md <<BODY
+          Main-tier workflow \`$WF\` failed on \`main\`.
+
+          - Run: $URL
+          - Head commit: $SHA
+          - Failing jobs: $FAILING
+          - First failing job: $FIRST
+          - Logs / first error excerpt: see the run's failed-job logs at the run URL above.
+
+          Breakage-ID: $BID
+
+          <!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken chain (filing, $NOW)
+          - holder: fleet queue (chain filing) -- filed with \`queue/queued\` for a priority Muse lane
+          - dispatch: handed to the fleet queue via pm-dispatch at filing time; the Jules leg is retired fleet-wide, so no \`jules\` label is applied or expected to trigger remediation
+          - dedupe: Breakage-ID \`$BID\`; repeat failures with the same ID append to this issue instead of filing anew
+          BODY
+          fi
+
+          {
+            echo "skip=false"
+            echo "existing=$EXISTING"
+            echo "bid=$BID"
+            echo "run_url=$URL"
+            echo "title=main-broken: $REPO $WF @$SHORT -- $FIRST"
+            echo "prompt<<PROMPT_EOF"
+            cat prompt.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$EXISTING" ]; then
+            echo "append decision recorded for existing issue #$EXISTING"
+          else
+            echo "filing decision recorded for Breakage-ID $BID"
+          fi
+
+      - name: Queue a new main-broken issue via pm-dispatch
+        id: queue-new
+        if: steps.filing.outputs.skip == 'false' && steps.filing.outputs.existing == ''
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
+        with:
+          title: ${{ steps.filing.outputs.title }}
+          prompt: ${{ steps.filing.outputs.prompt }}
+          priority: "critical"
+          kind: "ci_investigation"
+          issue: "true"
+
+      # Dispatch-created issues carry only queue/queued + source/dispatch;
+      # re-apply the workflow's full label set on the created issue.
+      - name: Apply the main-broken label set to the new issue
+        if: steps.queue-new.outputs.issue_number != ''
+        run: |
+          gh issue edit "${{ steps.queue-new.outputs.issue_number }}" --repo "${{ github.repository }}" --add-label "kind/ci,priority/critical,main-broken,queue/queued,status/needs-triage"
+
+      - name: Attach a fresh task to the existing main-broken issue via pm-dispatch
+        if: steps.filing.outputs.skip == 'false' && steps.filing.outputs.existing != ''
+        uses: ./.pm-central/.github/actions/pm-dispatch-queue
+        with:
+          title: ${{ steps.filing.outputs.title }}
+          prompt: ${{ steps.filing.outputs.prompt }}
+          priority: "critical"
+          kind: "ci_investigation"
+          issue_number: ${{ steps.filing.outputs.existing }}
+
+      # Race-loser reconcile (issue #1037): the workflow-level concurrency
+      # group is per-run by design so watchers never cancel each other
+      # (cancel-in-progress stays false), which means two watchers for the
+      # same Breakage-ID can both observe no existing issue and both file.
+      # The loser closes its duplicate with a pointer to the survivor and
+      # the survivor keeps exactly one open issue plus every run link.
+      - name: Reconcile duplicate main-broken issues for this Breakage-ID
+        if: steps.filing.outputs.skip == 'false'
+        env:
+          BID: ${{ steps.filing.outputs.bid }}
+          RUN_URL: ${{ steps.filing.outputs.run_url }}
+          CREATED: ${{ steps.queue-new.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if [ -z "${BID:-}" ]; then
+            echo "no Breakage-ID -- skipping reconcile"
+            exit 0
+          fi
+          echo "reconciling Breakage-ID $BID (created=${CREATED:-none} run=$RUN_URL)"
+          CANDIDATES=$(gh issue list --repo "$REPO" --state open --label main-broken \
+            --search "$BID" --json number --jq 'map(.number) | sort | join(" ")')
+          if [ -z "$CANDIDATES" ]; then
+            echo "no open main-broken issues mention $BID -- nothing to reconcile"
+            exit 0
+          fi
+          # Keep only issues whose body actually carries this Breakage-ID
+          # (search is lexical and can match neighbours).
+          MATCHED=""
+          for N in $CANDIDATES; do
+            BODY=$(gh issue view "$N" --repo "$REPO" --json body --jq '.body // ""')
+            case "$BODY" in
+              *"$BID"*) MATCHED="$MATCHED $N" ;;
+              *) echo "issue #$N does not contain $BID -- skipping" ;;
+            esac
+          done
+          MATCHED=$(echo "$MATCHED" | xargs)
+          if [ -z "$MATCHED" ]; then
+            echo "no open issue with Breakage-ID $BID -- nothing to reconcile"
+            exit 0
+          fi
+          SURVIVOR=$(echo "$MATCHED" | tr ' ' '\n' | sort -n | head -1)
+          echo "survivor is #$SURVIVOR; candidates:$MATCHED"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          for LOSER in $MATCHED; do
+            if [ "$LOSER" = "$SURVIVOR" ]; then
+              continue
+            fi
+            # RUN-LINKS-BEGIN -- pinned by script/main-broken-reconcile.test.ts (#1314).
+            # A loser can itself be a former survivor: run links from an
+            # earlier reconcile live only in its comments, not its body.
+            # Collect every distinct run link from the body AND all
+            # comments so a staged reconcile forwards the full chain.
+            LOSER_BODY=$(gh issue view "$LOSER" --repo "$REPO" --json body --jq '.body // ""')
+            LOSER_COMMENTS=$(gh issue view "$LOSER" --repo "$REPO" --json comments --jq '[.comments[].body // ""] | join("\n")')
+            LOSER_RUNS=$(printf '%s\n%s\n' "$LOSER_BODY" "$LOSER_COMMENTS" | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+' | awk '!seen[$0]++' || true)
+            if [ -z "$LOSER_RUNS" ]; then
+              LOSER_RUNS="(run link not found in #$LOSER body or comments)"
+            fi
+            echo "closing race-loser duplicate #$LOSER (runs: $LOSER_RUNS) in favour of #$SURVIVOR"
+            gh issue comment "$LOSER" --repo "$REPO" --body "<!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken race-loser reconcile ($NOW)
+          - duplicate of #$SURVIVOR for Breakage-ID \`$BID\`
+          - this run: $RUN_URL; loser runs:
+          $LOSER_RUNS
+          - closing so exactly one open main-broken issue remains per Breakage-ID" || true
+            gh issue close "$LOSER" --repo "$REPO" --reason "not planned" || gh issue close "$LOSER" --repo "$REPO" || true
+            gh issue comment "$SURVIVOR" --repo "$REPO" --body "<!-- agent-note:v1 -->
+          agent-note:v1 -- main-broken race-loser reconcile ($NOW)
+          - closed duplicate #$LOSER for the same Breakage-ID \`$BID\`
+          - loser runs (from #$LOSER body and prior reconcile comments):
+          $LOSER_RUNS
+          - reconciling run: $RUN_URL" || true
+            # RUN-LINKS-END
+          done
+          if [ -n "${CREATED:-}" ] && [ "$CREATED" != "$SURVIVOR" ]; then
+            echo "this run created loser #$CREATED -- its links were forwarded to #$SURVIVOR above"
+          else
+            echo "reconcile complete -- single survivor #$SURVIVOR"
+          fi

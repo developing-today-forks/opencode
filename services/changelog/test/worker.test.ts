@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { handle, loadSource } from "../src/index"
+import { CHANGELOG_MAX_BYTES, handle, loadSource } from "../src/index"
 
 const changelog = `# Changelog
 
@@ -126,5 +126,41 @@ describe("loadSource", () => {
   test("resolves undefined when GitHub fails and nothing is cached", async () => {
     stub(undefined)
     expect(await loadSource({ waitUntil: () => {} }, memoryCache().cache)).toBeUndefined()
+  })
+
+  test("refuses an oversized body and does not cache it", async () => {
+    stub("x".repeat(CHANGELOG_MAX_BYTES + 1))
+    const { cache, entries } = memoryCache()
+    expect(await loadSource({ waitUntil: () => {} }, cache)).toBeUndefined()
+    expect(entries.size).toBe(0)
+  })
+
+  test("refuses a body whose declared content-length is over the cap", async () => {
+    globalThis.fetch = (async () =>
+      new Response("small", {
+        headers: { "content-length": String(CHANGELOG_MAX_BYTES + 1) },
+      })) as unknown as typeof fetch
+    const { cache, entries } = memoryCache()
+    expect(await loadSource({ waitUntil: () => {} }, cache)).toBeUndefined()
+    expect(entries.size).toBe(0)
+  })
+
+  test("refuses an endless body without buffering it whole", async () => {
+    const chunk = new Uint8Array(64 * 1024).fill(120)
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(chunk)
+          },
+        }),
+      )) as unknown as typeof fetch
+    const { cache, entries } = memoryCache()
+    expect(await loadSource({ waitUntil: () => {} }, cache)).toBeUndefined()
+    expect(entries.size).toBe(0)
+  })
+
+  test("caps the changelog body at 1 MiB", () => {
+    expect(CHANGELOG_MAX_BYTES).toBe(1024 * 1024)
   })
 })

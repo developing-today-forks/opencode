@@ -36,10 +36,49 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
   Effect.gen(function* () {
     const session = yield* Session.Service
     const transfer = yield* SessionTransfer.Service
+    // Question escalation (#1884): a session may see and answer pending forms
+    // owned by itself or any descendant, so a subsession's question is
+    // answerable by its parent and passes up the ancestry to the root/client.
+    // Form stays tree-agnostic; the ancestry walk lives here in the server
+    // handler, resolved through the Session service's parent chain.
+    const descendantIDs = Effect.fnUntraced(function* (rootID: string) {
+      // Non-session ids (e.g. the "global" location pseudo-session) have no subtree.
+      if (!rootID.startsWith("ses")) return [] as Session.ID[]
+      const ids: Session.ID[] = []
+      const seen = new Set<string>([rootID])
+      const queue: Session.ID[] = [Session.ID.make(rootID)]
+      while (queue.length > 0) {
+        const current = queue.shift() as Session.ID
+        const children = yield* session
+          .list({ parentID: current })
+          .pipe(Effect.orElseSucceed(() => ({ data: [] as const })))
+        for (const child of children.data) {
+          if (seen.has(child.id)) continue
+          seen.add(child.id)
+          ids.push(child.id)
+          queue.push(child.id)
+        }
+      }
+      return ids
+    })
+    const ownsForm = Effect.fnUntraced(function* (sessionID: string, ownerID: Form.Info["sessionID"]) {
+      if (ownerID === sessionID) return true
+      if (!sessionID.startsWith("ses") || !ownerID.startsWith("ses")) return false
+      const seen = new Set<string>([ownerID])
+      let current = ownerID
+      while (true) {
+        const info = yield* session.get(Session.ID.make(current)).pipe(Effect.orElseSucceed(() => undefined))
+        if (!info?.parentID) return false
+        if (info.parentID === sessionID) return true
+        if (seen.has(info.parentID)) return false
+        seen.add(info.parentID)
+        current = info.parentID
+      }
+    })
     const requireOwnedForm = Effect.fnUntraced(function* (sessionID: Form.Info["sessionID"], formID: Form.ID) {
       const form = yield* Form.Service
       const info = yield* form.get(formID).pipe(Effect.catchTag("Form.NotFoundError", () => missingForm(formID)))
-      if (info.sessionID !== sessionID) return yield* missingForm(formID)
+      if (!(yield* ownsForm(sessionID, info.sessionID))) return yield* missingForm(formID)
       return { form, info }
     })
     const busySession = (error: Session.BusyError) =>
@@ -117,7 +156,20 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               timezone,
               tools: ctx.query.tools,
             }).pipe(
-              Effect.mapError(() => new InvalidRequestError({ message: "Stats range must end after it starts" })),
+              // SessionStats.InvalidRangeError has exactly two causes, and
+              // its from/to fields separate them: a reversed or empty range
+              // (from >= to), or a span over the service cap (#959). Report
+              // the actual cause — an over-wide span used to be mislabelled
+              // as a reversed range (#1000).
+              Effect.mapError(
+                (error) =>
+                  new InvalidRequestError({
+                    message:
+                      error.from >= error.to
+                        ? "Stats range must end after it starts"
+                        : `Stats range is too wide: the maximum span is ${SessionStats.MaxSpanDays} days`,
+                  }),
+              ),
             ),
           }
         }),
@@ -125,6 +177,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.create",
         Effect.fn(function* (ctx) {
+          if (ctx.query.directory !== undefined && ctx.payload.parentID !== undefined)
+            return yield* new InvalidRequestError({
+              message:
+                "The directory query parameter cannot be combined with parentID: a child session inherits its parent's location.",
+              field: "directory",
+            })
           return {
             data: yield* session
               .create({
@@ -135,8 +193,15 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 metadata: ctx.payload.metadata,
                 permissions: ctx.payload.permissions,
                 subagentPolicy: ctx.payload.subagentPolicy,
+                detached: ctx.payload.detached,
                 ...(ctx.payload.parentID === undefined
-                  ? { location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) } }
+                  ? {
+                      location:
+                        ctx.payload.location ??
+                        (ctx.query.directory === undefined
+                          ? { directory: AbsolutePath.make(process.cwd()) }
+                          : { directory: ctx.query.directory }),
+                    }
                   : { parentID: ctx.payload.parentID }),
               })
               .pipe(
@@ -646,7 +711,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.interrupt",
         Effect.fn(function* (ctx) {
-          return { interrupted: yield* session.interrupt(ctx.params.sessionID, { resume: ctx.query.resume }) }
+          return {
+            interrupted: yield* session.interrupt(ctx.params.sessionID, {
+              resume: ctx.query.resume,
+              force: ctx.query.force,
+            }),
+          }
         }),
       )
       .handle(
@@ -673,7 +743,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.form.list",
         Effect.fn(function* (ctx) {
           const form = yield* Form.Service
-          return { data: yield* form.list({ sessionID: ctx.params.sessionID }) }
+          const ids = [ctx.params.sessionID, ...(yield* descendantIDs(ctx.params.sessionID))]
+          const grouped = new Map<string, Form.Info[]>()
+          for (const id of ids) grouped.set(id, [])
+          for (const entry of yield* form.list()) grouped.get(entry.sessionID)?.push(entry)
+          return { data: ids.flatMap((id) => grouped.get(id) ?? []) }
         }),
       )
       .handle(

@@ -1,6 +1,7 @@
 export * as CodeModeCatalog from "./catalog.js"
 
 import { Schema } from "effect"
+import { Text } from "../util/text.js"
 
 export const Tool = Schema.Struct({
   type: Schema.Literal("tool"),
@@ -25,6 +26,7 @@ export type Inventory = {
 const Listing = Schema.Struct({
   path: Schema.String,
   line: Schema.String,
+  pinned: Schema.optionalKey(Schema.Boolean),
 })
 
 const NamespaceSummary = Schema.Struct({
@@ -32,6 +34,7 @@ const NamespaceSummary = Schema.Struct({
   description: Schema.optionalKey(Schema.String),
   count: Schema.Number,
   entries: Schema.Array(Listing),
+  inline: Schema.optionalKey(Schema.Boolean),
 })
 
 export const Summary = Schema.Struct({
@@ -49,8 +52,8 @@ const DESCRIPTION_LIMIT = 120
 const CHARACTERS_PER_TOKEN = 4
 const INLINE_BUDGET = 2_000
 
-// Keep every namespace visible, then select full listings one per namespace per round,
-// considering shorter listings first until the inline budget is exhausted.
+// Keep namespace inventory available for updates/search, but only render summaries and
+// listings that fit the inline budget. Full listings are selected round-robin.
 export function summarize(inventory: Inventory, options: Options = {}): Summary {
   const budget = options.budget ?? INLINE_BUDGET
   const flattened = flatten(inventory.tools)
@@ -66,9 +69,13 @@ export function summarize(inventory: Inventory, options: Options = {}): Summary 
         .map((entry) => {
           const firstLine = entry.description.split("\n", 1)[0]?.trim() ?? ""
           const description =
-            firstLine.length > DESCRIPTION_LIMIT ? firstLine.slice(0, DESCRIPTION_LIMIT - 3) + "..." : firstLine
+            firstLine.length > DESCRIPTION_LIMIT ? Text.truncate(firstLine, DESCRIPTION_LIMIT - 3) + "..." : firstLine
           const suffix = description.length === 0 ? "" : ` // ${description}`
-          return { path: entry.path, line: `  - ${entry.signature}${suffix}` }
+          return {
+            path: entry.path,
+            line: `  - ${entry.signature}${suffix}`,
+            ...(entry.pinned === undefined ? {} : { pinned: entry.pinned }),
+          }
         })
         .toSorted((left, right) => {
           if (left.path < right.path) return -1
@@ -89,29 +96,48 @@ export function summarize(inventory: Inventory, options: Options = {}): Summary 
         selectionOrder: ranked.filter((candidate) => !pinned.has(candidate.listing)),
         selectedListings: pinned,
         selectionIndex: 0,
+        inline: false,
       }
     })
 
-  const active = new Set(namespaces)
-  // TODO: Bound namespace discovery once large namespace inventories and descriptions can no longer stay inline.
-  let remaining =
-    budget -
-    namespaces.reduce(
-      (total, namespace) =>
-        total +
-        cost(
-          namespaceLine({
-            name: namespace.name,
-            ...(namespace.description === undefined ? {} : { description: namespace.description }),
-            count: namespace.listings.length,
-            entries: [],
-          }),
+  const pinnedCost = namespaces
+    .flatMap((namespace) => namespace.listings.filter((listing) => namespace.selectedListings.has(listing)))
+    .reduce((total, listing) => total + cost(listing.line), 0)
+  let remaining = Math.max(0, budget - pinnedCost)
+  const summaryCandidates = namespaces
+    .map((namespace) => {
+      // Reserve the longest header this namespace can render with: the shown count at
+      // render time can be anything from 0 ("none shown") up to the full count, and a
+      // header reserved for a shorter label would let the rendered catalog exceed the
+      // budget when a longer label is used.
+      const header = {
+        name: namespace.name,
+        ...(namespace.description === undefined ? {} : { description: namespace.description }),
+        count: namespace.listings.length,
+        entries: [],
+        inline: true,
+      }
+      return {
+        namespace,
+        cost: Math.max(
+          cost(namespaceLine(header, 0)),
+          cost(namespaceLine(header, Math.max(0, namespace.listings.length - 1))),
         ),
-      0,
-    ) -
-    namespaces
-      .flatMap((namespace) => namespace.listings.filter((listing) => namespace.selectedListings.has(listing)))
-      .reduce((total, listing) => total + cost(listing.line), 0)
+      }
+    })
+    .toSorted((left, right) => {
+      if (left.cost !== right.cost) return left.cost - right.cost
+      if (left.namespace.name < right.namespace.name) return -1
+      if (left.namespace.name > right.namespace.name) return 1
+      return 0
+    })
+  for (const candidate of summaryCandidates) {
+    if (candidate.cost > remaining) continue
+    candidate.namespace.inline = true
+    remaining -= candidate.cost
+  }
+
+  const active = new Set(namespaces.filter((namespace) => namespace.inline))
   while (active.size > 0) {
     for (const namespace of active) {
       const candidate = namespace.selectionOrder[namespace.selectionIndex]
@@ -131,6 +157,7 @@ export function summarize(inventory: Inventory, options: Options = {}): Summary 
     ...(namespace.description === undefined ? {} : { description: namespace.description }),
     count: namespace.listings.length,
     entries: namespace.listings.filter((listing) => namespace.selectedListings.has(listing)),
+    inline: namespace.inline,
   }))
   return {
     total: flattened.tools.length,
@@ -162,14 +189,9 @@ function flatten(entries: ReadonlyArray<Tool | Namespace>, path: ReadonlyArray<s
   return { tools, namespaces }
 }
 
-export function namespaceLine(namespace: typeof NamespaceSummary.Type) {
+export function namespaceLine(namespace: typeof NamespaceSummary.Type, shown = namespace.entries.length) {
   const count = namespace.count === 1 ? "1 tool" : `${namespace.count} tools`
-  const label =
-    namespace.entries.length === namespace.count
-      ? count
-      : namespace.entries.length === 0
-        ? `${count}, none shown`
-        : `${count}, ${namespace.entries.length} shown`
+  const label = shown === namespace.count ? count : shown === 0 ? `${count}, none shown` : `${count}, ${shown} shown`
   return `- ${namespace.name} (${label})${namespace.description === undefined ? "" : ` // ${namespace.description}`}`
 }
 

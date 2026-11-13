@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Layer, Schedule } from "effect"
+import { DateTime, Effect, Layer, Schedule, Schema, Stream } from "effect"
 import { Agent } from "@opencode/core/agent"
 import { AISDK } from "@opencode/core/aisdk"
 import { Bus } from "@opencode/core/bus"
@@ -115,7 +115,11 @@ const it = testEffect(
       Config.node.replace(config),
       Mcp.node.replace(emptyMcpLayer),
       Generate.node.replace(
-        Layer.succeed(Generate.Service, Generate.Service.of({ text: () => Effect.succeed('["2", "1"]') })),
+        Layer.succeed(Generate.Service, Generate.Service.of({
+            text: () => Effect.succeed('["2", "1"]'),
+            complete: () => Effect.die("unused"),
+            stream: () => Stream.die("unused"),
+          })),
       ),
     ],
   ).pipe(Layer.provideMerge(config)),
@@ -318,6 +322,30 @@ describe("MessagingTools", () => {
       expect((yield* request(child.id)).system.map((part) => part.text)).toEqual([
         `Session started ${created} (${MessagingTemplate.timeZone()}). Session ID: ${child.id}. Parent session: ${root.id}. Root session: ${root.id}.`,
       ])
+    }),
+  )
+
+  it.effect("rejects invalid offsets at the tool boundary like the contract", () =>
+    Effect.sync(() => {
+      for (const input of [MessagingTools.TopicsInput, MessagingTools.SessionsInput]) {
+        const decode = Schema.decodeUnknownSync(input)
+        expect(decode({ offset: 0 })).toMatchObject({ offset: 0 })
+        expect(decode({ offset: 10 })).toMatchObject({ offset: 10 })
+        expect(() => decode({ offset: -1 })).toThrow()
+        expect(() => decode({ offset: 1.5 })).toThrow()
+        expect(() => decode({ offset: NaN })).toThrow()
+      }
+    }),
+  )
+
+  it.effect("rejects invalid log context at the tool boundary like the contract", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(MessagingTools.SessionsInput)
+      expect(decode({ context: 0 })).toMatchObject({ context: 0 })
+      expect(decode({ context: 10 })).toMatchObject({ context: 10 })
+      expect(() => decode({ context: -1 })).toThrow()
+      expect(() => decode({ context: 1.5 })).toThrow()
+      expect(() => decode({ context: NaN })).toThrow()
     }),
   )
 })

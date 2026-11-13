@@ -22,16 +22,25 @@ on:
       - "nix/scripts/**"
       - "patches/**"
       - ".github/workflows/nix-hashes.yml"
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a restamp run (#1580): with cancel-in-progress: true each new
+  # merge killed the previous run before it could restamp, so the FOD hash
+  # rotted silently. Queue runs instead; a failed run is visible in Actions
+  # and a changed hash lands as the update-hashes commit below.
+  cancel-in-progress: false
 
 jobs:
   # Native runners required: bun install cross-compilation flags (--os/--cpu)
   # do not produce byte-identical node_modules as native installs.
   compute-hash:
     timeout-minutes: 20
+    # #1871: only the aarch64-darwin leg is masked. When its runner never
+    # starts, the leg is cancelled with zero steps and no step-level retry
+    # can run; masking just this leg lets compute-hash-darwin-fallback
+    # (below) recover at the workflow level. If the fallback also fails,
+    # the run still fails visibly. Linux legs keep failing the job as before.
+    continue-on-error: ${{ matrix.system == 'aarch64-darwin' }}
     strategy:
       fail-fast: false
       matrix:
@@ -95,9 +104,88 @@ jobs:
           path: hash.txt
           retention-days: 1
 
+  # #1871 fallback: run 42263623640 failed when the aarch64-darwin leg was
+  # cancelled with zero steps - the macos-latest runner never started.
+  # Recovery is workflow-level and bounded: exactly one recompute, on the
+  # alternate macos-15 runner pool, and only when the primary leg left no
+  # hash artifact. This job has no continue-on-error: if it fails, the run fails.
+  compute-hash-darwin-fallback:
+    timeout-minutes: 20
+    needs: compute-hash
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check for the primary darwin hash artifact
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hash-aarch64-darwin
+          path: primary-hash
+
+      - name: Decide whether the fallback compute is needed
+        id: decide
+        run: |
+          if [ -s primary-hash/hash.txt ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Primary aarch64-darwin leg produced its hash; fallback compute not needed."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Primary aarch64-darwin leg produced no hash artifact; computing it on macos-15 (see #1871)."
+          fi
+
+      - name: Setup Nix
+        if: steps.decide.outputs.present == 'false'
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - name: Compute node_modules hash (aarch64-darwin fallback)
+        if: steps.decide.outputs.present == 'false'
+        env:
+          SYSTEM: aarch64-darwin
+        run: |
+          set -euo pipefail
+
+          BUILD_LOG=$(mktemp)
+          trap 'rm -f "$BUILD_LOG"' EXIT
+
+          HASH=""
+          MAX_ATTEMPTS=3
+          for ((ATTEMPT = 1; ATTEMPT <= MAX_ATTEMPTS; ATTEMPT++)); do
+            # Build with fakeHash to trigger hash mismatch and reveal correct hash
+            nix build ".#packages.${SYSTEM}.node_modules_updater" --no-link 2>&1 | tee "$BUILD_LOG" || true
+
+            HASH="$(nix run --inputs-from . nixpkgs#gnugrep -- -oP 'got:\s*\Ksha256-[A-Za-z0-9+/=]+' "$BUILD_LOG" | tail -n1 || true)"
+
+            [ -n "$HASH" ] && break
+
+            if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+              echo "::warning::Attempt ${ATTEMPT}/${MAX_ATTEMPTS} produced no hash for ${SYSTEM}; retrying in $((ATTEMPT * 10))s"
+              sleep $((ATTEMPT * 10))
+            fi
+          done
+
+          if [ -z "$HASH" ]; then
+            echo "::error::Failed to compute hash for ${SYSTEM} after ${MAX_ATTEMPTS} attempts"
+            cat "$BUILD_LOG"
+            exit 1
+          fi
+
+          echo "$HASH" > hash.txt
+          echo "Computed hash for ${SYSTEM}: $HASH"
+
+      - name: Upload hash
+        if: steps.decide.outputs.present == 'false'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hash-aarch64-darwin
+          path: hash.txt
+          retention-days: 1
+
   update-hashes:
     timeout-minutes: 15
-    needs: compute-hash
+    needs: [compute-hash, compute-hash-darwin-fallback]
     if: github.event_name != 'pull_request'
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04

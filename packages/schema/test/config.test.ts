@@ -2,13 +2,21 @@ import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { Config } from "../src/config.js"
 import { ConfigAgent } from "../src/config/agent.js"
+import { ConfigAlias } from "../src/config/aliases.js"
+import { ConfigExperimental } from "../src/config/experimental.js"
 import { ConfigMCP } from "../src/config/mcp.js"
+import { ConfigMessaging } from "../src/config/messaging.js"
 import { ConfigModel } from "../src/config/model.js"
 import { ConfigModelRoutes } from "../src/config/model-routes.js"
 import { ConfigProvider } from "../src/config/provider.js"
+import { ConfigWarming } from "../src/config/warming.js"
+import { Form } from "../src/form.js"
 import { Mcp } from "../src/mcp.js"
+import { Messaging } from "../src/messaging.js"
 import { Model } from "../src/model.js"
 import { Provider } from "../src/provider.js"
+import { Question } from "../src/question.js"
+import { Skill } from "../src/skill.js"
 import { AbsolutePath } from "../src/schema.js"
 import { WebSearch } from "../src/websearch.js"
 
@@ -150,10 +158,14 @@ describe("ConfigModelRoutes field descriptions", () => {
   const described = (schema: Schema.Top) => {
     const { definitions } = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" })
     const fields: Record<string, string | undefined> = {}
-    for (const definition of Object.values(
-      definitions as Record<string, { properties?: Record<string, { description?: string }> }>,
-    ))
-      for (const [name, property] of Object.entries(definition.properties ?? {})) fields[name] ??= property.description
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (typeof node !== "object" || node === null) return
+      const { properties, ...rest } = node as { properties?: Record<string, { description?: string }> }
+      for (const [name, property] of Object.entries(properties ?? {})) fields[name] ??= property.description
+      Object.values(rest).forEach(walk)
+    }
+    Object.values(definitions as Record<string, unknown>).forEach(walk)
     return fields
   }
 
@@ -172,10 +184,11 @@ describe("ConfigModelRoutes field descriptions", () => {
           "quotaCooldownMs",
         ],
       ],
-      [ConfigModelRoutes.Window, ["daysOfWeek", "daysOfMonth", "start", "end", "timezone", "from", "until"]],
+      [ConfigModelRoutes.Window, ["daysOfWeek", "daysOfMonth", "dates", "excludeDates", "excludeWindows", "start", "end", "timezone", "from", "until"]],
       [ConfigModelRoutes.Schedule, ["id", "targets", "factor", "weight", "note"]],
       [ConfigModelRoutes.GlobalSchedule, ["providers", "models", "targets", "routes", "factor", "weight"]],
-      [ConfigModelRoutes.Route, ["budgets", "hedgeAfterMs", "attempts"]],
+      [ConfigModelRoutes.Route, ["budgets", "hedgeAfterMs", "attempts", "autonomy", "selection", "weights", "schedules", "limit"]],
+      [ConfigModelRoutes.Target, ["defaultVariant", "variants", "until", "limit"]],
       [ConfigModelRoutes.Tuning, ["enabled", "intervalMinutes", "windowHours", "notes"]],
       [ConfigModelRoutes.Log, ["captureErrorBodies"]],
     ]
@@ -184,6 +197,228 @@ describe("ConfigModelRoutes field descriptions", () => {
       for (const name of names) expect(fields[name], name).toBeString()
     }
     expect(described(ConfigModelRoutes.Budget).softLimit).toContain("Fraction of an allowance")
+    expect(described(ConfigModelRoutes.Route).autonomy).toContain("How much the route may decide")
+    expect(described(ConfigModelRoutes.Target).defaultVariant).toContain("Variant used when the route is selected")
+  })
+})
+
+describe("ConfigModelRoutes.Window bounds", () => {
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects empty or reversed epoch ranges and accepts one-sided or ordered bounds", () => {
+    expect(() => decode({ from: 2, until: 1 })).toThrow("window from must be before until")
+    expect(() => decode({ from: 1, until: 1 })).toThrow("window from must be before until")
+    expect(decode({ from: 1 })).toMatchObject({ from: 1 })
+    expect(decode({ until: 1 })).toMatchObject({ until: 1 })
+    expect(decode({ from: 1, until: 2 })).toMatchObject({ from: 1, until: 2 })
+  })
+})
+
+describe("ConfigModelRoutes.Window string fields (#1681)", () => {
+  // Oracle: the runtime parser in packages/core/src/model-route-schedule.ts
+  // (ModelRouteSchedule.parse) drops the WHOLE window when any of these strings is
+  // unreadable. Decode must reject exactly what the parser rejects for these fields,
+  // and accept what it accepts, so a typo fails at load instead of silently
+  // disabling every rule gated on the window.
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects date entries the parser drops: non-grammar, non-real, and reversed ranges", () => {
+    expect(() => decode({ dates: ["2026-02-30"] })).toThrow("not a real calendar date")
+    expect(() => decode({ excludeDates: ["2026-02-30"] })).toThrow("not a real calendar date")
+    expect(() => decode({ dates: ["2026/02/03"] })).toThrow("invalid window date entry")
+    expect(() => decode({ dates: ["2026-13-01"] })).toThrow("not a real calendar date")
+    expect(() => decode({ dates: ["2026-03-10/2026-03-01"] })).toThrow("range end is before its start")
+    expect(() => decode({ dates: [] })).toThrow("window dates must not be empty")
+    expect(() => decode({ excludeDates: [] })).toThrow("window excludeDates must not be empty")
+  })
+
+  test("accepts valid single dates and ordered ranges", () => {
+    expect(decode({ dates: ["2026-02-28"] })).toMatchObject({ dates: ["2026-02-28"] })
+    expect(decode({ dates: ["2026-03-01/2026-03-10"] })).toMatchObject({ dates: ["2026-03-01/2026-03-10"] })
+    expect(decode({ dates: ["2026-03-01/2026-03-01"] })).toMatchObject({ dates: ["2026-03-01/2026-03-01"] })
+    expect(decode({ excludeDates: ["2028-02-29"] })).toMatchObject({ excludeDates: ["2028-02-29"] })
+  })
+
+  test("rejects times the parser drops and accepts its friendly forms", () => {
+    expect(() => decode({ start: "25:00" })).toThrow("invalid window time")
+    expect(() => decode({ end: "9:60" })).toThrow("invalid window time")
+    expect(() => decode({ start: "9:30:60" })).toThrow("invalid window time")
+    expect(() => decode({ start: "half past nine" })).toThrow("invalid window time")
+    expect(decode({ start: "9:30" })).toMatchObject({ start: "9:30" })
+    expect(decode({ start: "9:5" })).toMatchObject({ start: "9:5" })
+    expect(decode({ start: "9:30:15" })).toMatchObject({ start: "9:30:15" })
+    expect(decode({ end: "17:00" })).toMatchObject({ end: "17:00" })
+  })
+
+  test("rejects start equal to end after normalization, accepts one-sided and wrapping bounds", () => {
+    expect(() => decode({ start: "09:00", end: "09:00" })).toThrow("window start and end must differ")
+    expect(() => decode({ start: "9:00", end: "09:00:00" })).toThrow("window start and end must differ")
+    expect(() => decode({ start: "09:00:30", end: "09:00:45" })).toThrow("window start and end must differ")
+    expect(decode({ start: "22:00", end: "06:00" })).toMatchObject({ start: "22:00", end: "06:00" })
+    expect(decode({ start: "09:00" })).toMatchObject({ start: "09:00" })
+  })
+
+  test("rejects timezones the runtime does not recognize, accepts IANA names and omission", () => {
+    expect(() => decode({ timezone: "Not/AZone" })).toThrow("unknown window timezone")
+    expect(() => decode({ timezone: "" })).toThrow("unknown window timezone")
+    expect(decode({ timezone: "America/Chicago" })).toMatchObject({ timezone: "America/Chicago" })
+    expect(decode({ timezone: "UTC" })).toMatchObject({ timezone: "UTC" })
+    expect(decode({})).toMatchObject({})
+  })
+
+  test("nested windows decode with the same validation", () => {
+    const decodeWindows = Schema.decodeUnknownSync(ConfigModelRoutes.Windows)
+    expect(() => decodeWindows({ peak: { dates: ["2026-02-30"] } })).toThrow("not a real calendar date")
+    expect(decodeWindows({ peak: { start: "9:30", end: "17:00", timezone: "America/Chicago" } })).toBeDefined()
+
+    const decodeSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.Schedule)
+    expect(() => decodeSchedule({ when: { start: "25:00" }, factor: 0.8 })).toThrow("invalid window time")
+    expect(decodeSchedule({ when: { dates: ["2026-12-25"] }, weight: 2 })).toBeDefined()
+  })
+})
+
+describe("ConfigModelRoutes.Window list, day and epoch fields (#2041)", () => {
+  // Oracle: the same runtime parser as the #1681 describe. For these fields the parser
+  // also drops the whole window on an empty list (every list field), on a day entry it
+  // cannot read, and on a non-finite epoch bound — while accepting friendly forms the
+  // schema used to reject: capitalised or padded day names, numeric-string days, padded
+  // excludeWindows names, and epoch bounds of 0 or fractional. Decode now mirrors both
+  // directions; the parser canonicalises the friendly forms downstream.
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects empty lists in every list field, naming the field", () => {
+    expect(() => decode({ daysOfWeek: [] })).toThrow("window daysOfWeek must not be empty")
+    expect(() => decode({ daysOfMonth: [] })).toThrow("window daysOfMonth must not be empty")
+    expect(() => decode({ excludeWindows: [] })).toThrow("window excludeWindows must not be empty")
+    // The #2035 controls still hold.
+    expect(() => decode({ dates: [] })).toThrow("window dates must not be empty")
+    expect(() => decode({ excludeDates: [] })).toThrow("window excludeDates must not be empty")
+  })
+
+  test("accepts the parser's friendly day forms and rejects the ones it drops", () => {
+    expect(decode({ daysOfWeek: ["Mon"] })).toMatchObject({ daysOfWeek: ["Mon"] })
+    expect(decode({ daysOfWeek: [" mon "] })).toMatchObject({ daysOfWeek: [" mon "] })
+    expect(decode({ daysOfWeek: ["sunday"] })).toMatchObject({ daysOfWeek: ["sunday"] })
+    expect(decode({ daysOfWeek: ["3"] })).toMatchObject({ daysOfWeek: ["3"] })
+    expect(decode({ daysOfWeek: ["03"] })).toMatchObject({ daysOfWeek: ["03"] })
+    expect(decode({ daysOfWeek: [0, "sat"] })).toMatchObject({ daysOfWeek: [0, "sat"] })
+    expect(() => decode({ daysOfWeek: ["funday"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["7"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["-1"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["constructor"] })).toThrow("invalid weekday")
+
+    expect(decode({ daysOfMonth: ["15"] })).toMatchObject({ daysOfMonth: ["15"] })
+    expect(decode({ daysOfMonth: ["-1"] })).toMatchObject({ daysOfMonth: ["-1"] })
+    expect(decode({ daysOfMonth: [" 15 "] })).toMatchObject({ daysOfMonth: [" 15 "] })
+    expect(decode({ daysOfMonth: [15, -1] })).toMatchObject({ daysOfMonth: [15, -1] })
+    expect(() => decode({ daysOfMonth: ["0"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: ["32"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: ["-2"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: [1.5] })).toThrow()
+    expect(() => decode({ daysOfMonth: [0] })).toThrow()
+  })
+
+  test("accepts padded excludeWindows names, rejects names the parser drops", () => {
+    expect(decode({ excludeWindows: [" peak "] })).toMatchObject({ excludeWindows: [" peak "] })
+    expect(decode({ excludeWindows: ["peak"] })).toMatchObject({ excludeWindows: ["peak"] })
+    expect(() => decode({ excludeWindows: [""] })).toThrow("invalid window name")
+    expect(() => decode({ excludeWindows: ["bad name"] })).toThrow("invalid window name")
+    expect(() => decode({ excludeWindows: ["-leading-dash"] })).toThrow("invalid window name")
+  })
+
+  test("accepts epoch bounds of 0 and fractional values, rejects non-finite ones", () => {
+    expect(decode({ from: 0, until: 1000 })).toMatchObject({ from: 0, until: 1000 })
+    expect(decode({ from: 1.5, until: 1000 })).toMatchObject({ from: 1.5, until: 1000 })
+    expect(decode({ from: 100, until: 1000 })).toMatchObject({ from: 100, until: 1000 })
+    expect(() => decode({ from: Number.NaN })).toThrow()
+    expect(() => decode({ until: Number.POSITIVE_INFINITY })).toThrow()
+    // The ordered-bounds rule is unchanged.
+    expect(() => decode({ from: 1000, until: 1000 })).toThrow("window from must be before until")
+  })
+
+  test("nested windows decode with the same list, day and epoch validation", () => {
+    const decodeWindows = Schema.decodeUnknownSync(ConfigModelRoutes.Windows)
+    expect(decodeWindows({ peak: { daysOfWeek: ["Mon"], from: 0 } })).toBeDefined()
+    expect(() => decodeWindows({ peak: { daysOfWeek: [] } })).toThrow("window daysOfWeek must not be empty")
+    expect(() => decodeWindows({ peak: { excludeWindows: ["bad name"] } })).toThrow("invalid window name")
+  })
+})
+
+describe("field descriptions beyond model-routes (#650)", () => {
+  // Same defect as #240, in the remaining schema files: a description annotated outside the package
+  // `optional` helper never reaches the encoded JSON schema. These cases pin the fields fixed by #650.
+  const described = (schema: Schema.Top) => {
+    const { definitions } = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" })
+    const fields: Record<string, string | undefined> = {}
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (typeof node !== "object" || node === null) return
+      const { properties, ...rest } = node as { properties?: Record<string, { description?: string }> }
+      for (const [name, property] of Object.entries(properties ?? {})) fields[name] ??= property.description
+      Object.values(rest).forEach(walk)
+    }
+    Object.values(definitions as Record<string, unknown>).forEach(walk)
+    return fields
+  }
+
+  test("every documented field carries its description in the encoded JSON schema", () => {
+    const cases: Array<[Schema.Top, string[]]> = [
+      [
+        Config.Info,
+        [
+          "shell",
+          "default_agent",
+          "username",
+          "snapshots",
+          "enterprise",
+          "agents",
+          "warming",
+          "websearch",
+          "plugins",
+          "references",
+          "commands",
+          "lsp",
+          "formatter",
+          "update",
+          "share",
+          "policies",
+          "skills",
+          "instructions",
+        ],
+      ],
+      [ConfigMessaging.Info, ["embedding"]],
+      [ConfigMessaging.Search, ["match", "model"]],
+      [ConfigMessaging.Embedding, ["tier", "pooling", "gpu_layers"]],
+      [ConfigMessaging.Remote, ["key"]],
+      [ConfigExperimental.Info, ["portable_shell_scanner", "subagent_depth", "shell_timeout", "policies", "routes"]],
+      [ConfigExperimental.Routes, ["schedules"]],
+      [ConfigAlias.Info, ["providers", "models", "variants"]],
+      [ConfigWarming.Info, ["prompt"]],
+      [Mcp.TimeoutConfig, ["startup", "catalog", "execution"]],
+      [Mcp.LocalConfig, ["cwd", "codemode"]],
+      [Mcp.OAuthConfig, ["auth_server_metadata_url"]],
+      [Messaging.Writer, ["children", "ancestors"]],
+      [Form.StringField, ["hidden"]],
+      [Question.Prompt, ["multiple"]],
+      [Skill.Info, ["vars"]],
+    ]
+    for (const [schema, names] of cases) {
+      const fields = described(schema)
+      for (const name of names) expect(fields[name], name).toBeString()
+    }
+    expect(JSON.stringify(Schema.toJsonSchemaDocument(WebSearch.Result, { onExcessProperty: "error" }))).toContain(
+      "Publication time in milliseconds",
+    )
+    expect(described(Messaging.Writer).children).toContain("Also allow its descendants")
+    expect(described(Config.Info).shell).toContain("Default shell to use")
+    expect(described(Config.Info)).toMatchObject({
+      policies: "Ordered policies controlling access to providers, tools, and integrations",
+      skills: "Additional paths or URLs to discover skills from",
+      instructions: "Additional paths or URLs supplying ambient instructions",
+    })
+    expect(described(ConfigExperimental.Info).policies).toBe(
+      "Deprecated: use top-level policies. Ordered policies controlling access to configured resources",
+    )
   })
 })
 
@@ -286,5 +521,115 @@ describe("ConfigModel.Selection segment spelling (#456)", () => {
       { providerID: "openai", model: "gpt-4", variant: "/" },
     ])
       expect(() => decode(input)).toThrow()
+  })
+})
+
+describe("ConfigExperimental routes.settings (#1140)", () => {
+  const decode = Schema.decodeUnknownSync(ConfigExperimental.Info)
+  const settings = {
+    bench: {
+      maxCooldownMs: 3_600_000,
+      multiplier: 3,
+      failureCapMs: 300_000,
+      retryAfterMinMs: 2_000,
+      cooldownCapMs: 120_000,
+      quotaCooldownCapMs: 7_200_000,
+    },
+    demotion: { after: 5, windowMs: 3_600_000, factor: 0.5 },
+    quotaGate: { maxMs: 86_400_000, fallbackMs: 60_000, feedTtlMs: 30_000, balanceDeadThreshold: 0.1 },
+    escalation: { enabled: false, afterGiveUps: 4, outcomeWindow: 8 },
+    network: { windowMs: 10_000, providers: 4, providerModels: 3 },
+    continuity: { hedgeRequests: 5 },
+    overrides: { preferredFactor: 2 },
+  }
+
+  test("accepts a full nested settings block and round-trips it", () => {
+    const input = { routes: { settings } }
+    const decoded = decode(input)
+    expect(Schema.encodeSync(ConfigExperimental.Info)(decoded)).toEqual(input)
+  })
+
+  test("accepts experimental.model_route_demotion with optional fields (#1151)", () => {
+    const decoded = decode({ model_route_demotion: { threshold: 1, window_ms: 60_000 } })
+    expect(decoded.model_route_demotion?.threshold).toBe(1)
+    expect(decoded.model_route_demotion?.window_ms).toBe(60_000)
+    expect(decode({ model_route_demotion: {} }).model_route_demotion).toBeDefined()
+    expect(decode({ model_route_demotion: { threshold: 2 } }).model_route_demotion?.window_ms).toBeUndefined()
+    expect(decode({}).model_route_demotion).toBeUndefined()
+  })
+
+  test("still accepts the deprecated flat model_route_settings spelling in the schema", () => {
+    // The flat keys stay in the schema so existing config files — and external file
+    // readers — keep validating; normalization folds them into routes.settings.
+    const decoded = decode({ model_route_settings: settings })
+    expect(decoded.model_route_settings?.bench?.multiplier).toBe(3)
+    expect(decoded.routes).toBeUndefined()
+  })
+
+  test("accepts an empty block and a partial one", () => {
+    expect(decode({ routes: { settings: {} } }).routes?.settings).toBeDefined()
+    expect(decode({ routes: { settings: { demotion: { factor: 0.25 } } } }).routes?.settings?.demotion?.factor).toBe(
+      0.25,
+    )
+    expect(decode({}).routes?.settings).toBeUndefined()
+  })
+
+  test("rejects nonsense values", () => {
+    const bad = [
+      { bench: { multiplier: 0.5 } },
+      { bench: { multiplier: 0 } },
+      { bench: { maxCooldownMs: -1 } },
+      { bench: { maxCooldownMs: 0 } },
+      { bench: { retryAfterMinMs: 86_400_001 } },
+      { bench: { failureCapMs: 86_400_001 } },
+      { demotion: { factor: 0 } },
+      { demotion: { factor: 1.5 } },
+      { demotion: { factor: -0.5 } },
+      { demotion: { after: 0 } },
+      { demotion: { after: 51 } },
+      { quotaGate: { fallbackMs: -30 } },
+      { quotaGate: { balanceDeadThreshold: -0.01 } },
+      { quotaGate: { maxMs: 7_776_000_001 } },
+      { network: { providers: 1 } },
+      { network: { windowMs: 0 } },
+      { escalation: { outcomeWindow: 0 } },
+      { escalation: { afterGiveUps: 51 } },
+      { escalation: { afterGiveUps: 6, outcomeWindow: 5 } },
+      { escalation: { afterGiveUps: 6 } },
+      { escalation: { outcomeWindow: 1 } },
+      { continuity: { hedgeRequests: 0 } },
+      { overrides: { preferredFactor: 0 } },
+    ]
+    for (const value of bad) expect(() => decode({ routes: { settings: value } })).toThrow()
+  })
+
+  test("accepts escalation pairs at the cross-field boundary (#1163)", () => {
+    // Equality is valid: every outcome in the window giving up reaches the threshold exactly.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5, outcomeWindow: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    // One-sided values at the default of the other side (afterGiveUps 2, outcomeWindow 5) are valid.
+    expect(decode({ routes: { settings: { escalation: { afterGiveUps: 5 } } } }).routes?.settings?.escalation?.afterGiveUps).toBe(5)
+    expect(decode({ routes: { settings: { escalation: { outcomeWindow: 2 } } } }).routes?.settings?.escalation?.outcomeWindow).toBe(2)
+    // The invariant also holds decoding Escalation on its own.
+    const decodeEscalation = Schema.decodeUnknownSync(ConfigModelRoutes.Escalation)
+    expect(decodeEscalation({ afterGiveUps: 2, outcomeWindow: 2 }).afterGiveUps).toBe(2)
+    expect(() => decodeEscalation({ afterGiveUps: 3, outcomeWindow: 2 })).toThrow()
+  })
+
+  test("enforces exactly one of factor and weight on schedules (#1589)", () => {
+    const decodeSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.Schedule)
+    // Exactly one set decodes, either way around.
+    expect(decodeSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    // Both set would silently discard factor in core's interpreter; neither is inert.
+    expect(() => decodeSchedule({ when: {}, factor: 2, weight: 5 })).toThrow("exactly one of factor and weight")
+    expect(() => decodeSchedule({ when: {} })).toThrow("exactly one of factor and weight")
+
+    const decodeGlobalSchedule = Schema.decodeUnknownSync(ConfigModelRoutes.GlobalSchedule)
+    expect(decodeGlobalSchedule({ when: {}, factor: 2 }).factor).toBe(2)
+    expect(decodeGlobalSchedule({ when: {}, weight: 5 }).weight).toBe(5)
+    expect(() => decodeGlobalSchedule({ when: {}, factor: 2, weight: 5 })).toThrow(
+      "exactly one of factor and weight",
+    )
+    expect(() => decodeGlobalSchedule({ when: {} })).toThrow("exactly one of factor and weight")
   })
 })

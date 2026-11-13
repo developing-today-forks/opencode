@@ -1,15 +1,21 @@
 import { describe, expect, test } from "bun:test"
+import { sql } from "drizzle-orm"
 import { Effect, Exit } from "effect"
+import { TestConsole } from "effect/testing"
 import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
 import { Permission } from "@opencode/core/permission"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { QuotaCurrent } from "@opencode/core/quota-current"
 import { ModelRouteReview } from "@opencode/core/model-route-review"
-import { AIError, QuotaExceededError } from "@opencode/ai"
+import { ModelUsage } from "@opencode/core/model-usage"
+import { AIError, AuthenticationError, QuotaExceededError, RateLimitError } from "@opencode/ai"
 import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
+import { RouteUsageTool } from "@opencode/core/tool/plugin/route-usage"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable } from "@opencode/core/model-route-log/sql"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
+import { withTempDir } from "./fixture/tmpdir"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([ModelRouteLog.node, Database.node])))
 
@@ -82,6 +88,43 @@ describe("ModelRouteLog", () => {
       expect(yield* ModelRouteLog.recentFailures(db, 0)).toHaveLength(1)
     }),
   )
+
+  it.live("counts content-policy rejections separately from failures", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRouteLog.record({ kind: "attempt", row: attempt({}) })
+      for (let i = 0; i < 3; i++)
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ContentPolicy", message: "blocked by policy" }),
+          }),
+        })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          outcome: "failure",
+          output_started: false,
+          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "You exceeded your current quota" }),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
+      expect(stats).toHaveLength(1)
+      expect(stats[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      const hourly = yield* ModelRouteLog.hourlyStats(db, 0)
+      expect(hourly).toHaveLength(1)
+      expect(hourly[0]).toMatchObject({ attempts: 5, failures: 1, policyRejections: 3 })
+
+      // The per-tag breakdown still sees the policy class by its own tag.
+      const breakdown = yield* ModelRouteLog.errorBreakdown(db, 0)
+      expect(breakdown.find((row) => row.tag === "ContentPolicy")?.count).toBe(3)
+    }),
+  )
 })
 
 describe("per-pool history", () => {
@@ -126,6 +169,7 @@ describe("per-pool history", () => {
       expect(decisions).toEqual([
         expect.objectContaining({
           routeID: "pool-cheap",
+          selection: "weighted",
           candidates: ["openai/gpt-6-luna", "azure/gpt-6-luna"],
           chosen: "openai/gpt-6-luna",
           reason: "drawn",
@@ -171,7 +215,9 @@ describe("usage history", () => {
           time_ended: 2_000,
           tokens_input: 1_000,
           tokens_output: 200,
+          tokens_cache_read: 400,
           cost_usd: 0.25,
+          cache_savings_usd: 0.05,
         }),
       })
       ModelRouteLog.record({
@@ -193,11 +239,28 @@ describe("usage history", () => {
       const session = (yield* ModelRouteLog.sessionUsage(db, 0, 50)).find((row) => row.sessionID === "ses_usage")
       expect(session).toMatchObject({ requests: 2, failures: 1, input: 1_500, output: 200 })
       expect(session?.costUsd).toBeCloseTo(0.35)
+      // Savings aggregate only over attempts recorded with pricing; the second attempt has none.
+      expect(session?.cacheRead).toBe(400)
+      expect(session?.cacheSavedUsd).toBeCloseTo(0.05)
 
-      const sessionTargets = yield* ModelRouteLog.sessionTargetUsage(db, ["ses_usage"])
+      const sessionTargets = yield* ModelRouteLog.sessionTargetUsage(db, 0, ["ses_usage"])
       expect(sessionTargets).toEqual([
         expect.objectContaining({ routeID: "usage-pool", providerID: "openai", modelID: "gpt-6-luna", requests: 2 }),
       ])
+
+      // Bounded by `since`: only the attempt at 3_000 counts, so the per-target rows sum to the
+      // since-filtered session totals instead of mixing in the older attempt at 1_000.
+      const bounded = yield* ModelRouteLog.sessionTargetUsage(db, 3_000, ["ses_usage"])
+      expect(bounded).toEqual([
+        expect.objectContaining({
+          routeID: "usage-pool",
+          providerID: "openai",
+          modelID: "gpt-6-luna",
+          requests: 1,
+          input: 500,
+        }),
+      ])
+      expect(yield* ModelRouteLog.sessionTargetUsage(db, 4_000, ["ses_usage"])).toEqual([])
 
       const target = (yield* ModelRouteLog.targetUsage(db, 0)).find(
         (row) => row.providerID === "openai" && row.modelID === "gpt-6-luna" && row.sessions === 1,
@@ -215,6 +278,261 @@ describe("usage history", () => {
       expect(offers.find((row) => row.target === "openai/gpt-6-luna")).toMatchObject({ offered: 1, chosen: 1 })
       expect(offers.find((row) => row.target === "azure/gpt-6-luna")).toMatchObject({ offered: 1, chosen: 0 })
     }),
+  )
+})
+
+describe("authoritative usage (#7)", () => {
+  it.live("sums only successful attempts, with cache savings and tokens by kind", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const seed = (overrides: Partial<ModelRouteLog.Attempt>) =>
+        ModelRouteLog.record({ kind: "attempt", row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }) })
+      seed({
+        time_started: 1_000,
+        time_ended: 2_000,
+        tokens_input: 1_000,
+        tokens_output: 200,
+        tokens_reasoning: 10,
+        tokens_cache_read: 400,
+        tokens_cache_write: 5,
+        cost_usd: 0.25,
+        cache_savings_usd: 0.05,
+      })
+      seed({
+        time_started: 3_000,
+        time_ended: 4_000,
+        tokens_input: 500,
+        tokens_output: 100,
+        tokens_cache_read: 100,
+        cost_usd: 0.1,
+        cache_savings_usd: 0.01,
+      })
+      // Priced but never completed: every non-success outcome is excluded, even
+      // though each row carries a stored cost_usd.
+      for (const [index, outcome] of ["failure", "timeout", "hedged-out"].entries())
+        seed({
+          time_started: 5_000 + index * 2_000,
+          time_ended: 6_000 + index * 2_000,
+          outcome,
+          output_started: false,
+          tokens_input: 9_999,
+          cost_usd: 0.5,
+          cache_savings_usd: 0.5,
+        })
+      yield* Effect.sleep("100 millis")
+
+      const [row] = yield* ModelRouteLog.authoritativeSessionUsage(db, ["ses_auth"])
+      expect(row).toMatchObject({
+        requests: 2,
+        input: 1_500,
+        output: 300,
+        reasoning: 10,
+        cacheRead: 500,
+        cacheWrite: 5,
+      })
+      expect(row?.costUsd).toBeCloseTo(0.35)
+      expect(row?.cacheSavedUsd).toBeCloseTo(0.06)
+
+      // The all-outcomes rollup counts the failed attempts' stored cost too; the
+      // authoritative total deliberately diverges from it (and from the
+      // projector's Session.Info.cost, which also folds in title/compaction
+      // usage that has no route_attempt row at all).
+      const all = (yield* ModelRouteLog.sessionUsage(db, 0, 50)).find((entry) => entry.sessionID === "ses_auth")
+      expect(all?.requests).toBe(5)
+      expect(all?.costUsd).toBeCloseTo(1.85)
+      expect(row?.costUsd).not.toBeCloseTo(all?.costUsd ?? 0)
+
+      // A session with no successful attempt has no authoritative row.
+      expect(yield* ModelRouteLog.authoritativeSessionUsage(db, ["ses_missing"])).toEqual([])
+    }),
+  )
+})
+
+describe("continuation attempts", () => {
+  it.live("links each chunk of a continued response to the attempt that started it", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          session_id: "ses_continued",
+          assistant_message_id: "msg_root",
+          time_started: 1_000,
+          time_ended: 2_000,
+          tokens_input: 1_000,
+          tokens_output: 100,
+          cost_usd: 0.1,
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        continuationOfMessageID: "msg_root",
+        row: attempt({
+          session_id: "ses_continued",
+          assistant_message_id: "msg_chunk_1",
+          continuation_index: 1,
+          time_started: 3_000,
+          time_ended: 4_000,
+          tokens_input: 1_100,
+          tokens_output: 80,
+          cost_usd: 0.08,
+        }),
+      })
+      // A continuation that fails keeps its own outcome and reason, and still belongs to the turn.
+      ModelRouteLog.record({
+        kind: "attempt",
+        continuationOfMessageID: "msg_root",
+        row: attempt({
+          session_id: "ses_continued",
+          assistant_message_id: "msg_chunk_2",
+          continuation_index: 2,
+          outcome: "failure",
+          output_started: false,
+          time_started: 5_000,
+          time_ended: 6_000,
+          tokens_input: 1_200,
+          cost_usd: 0.02,
+          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "You exceeded your current quota" }),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      const rows = yield* db.select().from(RouteAttemptTable).orderBy(RouteAttemptTable.id).all()
+      const root = rows.find((row) => row.assistant_message_id === "msg_root")
+      expect(root).toMatchObject({ continuation_of: null, continuation_index: 0 })
+      expect(rows.find((row) => row.assistant_message_id === "msg_chunk_1")).toMatchObject({
+        continuation_of: root?.id,
+        continuation_index: 1,
+        cost_usd: 0.08,
+      })
+      expect(rows.find((row) => row.assistant_message_id === "msg_chunk_2")).toMatchObject({
+        continuation_of: root?.id,
+        continuation_index: 2,
+        outcome: "failure",
+        error_tag: "QuotaExceeded",
+      })
+
+      // The per-session totals already count every chunk; the turn view gives the same usage as one response.
+      const session = (yield* ModelRouteLog.sessionUsage(db, 0, 50)).find((row) => row.sessionID === "ses_continued")
+      expect(session).toMatchObject({ requests: 3, failures: 1, input: 3_300, output: 180 })
+      const [turn] = ModelUsage.turns(yield* ModelRouteLog.turnAttempts(db, 0, "ses_continued"))
+      expect(turn).toMatchObject({
+        rootID: root?.id,
+        chunks: 3,
+        requests: 3,
+        failures: 1,
+        input: 3_300,
+        output: 180,
+        first: 1_000,
+        last: 6_000,
+        durationMs: 5_000,
+      })
+      expect(turn?.costUsd).toBeCloseTo(0.2)
+    }),
+  )
+
+  it.live("links to the attempt that answered when the first chunk was retried", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          session_id: "ses_retried",
+          assistant_message_id: "msg_retried",
+          outcome: "failure",
+          output_started: false,
+          time_started: 1_000,
+          time_ended: 2_000,
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          session_id: "ses_retried",
+          assistant_message_id: "msg_retried",
+          time_started: 2_100,
+          time_ended: 3_000,
+          tokens_input: 500,
+          tokens_output: 40,
+          cost_usd: 0.05,
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        continuationOfMessageID: "msg_retried",
+        row: attempt({
+          session_id: "ses_retried",
+          assistant_message_id: "msg_retried_chunk",
+          continuation_index: 1,
+          time_started: 4_000,
+          time_ended: 5_000,
+          tokens_input: 600,
+          tokens_output: 30,
+          cost_usd: 0.03,
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      const rows = yield* db.select().from(RouteAttemptTable).orderBy(RouteAttemptTable.id).all()
+      const answered = rows.find((row) => row.time_started === 2_100)
+      const chunk = rows.find((row) => row.assistant_message_id === "msg_retried_chunk")
+      expect(chunk?.continuation_of).toBe(answered?.id)
+      expect(chunk?.continuation_of).not.toBe(rows.find((row) => row.time_started === 1_000)?.id)
+      // The retry that produced no response still belongs to the turn it was part of.
+      const turns = ModelUsage.turns(yield* ModelRouteLog.turnAttempts(db, 0, "ses_retried"))
+      expect(turns).toHaveLength(1)
+      expect(turns[0]).toMatchObject({ rootID: answered?.id, chunks: 2, requests: 3, failures: 1 })
+    }),
+  )
+
+  it.live("route_usage lists a continued response as one turn", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            session_id: "ses_turn_report",
+            assistant_message_id: "msg_report_root",
+            time_started: now - 3_000,
+            time_ended: now - 2_000,
+            tokens_input: 100,
+            tokens_output: 40,
+            cost_usd: 0.04,
+          }),
+        })
+        ModelRouteLog.record({
+          kind: "attempt",
+          continuationOfMessageID: "msg_report_root",
+          row: attempt({
+            session_id: "ses_turn_report",
+            assistant_message_id: "msg_report_chunk",
+            continuation_index: 1,
+            time_started: now - 1_000,
+            time_ended: now,
+            tokens_input: 200,
+            tokens_output: 20,
+            cost_usd: 0.02,
+          }),
+        })
+        yield* Effect.sleep("100 millis")
+
+        const report = yield* RouteUsageTool.collect({ hours: 1, session: "ses_turn_report" }, undefined, {
+          dataDir: tmp.path,
+          now: () => now,
+        })
+        expect(report.turns).toHaveLength(1)
+        expect(report.turns[0]).toMatchObject({ chunks: 2, requests: 2, input: 300, output: 60, durationMs: 3_000 })
+        expect(report.sessions[0]).toMatchObject({ requests: 2, input: 300, output: 60 })
+
+        // A provider filter narrows the turn list like it narrows the target and day reports.
+        const filtered = yield* RouteUsageTool.collect({ hours: 1, provider: "azure" }, undefined, {
+          dataDir: tmp.path,
+          now: () => now,
+        })
+        expect(filtered.turns).toEqual([])
+      }),
+    ),
   )
 })
 
@@ -452,6 +770,37 @@ describe("error bodies", () => {
   test("a request can keep its body without the setting", () => {
     expect(ModelRouteLog.failureFields(reason, { captureBody: true }).error_body).toHaveLength(2_000)
   })
+
+  test("common credential formats are redacted from a captured body", () => {
+    const secrets = [
+      "ghp_" + "A".repeat(36),
+      "gho_" + "A".repeat(36),
+      "github_pat_" + "B".repeat(30),
+      "AKIA" + "C".repeat(16),
+      "ASIA" + "D".repeat(16),
+      "xoxb-" + "1".repeat(12) + "-abcdefghij",
+      "xoxp-" + "2".repeat(12) + "-abcdefghij",
+      "AIza" + "E".repeat(35),
+      "eyJ" + "F".repeat(10) + "." + "G".repeat(10) + "." + "H".repeat(10),
+      "dXNlcjpwYXNz",
+      "urlsecretpass",
+    ]
+    const body = [
+      "retry later ordinary text 12345 https://example.com/docs",
+      ...secrets.slice(0, 8),
+      `token ${secrets[8]}`,
+      `Basic ${secrets[9]}`,
+      `https://user:${secrets[10]}@example.com/path`,
+    ].join(" ")
+    const kept = ModelRouteLog.failureFields(
+      { _tag: "RateLimit", message: "rate limited", body },
+      { captureBody: true },
+    ).error_body
+    for (const secret of secrets) expect(kept).not.toContain(secret)
+    expect(kept).toContain("retry later ordinary text 12345 https://example.com/docs")
+    expect(kept).toContain("Basic [REDACTED]")
+    expect(kept).toContain("https://user:[REDACTED]@example.com/path")
+  })
 })
 
 describe("usage restore", () => {
@@ -526,6 +875,421 @@ describe("cooldown restore", () => {
       expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "restart-extended", model: "m" }))).toBe(
         now + 90_000,
       )
+    }),
+  )
+})
+
+describe("quota cooldown restore re-judged against current quota (#1976)", () => {
+  const reading = (
+    providerID: string,
+    models: Record<string, { percent: number; resetAt: number | null }>,
+    now: number,
+  ): QuotaCurrent.ProviderReading => ({
+    providerID,
+    measuredAt: now,
+    windows: [],
+    models: Object.fromEntries(
+      Object.entries(models).map(([modelID, window]) => [
+        modelID,
+        [{ name: "window", usedPercent: window.percent, resetAt: window.resetAt, measuredAt: now }],
+      ]),
+    ),
+  })
+  const bench = (provider_id: string, model_id: string, reason: string, until: number, now: number) =>
+    ModelRouteLog.record({
+      kind: "health",
+      row: { time: now - 5_000, provider_id, model_id, kind: "cooldown-start", reason, until },
+    })
+
+  it.live("a family-A wall does not re-bench sibling family B on the same credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-family", "fam-a", "quota credential:cred-shared", now + 3_600_000, now)
+      bench("restore-family", "fam-b", "quota credential:cred-shared", now + 3_600_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading(
+          "restore-family",
+          {
+            "fam-a": { percent: 100, resetAt: now + 1_800_000 },
+            "fam-b": { percent: 40, resetAt: null },
+          },
+          now,
+        ),
+      ])
+      const famA = ModelRoute.ref({ providerID: "restore-family", model: "fam-a" })
+      const famB = ModelRoute.ref({ providerID: "restore-family", model: "fam-b" })
+      // Family A is still full: its bench stands, bounded by the measured reset.
+      expect(ModelRoute.credentialCooldownUntil(famA, "cred-shared", now)).toBe(now + 1_800_000)
+      // Family B has headroom on its own leg: its persisted bench is discarded, and
+      // family A's full window never held it.
+      expect(ModelRoute.credentialCoolingDown(famB, "cred-shared", now)).toBe(false)
+      expect(ModelRoute.coolingDown(famB, now)).toBe(false)
+    }),
+  )
+
+  it.live("a fresh headroom reading releases a restored quota bench", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-headroom", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-headroom", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-headroom", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(false)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+    }),
+  )
+
+  it.live("a still-full matching window remains benched, bounded by its measured reset", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-full", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-full", { m: { percent: 100, resetAt: now + 30_000 } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-full", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 30_000)
+    }),
+  )
+
+  it.live("a non-quota transport bench restores unchanged despite a headroom reading", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-transport", "m", "failure", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("restore-transport", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-transport", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    }),
+  )
+
+  it.live("no reading for the leg keeps the persisted quota bench", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-noreading", "m", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [
+        reading("someone-else", { m: { percent: 10, resetAt: null } }, now),
+      ])
+      const target = ModelRoute.ref({ providerID: "restore-noreading", model: "m" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    }),
+  )
+})
+
+describe("credential cooldown restore (#870)", () => {
+  it.live("rebuilds a credential-scoped cooldown onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-cred",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-a",
+          until: now + 60_000,
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-cred", model: "m" })
+      // Only the benched credential is excluded after the restart; the healthy alternate
+      // credential behind the same target stays routable, and the target itself is not benched.
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a")).toBe(now + 60_000)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-a")).toBe(true)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-b")).toBe(false)
+      expect(ModelRoute.coolingDown(target)).toBe(false)
+      expect(ModelRoute.cooldownUntil(target)).toBe(0)
+    }),
+  )
+
+  it.live("rebuilds a credential-scoped rate-limit window onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "limit-cred",
+          model_id: "m",
+          kind: "rate-limit-window",
+          reason: "provider-reported credential:cred-a",
+          until: now + 120_000,
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "limit-cred", model: "m" })
+      expect(ModelRoute.limitedUntil(target, now, "cred-a")).toBe(now + 120_000)
+      expect(ModelRoute.limitedUntil(target, now, "cred-b")).toBe(0)
+      expect(ModelRoute.limitedUntil(target, now)).toBe(0)
+    }),
+  )
+})
+
+describe("credential column restore (#1055)", () => {
+  it.live("restores from the credential_id column when the reason names no credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-col",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota",
+          until: now + 60_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-col", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a")).toBe(now + 60_000)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-a")).toBe(true)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-b")).toBe(false)
+      expect(ModelRoute.coolingDown(target)).toBe(false)
+    }),
+  )
+
+  it.live("restores a column-only rate-limit window onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "limit-col",
+          model_id: "m",
+          kind: "rate-limit-window",
+          reason: "provider-reported",
+          until: now + 120_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "limit-col", model: "m" })
+      expect(ModelRoute.limitedUntil(target, now, "cred-a")).toBe(now + 120_000)
+      expect(ModelRoute.limitedUntil(target, now, "cred-b")).toBe(0)
+      expect(ModelRoute.limitedUntil(target, now)).toBe(0)
+    }),
+  )
+
+  it.live("prefers the credential_id column over a stale credential in the reason", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-prefer",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-b",
+          until: now + 60_000,
+          credential_id: "cred-a",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-prefer", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a")).toBe(now + 60_000)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-b")).toBe(false)
+      expect(ModelRoute.coolingDown(target)).toBe(false)
+    }),
+  )
+
+  it.live("a provider-scoped reason never restores onto a credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 5_000,
+          provider_id: "restart-prov",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "provider:restart-prov quota-known-full",
+          until: now + 60_000,
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restart-prov", model: "m" })
+      // The hold belongs to the target: no credential inherits it.
+      expect(ModelRoute.coolingDown(target)).toBe(true)
+      expect(ModelRoute.credentialCoolingDown(target, "restart-prov")).toBe(false)
+      expect(ModelRoute.credentialCoolingDown(target, "cred-a")).toBe(false)
+    }),
+  )
+})
+
+describe("credential attempt snapshot restore (#1116)", () => {
+  it.live("restores each credential's attempt snapshot onto its own window, never target-wide", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const snap = (remaining: string) => ({
+        limit: { tokens: "1000" },
+        remaining: { tokens: remaining },
+        reset: { tokens: "3600" },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 5_000,
+          time_ended: now - 4_000,
+          quota: snap("11"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          credential_id: "cred-b",
+          time_started: now - 5_000,
+          time_ended: now - 3_000,
+          quota: snap("22"),
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "snapshots",
+          model_id: "m",
+          time_started: now - 5_000,
+          time_ended: now - 2_000,
+          quota: snap("33"),
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "snapshots", model: "m" })
+      expect(ModelRoute.rateLimitOf(target, "cred-a")?.remaining).toEqual({ tokens: "11" })
+      expect(ModelRoute.rateLimitOf(target, "cred-b")?.remaining).toEqual({ tokens: "22" })
+      // The credential-less snapshot keeps the pre-column target-wide behavior.
+      expect(ModelRoute.rateLimitOf(target)?.remaining).toEqual({ tokens: "33" })
+    }),
+  )
+})
+
+describe("quota cooldown reset restore (#1123)", () => {
+  it.live("caps a previously persisted long quota bench at its matching exhausted window reset", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const resetAt = now - 1_000 + 5 * 3_600_000
+      ModelRouteLog.record({
+        kind: "health",
+        row: {
+          time: now - 1_000,
+          provider_id: "restore-quota",
+          model_id: "m",
+          kind: "cooldown-start",
+          reason: "quota credential:cred-a",
+          until: now + 86_400_000,
+          credential_id: "cred-a",
+        },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "restore-quota",
+          model_id: "m",
+          credential_id: "cred-a",
+          time_started: now - 2_000,
+          time_ended: now - 1_000,
+          outcome: "failure",
+          quota: {
+            limit: { requests: "100" },
+            remaining: { requests: "0" },
+            reset: { requests: "18000" },
+          },
+        }),
+      })
+      yield* Effect.sleep("100 millis")
+
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      const target = ModelRoute.ref({ providerID: "restore-quota", model: "m" })
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-a", now)).toBe(resetAt)
+      expect(ModelRoute.credentialCooldownUntil(target, "cred-b", now)).toBe(0)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(0)
+    }),
+  )
+})
+
+describe("rate-limit hold release restore (#870)", () => {
+  it.live("a cleared hold stays cleared after a restart", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const target = ModelRoute.ref({ providerID: "limit-released", model: "m" })
+      const spent = { at: now, remaining: { requests: "0" }, reset: { requests: "45s" } }
+      ModelRoute.observeRateLimit(target, spent, now, "cred-a")
+      expect(ModelRoute.limitedUntil(target, now, "cred-a")).toBe(now + 45_000)
+      // The serving credential then succeeds without limit headers: the hold is released,
+      // and the release is persisted so replay does not resurrect the original window row.
+      ModelRoute.clearRateLimit(target, "cred-a")
+      expect(ModelRoute.limitedUntil(target, now, "cred-a")).toBe(0)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreCooldownsFrom(db)
+      expect(ModelRoute.limitedUntil(target, Date.now(), "cred-a")).toBe(0)
+      expect(ModelRoute.limitedUntilAny(target, Date.now())).toBe(0)
     }),
   )
 })
@@ -667,6 +1431,29 @@ describe("ModelRouteLog.observer", () => {
     }),
   )
 
+  it.live("stores the canonical retryable verdict for observer failures", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const attemptFor = (routeID: string, failure: unknown) =>
+        ModelRouteLog.observer({ routeID, providerID: "openai", modelID: "m", startedAt: Date.now() }).done(
+          "failure",
+          { failure, outputStarted: false },
+        )
+      attemptFor("auth", new AIError({ reason: new AuthenticationError({ message: "bad key" }) }))
+      attemptFor("quota", new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+      attemptFor("rate", new AIError({ reason: new RateLimitError({ message: "slow down" }) }))
+      attemptFor("plain", new Error("boom"))
+      yield* Effect.sleep("100 millis")
+      const rows = yield* db.select().from(RouteAttemptTable).all()
+      expect(rows.map((row) => [row.route_id, row.retryable]).toSorted()).toEqual([
+        ["auth", false],
+        ["plain", false],
+        ["quota", false],
+        ["rate", true],
+      ])
+    }),
+  )
+
   it.live("marks both legs of a hedged attempt", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
@@ -679,6 +1466,60 @@ describe("ModelRouteLog.observer", () => {
         ["hedged-out", true],
         ["success", true],
       ])
+    }),
+  )
+})
+
+describe("per-credential usage (#1106)", () => {
+  it.live("targetUsage splits by serving credential; unattributed usage feeds no credential", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const now = Date.now()
+      const serve = (credentialID: string | undefined, input: number) =>
+        ModelRouteLog.observer({
+          routeID: "quota-pool",
+          providerID: "multi",
+          modelID: "m",
+          sessionID: `ses_${credentialID ?? "none"}`,
+          startedAt: now,
+          credentialID,
+        }).done("success", {
+          outputStarted: true,
+          tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
+      serve("cred-a", 900)
+      serve("cred-b", 100)
+      serve(undefined, 500)
+      // One session served by two credentials of the same target (credential fallback).
+      ModelRouteLog.observer({
+        routeID: "quota-pool",
+        providerID: "multi",
+        modelID: "m",
+        sessionID: "ses_cred-a",
+        startedAt: now,
+        credentialID: "cred-b",
+      }).done("success", {
+        outputStarted: true,
+        tokens: { input: 50, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+      yield* Effect.sleep("100 millis")
+
+      const rows = yield* db.select().from(RouteAttemptTable).all()
+      expect(rows.map((row) => row.credential_id).toSorted()).toEqual(["cred-a", "cred-b", "cred-b", null])
+
+      const usage = yield* ModelRouteLog.targetUsage(db, 0)
+      // The quota gate's per-credential sum: each credential sees only its own usage, and the
+      // unattributed (env-served) row contributes to neither credential's totals.
+      const forCredential = (credentialID: string) =>
+        ModelUsage.sum(usage.filter((row) => row.providerID === "multi" && row.credentialID === credentialID))
+      expect(forCredential("cred-a").input).toBe(900)
+      expect(forCredential("cred-b").input).toBe(150)
+      expect(usage.find((row) => row.providerID === "multi" && row.credentialID === null)?.input).toBe(500)
+      // The provider scope still sums every row, as it did before the credential dimension.
+      expect(ModelUsage.sum(usage.filter((row) => row.providerID === "multi")).input).toBe(1_550)
+      // Distinct sessions per target stays exact despite the credential split: ses_cred-a was
+      // served by both credentials but is one session.
+      expect(yield* ModelRouteLog.targetSessions(db, 0)).toEqual([{ providerID: "multi", modelID: "m", sessions: 3 }])
     }),
   )
 })
@@ -707,6 +1548,266 @@ describe("hedge accuracy", () => {
         { providerID: "anthropic", modelID: "m", hedges: 1, wins: 1 },
         { providerID: "openai", modelID: "m", hedges: 1, wins: 0 },
       ])
+    }),
+  )
+})
+
+describe("demotion restore (#1151)", () => {
+  const quotaAttempt = (provider_id: string, at: number, credential_id?: string) =>
+    ModelRouteLog.record({
+      kind: "attempt",
+      row: attempt({
+        provider_id,
+        model_id: "m",
+        time_started: at - 100,
+        time_ended: at,
+        outcome: "failure",
+        output_started: false,
+        ...(credential_id ? { credential_id } : {}),
+        ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "out of quota" }),
+      }),
+    })
+
+  it.live("demotion counts survive a restart: the ledger rehydrates the hot cache", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-restart", at)
+      // Only two quota errors: below the threshold of three, even after a restore.
+      for (const at of [now - 2_000, now - 1_000]) quotaAttempt("demote-few", at)
+      // Non-quota failures are not demotion evidence, however many the ledger holds.
+      for (const at of [now - 3_000, now - 2_000, now - 1_000])
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({
+            provider_id: "demote-other",
+            model_id: "m",
+            time_started: at - 100,
+            time_ended: at,
+            outcome: "failure",
+            output_started: false,
+            ...ModelRouteLog.failureFields({ _tag: "ProviderInternal", message: "upstream said no" }),
+          }),
+        })
+      yield* Effect.sleep("100 millis")
+
+      // The simulated restart: the in-process cache is wiped, the ledger is all that remains.
+      ModelRoute.resetHealth()
+      const target = (providerID: string) => ModelRoute.ref({ providerID, model: "m" })
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(false)
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-other"), now)).toBe(false)
+      // A repeated restore over the same ledger must not count an attempt twice:
+      // demote-few would cross the threshold if its two rows were replayed again.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      expect(ModelRoute.demoted(target("demote-few"), now)).toBe(false)
+      expect(ModelRoute.demoted(target("demote-restart"), now)).toBe(true)
+    }),
+  )
+
+  it.live("restored counts still expire with the demotion window", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const fiveHoursAgo = now - 5 * 3_600_000
+      for (const at of [fiveHoursAgo, fiveHoursAgo + 1_000, fiveHoursAgo + 2_000]) quotaAttempt("demote-old", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-old", model: "m" })
+      // The rows are restored (they demote when judged inside their window) but the
+      // default four-hour window has passed by now, so the target is not demoted.
+      expect(ModelRoute.demoted(target, fiveHoursAgo + 3_000)).toBe(true)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+
+  it.live("a credential's quota rows restore onto that credential only", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      for (const at of [now - 3_000, now - 2_000, now - 1_000]) quotaAttempt("demote-cred", at, "cred-a")
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-cred", model: "m" })
+      expect(ModelRoute.demoted(target, now, "cred-a")).toBe(true)
+      expect(ModelRoute.demoted(target, now, "cred-b")).toBe(false)
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+    }),
+  )
+
+  it.live("distinct attempts that share a millisecond each count toward demotion", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // Three distinct ledger rows, one time_ended: live recordQuota would count all
+      // three, so the restore must too — deduplication is by row id, not timestamp.
+      for (let i = 0; i < 3; i++) quotaAttempt("demote-same-ms", now - 1_000)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-same-ms", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(true)
+    }),
+  )
+
+  it.live("restored history survives when the judging window registers after the restore", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      // One failure inside the default retention, two far outside it: replaying
+      // through the default four-hour retention would keep only the latest.
+      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000]) quotaAttempt("demote-late-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // No demotion config is registered yet, so retention at restore time is
+      // the default; the seven-day policy only arrives afterwards.
+      yield* ModelRouteLog.restoreDemotionFrom(db)
+      const target = ModelRoute.ref({ providerID: "demote-late-window", model: "m" })
+      expect(ModelRoute.demoted(target, now)).toBe(false)
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
+    }),
+  )
+
+  it.live("rows older than a day restore when the configured window reaches them", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      const twoDaysAgo = now - 2 * 86_400_000
+      for (const at of [twoDaysAgo, twoDaysAgo + 1_000, twoDaysAgo + 2_000]) quotaAttempt("demote-long-window", at)
+      yield* Effect.sleep("100 millis")
+
+      ModelRoute.resetHealth()
+      // A seven-day demotion window (the schema admits up to ninety days): rows from
+      // two days ago still count, so the restore must reach back past one day.
+      const off = ModelRoute.onDemotionConfig(() => ({ windowMs: 7 * 86_400_000 }))
+      try {
+        yield* ModelRouteLog.restoreDemotionFrom(db)
+        const target = ModelRoute.ref({ providerID: "demote-long-window", model: "m" })
+        expect(ModelRoute.demoted(target, now)).toBe(true)
+      } finally {
+        off()
+      }
+    }),
+  )
+})
+
+describe("ModelRouteLog.failureFields surrogate-pair guard (#1973)", () => {
+  test("a pair straddling the error_body cut is dropped whole", () => {
+    const body = "a".repeat(1_999) + "\u{1F600}" + "b".repeat(10)
+    const fields = ModelRouteLog.failureFields({ _tag: "RateLimit", message: "x", body }, { captureBody: true })
+    expect(fields.error_body).toBe("a".repeat(1_999))
+    expect(fields.error_body?.isWellFormed()).toBe(true)
+  })
+})
+
+describe("writer persistence failure (#2331)", () => {
+  it.live("a failed batch is retained, retried and persisted exactly once after the database recovers", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const now = Date.now()
+      // Sabotage: with the attempt table renamed away, every batch carrying an
+      // attempt fails part-way through its inserts.
+      yield* db.run(sql`ALTER TABLE route_attempt RENAME TO route_attempt_down`)
+      ModelRouteLog.record({
+        kind: "decision",
+        row: {
+          time: 1,
+          route_id: "luna",
+          selection: "weighted",
+          candidates: ["openai/gpt-6-luna"],
+          chosen: "openai/gpt-6-luna",
+          reason: "drawn",
+        },
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "recovery-probe",
+          model_id: "m-recovery",
+          time_started: now - 2_000,
+          time_ended: now - 1_000,
+          tokens_input: 10,
+          tokens_output: 5,
+        }),
+      })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "recovery-probe",
+          model_id: "m-recovery",
+          time_started: now - 900,
+          time_ended: now - 100,
+          outcome: "failure",
+          output_started: false,
+          tokens_input: 20,
+          tokens_output: 5,
+        }),
+      })
+      // Wait until a failed persistence attempt is OBSERVED — the writer logs a
+      // warning for every retained batch it retries — instead of sleeping a fixed
+      // interval and hoping the writer ran. The test cannot pass unless the
+      // writer actually attempted the batch and the failure was seen.
+      let failureObserved = false
+      for (let i = 0; i < 100 && !failureObserved; i++) {
+        const lines = yield* TestConsole.logLines
+        failureObserved = lines.some(
+          (line) =>
+            typeof line === "string" && line.includes("failed to persist model route telemetry; batch retained for retry"),
+        )
+        if (!failureObserved) yield* Effect.sleep("50 millis")
+      }
+      expect(failureObserved).toBe(true)
+      // Atomicity: the decision from the same batch is not visible either —
+      // the failed batch rolled back in full instead of leaving partial rows.
+      expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(0)
+
+      // The database recovers; the retained batch must land exactly once.
+      yield* db.run(sql`ALTER TABLE route_attempt_down RENAME TO route_attempt`)
+      let attempts: (typeof RouteAttemptTable.$inferSelect)[] = []
+      for (let i = 0; i < 50; i++) {
+        attempts = yield* db.select().from(RouteAttemptTable).all()
+        if (attempts.length === 2) break
+        yield* Effect.sleep("200 millis")
+      }
+      expect(attempts).toHaveLength(2)
+      expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(1)
+      // The recovered rows feed the diagnostic stats for the target.
+      const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
+      expect(stats).toHaveLength(1)
+      expect(stats[0]).toMatchObject({ attempts: 2, failures: 1 })
+      // …and the quota usage read: each recovered attempt counted exactly once.
+      const usage = yield* ModelRouteLog.targetUsage(db, 0)
+      const recovered = ModelUsage.sum(usage.filter((row) => row.providerID === "recovery-probe"))
+      expect(recovered.input).toBe(30)
+      expect(recovered.output).toBe(10)
+      // …and the restart restoration read: a restore from the persisted rows
+      // rebuilds the same usage (current timestamps keep the rows inside the
+      // restoration window, which only reaches back one day).
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreUsageFrom(db)
+      expect(ModelRoute.usageOf(ModelRoute.ref({ providerID: "recovery-probe", model: "m-recovery" })).day).toEqual({
+        requests: 2,
+        tokens: 40,
+      })
     }),
   )
 })

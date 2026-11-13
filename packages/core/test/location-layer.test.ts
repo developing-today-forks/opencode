@@ -547,9 +547,14 @@ describe("LocationServiceMap", () => {
                 providers: { pool: { name: "Pool", package: "test-provider", models: { one: {}, two: {} } } },
                 experimental: {
                   model_routes: {
-                    inner: { targets: ["pool/one", "pool/two"], selection: "weighted", weights: { "pool/two": 3 } },
+                    inner: {
+                      targets: [{ model: "pool/one", cache_format: "alibaba" }, "pool/two"],
+                      selection: "weighted",
+                      weights: { "pool/two": 3 },
+                    },
                     best: {
                       name: "Best",
+                      cache_format: "anthropic",
                       targets: ["opencode-route/inner", { model: "pool/one", defaultVariant: "max" }],
                       selection: "round-robin",
                       attempts: 2,
@@ -596,6 +601,8 @@ describe("LocationServiceMap", () => {
           expect(definition?.budgets?.[0]).toMatchObject({ requestsPerDay: 10, softLimit: 0.8 })
           expect(definition?.nodes.map((node) => node.selection)).toEqual(["round-robin", "weighted"])
           expect(definition?.nodes[1].weights).toEqual([1, 3])
+          // The route-level format reaches the leaf that inherits it; a target's own declaration wins.
+          expect(definition?.targetCacheFormats).toEqual([{ cacheFormat: "alibaba" }, { cacheFormat: "anthropic" }])
           const without = yield* inspect(plain.path)
           expect(without.providers.map(String)).not.toContain("opencode-route")
           expect(without.tools).not.toContain("route_adjust")
@@ -698,6 +705,163 @@ describe("LocationServiceMap", () => {
             variants: ["low", "high"],
           })
           expect(summary(routes.remappedOuter)).toEqual(summary(routes.remapped))
+        }),
+      ),
+    ),
+  )
+
+
+  it.live("presents a route's configured context cap as its model limit", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  pool: {
+                    name: "Pool",
+                    package: "test-provider",
+                    models: { one: { limit: { context: 200_000 } }, two: { limit: { context: 300_000 } } },
+                  },
+                },
+                experimental: {
+                  model_routes: {
+                    plain: { targets: ["pool/one", "pool/two"] },
+                    capped: { targets: ["pool/one", "pool/two"], limit: { context: 100_000 } },
+                    overcapped: { targets: ["pool/one", "pool/two"], limit: { context: 500_000 } },
+                  },
+                },
+              }),
+            ),
+          )
+          yield* Effect.gen(function* () {
+            yield* Reference.Service
+            const plugins = yield* Plugin.Service
+            yield* plugins.awaitActivation
+            const models = yield* Model.Service
+            const context = (id: string) =>
+              Effect.map(models.get(ModelRoute.PROVIDER_ID, Model.ID.make(id)), (model) => model?.limit.context)
+            expect(yield* context("plain")).toBe(200_000)
+            expect(yield* context("capped")).toBe(100_000)
+            // A cap above every target's own limit changes nothing: the route can never
+            // present more context than its targets support.
+            expect(yield* context("overcapped")).toBe(200_000)
+          }).pipe(
+            Effect.provide(
+              LocationServiceMap.Service.get(Location.Ref.make({ directory: AbsolutePath.make(dir.path) })),
+            ),
+          )
+        }),
+      ),
+    ),
+  )
+
+  it.live("presents the smallest per-target ceiling of a flat mixed-ceiling pool", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  pool: {
+                    name: "Pool",
+                    package: "test-provider",
+                    models: {
+                      one: { limit: { context: 200_000 } },
+                      two: { limit: { context: 200_000 } },
+                      three: { limit: { context: 500_000 } },
+                    },
+                  },
+                },
+                experimental: {
+                  model_routes: {
+                    small: {
+                      targets: [
+                        { model: "pool/one", limit: { context: 100_000 } },
+                        { model: "pool/two", limit: { context: 100_000 } },
+                        { model: "pool/three", limit: { context: 200_000 } },
+                      ],
+                    },
+                  },
+                },
+              }),
+            ),
+          )
+          yield* Effect.gen(function* () {
+            yield* Reference.Service
+            const plugins = yield* Plugin.Service
+            yield* plugins.awaitActivation
+            const models = yield* Model.Service
+            const presented = yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("small"))
+            // The flat pool needs no nested sub-route: the route presents the smallest
+            // per-element ceiling, so compaction cannot bypass any target's cap.
+            expect(presented?.limit.context).toBe(100_000)
+            const definition = presented ? ModelRoute.definition(presented) : undefined
+            expect(definition?.targetLimits).toEqual([
+              { context: 100_000 },
+              { context: 100_000 },
+              { context: 200_000 },
+            ])
+          }).pipe(
+            Effect.provide(
+              LocationServiceMap.Service.get(Location.Ref.make({ directory: AbsolutePath.make(dir.path) })),
+            ),
+          )
+        }),
+      ),
+    ),
+  )
+
+  it.live("presents a route's context cap as its input limit when targets define one", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  pool: {
+                    name: "Pool",
+                    package: "test-provider",
+                    models: {
+                      one: { limit: { context: 200_000, input: 180_000 } },
+                      two: { limit: { context: 300_000, input: 250_000 } },
+                    },
+                  },
+                },
+                experimental: {
+                  model_routes: {
+                    plain: { targets: ["pool/one", "pool/two"] },
+                    capped: { targets: ["pool/one", "pool/two"], limit: { context: 100_000 } },
+                    overcapped: { targets: ["pool/one", "pool/two"], limit: { context: 500_000 } },
+                  },
+                },
+              }),
+            ),
+          )
+          yield* Effect.gen(function* () {
+            yield* Reference.Service
+            const plugins = yield* Plugin.Service
+            yield* plugins.awaitActivation
+            const models = yield* Model.Service
+            const input = (id: string) =>
+              Effect.map(models.get(ModelRoute.PROVIDER_ID, Model.ID.make(id)), (model) => model?.limit.input)
+            expect(yield* input("plain")).toBe(180_000)
+            // Compaction prefers limit.input over limit.context, so the cap must reach the
+            // presented input limit or it never takes effect for input-carrying targets.
+            expect(yield* input("capped")).toBe(100_000)
+            // A cap above every target's own input limit changes nothing.
+            expect(yield* input("overcapped")).toBe(180_000)
+          }).pipe(
+            Effect.provide(
+              LocationServiceMap.Service.get(Location.Ref.make({ directory: AbsolutePath.make(dir.path) })),
+            ),
+          )
         }),
       ),
     ),

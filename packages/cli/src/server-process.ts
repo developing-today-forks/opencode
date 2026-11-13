@@ -3,16 +3,18 @@ export * as ServerProcess from "./server-process"
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
 import { AppProcess } from "@opencode/util/process"
 import { randomBytes, randomUUID } from "node:crypto"
-import { Effect, Option, Redacted, Schema } from "effect"
+import { Cause, Effect, Option, Redacted, Schema } from "effect"
 import { PersistentPty } from "@opencode/schema/persistent-pty"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
 import { Env } from "./env"
 import { ServiceConfig } from "./services/service-config"
+import { ServerConnection } from "./services/server-connection"
 import { RetainedImage } from "./services/retained-image"
 import { ServiceRegistration } from "./services/service-registration"
 import { RemoteTunnel } from "./services/remote-tunnel"
@@ -29,11 +31,61 @@ export type Options = {
   readonly cors?: readonly string[]
 }
 
+/** A compatible managed service already bound to the service URL, as probed without a version requirement. */
+export type ServiceIncumbent = {
+  readonly version?: string
+  readonly pid?: number
+}
+
+/**
+ * What a deliberate `serve --service` start does about an incumbent (code#8255): no incumbent
+ * proceeds to bind; an incumbent on this build's version is an explicit already-current no-op
+ * (same code = no restart); any other version is taken over, because service mode is only
+ * entered deliberately (see the call site in processEffect for why that makes takeover on any
+ * mismatch safe here, unlike a passive client probe).
+ */
+export function incumbentDecision(incumbent: ServiceIncumbent | undefined, version: string = OPENCODE_VERSION) {
+  if (incumbent === undefined) return { _tag: "proceed" } as const
+  if (incumbent.version !== undefined && incumbent.version === version)
+    return { _tag: "already-current", version: incumbent.version, pid: incumbent.pid } as const
+  return { _tag: "takeover", version: incumbent.version, pid: incumbent.pid } as const
+}
+
+/**
+ * Stop an incumbent so this build can bind in its place. The stop effect is injected so tests
+ * can observe the handoff stop and its failure without a live service. A failed stop is a loud
+ * failure: exiting 0 here would report a successful start that never bound, which is exactly
+ * the silent no-op this takeover exists to remove.
+ */
+export function takeoverIncumbent<R>(
+  incumbent: ServiceIncumbent,
+  stop: Effect.Effect<void, unknown, R>,
+  version: string = OPENCODE_VERSION,
+) {
+  return Effect.gen(function* () {
+    yield* Effect.sync(() =>
+      console.log(
+        `managed service version ${incumbent.version ?? "unknown"} (pid ${incumbent.pid ?? "unknown"}) is running; taking over with version ${version}`,
+      ),
+    )
+    yield* stop.pipe(
+      Effect.catchCause((cause) =>
+        Effect.fail(
+          new Error(
+            `Failed to stop managed service version ${incumbent.version ?? "unknown"} (pid ${incumbent.pid ?? "unknown"}) so version ${version} could take over; refusing to exit without binding`,
+            { cause: Cause.squash(cause) },
+          ),
+        ),
+      ),
+    )
+  })
+}
+
 // The process effect lives until server shutdown; tracing it would parent every request to one process-lifetime trace.
 export const run = Effect.fnUntraced(function* (options: Options) {
   return yield* processEffect(options).pipe(
     Effect.provide(
-      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node]), {
+      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, FSUtil.node]), {
         replacements: [
           Global.node.replace(
             Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
@@ -69,7 +121,11 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const foreground = options.mode === "default"
-      const serviceOptions = options.mode === "service" ? yield* ServiceConfig.options() : undefined
+      // Version-checked in service mode so the incumbent probe below can tell this build's
+      // own service apart from a different build's (code#8255). Only `file` is used from these
+      // options later (registration), so the version field changes nothing downstream.
+      const serviceOptions =
+        options.mode === "service" ? yield* ServiceConfig.options({ checkVersion: true }) : undefined
       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"
       const port = options.port ?? config.port ?? (options.mode === "service" ? ServiceConfig.defaultPort() : undefined)
@@ -77,7 +133,45 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         serviceOptions !== undefined && port !== undefined
           ? Service.incumbent({ ...serviceOptions, url: serviceURL(hostname, port) })
           : undefined
-      if (findIncumbent !== undefined && (yield* findIncumbent) !== undefined) return
+      if (serviceOptions !== undefined && port !== undefined) {
+        // Probe without the version requirement too: the version-checked probe above cannot
+        // distinguish "no incumbent" from "incumbent on a different version", and those must
+        // not share an outcome. Service mode is only entered by a deliberate
+        // `serve --service` invocation: a systemd unit, `opencode service start/restart`
+        // (through ensure), desktop's background-service ensure, or a contender spawned by
+        // ensure. A contender runs its spawner's own binary (selfCommand), so it shares the
+        // spawner's version by construction; a mismatch here therefore means a different
+        // build was deliberately started against this service, so taking over on any
+        // mismatch is the intended replace semantics (the same symmetry as decide() in
+        // ensure), not an accidental downgrade by a passive client.
+        const existing = yield* Service.incumbent({
+          ...serviceOptions,
+          version: undefined,
+          url: serviceURL(hostname, port),
+        })
+        const decision = incumbentDecision(existing)
+        if (decision._tag === "already-current") {
+          yield* Effect.sync(() =>
+            console.log(
+              `managed service version ${decision.version} (pid ${decision.pid ?? "unknown"}) is already running; this build is already current`,
+            ),
+          )
+          return
+        }
+        if (decision._tag === "takeover") {
+          const stopOptions = { ...serviceOptions, pty: "handoff" as const }
+          yield* takeoverIncumbent(
+            { version: decision.version, pid: decision.pid },
+            Effect.gen(function* () {
+              // Same primitives as the service restart handler: ask the incumbent to hand its
+              // persistent terminals over (best-effort), then stop it with a PTY handoff so
+              // those terminals survive the replacement.
+              yield* ServerConnection.shutdownPersistentPty(serviceOptions).pipe(Effect.ignore)
+              yield* Service.stop(stopOptions)
+            }),
+          )
+        }
+      }
       // Desktop can launch the service directly without injecting its saved environment.
       Object.assign(process.env, config.env)
       // Keep a package-manager or curl install replaceable while the service runs; Desktop updates its own copy.
@@ -247,9 +341,15 @@ function addressInUse(error: unknown): boolean {
   return "cause" in error && addressInUse(error.cause)
 }
 
-function shutdownGrace() {
-  const value = Number(process.env.OPENCODE_SHUTDOWN_GRACE_MS)
-  return Number.isFinite(value) && value >= 0 ? value : 30_000
+export function shutdownGrace() {
+  // Mirror of serverShutdownGrace() in packages/client/src/service-timing.ts; the two copies
+  // must agree, because the client's stop path has to outwait the server's drain. A blank value
+  // is absent, not an authored 0 (#874): bare Number() reads "" as 0 and also accepts hex and
+  // exponent spellings, so only a plain non-negative decimal (surrounding whitespace trimmed)
+  // names a duration; anything else falls back to the default.
+  const raw = process.env.OPENCODE_SHUTDOWN_GRACE_MS?.trim()
+  const value = raw && /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+  return Number.isFinite(value) ? value : 30_000
 }
 
 // The first SIGTERM is the shutdown being drained; a second one ends the drain wait at once.

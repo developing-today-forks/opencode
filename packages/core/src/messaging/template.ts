@@ -3,6 +3,7 @@ export * as MessagingTemplate from "./template.js"
 import { Effect, Schema } from "effect"
 import type { ConfigMessaging } from "@opencode/schema/config/messaging"
 import { ConfigMarkdown } from "../config/markdown.js"
+import { ModelRouteLimits } from "../model-route-limits.js"
 
 /**
  * Topic presets and template variables.
@@ -306,8 +307,14 @@ export const render = Effect.fnUntraced(function* <E, R>(
           output.push(resolved.value)
           continue
         }
-        if (stack.includes(name) || stack.length >= MAX_DEPTH)
-          return yield* new TemplateError({ message: `Variable {${name}} refers to itself` })
+        if (stack.includes(name))
+          return yield* new TemplateError({
+            message: `Variable reference cycle: ${[...stack, name].join(" -> ")} (variable {${name}} is reached again)`,
+          })
+        if (stack.length >= MAX_DEPTH)
+          return yield* new TemplateError({
+            message: `Variable {${name}} exceeds the maximum expansion depth of ${MAX_DEPTH} (chain: ${[...stack, name].join(" -> ")})`,
+          })
         output.push(yield* expand(resolved.value, [...stack, name]))
       }
       return output.join("")
@@ -364,7 +371,10 @@ export function presetList(config?: ConfigMessaging.Info): ReadonlyArray<Preset>
 
 /** Constant value with config overrides applied; custom variables are resolved by the caller. */
 export function constant(name: string, config?: ConfigMessaging.Info) {
-  return config?.vars?.[name] ?? constants[name]?.value
+  // Own-property lookups only (#793): plain indexing reads through the prototype chain, so
+  // "constructor" / "__proto__" resolve to inherited non-string values when any vars exist.
+  const configured = config?.vars && Object.hasOwn(config.vars, name) ? config.vars[name] : undefined
+  return configured ?? (Object.hasOwn(constants, name) ? constants[name]?.value : undefined)
 }
 
 export interface Classification {
@@ -494,7 +504,7 @@ export function timeZone() {
 export const defaultSessionStart =
   "Session started {session_start} ({system_time_zone}). Session ID: {session_id}.{session_lineage}"
 
-/** Parses an ISO time or a relative age such as 90s, 15m, 2h, 3d or 1w into epoch milliseconds. */
+/** Parses an ISO time, a relative age such as 90s, 15m, 2h, 3d or 1w, or a bare epoch timestamp into epoch milliseconds. Bare epochs are magnitude-aware: exactly 10 digits are epoch seconds (the form most tools emit) and are scaled to milliseconds; exactly 13 digits are epoch milliseconds. Any other bare-digit length is rejected (undefined, so callers raise Invalid time) instead of being silently misread, except a bare 4-digit ISO year ("2026"), which falls through to Date.parse and reads as Jan 1 of that year. */
 export function parseTime(input: string, now: number): number | undefined {
   const relative = /^(\d+(?:\.\d+)?)\s*(s|m|h|d|w)$/i.exec(input.trim())
   if (relative) {
@@ -503,7 +513,15 @@ export function parseTime(input: string, now: number): number | undefined {
     ]
     return now - Number(relative[1]) * unit
   }
-  if (/^\d{10,}$/.test(input.trim())) return Number(input.trim())
-  const parsed = Date.parse(input)
-  return Number.isNaN(parsed) ? undefined : parsed
+  const bare = input.trim()
+  if (/^\d{10}$/.test(bare)) return Number(bare) * 1_000
+  if (/^\d{13}$/.test(bare)) return Number(bare)
+  // A bare 4-digit ISO year ("2026") is not a bare epoch; fall through to the calendar-checked
+  // Date.parse path so it parses as Jan 1 (#695), restoring the pre-#623 behaviour for this form.
+  if (/^\d+$/.test(bare) && !/^\d{4}$/.test(bare)) return undefined
+  // Calendar check via ModelRouteLimits.parseAbsoluteTime (#609): a bare Date.parse
+  // silently rolls calendar-invalid ISO dates such as 2026-02-30 into the next month
+  // instead of failing, so callers would query the wrong day instead of raising
+  // Invalid time. Non-ISO Date.parse forms (e.g. "Jan 5 2026") keep their old behaviour.
+  return ModelRouteLimits.parseAbsoluteTime(input.trim())
 }

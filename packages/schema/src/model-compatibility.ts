@@ -13,7 +13,11 @@ export const MaxTokensField = Schema.Literals(["max_completion_tokens", "max_tok
 })
 export type MaxTokensField = typeof MaxTokensField.Type
 
-export const CacheFormat = Schema.Literals(["anthropic", "alibaba"]).annotate({ identifier: "Model.CacheFormat" })
+export const CacheFormat = Schema.Literals(["anthropic", "alibaba"]).annotate({
+  identifier: "Model.CacheFormat",
+  description:
+    "Prompt-cache marker syntax the endpoint accepts. Overrides the route default; both send `cache_control`, and `alibaba` skips tool definitions. A model route may set it per route or per target; a target's own value overrides the route's and nested routes inherit it.",
+})
 export type CacheFormat = typeof CacheFormat.Type
 
 export interface Compatibility extends Schema.Schema.Type<typeof Compatibility> {}
@@ -22,6 +26,12 @@ export const Compatibility = Schema.Struct({
   /** Require every assistant message to include its reasoning field, even when empty. */
   requireReasoning: Schema.Boolean.pipe(optional),
   maxTokensField: MaxTokensField.pipe(optional),
+  /** Supports the OpenAI `store` request field. Gateway-door family defaults (e.g. GLM/Kimi/Gemini/DeepSeek models behind cline-pass, opendesign, opencode-go) are carried as per-model entries here, not detected in the shared protocol (#1824). */
+  supportsStore: Schema.Boolean.pipe(optional),
+  /** Supports the strict field on tool definitions. */
+  supportsStrictMode: Schema.Boolean.pipe(optional),
+  /** Sends `tool_stream` for GLM models on ZAI-shaped endpoints. */
+  zaiToolStream: Schema.Boolean.pipe(optional),
   requireFinishReason: Schema.Boolean.pipe(optional),
   requireAssistantAfterTool: Schema.Boolean.pipe(optional),
   supportsPromptCacheKey: Schema.Boolean.pipe(optional),

@@ -1,9 +1,12 @@
 export * as ModelPlan from "./model-plan.js"
 
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { Global } from "@opencode/util/global"
 import { Schema } from "effect"
+import { ModelRouteLimits } from "./model-route-limits.js"
+import { ownValue } from "./util/record.js"
 
 /**
  * The plan store: subscriptions and their quota windows, the cost tier of each model, what each pool is for,
@@ -119,6 +122,15 @@ export const readStore = (dataDir?: string): Store => {
   return Schema.decodeUnknownSync(Store)(parsed)
 }
 
+/**
+ * Whether a plan still describes capacity the quota gate may act on. A plan that has
+ * ended (`expired` or `cancelled`) stays in the store as history but must not feed the
+ * gate: its smaller window could otherwise produce the gating snapshot for a provider
+ * whose current plan has room (#1340). A plan whose status is `unknown` was never
+ * verified as ended, so it keeps feeding — only a positively ended plan drops out.
+ */
+export const feedsGate = (plan: Plan): boolean => plan.status !== "expired" && plan.status !== "cancelled"
+
 const transientRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
 const renameRetryDelays = [10, 25, 50, 100]
 const renameWait = new Int32Array(new SharedArrayBuffer(4))
@@ -129,10 +141,7 @@ function isTransientRenameError(error: unknown) {
   return typeof error.code === "string" && transientRenameCodes.has(error.code)
 }
 
-// On Windows, renaming over a destination another handle is reading fails
-// with EPERM and the update would be lost; retry briefly before giving up
-// (same fix as #85 for the TUI persistence helper, kept in sync with the
-// desktop copy in packages/desktop/src/main/atomic-write.ts).
+// Sync writers follow the atomic-replace contract in design #1345.
 function renameSyncWithRetry(source: string, destination: string) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -150,16 +159,70 @@ function renameSyncWithRetry(source: string, destination: string) {
 export const writeStore = (store: Store, dataDir?: string) => {
   const dir = directory(dataDir)
   fs.mkdirSync(dir, { recursive: true })
-  const file = path.join(dir, "plans.json")
+  const file = resolveAtomicTarget(path.join(dir, "plans.json"))
+  fs.mkdirSync(path.dirname(file), { recursive: true })
   const valid = Schema.decodeUnknownSync(Store)(store)
-  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  const temporary = path.join(path.dirname(file), `.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`)
+  const mode = fileMode(file)
+  let created = false
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(valid, null, 2)}\n`)
-    renameSyncWithRetry(temporary, file)
-  } catch (error) {
+    const descriptor = fs.openSync(temporary, "wx", 0o600)
+    created = true
     try {
-      fs.rmSync(temporary, { force: true })
-    } catch {}
+      fs.writeFileSync(descriptor, `${JSON.stringify(valid, null, 2)}\n`)
+    } finally {
+      fs.closeSync(descriptor)
+    }
+    fs.chmodSync(temporary, mode)
+    renameSyncWithRetry(temporary, file)
+    created = false
+  } catch (error) {
+    if (created) {
+      try {
+        fs.rmSync(temporary, { force: true })
+      } catch {}
+    }
+    throw error
+  }
+}
+
+function resolveAtomicTarget(file: string, remaining = 8): string {
+  const absolute = path.resolve(file)
+  try {
+    return fs.realpathSync(absolute)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+  }
+
+  let parent: string
+  try {
+    parent = fs.realpathSync(path.dirname(path.resolve(file)))
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+    parent = path.dirname(absolute)
+  }
+
+  const target = path.join(parent, path.basename(absolute))
+  let link: string
+  try {
+    link = fs.readlinkSync(target)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EINVAL") return target
+    throw error
+  }
+  if (remaining === 0) throw new Error(`Too many levels of symbolic links: ${file}`)
+  return resolveAtomicTarget(path.resolve(parent, link), remaining - 1)
+}
+
+function fileMode(file: string) {
+  // These stores use the contract's preserve policy: keep an existing mode, or use 0o600 for a new file.
+  try {
+    return fs.statSync(file).mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600
     throw error
   }
 }
@@ -171,6 +234,8 @@ export const slug = (value: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64)
+    // The slice can cut right after a separator, leaving a trailing dash the trim above missed.
+    .replace(/-+$/, "")
 
 /** Fields to change on a plan. A field left out is kept; a field set to null is removed. */
 export interface PlanPatch {
@@ -227,7 +292,9 @@ export const setModel = (
   patch: { tier?: Tier; coveredBy?: readonly string[] | null; note?: string | null },
   now: string,
 ): Store => {
-  const existing = store.models[model]
+  // Own-property reads: an id named for an inherited key ("constructor", "toString") must
+  // start from an empty entry rather than merging whatever the prototype chain answers.
+  const existing = ownValue(store.models, model)
   const tier = patch.tier ?? existing?.tier
   if (!tier) throw new Error(`${model} needs a tier: cheap, standard or frontier.`)
   const entry = Schema.decodeUnknownSync(ModelEntry)(merge(existing ?? {}, { ...patch, tier, updatedAt: now }))
@@ -241,7 +308,8 @@ export const setPool = (
   patch: { tier?: Tier | null; purpose?: string | null },
   now: string,
 ): Store => {
-  const entry = Schema.decodeUnknownSync(PoolEntry)(merge(store.pools[poolID] ?? {}, { ...patch, updatedAt: now }))
+  const existing = ownValue(store.pools, poolID) ?? {}
+  const entry = Schema.decodeUnknownSync(PoolEntry)(merge(existing, { ...patch, updatedAt: now }))
   return { ...store, pools: { ...store.pools, [poolID]: entry } }
 }
 
@@ -261,8 +329,12 @@ const noteFile = (dataDir?: string) => path.join(directory(dataDir), "plan-notes
 export const addNote = (input: NoteInput, now: string, dataDir?: string): Note => {
   const text = input.text.trim()
   if (!text) throw new Error("A note needs some text.")
+  // Calendar check via ModelRouteLimits.parseAbsoluteTime (#609): a bare Date.parse silently
+  // rolls calendar-invalid dates such as 2026-02-30 into the next month, so the id must not
+  // embed the rolled instant; a date with no usable instant embeds NaN, as an unparseable
+  // date always has.
   const note = Schema.decodeUnknownSync(Note)({
-    id: `note_${Date.parse(now).toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `note_${(ModelRouteLimits.parseAbsoluteTime(now) ?? Number.NaN).toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     at: now,
     kind: input.kind ?? "other",
     text,
@@ -288,8 +360,17 @@ export interface NoteFilter {
 }
 
 /** The notes that match, oldest first, keeping the newest `limit`. A line that does not parse is skipped and
- * counted, so one damaged line cannot hide the rest. */
+ * counted, so one damaged line cannot hide the rest. A `since` that does not parse is a caller error and
+ * throws, rather than silently matching nothing; a note whose own timestamp does not parse cannot be
+ * shown to be at or after `since`, so under a `since` filter it is skipped and counted too. */
 export const readNotes = (filter: NoteFilter = {}, dataDir?: string): { notes: Note[]; skipped: number } => {
+  // Calendar check via ModelRouteLimits.parseAbsoluteTime (#609): a bare Date.parse silently
+  // rolls a calendar-invalid since such as 2026-02-30 into Mar 2, so it would filter from
+  // the rolled instant instead of throwing the caller error below. Non-ISO parseable forms
+  // keep their current behaviour (parseAbsoluteTime only calendar-checks ISO-shaped dates).
+  const since = filter.since === undefined ? undefined : ModelRouteLimits.parseAbsoluteTime(filter.since)
+  if (filter.since !== undefined && since === undefined)
+    throw new Error(`The since filter "${filter.since}" is not a parseable date. Use an ISO timestamp, or omit it.`)
   const file = noteFile(dataDir)
   if (!fs.existsSync(file)) return { notes: [], skipped: 0 }
   let skipped = 0
@@ -302,23 +383,51 @@ export const readNotes = (filter: NoteFilter = {}, dataDir?: string): { notes: N
       skipped += 1
     }
   }
-  const since = filter.since === undefined ? undefined : Date.parse(filter.since)
-  const matching = parsed
+  const candidates = parsed
     .filter((note) => filter.providerID === undefined || note.providerID === filter.providerID)
     .filter((note) => filter.planID === undefined || note.planID === filter.planID)
     .filter((note) => filter.modelID === undefined || note.modelID === filter.modelID)
     .filter((note) => filter.poolID === undefined || note.poolID === filter.poolID)
     .filter((note) => filter.kind === undefined || note.kind === filter.kind)
-    .filter((note) => since === undefined || Date.parse(note.at) >= since)
-    .sort((left, right) => left.at.localeCompare(right.at))
-  return { notes: filter.limit === undefined ? matching : matching.slice(-filter.limit), skipped }
+  const matching: Note[] = []
+  for (const note of candidates) {
+    if (since === undefined) {
+      matching.push(note)
+      continue
+    }
+    const at = ModelRouteLimits.parseAbsoluteTime(note.at)
+    if (at === undefined) {
+      skipped += 1
+      continue
+    }
+    if (at >= since) matching.push(note)
+  }
+  matching
+    .sort((left, right) => {
+      const leftAt = ModelRouteLimits.parseAbsoluteTime(left.at)
+      const rightAt = ModelRouteLimits.parseAbsoluteTime(right.at)
+      if (leftAt === undefined) return rightAt === undefined ? 0 : -1
+      if (rightAt === undefined) return 1
+      return leftAt - rightAt
+    })
+  // slice(-0) is slice(0): a limit of 0 (or less) must keep no notes, not every note.
+  // A non-finite limit slips past that guard (NaN <= 0 is false, and slice(-Infinity) is
+  // also slice(0)), so it keeps no notes either (#733).
+  // A fractional limit truncates the same way in slice: slice(-0.5) is also slice(0), so
+  // a limit in (0, 1) would return every note (#904). Floor the limit first: a floored
+  // limit of 0 keeps no notes, and a fractional limit >= 1 keeps at most the floored count.
+  const floored = filter.limit === undefined ? undefined : Math.floor(filter.limit)
+  const limited = floored === undefined ? matching : !Number.isFinite(floored) || floored <= 0 ? [] : matching.slice(-floored)
+  return { notes: limited, skipped }
 }
 
 /** Whole days since a date the user or the model recorded, or null when there is no usable date. */
 export const daysSince = (date: string | undefined, now: number) => {
   if (date === undefined) return null
-  const at = Date.parse(date)
-  return Number.isNaN(at) ? null : Math.floor((now - at) / 86_400_000)
+  // Calendar-invalid dates (2026-02-30) have no usable instant either: a bare Date.parse
+  // would count from the rolled instant (Mar 2) instead.
+  const at = ModelRouteLimits.parseAbsoluteTime(date)
+  return at === undefined ? null : Math.max(0, Math.floor((now - at) / 86_400_000))
 }
 
 const GENERAL_GUIDANCE = [

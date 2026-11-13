@@ -301,6 +301,7 @@ export type FooterPromptRoute =
 
 export type FooterSubagentTab = {
   sessionID: string
+  parentID?: string
   label: string
   description: string
   status: "running" | "completed" | "cancelled" | "error"

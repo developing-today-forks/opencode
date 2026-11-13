@@ -276,7 +276,6 @@ describe("AzurePlugin connecting", () => {
       ])
     }),
   )
-
 })
 
 describe("AzurePlugin startup", () => {
@@ -293,6 +292,58 @@ describe("AzurePlugin startup", () => {
       const providers = yield* Provider.Service
       expect(required(yield* providers.get(Provider.ID.azure)).settings?.resourceName).toBe("test-resource")
       expect(yield* azureModelIDs).toEqual(catalogIDs)
+
+      yield* eventually(azureModelIDs, (ids) => ids.length === 1)
+      expect(yield* azureModelIDs).toEqual(["gpt-5-mini"])
+    }),
+  )
+})
+
+describe("AzurePlugin token expiry", () => {
+  const cliTokenWithExpiry = (expiresOn: string) => (args: readonly string[]) => ({
+    accessToken: `${args[args.indexOf("--scope") + 1]}-token`,
+    expiresOn,
+  })
+
+  // Date.parse rolls each of these into a real (future) instant, so without a
+  // calendar check the token would be cached with a fabricated expiry.
+  for (const expiresOn of ["2027-02-30 10:00:00.000000", "2027-04-31T10:00:00Z", "2027-03-01T24:00:00Z"]) {
+    it.live(`rejects the calendar-invalid CLI expiry ${expiresOn}`, () =>
+      Effect.gen(function* () {
+        const cli = yield* fakeAzureCli(cliTokenWithExpiry(expiresOn))
+        const azure = yield* fakeAzure({
+          resource: () => resourceList(listed("gpt-5-mini", "gpt-5-mini")),
+          management: () => managementPage([managed("gpt-5-mini", "gpt-5-mini")]),
+        })
+        yield* seedCatalog
+        yield* connect(cliCredential())
+        yield* addPlugin(azure.endpoints).pipe(cli.provide)
+
+        yield* settle
+        // The CLI was asked, its answer was rejected, and no deployment list
+        // was ever fetched with the token.
+        expect(cli.commands.length).toBeGreaterThan(0)
+        expect(azure.requests).toEqual([])
+        expect(yield* azureModelIDs).toEqual(catalogIDs)
+      }),
+    )
+  }
+
+  it.live("accepts the Azure CLI's space-separated expiry shape", () =>
+    Effect.gen(function* () {
+      const at = new Date(Date.now() + hour)
+      const pad = (value: number) => String(value).padStart(2, "0")
+      const expiresOn = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.000000`
+      const cli = yield* fakeAzureCli(cliTokenWithExpiry(expiresOn))
+      const azure = yield* fakeAzure({
+        management: (request) =>
+          request.authorization === managementBearer
+            ? managementPage([managed("gpt-5-mini", "gpt-5-mini")])
+            : unauthorized(),
+      })
+      yield* seedCatalog
+      yield* connect(cliCredential())
+      yield* addPlugin(azure.endpoints).pipe(cli.provide)
 
       yield* eventually(azureModelIDs, (ids) => ids.length === 1)
       expect(yield* azureModelIDs).toEqual(["gpt-5-mini"])

@@ -14,7 +14,14 @@ export async function discoverThemes(directories: string[]) {
       .map((entry) => path.join(themeDirectory, entry.name))
       .sort()
     for (const file of files) {
-      result[path.basename(file, ".json")] = JSON.parse(await readFile(file, "utf8")) as unknown
+      const theme = await readFile(file, "utf8")
+        .then((contents) => JSON.parse(contents) as unknown)
+        .catch((error: unknown) => {
+          console.warn("Skipping invalid custom theme", { file, error })
+          return undefined
+        })
+      if (theme === undefined) continue
+      result[path.basename(file, ".json")] = theme
     }
   }
   return result

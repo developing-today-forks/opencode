@@ -22,7 +22,7 @@ import { decode64 } from "@/runtime/persistence/base64"
 import { handleDocumentSearchKeydown } from "@/shell/commands/search-keydown"
 import { createMenuDismissController } from "@/shell/commands/menu-dismiss"
 import { createEventListener } from "@solid-primitives/event-listener"
-import { matchesModelSearch } from "./search"
+import { isExactModelName, isWildcardSearch, matchesModelSearch, matchesWildcardSearch } from "./search"
 import { SettingsList } from "@/settings/list"
 import {
   CONSOLE_GROUP_KEY,
@@ -462,14 +462,48 @@ function createModelSelectorController(input: {
       .filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
   )
 
+  // The provider-filtered catalog before visibility filtering (#230): exact
+  // hidden-model matches are evaluated against this list, so a hidden model
+  // the automatic visibility policy would age out can still be revealed by
+  // typing its full name.
+  const catalogModels = createMemo(() =>
+    model.list().filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
+  )
+
   return {
     all: () => model.list().filter((item) => (input.provider() ? item.provider.id === input.provider() : true)),
     models: (search: string) => {
       const query = search.trim()
 
+      // Hidden models (#230) are absent from the picker unless the search is
+      // the model's exact full name or a matching wildcard pattern; every
+      // other model keeps fuzzy matching (or the same wildcard rule).
       const filtered = query
-        ? allModels().filter((item) => matchesModelSearch(query, [item.name, item.id, item.provider.name]))
-        : allModels()
+        ? catalogModels().filter((item) =>
+            item.hidden
+              ? isExactModelName(query, [
+                  item.name,
+                  item.id,
+                  `${item.provider.id}/${item.id}`,
+                  `${item.provider.name}/${item.name}`,
+                ]) ||
+                matchesWildcardSearch(query, [
+                  item.name,
+                  item.id,
+                  `${item.provider.id}/${item.id}`,
+                  `${item.provider.name}/${item.name}`,
+                ])
+              : model.visible({ modelID: item.id, providerID: item.provider.id }) &&
+                (isWildcardSearch(query)
+                  ? matchesWildcardSearch(query, [
+                      item.name,
+                      item.id,
+                      `${item.provider.id}/${item.id}`,
+                      `${item.provider.name}/${item.name}`,
+                    ])
+                  : matchesModelSearch(query, [item.name, item.id, item.provider.name])),
+          )
+        : allModels().filter((item) => !item.hidden)
 
       return [...filtered].sort((a, b) => a.name.localeCompare(b.name))
     },

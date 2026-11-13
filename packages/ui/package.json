@@ -98,10 +98,15 @@
     "generate:v2-oc2": "bun run script/build-oc2-v2-overrides.ts"
   },
   "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@babel/preset-typescript": "7.27.1",
+    "@happy-dom/global-registrator": "20.0.11",
     "@solidjs/meta": "catalog:",
     "@tsconfig/node22": "catalog:",
+    "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:",
+    "babel-preset-solid": "1.9.15",
     "solid-js": "catalog:",
     "tailwindcss": "catalog:",
     "typescript": "catalog:",

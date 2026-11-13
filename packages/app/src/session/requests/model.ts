@@ -126,15 +126,38 @@ export function createSessionRequestModel() {
     return data.session.root(id)
   })
 
-  // The owner's messages name the subagent calls still starting at the root; load them when a subagent
-  // view makes a different session the owner and they have not arrived yet.
+  // A subagent view needs the root's full session family and messages to render running work for the whole tree.
+  createEffect(
+    on(
+      () => [params.id, serverSDK.connection.status()] as const,
+      ([id, status]) => {
+        if (!id || status !== "connected") return
+        void data.session
+          .sync(id, { children: true })
+          .then(() => {
+            const rootID = owner()
+            if (!rootID || rootID === id) return
+            return data.session
+              .sync(rootID, { children: true })
+              .then(() => data.session.sync(rootID, { children: true }))
+              .then(() => data.session.message.sync(rootID))
+          })
+          .catch(() => undefined)
+      },
+    ),
+  )
+
+  // The running menu walks the owner's whole tree, so the owner's family loads whenever a subagent
+  // view makes a different session the owner. Landing directly on a descendant otherwise syncs only
+  // that session's own descendants plus the ancestors the titlebar walk fetches, and the root's other
+  // subagents never arrive. This is separate from the message load above: that load's already-loaded
+  // guard must not skip the family, and the family sync's own key dedupes repeat runs.
   createEffect(
     on(
       () => [owner(), params.id, serverSDK.connection.status()] as const,
       ([rootID, id, status]) => {
         if (!rootID || rootID === id || status !== "connected") return
-        if (data.session.message.list(rootID).length > 0) return
-        void Promise.all([data.session.sync(rootID), data.session.message.sync(rootID)]).catch(() => undefined)
+        void data.session.sync(rootID, { children: true }).catch(() => undefined)
       },
       { defer: true },
     ),

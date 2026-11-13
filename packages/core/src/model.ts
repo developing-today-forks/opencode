@@ -57,6 +57,9 @@ export { Event } from "@opencode/schema/model"
 export interface Editor {
   /** Includes disabled candidates so later transforms can re-enable them. */
   readonly list: (providerID?: Provider.ID) => readonly MutableInfo[]
+  /** Current model ids for one provider, read from state keys only: no model is
+   * drafted (structuredClone) to answer this, unlike `list`/`get` (#236). */
+  readonly ids: (providerID: Provider.ID) => readonly ID[]
   readonly get: (providerID: Provider.ID, modelID: ID) => MutableInfo | undefined
   readonly update: (providerID: Provider.ID, modelID: ID, update: (model: MutableInfo) => void) => void
   readonly remove: (providerID: Provider.ID, modelID: ID) => void
@@ -75,6 +78,11 @@ export interface Interface extends State.Transformable<Editor> {
   readonly get: (providerID: Provider.ID, modelID: ID) => Effect.Effect<Info | undefined>
   readonly all: () => Effect.Effect<readonly Info[]>
   readonly available: () => Effect.Effect<readonly Info[]>
+  /** The execution/validity catalog (#230): enabled models including hidden
+   * ones, in the picker list's preferred-free order. Execution paths —
+   * explicit session selection, client validity checks — read this list;
+   * only discovery/picker surfaces read `available`. */
+  readonly catalog: () => Effect.Effect<readonly Info[]>
   readonly default: () => Effect.Effect<Info | undefined>
   readonly small: (providerID: Provider.ID) => Effect.Effect<Info | undefined>
 }
@@ -123,6 +131,7 @@ const layer = Layer.effect(
           return copy
         }
         return {
+          ids: (providerID) => Array.from(data.models.get(providerID)?.keys() ?? []),
           list: (providerID) => {
             const ids = providerID === undefined ? Array.from(data.models.keys()) : [providerID]
             return ids.flatMap((id) =>
@@ -172,6 +181,7 @@ const layer = Layer.effect(
           data: Data
           all: readonly Info[]
           available: readonly Info[]
+          catalog: readonly Info[]
           byProvider: ReadonlyMap<Provider.ID, ReadonlyMap<ID, Info>>
         }
       | undefined
@@ -223,7 +233,21 @@ const layer = Layer.effect(
         const all = Array.from(byProvider.values())
           .flatMap((models) => Array.from(models.values()))
           .sort((left, right) => right.time.released - left.time.released)
-        cached = freeze({ data, all, available: preferFree(all.filter((model) => model.enabled)), byProvider }, true)
+        cached = freeze(
+          {
+            data,
+            all,
+            // The picker list (#230): enabled and not hidden. Hidden models stay in
+            // `all` (and in route expansion, which filters on `enabled` only), so
+            // they remain fully routable while absent here.
+            available: preferFree(all.filter((model) => model.enabled && !model.hidden)),
+            // The execution/validity catalog (#230): every enabled model, hidden
+            // included, in the same preferred-free order as the picker list.
+            catalog: preferFree(all.filter((model) => model.enabled)),
+            byProvider,
+          },
+          true,
+        )
         return cached
       }
     })
@@ -262,6 +286,7 @@ const layer = Layer.effect(
       ),
       all: Effect.fn("Model.all")(() => read().pipe(Effect.map((value) => value.all))),
       available: Effect.fn("Model.available")(() => read().pipe(Effect.map((value) => value.available))),
+      catalog: Effect.fn("Model.catalog")(() => read().pipe(Effect.map((value) => value.catalog))),
       default: Effect.fn("Model.default")(function* () {
         const value = yield* read()
         const requested = value.data.defaultModel

@@ -98,7 +98,7 @@ export const Plugin = define({
                 })
                 if (subagent ?? commandAgent?.mode === "subagent") {
                   const parent = yield* sessions.get(input.sessionID)
-                  yield* SubagentDepth.assertWithinLimit(sessions, config, parent)
+                  yield* SubagentDepth.assertWithinLimit(sessions, config, parent, fs)
                   const selected = yield* agents.select(agent ?? parent.agent)
                   const child = yield* sessions.create({
                     parentID: parent.id,
@@ -247,6 +247,9 @@ function parseArguments(input: string) {
 }
 
 const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
-const placeholderRegex = /\$(\d+)/g
+// Positional placeholders start at $1: there is no argument 0, and admitting $0 made the
+// expansion callback read args[-1] — the literal string "undefined", or the last argument
+// when $0 was the only placeholder (#736). $0/$00 stay as written, like other unrecognised $ forms.
+const placeholderRegex = /\$([1-9]\d*)/g
 const quoteTrimRegex = /^["']|["']$/g
 const shellRegex = /!`([^`]+)`/g

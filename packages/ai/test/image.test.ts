@@ -947,4 +947,81 @@ describe("Image", () => {
       ),
     ),
   )
+  it.effect("does not double the version segment for BFL, Replicate or Stability image routes (#1962)", () =>
+    Effect.gen(function* () {
+      const urls: string[] = []
+      const serve = (body: unknown, status?: number) =>
+        layer((input) => {
+          urls.push(input.request.url)
+          return Effect.succeed(status === undefined ? json(input, body) : json(input, body, { status }))
+        })
+
+      // BFL submit: path carries /v1, so a baseURL ending in /v1 must render the same URL as the bare base.
+      const bflReply = { id: "req_1", polling_url: "https://bfl.test/v1/get_result?id=req_1" }
+      for (const baseURL of ["https://bfl.test/v1", "https://bfl.test"]) {
+        yield* Image.start({
+          model: BlackForestLabs.configure({ apiKey: "test", baseURL }).image("flux-2-pro"),
+          prompt: "A lighthouse",
+        }).pipe(Effect.provide(serve(bflReply)))
+      }
+      expect(urls.splice(0)).toEqual(["https://bfl.test/v1/flux-2-pro", "https://bfl.test/v1/flux-2-pro"])
+
+      // Replicate submit: official-model path carries /v1.
+      const predictionReply = {
+        id: "p_1",
+        status: "processing",
+        urls: {
+          get: "https://replicate.test/v1/predictions/p_1",
+          cancel: "https://replicate.test/v1/predictions/p_1/cancel",
+        },
+      }
+      for (const baseURL of ["https://replicate.test/v1", "https://replicate.test"]) {
+        yield* Image.start({
+          model: Replicate.configure({ apiKey: "test", baseURL }).image("owner/model"),
+          prompt: "A lighthouse",
+        }).pipe(Effect.provide(serve(predictionReply)))
+      }
+      expect(urls.splice(0)).toEqual([
+        "https://replicate.test/v1/models/owner/model/predictions",
+        "https://replicate.test/v1/models/owner/model/predictions",
+      ])
+
+      // Stability generate (inline): path carries /v2beta.
+      for (const baseURL of ["https://stability.test/v2beta", "https://stability.test"]) {
+        yield* Image.generate({
+          model: Stability.configure({ apiKey: "test", baseURL }).image("core"),
+          prompt: "A lighthouse",
+        }).pipe(Effect.provide(serve({ image: "AQID" })))
+      }
+      expect(urls.splice(0)).toEqual([
+        "https://stability.test/v2beta/stable-image/generate/core",
+        "https://stability.test/v2beta/stable-image/generate/core",
+      ])
+
+      // Stability upscale submit and poll: submit path and the /v2beta/results poll path both carry the version.
+      for (const baseURL of ["https://stability.test/v2beta", "https://stability.test"]) {
+        yield* Image.start({
+          model: Stability.configure({ apiKey: "test", baseURL }).upscale(),
+          prompt: "A lighthouse",
+          images: [Media.bytes(new Uint8Array([1, 2, 3]), "image/png")],
+        }).pipe(Effect.provide(serve({ id: "up_1" }, 202)))
+        const error = yield* Effect.gen(function* () {
+          const generation = yield* Image.resume(Stability.configure({ apiKey: "test", baseURL }).upscale(), {
+            id: "up_1",
+          })
+          return yield* generation.result().pipe(Effect.flip)
+        }).pipe(Effect.provide(serve({ id: "up_1", status: "in-progress" }, 202)))
+        expect(error.reason._tag).toBe("InvalidRequest")
+      }
+      // result() reads status and result, both served from the same /v2beta/results poll URL.
+      expect(urls.splice(0)).toEqual([
+        "https://stability.test/v2beta/stable-image/upscale/creative",
+        "https://stability.test/v2beta/results/up_1",
+        "https://stability.test/v2beta/results/up_1",
+        "https://stability.test/v2beta/stable-image/upscale/creative",
+        "https://stability.test/v2beta/results/up_1",
+        "https://stability.test/v2beta/results/up_1",
+      ])
+    }),
+  )
 })

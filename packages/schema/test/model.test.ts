@@ -88,6 +88,32 @@ describe("Model.Selector", () => {
     expect(Model.Selector.intersect(" anthropic/*", "anthropic/claude-haiku-5-5")).toBeUndefined()
   })
 
+  test("rejects #-in-segment and *-in-provider/variant selectors (#520)", () => {
+    for (const input of [
+      "anthropic/claude-haiku-5-5#a#b",
+      "anth#ropic/claude-haiku-5-5",
+      "*/claude-haiku-5-5",
+      "anthrop*c/claude-haiku-5-5",
+      "anthropic/claude-haiku-5-5#*",
+      "anthropic/claude-haiku-5-5#**",
+      "anthropic/claude-haiku-5-5#hi*gh",
+    ])
+      expect(() => decode(input)).toThrow()
+  })
+
+  test("matches and intersect return false/undefined — never throw — for #-in-segment raw strings (#520)", () => {
+    const haiku = Model.Ref.parse("anthropic/claude-haiku-5-5")
+    for (const input of ["anthropic/claude-haiku-5-5#a#b", "anth#ropic/claude-haiku-5-5", "anthropic/claude#high#extra"]) {
+      expect(Model.Selector.matches(input, haiku)).toBe(false)
+      expect(Model.Selector.intersect(input, input)).toBeUndefined()
+      expect(Model.Selector.intersect(input, "anthropic/claude-haiku-5-5")).toBeUndefined()
+    }
+    for (const input of ["*/claude-haiku-5-5", "anthrop*c/claude-haiku-5-5", "anthropic/claude-haiku-5-5#*"]) {
+      expect(Model.Selector.matches(input, haiku)).toBe(false)
+      expect(Model.Selector.intersect(input, input)).toBeUndefined()
+    }
+  })
+
   test("matches exact, variant, and wildcard selectors", () => {
     const haiku = Model.Ref.parse("anthropic/claude-haiku-5-5")
     const haikuHigh = Model.Ref.parse("anthropic/claude-haiku-5-5#high")

@@ -1,4 +1,5 @@
 import { Duration, Effect, Equal, Option, Schema, SchemaGetter, Scope, Semaphore, Stream } from "effect"
+import { deviceLifetimeSeconds, expiresInSeconds } from "./expires.js"
 import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import { define } from "@opencode/plugin/effect/plugin"
 import type { SessionHttpResponse } from "@opencode/plugin/effect/session"
@@ -22,6 +23,22 @@ import { Money } from "@opencode/schema/money"
 const defaultServer = "https://opencode.ai/console"
 const clientID = "opencode-cli"
 const methodID = Integration.MethodID.make("device")
+const pollingSafetyMargin = 3000
+/** Poll interval for the device flow, in milliseconds. The server-supplied
+ * `interval` was only floored (#880): 0 or a negative value would make
+ * the poll loop sleep for no time at all and busy-poll the token endpoint,
+ * and a sub-second value floods it almost as fast. Non-positive and
+ * non-finite values take the 5-second fallback (the OpenAI flow's
+ * deviceIntervalMs precedent, #771) and the result is clamped to [1s, 60s];
+ * the 60-second ceiling is the Copilot bound from #915 (#941): a large or
+ * unit-confused value would otherwise make the first sleep — taken before
+ * the first token request — outlast the attempt lifetime, and slow_down
+ * growth composes from the clamped value. The poll loop adds
+ * pollingSafetyMargin on top of every wait. */
+export const deviceIntervalMs = (interval: number): number => {
+  const seconds = Number.isFinite(interval) && interval > 0 ? interval : 5
+  return Math.min(Math.max(seconds, 1), 60) * 1000
+}
 // Drop statements whose action or effect is a value this version does not know, so a newer Console can
 // extend either enum. Malformed statements still fail validation.
 const RemotePolicies = Schema.Array(Schema.Unknown).pipe(
@@ -139,11 +156,19 @@ function oauth(http: HttpClient.HttpClient, integrationID: Integration.ID) {
           catch: (cause) =>
             new Error(`Invalid device verification URL: ${cause instanceof Error ? cause.message : String(cause)}`),
         })
+        // The integration layer bounds the attempt by expiresAt when given
+        // one; without it a short-lived code is polled for the full
+        // 10-minute attempt lifetime (#880). The server-supplied lifetime is
+        // clamped to that same 10-minute ceiling (#900): a millisecond-scale
+        // expires_in must not stretch the attempt — and the deadline-free
+        // poll loop — to days.
+        const lifetime = deviceLifetimeSeconds(device.expires_in, 0)
         return {
           mode: "auto" as const,
           url: verification.href,
           instructions: `Enter code: ${device.user_code}`,
-          callback: poll(http, server, device.device_code, Duration.seconds(device.interval)),
+          ...(lifetime ? { expiresAt: Date.now() + lifetime * 1000 } : {}),
+          callback: poll(http, server, device.device_code, deviceIntervalMs(device.interval)),
         }
       }),
     refresh: (credential) =>
@@ -165,7 +190,7 @@ function oauth(http: HttpClient.HttpClient, integrationID: Integration.ID) {
           ...credential,
           access: token.access_token,
           refresh: token.refresh_token,
-          expires: Date.now() + token.expires_in * 1000,
+          expires: Date.now() + expiresInSeconds(token.expires_in, 3600) * 1000,
           metadata:
             token.org_id == null
               ? credential.metadata
@@ -648,10 +673,10 @@ function normalizeServer(input: unknown) {
   })
 }
 
-function poll(http: HttpClient.HttpClient, server: string, deviceCode: string, interval: Duration.Duration) {
-  const loop = (wait: Duration.Duration): Effect.Effect<Credential.OAuth, unknown> =>
+function poll(http: HttpClient.HttpClient, server: string, deviceCode: string, interval: number) {
+  const loop = (wait: number): Effect.Effect<Credential.OAuth, unknown> =>
     Effect.gen(function* () {
-      yield* Effect.sleep(wait)
+      yield* Effect.sleep(Duration.millis(wait + pollingSafetyMargin))
       const result = yield* post(
         http,
         `${server}/auth/device/token`,
@@ -666,7 +691,7 @@ function poll(http: HttpClient.HttpClient, server: string, deviceCode: string, i
       if ("access_token" in result) return yield* credential(http, server, result)
       if (result.error === "authorization_pending") return yield* loop(wait)
       if (result.error === "slow_down") {
-        return yield* loop(Duration.sum(wait, Duration.seconds(5)))
+        return yield* loop(wait + 5000)
       }
       return yield* Effect.fail(new Error(`Device authorization failed: ${result.error}`))
     })
@@ -694,7 +719,7 @@ function credential(http: HttpClient.HttpClient, server: string, token: typeof T
       methodID,
       access: token.access_token,
       refresh: token.refresh_token,
-      expires: Date.now() + token.expires_in * 1000,
+      expires: Date.now() + expiresInSeconds(token.expires_in, 3600) * 1000,
       metadata: {
         server,
         accountID: user.id,

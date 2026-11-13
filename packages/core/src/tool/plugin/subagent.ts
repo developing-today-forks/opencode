@@ -14,6 +14,7 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentDepth } from "../../session/subagent-depth.js"
+import { FSUtil } from "@opencode/util/fs-util"
 import { SubagentJob } from "../../session/subagent-job.js"
 import { McpxSubagent } from "./mcpx-subagent.js"
 
@@ -52,6 +53,10 @@ export const Input = Schema.Struct({
     description:
       "Run the subagent in the background and return immediately. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress.",
   }),
+  stopPolicy: Schema.optionalKey(Job.StopPolicy).annotate({
+    description:
+      "What interrupting the parent does to a background subagent: independent (default) keeps running, cascade stops with the parent, detached survives plain and cascade stops and needs force-stop.",
+  }),
 })
 
 export const Output = Schema.Struct({
@@ -61,14 +66,20 @@ export const Output = Schema.Struct({
 })
 export const description = [
   "Spawns an agent in a child session to work on the specified task.",
-  "Subagents are the default way to delegate non-trivial work: launch one rather than doing everything in the current session.",
+  "Spawn subagents only when the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.",
   "A subagent may itself launch subagents, subject to the depth limit and to model governance; governance failures name the allowed models, so pick a permitted one and retry.",
   "The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
   "Foreground (default) runs the subagent to completion and returns its final response.",
   "Background mode (background=true) launches it asynchronously and returns immediately; you are notified when it finishes.",
   "Use background only for independent work that can run while you continue elsewhere.",
-  "When you are a subagent yourself, launches always run in the foreground, so your final answer includes their results.",
+  "Background launches accept stopPolicy: independent (default) keeps running when the parent is interrupted, cascade stops with the parent, detached survives plain and cascade stops until force-stopped.",
+  "Subagents may background their own subagents; a background child notifies its direct parent when it finishes.",
+  "Children inherit your working directory: a child runs in the same directory as the session that launched it.",
+  "Children inherit your model and route when you pass no model argument, unless the chosen agent definition configures its own model, which then wins; pass model to override either. The child result confirms only the sessionID, so rely on this inheritance rule, not on the result, for the directory and model a child actually got.",
+  "Nesting depth is capped by experimental.subagent_depth (default 5): a top-level session is depth 0 and can nest 5 levels deep, and a max_depth on an agent definition can lower the cap for its subtree. The section appended below states your current depth and how many nesting levels remain from your session.",
+  "Background completion is delivered, not polled: when a background child finishes, its result is delivered to its direct parent unprompted as a synthetic turn, and a background child that errors reports that error the same way, verbatim as its result.",
+  "Warning: a child that calls the question tool blocks until an external actor answers. A foreground subagent call waits on that answer, and in a detached or background context nobody may ever answer, stalling the child and its caller. Tell children in their prompt to record open questions and keep working with a documented default instead of calling question.",
 ].join("\n")
 
 export const Plugin = {
@@ -78,13 +89,16 @@ export const Plugin = {
     const jobs = yield* Job.Service
     const agents = yield* Agent.Service
     const config = yield* Config.Service
+    const fs = yield* FSUtil.Service
     const permission = yield* Permission.Service
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const aliases = Config.latest(yield* config.entries(), "aliases")
-      const availableModels = yield* models.available()
+      // An explicit subagent model request is execution, not discovery (#230): a
+      // hidden model stays selectable here; only the picker list hides it.
+      const availableModels = (yield* models.all()).filter((model) => model.enabled)
       const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
         availableModels.some((m) => m.providerID === providerID && m.id === modelID)
       let resolved = input
@@ -132,7 +146,7 @@ export const Plugin = {
                     (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
                   ),
                 )
-              const depth = yield* SubagentDepth.assertWithinLimit(sessions, config, parent).pipe(
+              yield* SubagentDepth.assertWithinLimit(sessions, config, parent, fs).pipe(
                 Effect.mapError((error) => new ToolFailure({ message: error.message })),
               )
               const agent = yield* agents.resolve(input.agent)
@@ -230,9 +244,10 @@ export const Plugin = {
                 childID: child.id,
               }).pipe(Effect.catch(() => Effect.void))
 
-              // A nested background child would end its job before its own subagent reports back,
-              // and that later answer would reach only the child, so nested launches block.
-              const background = input.background === true && depth === 0
+              // Background launches are allowed at any depth; each background child
+              // notifies its direct parent, so nested background work reports back
+              // to the subagent that launched it.
+              const background = input.background === true
               yield* context.progress({ sessionID: child.id, status: "running" })
 
               // Standard prompt admission outside the job: Job.start joining a running child skips
@@ -258,6 +273,7 @@ export const Plugin = {
                 childSessionID: child.id,
                 agent: agent.name,
                 description: input.description,
+                stopPolicy: input.stopPolicy ?? ("independent" as const),
               }
               yield* subagents.start(recovery)
 
@@ -337,6 +353,10 @@ export const Plugin = {
           )
           .toSorted((a, b) => a.id.localeCompare(b.id))
         if (available.length === 0) return
+        const depthLine = yield* Effect.gen(function* () {
+          const current = yield* sessions.get(event.sessionID)
+          return SubagentDepth.formatDepthLine(yield* SubagentDepth.readout(sessions, config, current, fs))
+        }).pipe(Effect.orElseSucceed(() => undefined))
         tool.description = [
           tool.description,
           "",
@@ -345,6 +365,7 @@ export const Plugin = {
             (agent) =>
               `- ${agent.id}: ${agent.description ?? "This subagent should only be called when explicitly requested."}`,
           ),
+          ...(depthLine === undefined ? [] : ["", depthLine]),
         ].join("\n")
       })
     yield* ctx.session.hook("context", hook)

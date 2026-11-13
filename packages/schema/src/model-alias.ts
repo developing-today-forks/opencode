@@ -32,6 +32,19 @@ export type ExistsPredicate = (ref: { providerID: string; modelID: string }) => 
 const MAX_DEPTH = 10
 
 /**
+ * Builds the reference string for a structured model target. A bare alias
+ * target carries an empty model id; its variant, when present, rides on the
+ * provider/alias name (`provider#variant`) so alias resolution can see it —
+ * dropping it would silently replace the user's variant with the alias
+ * target's variant.
+ */
+export function refString(input: { providerID: string; id: string; variant?: string }): string {
+  if (input.id)
+    return input.variant ? `${input.providerID}/${input.id}#${input.variant}` : `${input.providerID}/${input.id}`
+  return input.variant ? `${input.providerID}#${input.variant}` : input.providerID
+}
+
+/**
  * Resolves a model reference string (which may use provider, model, or variant aliases)
  * into a canonical `provider/model[#variant]` reference string.
  */

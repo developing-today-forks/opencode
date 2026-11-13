@@ -15,7 +15,20 @@ export function parseFrecency(text: string) {
     .filter(Boolean)
     .map((line) => {
       try {
-        return JSON.parse(line) as FrecencyEntry
+        const entry: unknown = JSON.parse(line)
+        if (typeof entry !== "object" || entry === null) return undefined
+        if (
+          !("path" in entry) ||
+          typeof entry.path !== "string" ||
+          !("frequency" in entry) ||
+          typeof entry.frequency !== "number" ||
+          !Number.isFinite(entry.frequency) ||
+          !("lastOpen" in entry) ||
+          typeof entry.lastOpen !== "number" ||
+          !Number.isFinite(entry.lastOpen)
+        )
+          return undefined
+        return { path: entry.path, frequency: entry.frequency, lastOpen: entry.lastOpen }
       } catch {
         return undefined
       }

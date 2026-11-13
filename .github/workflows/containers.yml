@@ -16,13 +16,6 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - packages/containers/**
-      - .github/workflows/containers.yml
-      - package.json
   workflow_dispatch:
     inputs:
       push:

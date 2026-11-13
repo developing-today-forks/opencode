@@ -18,13 +18,17 @@ export const tokens = (usage: Usage | undefined): TokenUsage.Info => ({
   },
 })
 
-// TODO(#35765): Use Copilot's reported billed amount once billing has a dedicated typed runtime contract.
-export function calculateCost(costs: Model.Info["cost"], usage: TokenUsage.Info) {
+const selectCost = (costs: Model.Info["cost"], usage: TokenUsage.Info) => {
   const context = usage.input + usage.cache.read + usage.cache.write
   const tier = costs
     .filter((cost) => cost.tier?.type === "context" && context > cost.tier.size)
     .toSorted((a, b) => (b.tier?.size ?? 0) - (a.tier?.size ?? 0))[0]
-  const cost = tier ?? costs.find((cost) => cost.tier === undefined)
+  return tier ?? costs.find((cost) => cost.tier === undefined)
+}
+
+// TODO(#35765): Use Copilot's reported billed amount once billing has a dedicated typed runtime contract.
+export function calculateCost(costs: Model.Info["cost"], usage: TokenUsage.Info) {
+  const cost = selectCost(costs, usage)
   if (!cost) return Money.USD.zero
   return Money.USD.make(
     (usage.input * finite(cost.input) +
@@ -33,6 +37,17 @@ export function calculateCost(costs: Model.Info["cost"], usage: TokenUsage.Info)
       usage.cache.write * finite(cost.cache.write)) /
       1_000_000,
   )
+}
+
+/**
+ * What prompt caching saved on this usage: the counterfactual cost of the cache-read tokens at the
+ * full input price minus what they actually cost at the cache-read price, using the same catalog
+ * tier selection as `calculateCost`. Zero when nothing was read from cache or no price applies.
+ */
+export function calculateCacheSavings(costs: Model.Info["cost"], usage: TokenUsage.Info) {
+  const cost = selectCost(costs, usage)
+  if (!cost) return Money.USD.zero
+  return Money.USD.make((usage.cache.read * (finite(cost.input) - finite(cost.cache.read))) / 1_000_000)
 }
 
 export type Recorded = { readonly tokens: TokenUsage.Info; readonly cost: Money.USD }

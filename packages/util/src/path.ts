@@ -1,3 +1,5 @@
+import { Text } from "./text.js"
+
 export function getFilename(path: string | undefined) {
   if (!path) return ""
   const trimmed = path.replace(/[/\\]+$/, "")
@@ -15,19 +17,25 @@ export function getDirectory(path: string | undefined) {
 export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
   const filename = getFilename(path)
   if (filename.length <= maxLength) return filename
+  // slice(0, maxLength - 1) below is slice(0, -1) at maxLength 0: it keeps
+  // all but the last character instead of returning an empty string.
+  if (maxLength <= 0) return ""
   const lastDot = filename.lastIndexOf(".")
   const extension = lastDot <= 0 ? "" : filename.slice(lastDot)
   const available = maxLength - extension.length - 1
-  if (available <= 0) return filename.slice(0, maxLength - 1) + "…"
-  return filename.slice(0, available) + "…" + extension
+  if (available <= 0) return Text.truncate(filename, maxLength - 1) + "…"
+  return Text.truncate(filename, available) + "…" + extension
 }
 
 export function truncateMiddle(text: string, maxLength = 20) {
   if (text.length <= maxLength) return text
+  if (maxLength <= 0) return ""
   const available = maxLength - 1
   const start = Math.ceil(available / 2)
   const end = Math.floor(available / 2)
-  return text.slice(0, start) + "…" + text.slice(-end)
+  // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
+  // slicing with it would return the whole string.
+  return Text.truncate(text, start) + "…" + (end > 0 ? Text.truncateTail(text, end) : "")
 }
 
 const isDrive = (value: string) => {
@@ -62,6 +70,10 @@ export function containsDirectory(parent: string, child: string) {
   }
   const root = normalize(parent)
   const target = normalize(child)
+  // An empty parent is not a directory: it contains nothing. Without this
+  // guard the prefix test below degenerates to startsWith("/") and every
+  // absolute path would count as contained.
+  if (!root) return false
   return target === root || target.startsWith(root.endsWith("/") ? root : `${root}/`)
 }
 
@@ -124,10 +136,15 @@ export function parsePathLineSuffix(input: string) {
   if (hashMatch) {
     const first = Number(hashMatch[2])
     const second = hashMatch[3] ? Number(hashMatch[3]) : first
+    const selection = toLineRange(first, second)
+    // An out-of-range suffix is not a line suffix at all (#2187): consumers treat
+    // path !== input as "a suffix was parsed", so stripping it here would silently
+    // drop the suffix (and mangle inputs like tel:5551234). Return the input untouched.
+    if (selection === undefined) return { path: input, selection: undefined }
 
     return {
       path: hashMatch[1] ?? "",
-      selection: toLineRange(first, second),
+      selection,
     }
   }
 
@@ -136,10 +153,12 @@ export function parsePathLineSuffix(input: string) {
   if (colonMatch && !/^[a-z]:?$/i.test(colonMatch[1] ?? "")) {
     const first = Number(colonMatch[2])
     const second = colonMatch[3] ? Number(colonMatch[3]) : first
+    const selection = toLineRange(first, second)
+    if (selection === undefined) return { path: input, selection: undefined }
 
     return {
       path: colonMatch[1] ?? "",
-      selection: toLineRange(first, second),
+      selection,
     }
   }
 

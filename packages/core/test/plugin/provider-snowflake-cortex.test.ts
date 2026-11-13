@@ -165,6 +165,52 @@ it.live("browser OAuth supplies the native endpoint/token and refreshes a reject
   ),
 )
 
+it.live("fails the login when the token response exceeds the OAuth body cap (#1029)", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const attempt = yield* test.integrations.oauth.connect({
+        integrationID,
+        methodID,
+        answer: { account: endpoint },
+      })
+      const url = new URL(attempt.url)
+      const callback = new URL(url.searchParams.get("redirect_uri") ?? "")
+      callback.searchParams.set("state", url.searchParams.get("state") ?? "")
+      callback.searchParams.set("code", "auth-code")
+      test.replies.push(new Response("x".repeat(70_000)))
+      yield* Effect.promise(() => fetch(callback))
+      expect(yield* test.status(attempt.attemptID)).toMatchObject({
+        status: "failed",
+        message: expect.stringContaining("Snowflake token response exceeded"),
+      })
+    }),
+  ),
+)
+
+it.live("reports only the status when a token error body exceeds the OAuth body cap (#1029)", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      const attempt = yield* test.integrations.oauth.connect({
+        integrationID,
+        methodID,
+        answer: { account: endpoint },
+      })
+      const url = new URL(attempt.url)
+      const callback = new URL(url.searchParams.get("redirect_uri") ?? "")
+      callback.searchParams.set("state", url.searchParams.get("state") ?? "")
+      callback.searchParams.set("code", "auth-code")
+      test.replies.push(new Response("x".repeat(70_000), { status: 401 }))
+      yield* Effect.promise(() => fetch(callback))
+      expect(yield* test.status(attempt.attemptID)).toMatchObject({
+        status: "failed",
+        message: "Snowflake token request failed (401): ",
+      })
+    }),
+  ),
+)
+
 it.live("manual PAT uses its account and native compatibility rather than an SDK request rewrite", () =>
   withEnv(env, () =>
     Effect.gen(function* () {
@@ -246,6 +292,47 @@ it.live("uses environment tokens rather than the account identifier and bypasses
         expect(test.requests[1].url).toBe(`${endpoint}/api/v2/cortex/v1/chat/completions`)
         expect(test.requests[1].headers.get("authorization")).toBe("Bearer env-token")
       }),
+  ),
+)
+
+it.live("does not rewrite an over-cap 400 error body as conversation complete", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      // The message names the rewrite trigger, but the body is over the hook's cap: it must
+      // be left alone (and surface as the failure it is), not buffered whole and rewritten.
+      test.replies.push(
+        Response.json(
+          { message: `Conversation complete ${"x".repeat(128 * 1024)}` },
+          { status: 400 },
+        ),
+      )
+      expect((yield* test.send.pipe(Effect.exit))._tag).toBe("Failure")
+    }),
+  ),
+)
+
+it.live("does not deadlock on a streamed over-cap 400 error body", () =>
+  withEnv(env, () =>
+    Effect.gen(function* () {
+      const test = yield* fixture()
+      // Regression (Codex P1 on #1603): the hook reads a clone of the error response
+      // before downstream code consumes the original; awaiting the bounded reader's
+      // cancellation of the tee'd clone deadlocked exactly this streamed case.
+      const chunk = new Uint8Array(32 * 1024).fill(120)
+      test.replies.push(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let index = 0; index < 5; index++) controller.enqueue(chunk)
+              controller.close()
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      )
+      expect((yield* test.send.pipe(Effect.exit))._tag).toBe("Failure")
+    }),
   ),
 )
 

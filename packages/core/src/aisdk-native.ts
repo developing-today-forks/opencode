@@ -119,12 +119,15 @@ const HOSTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   "zhipuai-coding-plan": protocols("zai-coding-plan"),
 }
 
+const hostTable = (providerID: string) => (Object.hasOwn(HOSTS, providerID) ? HOSTS[providerID] : undefined)
+
 export function native(npm: string, context: Context & { readonly settings?: Provider.Settings }): string | undefined {
-  const host = HOSTS[context.providerID]?.[npm]
+  const hosts = hostTable(context.providerID)
+  const host = hosts !== undefined && Object.hasOwn(hosts, npm) ? hosts[npm] : undefined
   if (host) return host
   if (npm === "@ai-sdk/amazon-bedrock/mantle") return mantle(context.modelID)
   if (npm === "@ai-sdk/azure" && azureChat(context)) return "@opencode/ai/providers/azure/chat"
-  return PACKAGES[npm]
+  return Object.hasOwn(PACKAGES, npm) ? PACKAGES[npm] : undefined
 }
 
 const azureChat = (context: Context & { readonly settings?: Provider.Settings }) =>
@@ -139,7 +142,8 @@ const mantle = (modelID: string | undefined) => {
 
 function resolve(specifier: string, context: Context & { readonly settings?: Provider.Settings }): string | undefined {
   const npm = Provider.packageName(specifier)
-  if (Provider.isAISDK(specifier) || npm in PACKAGES || npm in (HOSTS[context.providerID] ?? {}))
+  const hosts = hostTable(context.providerID)
+  if (Provider.isAISDK(specifier) || Object.hasOwn(PACKAGES, npm) || (hosts !== undefined && Object.hasOwn(hosts, npm)))
     return native(npm, context)
   if (npm === "@opencode/ai/providers/amazon-bedrock/mantle" || npm === "@opencode/ai/providers/amazon-bedrock-mantle")
     return mantle(context.modelID)

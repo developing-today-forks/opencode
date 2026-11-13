@@ -59,6 +59,7 @@ const session = (
   agent: null,
   model: null,
   subagent_policy: null,
+  detached: null,
   time_created: 1,
   time_updated: 2,
   time_idle: null,
@@ -208,6 +209,97 @@ describe("V1Migration.transformSession", () => {
       ],
       time: { created: 10 },
     })
+  })
+
+  test("skips malformed data URLs with a warning and keeps migrating the session", () => {
+    const message = user("msg_000000000050aaaaaaaaaaaaaa")
+    const next = user("msg_000000000051aaaaaaaaaaaaaa", {}, 20)
+    const result = transform(
+      [message, next],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, { type: "file", mime: "text/plain", url: "data:text/plain,100% coverage" }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aGk=" }),
+        part("prt_4", next.id, { type: "text", text: "next message" }),
+      ],
+    )
+
+    expect(result.messages.map((row) => row.data.text)).toEqual(["prompt", "next message"])
+    expect(result.messages[0].data.files).toEqual([{ data: "aGk=", mime: "text/plain", source: { type: "inline" } }])
+    expect(result.warnings).toEqual([
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_2" },
+    ])
+  })
+
+  test("keeps valid binary percent-escapes in non-base64 data URLs as bytes (#1529)", () => {
+    const message = user("msg_000000000054aaaaaaaaaaaaaa")
+    const result = transform(
+      [message],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, {
+          type: "file",
+          mime: "application/octet-stream",
+          url: "data:application/octet-stream,%FF%00%41",
+        }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain,caf%C3%A9 %E2%82%AC" }),
+      ],
+    )
+
+    // %FF%00%41 is stored as exactly those bytes (base64 /wBB), not dropped
+    // as an invalid data URL; valid UTF-8 escapes and literals round-trip.
+    expect(result.messages[0].data.files).toEqual([
+      { data: "/wBB", mime: "application/octet-stream", source: { type: "inline" } },
+      { data: Buffer.from("caf\u00e9 \u20ac", "utf8").toString("base64"), mime: "text/plain", source: { type: "inline" } },
+    ])
+    expect(result.warnings).toEqual([])
+  })
+
+  test("rejects malformed base64 data URLs with a warning instead of storing stripped garbage (#1360)", () => {
+    const message = user("msg_000000000052aaaaaaaaaaaaaa")
+    const result = transform(
+      [message],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,!!!" }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aG!k=" }),
+        part("prt_4", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aGk=####" }),
+        part("prt_5", message.id, {
+          type: "file",
+          mime: "text/plain",
+          url: "data:text/plain;base64,aGVsbG8gd29ybGQ=",
+        }),
+      ],
+    )
+
+    // Only the canonical payload is stored, byte-identical; every garbage
+    // payload takes the invalid-data-url path.
+    expect(result.messages[0].data.files).toEqual([
+      { data: "aGVsbG8gd29ybGQ=", mime: "text/plain", source: { type: "inline" } },
+    ])
+    expect(result.warnings).toEqual([
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_2" },
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_3" },
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_4" },
+    ])
+  })
+
+  test("unpadded and whitespace-bearing base64 payloads are invalid by decision (#1360)", () => {
+    const message = user("msg_000000000053aaaaaaaaaaaaaa")
+    const result = transform(
+      [message],
+      [
+        part("prt_1", message.id, { type: "text", text: "prompt" }),
+        part("prt_2", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aGk" }),
+        part("prt_3", message.id, { type: "file", mime: "text/plain", url: "data:text/plain;base64,aGk= " }),
+      ],
+    )
+
+    expect(result.messages[0].data.files).toBeUndefined()
+    expect(result.warnings).toEqual([
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_2" },
+      { reason: "invalid-file-data-url", sessionID: "ses_test", messageID: message.id, partID: "prt_3" },
+    ])
   })
 
   test("maps attachment-only source variants and uses resource URIs as unavailable labels", () => {

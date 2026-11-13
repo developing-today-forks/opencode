@@ -47,6 +47,17 @@ describe("partial JSON", () => {
     expect(parse("1e", Allow.NUM)).toBe(1)
   })
 
+  test("nested exponent trim requires Allow.NUM and stays within the token", () => {
+    // Oracle: the Allow.NUM contract + token scope from #2213 — a nested
+    // exponent-truncated number is repaired only when NUM is allowed, and
+    // the trim never reaches past the scanned token into later keys.
+    expect(parse("[1e]", Allow.ARR | Allow.NUM)).toEqual([1])
+    expect(parse("[1e]", Allow.ARR)).toEqual([])
+    expect(() => parse("[1e]", 0)).toThrow(PartialJSON)
+    expect(parse('{"a":1e,"e":5}', Allow.ALL)).toEqual({ a: 1, e: 5 })
+    expect(parse('{"e":5,"a":1e}', Allow.ALL)).toEqual({ e: 5, a: 1 })
+  })
+
   test("distinguishes disallowed partial values from malformed values", () => {
     expect(() => parse("[", Allow.STR)).toThrow(PartialJSON)
     expect(() => parse("n", ~Allow.NULL)).toThrow(MalformedJSON)

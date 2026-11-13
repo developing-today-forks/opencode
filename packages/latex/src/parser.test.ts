@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseLatex } from "./parser"
+import { expandLatexMacros, parseLatex } from "./parser"
 import { LatexParseError } from "./types"
 
 describe("parseLatex", () => {
@@ -202,6 +202,48 @@ describe("parseLatex", () => {
     expect(parseLatex(String.raw`\R \to \R`, { macros: { "\\R": String.raw`\mathbb{R}` } })).toMatchObject({
       type: "row",
     })
+  })
+
+  test("treats prototype-named commands as unknown commands (#937)", () => {
+    for (const name of ["constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      // Non-strict: the unknown-command fallback, never a dispatch into an
+      // inherited Object.prototype member (no node field may hold a function).
+      expect(parseLatex(`\\${name}{x}`)).toMatchObject({
+        type: "row",
+        body: [
+          { type: "text", value: `\\${name}` },
+          { type: "symbol", value: "x" },
+        ],
+      })
+      expect(() => parseLatex(`\\${name}{x}`, { strict: true })).toThrow(new RegExp(`Unsupported command \\\\${name}`))
+    }
+    // Controls: genuine table entries still dispatch.
+    expect(parseLatex(String.raw`\hat{x}`)).toMatchObject({ type: "accent", accent: "hat" })
+    expect(parseLatex(String.raw`\alpha`)).toMatchObject({ type: "symbol", value: "α" })
+  })
+
+  test("does not read delimiters or text spacing through the prototype chain (#937)", () => {
+    expect(parseLatex(String.raw`\left\constructor x\right)`)).toMatchObject({
+      type: "delimited",
+      left: String.raw`\constructor`,
+      right: ")",
+    })
+    expect(() => parseLatex(String.raw`\left\constructor x\right)`, { strict: true })).toThrow(
+      /Unsupported delimiter \\constructor/,
+    )
+    // Inside a text group a prototype-named command is preserved verbatim,
+    // not resolved as a spacing command.
+    expect(parseLatex(String.raw`\text{a\constructor b}`)).toMatchObject({
+      type: "text",
+      value: String.raw`a\constructor b`,
+    })
+  })
+
+  test("passes prototype-named commands through macro expansion (#937)", () => {
+    // Used to throw TypeError: the inherited Object constructor is not a macro.
+    expect(expandLatexMacros(String.raw`\constructor`, { macros: { "\\R": "x" } })).toBe(String.raw`\constructor`)
+    // A macro the caller actually defines under that name still expands.
+    expect(expandLatexMacros(String.raw`\constructor`, { macros: { constructor: "y" } })).toBe("y")
   })
 
   test("reports useful strict-mode errors", () => {

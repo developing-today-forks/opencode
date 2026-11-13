@@ -412,6 +412,28 @@ describe("Worktree", () => {
     }),
   )
 
+  it.live("rejects worktree names that are not a single path segment (#1004)", () =>
+    Effect.gen(function* () {
+      const input = yield* setup()
+      const worktree = yield* fixtureWorktree()
+      const parent = abs(`${input.root.path}-named-worktree`)
+      yield* Effect.addFinalizer(() => Effect.promise(() => fs.rm(parent, { recursive: true, force: true })))
+
+      for (const name of ["../escape", "../../escape", "a/b", "..", ".", "", "   ", "a\\b"]) {
+        const error = yield* worktree.create({ directory: parent, name }).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(Worktree.InvalidNameError)
+      }
+      // Nothing was created on disk and nothing was recorded as managed.
+      expect(yield* Effect.promise(() => Bun.file(parent).exists())).toBe(false)
+      expect(yield* stored(input.projectID)).toEqual([{ directory: input.sourceDirectory, strategy: null }])
+
+      // A normal name still creates inside the parent.
+      const created = yield* worktree.create({ directory: parent, name: "plain-name" })
+      expect(created.directory).toBe(abs(path.join(parent, "plain-name")))
+      yield* worktree.remove({ directory: created.directory, force: false })
+    }),
+  )
+
   it.live("rejects a missing source directory", () =>
     Effect.gen(function* () {
       const input = yield* setup()

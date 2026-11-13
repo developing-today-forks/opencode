@@ -2,6 +2,7 @@ import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema, Sema
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { ModelsDev } from "@opencode/schema/models-dev"
 import { Money } from "@opencode/schema/money"
+import { collectBoundedResponseBody } from "./tool/http-body.js"
 import { App } from "./app.js"
 import { Hash } from "@opencode/util/hash"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -214,6 +215,7 @@ function modelInfo(
   const providerID = Provider.ID.make(provider.id)
   const resolved = nativePackage(provider, model)
   const pkg = model.provider?.npm || resolved !== nativePackage(provider) ? resolved : undefined
+  const compatibility = { ...Model.compatibility(model.interleaved), ...gatewayDoorCompatibility(provider.id, model.id) }
   // Per model, so it never merges into a model that overrides to a different package.
   const settings = {
     ...(model.provider?.api ? { baseURL: model.provider.api } : {}),
@@ -224,7 +226,7 @@ function modelInfo(
     modelID: Model.ID.make(model.id),
     providerID,
     name: input.name ?? model.name,
-    compatibility: Model.compatibility(model.interleaved),
+    compatibility: Object.keys(compatibility).length > 0 ? compatibility : undefined,
     family: model.family ? Model.Family.make(model.family) : undefined,
     package: pkg,
     settings: Object.keys(settings).length === 0 ? undefined : settings,
@@ -247,6 +249,43 @@ function modelInfo(
     headers: input.request?.headers ? { ...input.request.headers } : undefined,
     body: input.request?.body ? { ...input.request.body } : undefined,
   }
+}
+
+// Gateway-door compatibility entries (#1824, relocated from the shared
+// OpenAI Chat protocol in #1706/#1737): the multi-family gateway doors
+// (cline-pass, opendesign, opencode-go) front many model families behind a
+// single provider id/baseURL, so family-sensitive defaults are attached
+// here, in the catalog layer, as explicit per-model `compatibility`
+// entries. The shared protocol no longer keys any behavior off a model-id
+// family; it only consumes these entries. Patterns are anchored to a
+// whole id segment (start of id, or the segment after a "/" vendor
+// prefix), never arbitrary substrings, and matching is case-insensitive:
+//   glm:      "glm-<digit>..."            e.g. glm-5.3, cline-pass/glm-5.3
+//   kimi:     "kimi-..." / "moonshot-..." e.g. kimi-k2.6, moonshot-v1-8k
+//   gemini:   "gemini-<digit>..."         e.g. gemini-2.5-flash
+//   deepseek: "deepseek-..."              e.g. deepseek-v4-pro
+// GLM 4.5-family models are excluded from tool streaming (final-segment
+// comparison, so vendor-prefixed ids are excluded like the bare id).
+const GATEWAY_DOOR_PROVIDERS = new Set(["cline-pass", "opendesign", "opencode-go"])
+
+const GLM_TOOL_STREAM_EXCLUDED = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"])
+
+function gatewayDoorCompatibility(providerID: string, modelID: string): Model.Info["compatibility"] {
+  if (!GATEWAY_DOOR_PROVIDERS.has(providerID)) return undefined
+  const id = modelID.toLowerCase()
+  if (/(?:^|\/)glm-\d/.test(id)) {
+    const segment = id.split("/").pop() ?? ""
+    return {
+      maxTokensField: "max_tokens",
+      supportsStore: false,
+      zaiToolStream: !GLM_TOOL_STREAM_EXCLUDED.has(segment),
+    }
+  }
+  if (/(?:^|\/)(?:kimi|moonshot)-[a-z0-9]/.test(id))
+    return { maxTokensField: "max_tokens", supportsStore: false, supportsStrictMode: false }
+  if (/(?:^|\/)gemini-\d/.test(id)) return { supportsStore: false }
+  if (/(?:^|\/)deepseek-[a-z0-9]/.test(id)) return { maxTokensField: "max_tokens", supportsStore: false }
+  return undefined
 }
 
 export { Event } from "@opencode/schema/models-dev"
@@ -277,6 +316,13 @@ const Cache = Schema.Struct({
   body: CatalogJson,
 })
 const defaultSource = "https://models.opencode.ai"
+
+/** The catalog fetch size bound (#1078): the real api.json passed 2 MB in Aug 2026
+ * and keeps growing, so the cap sits well above it — 16 MiB, the generated-client
+ * precedent (#1007) — while still bounding a hostile or broken source body in
+ * flight instead of buffering it whole. The source URL is configurable, so the
+ * body is not trusted just because the endpoint usually behaves. */
+const MAX_API_BYTES = 16 * 1024 * 1024
 
 // Bundled snapshot of https://models.opencode.ai/api.json, committed at
 // packages/core/src/models-dev/snapshot.txt and refreshed via
@@ -346,7 +392,10 @@ export const layer = (options?: Options) =>
         return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
           HttpClientRequest.setHeader("User-Agent", userAgent),
           http.execute,
-          Effect.flatMap((res) => res.text),
+          Effect.flatMap((res) =>
+            collectBoundedResponseBody(res, MAX_API_BYTES, () => new Error("models.dev catalog exceeded the size bound")),
+          ),
+          Effect.map((body) => new TextDecoder().decode(body)),
           Effect.timeout("10 seconds"),
         )
       })

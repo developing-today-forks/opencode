@@ -1,6 +1,8 @@
 import { statModel } from "./model-normalization"
+import { readCatalogResponse } from "./catalog-response"
 
 const CATALOG_URL = "https://models.opencode.ai/catalog.json"
+const CATALOG_FETCH_TIMEOUT_MS = 10_000
 const STATS_PROVIDERS = ["opencode", "opencode-go"] as const
 const cache: { value?: CatalogIdentity; expiresAt?: number } = {}
 
@@ -11,10 +13,11 @@ export type CatalogIdentity = {
 
 export async function loadCatalogIdentity() {
   if (cache.value && (cache.expiresAt ?? 0) > Date.now()) return { catalog: cache.value, stale: false }
-  return fetch(CATALOG_URL, { signal: AbortSignal.timeout(10_000) })
+  const signal = AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
+  return fetch(CATALOG_URL, { signal })
     .then(async (response) => {
       if (!response.ok) throw new Error(`Model catalog returned ${response.status}`)
-      return catalogIdentity(await response.json())
+      return catalogIdentity(JSON.parse(await readCatalogResponse(response, signal)))
     })
     .then((value) => {
       cache.value = value

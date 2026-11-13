@@ -79,9 +79,13 @@ export const isContextOverflowFailure = (failure: unknown) =>
  * not deliver an accepted write, and unrecognized failures. Callers decide which calls are safe to repeat.
  */
 export const isRetryable = (error: AIError) => {
-  const override = error.reason.http?.headers["x-should-retry"]
-  if (override === "true") return true
-  if (override === "false") return false
+  // Classification only — a wire-supplied `x-should-retry` header is
+  // never consulted (#2225): the header arrives verbatim from the
+  // failing provider or any proxy on the wire, and retry policy is a
+  // client-side decision the failing party must not dictate (it could
+  // force retries of auth/quota failures, or suppress retries of
+  // transient ones). Local callers that need to stop or force a retry
+  // use the session retry hook / policy, not a response header.
   switch (error.reason._tag) {
     case "RateLimit":
     case "ProviderInternal":
@@ -163,7 +167,18 @@ const CONTENT_POLICY_CODES = new Set([
 const GATEWAY_CODE_LABEL = /^[^:\n]+: \[([A-Za-z0-9_.-]+)\]/
 // xAI reports an invalid API key as HTTP 400 with the generic `invalid-argument` code.
 const AUTH_TEXT = /incorrect api key provided/i
+// Text that explicitly reports credits or a balance spent — the only wording
+// (besides a quota code or a 402) that may classify a failure as quota at ANY
+// status. Mirrors the session runner's balance-exhaustion evidence (#1380):
+// one definition of what a spend wall sounds like, in both classifiers.
+const BALANCE_EXHAUSTION_TEXT =
+  /insufficient credits|insufficient balance|insufficient funds|out of credits|credits? exhausted|balance exhausted|credit balance is too low|no credits (?:left|remaining)/i
 const RATE_LIMIT_TEXT = /rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
+// A membership tier cap (Open Design's `tier_limit_exceeded`, #2253): a momentary
+// concurrency/window limit on the account, whatever status it rides on — never a
+// spend wall, so it classifies as a rate limit even when the gateway serves it as
+// a 4xx that would otherwise fall through to InvalidRequest.
+const TIER_LIMIT_TEXT = /tier[-_\s]?limit|membership (?:concurrency|rpm) limit/i
 // Only consulted on 429, where throttles and account caps share a status.
 // Z.ai reports balance, plan expiry, plan limits, and plan model access on 429.
 const QUOTA_TEXT =
@@ -261,9 +276,30 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
   if (
     input.status === 402 ||
     codes.some((code) => QUOTA_CODES.has(code)) ||
-    (input.status === 429 && QUOTA_TEXT.test(text))
+    (input.status === 429 && QUOTA_TEXT.test(text)) ||
+    // A spend wall stated only in the provider's own words, at any status:
+    // Command Code's monthly-credits refusal arrives as a bare 400 whose text
+    // says "insufficient credits" (code#8086) — without this it fell through
+    // to a plain InvalidRequest, which neither gates the pool nor (in its
+    // text-bearing shape) cascades in the session runner, so sessions kept
+    // spending attempts on a door that had already answered 100%. The
+    // balance-specific wording is the same evidence #1380 requires before a
+    // failure may install a balance hold; generic limit wording stays a
+    // rate limit, never a quota.
+    BALANCE_EXHAUSTION_TEXT.test(text)
   )
     return new QuotaExceededError(details)
+  // A membership tier cap precedes auth (#2253): a gateway may serve the
+  // account cap under ANY status — including a 403 that would otherwise read as
+  // an authentication refusal — and a tier-limit 403 is a momentary cap, not a
+  // dead credential. The code and the exact membership wording are the only
+  // evidence strong enough to outrank a 401/403.
+  if (codes.includes("tier_limit_exceeded") || (clientScoped && TIER_LIMIT_TEXT.test(text)))
+    return new RateLimitError({
+      ...details,
+      retryAfterMs: input.retryAfterMs,
+      rateLimit: input.rateLimit,
+    })
   if (
     input.status === 401 ||
     input.status === 403 ||
@@ -273,9 +309,7 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
     return new AuthenticationError(details)
   if (
     input.status === 429 ||
-    codes.some(
-      (code) => code.includes("rate_limit") || code === "too_many_requests" || code === "throttlingexception",
-    ) ||
+    codes.some((code) => code.includes("rate_limit") || code === "too_many_requests" || code === "throttlingexception") ||
     RATE_LIMIT_TEXT.test(text)
   )
     return new RateLimitError({

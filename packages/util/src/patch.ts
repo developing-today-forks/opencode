@@ -318,7 +318,9 @@ function computeReplacements(lines: ReadonlyArray<string>, path: string, chunks:
       lineIndex = context + 1
     }
     if (chunk.oldLines.length === 0) {
-      replacements.push([lines.length, 0, chunk.newLines])
+      // A pure-addition chunk that sought a @@ context inserts right after
+      // the located context line; without one (or at End of File) it appends.
+      replacements.push([chunk.changeContext && !chunk.endOfFile ? lineIndex : lines.length, 0, chunk.newLines])
       continue
     }
     let oldLines = chunk.oldLines

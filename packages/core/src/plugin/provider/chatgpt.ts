@@ -1,6 +1,7 @@
 import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { define } from "@opencode/plugin/effect/plugin"
+import { expiresInSeconds } from "./expires.js"
 // import { Deferred, Duration, Effect, Option, Schema, Semaphore, Stream } from "effect"
 import { Deferred, Effect, Option, Schema, Semaphore, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
@@ -14,6 +15,7 @@ import { Model } from "../../model.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
+import { readBoundedResponseText } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
 import { eachInstance } from "./instance.js"
@@ -54,6 +56,36 @@ const nonRetryableSharingCodes = [
   "chatpass_v2_scope_not_authorized",
   "chatpass_v2_invalid_authorization_context",
 ]
+
+/** Platform-API scopes a token-sharing credential's token must carry to serve the resource backend. */
+const platformScopes = ["api.responses.write", "resource.invoke"]
+
+/**
+ * Classifies a platform-API error body as a credential-method mismatch (#1119): the active
+ * token-sharing credential holds a token minted by a different sign-in flow (for example a
+ * Codex browser/headless token), so the platform API rejects every call with a 401 reporting
+ * missing scopes. Returns an explicit mismatch message naming the active method and the
+ * backend the token cannot serve, or undefined when the body is not that failure.
+ */
+export function credentialMethodMismatch(body: string | undefined): string | undefined {
+  if (!body) return undefined
+  if (body.includes("credential_method_mismatch") || body.includes("Credential-method mismatch")) {
+    return (
+      `Credential-method mismatch: the active OpenAI credential uses method chatgpt-token-sharing, ` +
+      `but its token cannot serve ${resource}. Reconnect with token sharing, or switch to the credential that matches this token.`
+    )
+  }
+  if (!/missing[^"]*scopes/i.test(body)) return undefined
+  const missing = platformScopes.filter((scope) => body.includes(scope))
+  if (missing.length === 0) return undefined
+  return (
+    `Credential-method mismatch: the active OpenAI credential uses method chatgpt-token-sharing, ` +
+    `but its token is missing the scopes (${missing.join(", ")}) required by ${resource}. ` +
+    `The token was likely minted by a different sign-in flow (for example Codex browser/headless). ` +
+    `Reconnect with token sharing, or switch to the credential that matches this token.`
+  )
+}
+
 type Pkce = {
   verifier: string
   challenge: string
@@ -275,7 +307,14 @@ export const ChatGPTPlugin = define({
           "retry",
           (event) =>
             Effect.sync(() => {
-              if (!chatgpt || !nonRetryableSharingCodes.some((code) => event.error.response?.body.includes(code)))
+              if (!chatgpt) return
+              // A scopes-401 for a token-sharing credential is a credential-method mismatch
+              // (#1119): retrying the same token against the same backend can never succeed.
+              if (
+                !nonRetryableSharingCodes.some((code) => event.error.response?.body.includes(code)) &&
+                credentialMethodMismatch(event.error.response?.body) === undefined &&
+                credentialMethodMismatch(event.error.message) === undefined
+              )
                 return
               event.decision = { retry: false }
             }),
@@ -501,12 +540,25 @@ export function verifyIDToken(
   })
 }
 
+/**
+ * Size cap for OAuth token/device/discovery response bodies. These are
+ * small JSON structs (a few KB in practice); 64 KiB is generous headroom
+ * while keeping a misbehaving or malicious issuer/enterprise host from
+ * buffering an unbounded body into memory during auth/startup (#1026).
+ */
+export const oauthMaxResponseBytes = 64 * 1024
+
 function request<A>(url: string, init: RequestInit) {
   return Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(url, { ...init, signal })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
-      return response.json() as Promise<A>
+      const text = await readBoundedResponseText(
+        response,
+        oauthMaxResponseBytes,
+        () => new Error(`OAuth response exceeded ${oauthMaxResponseBytes} bytes`),
+      )
+      return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(text) as A
     },
     catch: (cause) => cause,
   })
@@ -518,7 +570,7 @@ function credential(tokens: TokenResponse, clientID: string, scopes?: ReadonlyAr
     methodID,
     refresh: tokens.refresh_token,
     access: tokens.access_token,
-    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    expires: Date.now() + expiresInSeconds(tokens.expires_in, 3600) * 1000,
     metadata: { clientID, scopes: tokens.scope?.split(" ").filter(Boolean) ?? scopes ?? [] },
   })
 }

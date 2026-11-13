@@ -311,7 +311,10 @@ const makeTransport = <Request extends MediaRequest>(
 ) => {
   const routeHttp = input.headers === undefined ? undefined : new HttpOptions({ headers: input.headers })
   const authorize = Auth.toEffect(input.auth)
-  const baseURL = (path: string) => new URL(`${Endpoint.trimBaseUrl(input.endpoint.baseURL ?? "")}${path}`)
+  // Submit URLs go through `Endpoint.render`; follow-up calls (poll, cancel, upload) carry their own path, so they build
+  // it here through the same version-aware composer. A protocol's PATH may carry the API version segment ("/v1/listen",
+  // "/v2/transcript") instead of the baseURL, so a baseURL ending in that segment is de-duplicated rather than doubled.
+  const baseURL = (path: string) => Endpoint.renderURL(input.endpoint.baseURL ?? "", path)
   /** `auth` is only what `Auth` added or changed, never untouched deployment headers. */
   const send = Effect.fn("MediaRoute.send")(function* (
     call: {

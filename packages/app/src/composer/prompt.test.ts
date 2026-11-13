@@ -175,6 +175,43 @@ describe("extractPromptFromMessage", () => {
     ])
   })
 
+  test("restores a file selection only for plain-decimal line ranges present in the URL", () => {
+    const selectionFor = (uri: string) => {
+      const message = {
+        id: "msg_1",
+        type: "user",
+        text: "inspect app.ts",
+        files: [
+          {
+            data: "",
+            mime: "text/plain",
+            source: { type: "uri", uri },
+            name: "app.ts",
+          },
+        ],
+        time: { created: 1 },
+      } satisfies SessionMessageUser
+
+      return extractPromptContext(message, { directory: "/repo" }).files[0]?.selection
+    }
+
+    expect(selectionFor("file:///repo/app.ts?start=2&end=4")).toEqual({
+      startLine: 2,
+      endLine: 4,
+      startChar: 0,
+      endChar: 0,
+    })
+    // Absent params must not fabricate a 0,0 selection.
+    expect(selectionFor("file:///repo/app.ts?start=2")).toBeUndefined()
+    expect(selectionFor("file:///repo/app.ts?end=4")).toBeUndefined()
+    expect(selectionFor("file:///repo/app.ts?other=1")).toBeUndefined()
+    // Non-decimal spellings are not line numbers.
+    for (const bad of ["0x10", "1e1", "2.5", "0", "-2", "+2", "2.0", " 2"]) {
+      expect(selectionFor(`file:///repo/app.ts?start=${encodeURIComponent(bad)}&end=4`)).toBeUndefined()
+      expect(selectionFor(`file:///repo/app.ts?start=2&end=${encodeURIComponent(bad)}`)).toBeUndefined()
+    }
+  })
+
   test("restores skill mentions as structured Composer parts", () => {
     const message = {
       id: "msg_1",

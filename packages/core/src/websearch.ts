@@ -8,6 +8,7 @@ import { HttpClientError } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "./bus.js"
 import { KV } from "./kv.js"
+import { ModelRouteLimits } from "./model-route-limits.js"
 import { State } from "./state.js"
 
 export const ID = WebSearch.ID
@@ -212,12 +213,33 @@ const layer = Layer.effect(
   }),
 )
 
-function cooldownMillis(value: string | undefined, now: number) {
+// retry-after is RFC 9110 delay-seconds (1*DIGIT) or an HTTP-date. Only plain
+// unsigned decimal integers are delay-seconds: spellings Number() would
+// reinterpret (hex "0x10", exponent "1e3", signs, fractions) are unusable and
+// take the 60-second fallback instead of an invented cooldown. They must not
+// reach the HTTP-date branch either — Date.parse reads some of them as dates.
+// The magnitude is bounded too: a provider-stated cooldown is clamped to
+// 15 minutes — the bound the session runner puts on a provider-stated
+// retry-after (session/runner/retry.ts) — so one malformed or hostile
+// Retry-After, in either branch, cannot sideline a provider from rotation
+// for the process lifetime.
+const COOLDOWN_MAX = 15 * 60_000
+
+export function cooldownMillis(value: string | undefined, now: number) {
   if (!value?.trim()) return 60_000
-  const seconds = Number(value)
-  if (Number.isFinite(seconds)) return seconds >= 0 ? seconds * 1000 : 60_000
-  const date = Date.parse(value)
-  return Number.isFinite(date) ? Math.max(0, date - now) : 60_000
+  const trimmed = value.trim()
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    if (Number.isFinite(seconds)) return Math.min(seconds * 1000, COOLDOWN_MAX)
+  }
+  if (Number.isFinite(Number(trimmed))) return 60_000
+  // The date branch goes through the calendar check every sibling date surface
+  // uses (#713): bare Date.parse rolls calendar-invalid ISO dates such as
+  // 2026-02-30 into the next month and hour 24 into the next day, inventing a
+  // cooldown instead of taking the fallback. Calendar-valid non-ISO forms
+  // (IMF-fixdate and friends) keep their parsed instant unchanged.
+  const date = ModelRouteLimits.parseAbsoluteTime(trimmed)
+  return date === undefined ? 60_000 : Math.min(Math.max(0, date - now), COOLDOWN_MAX)
 }
 
 export const node = makeLocationNode({

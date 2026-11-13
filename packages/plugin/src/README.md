@@ -174,3 +174,48 @@ ctx.tool.reload()
 ctx.vcs.reload()
 ctx.websearch.reload()
 ```
+
+## Reading Server State
+
+Child sessions are read-only through the session domain. Pass `parentID` to
+enumerate a session's subagent sessions, for example for a per-subagent cost
+breakdown:
+
+```ts
+const children = await ctx.session.list({ parentID: sessionID })
+for (const child of children.data) {
+  // child.parentID === sessionID
+}
+if (children.cursor.next) {
+  const next = await ctx.session.list({ parentID: sessionID, cursor: children.cursor.next })
+}
+```
+
+`parentID: null` lists root sessions. Results otherwise match the HTTP
+`session.list` endpoint: `{ data, cursor }`.
+
+Live provider pricing is already on the model catalog. `ctx.model.list()`
+returns `{ location, data }`, where each `Model.Info` entry's `cost` is an
+array of USD-per-million-tokens rates (`input`, `output`, `cache.read`,
+`cache.write`):
+
+```ts
+const { data: models } = await ctx.model.list()
+const rate = models.find((model) => model.id === "example-model")?.cost[0]
+```
+
+Multiplying those rates by observed token usage is plugin-side. The agent and
+skill catalogs enumerate the same way (`ctx.agent.list()`,
+`ctx.skill.list()`); estimating their token cost is likewise plugin-side, the
+server does not report it.
+
+`ctx.serverUrl` is the active server listener URL (for example
+`http://127.0.0.1:4096`), or `undefined` on hosts without a listener such as
+embedded SDK hosts. In-process domain calls are already authenticated, which
+is the documented equivalent of v1's `client`: prefer `ctx.session`,
+`ctx.model`, and the other domains over raw HTTP, and only use `serverUrl`
+when a raw HTTP(S) URL is needed.
+
+`ctx.session.context` returns the messages since the last compaction — the
+context the model will see, by design. Full pre-compaction history is not
+exposed; file a follow-up if a plugin needs it.

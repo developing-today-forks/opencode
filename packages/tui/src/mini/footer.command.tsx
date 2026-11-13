@@ -15,6 +15,7 @@ import {
   type RunFooterMenuItem,
 } from "./footer.menu"
 import { stringWidth } from "../util/string-width"
+import { sessionFamily } from "../util/session"
 import { monoShortcut } from "./mono"
 import type { RunFooterTheme } from "./theme"
 import type {
@@ -73,6 +74,12 @@ type SubagentEntry = PanelEntry & {
   sessionID: string
   current: boolean
 }
+
+type FamilyTab = { id: string; parentID?: string; tab?: FooterSubagentTab }
+
+// The mini session that started the family is not itself a tab, so tabs whose
+// parent is absent hang off this synthetic root to give sessionFamily one tree.
+const FAMILY_ROOT = "\u0000mini-subagent-root"
 
 type SettingEntry = PanelEntry & {
   key: keyof MiniSettings | "verbosity"
@@ -870,15 +877,32 @@ export function RunSubagentSelectBody(props: {
   mono?: boolean
 }) {
   const [active, setActive] = createSignal(true)
-  const entries = createMemo<SubagentEntry[]>(() =>
-    props
-      .tabs()
-      .filter((item) => (active() ? item.status === "running" : item.status !== "running"))
-      .map((item) => {
-        const title = item.description || item.title || item.label
-        return {
+  const entries = createMemo<SubagentEntry[]>(() => {
+    const tabs = props.tabs()
+    const tabIDs = new Set(tabs.map((item) => item.sessionID))
+    // Keep a tab under its real parent only when that parent is also a row;
+    // otherwise it roots the visible forest and hangs off the synthetic root.
+    const family: FamilyTab[] = [
+      { id: FAMILY_ROOT },
+      ...tabs.map((item) => ({
+        id: item.sessionID,
+        parentID: item.parentID && tabIDs.has(item.parentID) ? item.parentID : FAMILY_ROOT,
+        tab: item,
+      })),
+    ]
+    return sessionFamily(
+      family,
+      FAMILY_ROOT,
+      (entry) =>
+        entry.tab !== undefined && (active() ? entry.tab.status === "running" : entry.tab.status !== "running"),
+    ).flatMap(({ session, prefix }) => {
+      const item = session.tab
+      if (!item) return []
+      const title = item.description || item.title || item.label
+      return [
+        {
           category: "",
-          display: title,
+          display: `${prefix}${title}`,
           description: title === item.label ? undefined : item.label,
           footer: subagentStatusLabel(item.status),
           footerTone:
@@ -890,9 +914,10 @@ export function RunSubagentSelectBody(props: {
           keywords: `${item.label} ${item.description} ${item.title ?? ""} ${item.status}`,
           sessionID: item.sessionID,
           current: props.current() === item.sessionID,
-        }
-      }),
-  )
+        },
+      ]
+    })
+  })
   const controller = createSearchablePanelController({
     entries,
     limit: SUBAGENT_LIST_ROWS,

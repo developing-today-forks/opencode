@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect } from "bun:test"
+import { beforeEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Integration } from "@opencode/core/integration"
 import { WebSearch } from "@opencode/core/websearch"
@@ -220,6 +220,99 @@ describe("built-in web search providers", () => {
     }),
   )
 
+
+  it.effect("omits calendar-invalid Exa published dates and keeps valid ones (#785)", () =>
+    Effect.gen(function* () {
+      const text = [
+        "Title: Bad Date\nURL: https://bad.example\nPublished: 2026-02-30T00:00:00.000Z\nHighlights:\nBad date content",
+        "Title: Good Date\nURL: https://good.example\nPublished: 2026-07-25T00:00:00.000Z\nHighlights:\nGood date content",
+      ].join("\n\n---\n\n")
+      resetWebSearchFixture(
+        "event: message\ndata: " +
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text, _meta: { searchTime: 123 } }] },
+          }) +
+          "\n\n",
+      )
+      const integrations = yield* Integration.Service
+      const websearch = yield* WebSearch.Service
+      yield* WebSearchExa.Plugin.effect(
+        host({ integration: integrationHost(integrations), websearch: webSearchHost(websearch) }),
+      )
+      yield* integrations.connection.key({ integrationID: Integration.ID.make("exa"), key: "exa secret" })
+      expect(yield* websearch.query({ query: "dates", providerID: WebSearch.ID.make("exa") })).toEqual(
+        new WebSearch.Response({
+          providerID: WebSearch.ID.make("exa"),
+          results: [
+            { url: "https://bad.example", title: "Bad Date", content: "Bad date content", time: {} },
+            {
+              url: "https://good.example",
+              title: "Good Date",
+              content: "Good date content",
+              time: { published: Date.parse("2026-07-25T00:00:00.000Z") },
+            },
+          ],
+        }),
+      )
+    }),
+  )
+
+  it.effect("omits calendar-invalid Parallel publish dates and keeps valid ones (#785)", () =>
+    Effect.gen(function* () {
+      resetWebSearchFixture(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "search results" }],
+            structuredContent: {
+              search_id: "search_1",
+              results: [
+                { url: "https://bad.example", title: "Bad Date", publish_date: "2026-04-31", excerpts: ["Bad"] },
+                {
+                  url: "https://hour.example",
+                  title: "Hour Date",
+                  publish_date: "2026-01-01T24:00:00Z",
+                  excerpts: ["Hour"],
+                },
+                { url: "https://good.example", title: "Good Date", publish_date: "2026-07-25", excerpts: ["Good"] },
+              ],
+              warnings: null,
+              usage: [{ name: "sku_search", count: 1 }],
+              session_id: "ses_parallel",
+            },
+          },
+        }),
+      )
+      const integrations = yield* Integration.Service
+      const websearch = yield* WebSearch.Service
+      yield* WebSearchParallel.Plugin.effect(
+        host({ integration: integrationHost(integrations), websearch: webSearchHost(websearch) }),
+      )
+      yield* integrations.connection.key({
+        integrationID: Integration.ID.make("parallel"),
+        key: "parallel-secret",
+      })
+      expect(yield* websearch.query({ query: "dates", providerID: WebSearch.ID.make("parallel") })).toEqual(
+        new WebSearch.Response({
+          providerID: WebSearch.ID.make("parallel"),
+          results: [
+            { url: "https://bad.example", title: "Bad Date", content: "Bad", time: {} },
+            { url: "https://hour.example", title: "Hour Date", content: "Hour", time: {} },
+            {
+              url: "https://good.example",
+              title: "Good Date",
+              content: "Good",
+              time: { published: Date.parse("2026-07-25") },
+            },
+          ],
+        }),
+      )
+    }),
+  )
+
   it.effect("registers Tavily with keyless and keyed Search API access", () =>
     Effect.gen(function* () {
       resetWebSearchFixture(
@@ -370,4 +463,45 @@ describe("built-in web search providers", () => {
       expect(requests[3]?.headers["x-tinyfish-access-mode"]).toBeUndefined()
     }),
   )
+})
+
+describe("WebSearch cooldownMillis retry-after grammar", () => {
+  const now = 1_700_000_000_000
+
+  test("rejects hex and exponent spellings to the 60-second fallback", () => {
+    expect(WebSearch.cooldownMillis("1e3", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("0x10", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("1.5", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("+7", now)).toBe(60_000)
+  })
+
+  test("keeps authored plain delay-seconds unchanged", () => {
+    expect(WebSearch.cooldownMillis("0", now)).toBe(0)
+    expect(WebSearch.cooldownMillis("7", now)).toBe(7_000)
+    expect(WebSearch.cooldownMillis(" 12 ", now)).toBe(12_000)
+  })
+
+  test("keeps the existing fallbacks for unusable values", () => {
+    expect(WebSearch.cooldownMillis(undefined, now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis(" ", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("-5", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("garbage", now)).toBe(60_000)
+  })
+
+  test("keeps HTTP-date retry-after values", () => {
+    expect(WebSearch.cooldownMillis(new Date(now + 90_000).toUTCString(), now)).toBe(90_000)
+    expect(WebSearch.cooldownMillis(new Date(now - 90_000).toUTCString(), now)).toBe(0)
+  })
+
+  test("rejects calendar-invalid ISO dates to the 60-second fallback (#713)", () => {
+    expect(WebSearch.cooldownMillis("2026-02-30T00:00:00Z", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("2026-13-01T00:00:00Z", now)).toBe(60_000)
+    expect(WebSearch.cooldownMillis("2026-01-01T24:00:00Z", now)).toBe(60_000)
+  })
+
+  test("keeps valid ISO retry-after dates (#713)", () => {
+    expect(WebSearch.cooldownMillis(new Date(now + 90_000).toISOString(), now)).toBe(90_000)
+    expect(WebSearch.cooldownMillis(new Date(now - 90_000).toISOString(), now)).toBe(0)
+  })
 })

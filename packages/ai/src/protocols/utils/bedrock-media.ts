@@ -94,7 +94,7 @@ const mediaBase64 = Effect.fnUntraced(function* (part: MediaPart) {
 // not a kind-detection issue.
 export const lower = Effect.fnUntraced(function* (part: MediaPart, documentNames: Set<string>) {
   const mime = part.media.mediaType.toLowerCase()
-  const imageFormat = IMAGE_FORMATS[mime as keyof typeof IMAGE_FORMATS]
+  const imageFormat = Object.hasOwn(IMAGE_FORMATS, mime) ? IMAGE_FORMATS[mime as keyof typeof IMAGE_FORMATS] : undefined
   if (imageFormat) {
     return [{ image: { format: imageFormat, source: { bytes: yield* mediaBase64(part) } } } satisfies ImageBlock]
   }
@@ -102,7 +102,7 @@ export const lower = Effect.fnUntraced(function* (part: MediaPart, documentNames
     return yield* ProviderShared.invalidRequest(
       `Bedrock Converse does not support image media type ${part.media.mediaType}`,
     )
-  const documentFormat = DOCUMENT_FORMATS[mime as keyof typeof DOCUMENT_FORMATS]
+  const documentFormat = Object.hasOwn(DOCUMENT_FORMATS, mime) ? DOCUMENT_FORMATS[mime as keyof typeof DOCUMENT_FORMATS] : undefined
   if (documentFormat) {
     const name = documentName(part.filename, documentNames)
     const block = documentBlock(name, documentFormat, yield* mediaBase64(part))

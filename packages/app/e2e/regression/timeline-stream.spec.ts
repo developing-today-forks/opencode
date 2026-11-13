@@ -1595,10 +1595,14 @@ test.describe("background shortcut", () => {
 
     // The menu is rooted at the tree's root, so the grandchild view lists the root's other running
     // subagent alongside the viewed session's own parent chain.
-    const trigger = page.locator("[data-session-title]").getByRole("button", { name: "+2 working", exact: true })
+    // The titled trigger's accessible name is the viewed session's title plus the count
+    // (aria-labelledby in session-running-menu), so match the full name.
+    const trigger = page
+      .locator("[data-session-title]")
+      .getByRole("button", { name: "Search callers +2 working", exact: true })
     await expect(trigger).toBeVisible()
     await trigger.click()
-    const rows = page.getByRole("menu", { name: "+2 working", exact: true }).getByRole("menuitem")
+    const rows = page.getByRole("menu", { name: "Working Search callers +2 working", exact: true }).getByRole("menuitem")
     await expect(rows).toHaveText([
       /^Explore\s*Plan the migration$/,
       /^General\s*Search callers$/,

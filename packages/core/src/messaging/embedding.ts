@@ -7,7 +7,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { Context, Deferred, Duration, Effect, Fiber, Latch, Layer, Schedule, Schema, Semaphore, Stream } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { ChildProcess } from "effect/process"
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner"
 import { ConfigMessaging } from "@opencode/schema/config/messaging"
@@ -16,7 +16,9 @@ import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { Global } from "@opencode/util/global"
+import { collectBoundedResponseBody } from "../tool/http-body.js"
 import { which } from "../util/which.js"
+import { Text } from "../util/text.js"
 
 export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Messaging.EmbeddingUnavailableError", {
   message: Schema.String,
@@ -101,30 +103,40 @@ export const tiers: ReadonlyArray<Tier> = [
 ]
 
 const LLAMA_BUILD = "b11669"
-const LLAMA_ASSETS: Readonly<Record<string, { readonly name: string; readonly sha256: string }>> = {
+// Sizes are the exact byte counts of the ggml-org/llama.cpp b11669 release assets; download enforces
+// them in flight, so the sha-only asset path is bounded just like a model download.
+const LLAMA_ASSETS: Readonly<
+  Record<string, { readonly name: string; readonly sha256: string; readonly size: number }>
+> = {
   "darwin-arm64": {
     name: "llama-b11669-bin-macos-arm64.tar.gz",
     sha256: "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
+    size: 12191582,
   },
   "darwin-x64": {
     name: "llama-b11669-bin-macos-x64.tar.gz",
     sha256: "cab28238d78158109b48deb27b05d50e0dcef56275d2e76da9ca8281526c7532",
+    size: 11677404,
   },
   "linux-arm64": {
     name: "llama-b11669-bin-ubuntu-arm64.tar.gz",
     sha256: "9ac6fda2058d35677608a06f751a50122ddfa4ce0ddb7f084466b8e79b6d4a99",
+    size: 13900160,
   },
   "linux-x64": {
     name: "llama-b11669-bin-ubuntu-x64.tar.gz",
     sha256: "cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac",
+    size: 17851611,
   },
   "win32-x64": {
     name: "llama-b11669-bin-win-cpu-x64.zip",
     sha256: "37b3efcf962847ca869745fd4ccf7f5e7e8dacfeff9fa3523b4ca8cdc66d632b",
+    size: 19537886,
   },
   "win32-arm64": {
     name: "llama-b11669-bin-win-cpu-arm64.zip",
     sha256: "9cff39ffed17edcd03a7d876073f74d7b48cd43a1e5eafdd59ee094185ad871b",
+    size: 12442177,
   },
 }
 
@@ -133,6 +145,14 @@ const BATCH = 32
 const MAX_CHARS = 8000
 /** Upper bound for one embeddings request; a full batch of long documents on a slow CPU stays well under it. */
 const REQUEST_TIMEOUT = "60 seconds"
+/** Cap on a non-200 embeddings error body (#1079): only the first 500 chars are ever shown, so the 64 KiB OAuth-error precedent (#1029) is generous headroom. */
+export const embeddingErrorMaxResponseBytes = 64 * 1024
+/**
+ * Cap on a 200 embeddings response body (#1079): one request batches BATCH inputs and each vector has at
+ * most 4096 dimensions (the largest local tier), so 32 x 4096 JSON floats at ~24 bytes each is ~3.2 MiB;
+ * 16 MiB gives ~5x headroom and matches the house 16 MiB body caps.
+ */
+export const embeddingMaxResponseBytes = 16 * 1024 * 1024
 
 // Hardware facts the tier gate depends on, kept separate from detection so the gate is testable.
 export interface Hardware {
@@ -227,6 +247,9 @@ export function resolve(
     if (!file) return { remote, autostart, error: `Invalid embedding model URL: ${custom}` }
     const stem = file.replace(/\.gguf$/i, "")
     const qwen = file.toLowerCase().includes("qwen3-embedding")
+    // sha256/size pin the configured source only: an environment override that selects a different
+    // url or path must not inherit the configured model's integrity metadata.
+    const pinned = !override || (source.url === config.url && source.path === config.path) ? config : {}
     return {
       remote,
       autostart,
@@ -238,6 +261,8 @@ export function resolve(
         file,
         url: source.path ? undefined : source.url,
         path: source.path,
+        sha256: pinned.sha256,
+        size: pinned.size,
         pooling: config.pooling ?? (qwen ? "last" : "mean"),
         query: config.query ?? (qwen ? QWEN_QUERY : undefined),
         context: qwen ? 8192 : 512,
@@ -282,11 +307,21 @@ function expandEnv(value: string, env: Readonly<Record<string, string | undefine
   return env[match[1] ?? ""]
 }
 
+/**
+ * Hard ceiling for a download whose expected size is unknown (the custom-URL embedding shape carries
+ * neither sha256 nor size): 16 GiB, above the largest built-in tier (top, 15,141,156,384 bytes) with
+ * headroom, so a legitimate custom GGUF still fits while an endless or oversized stream cannot fill
+ * the disk. A configured size replaces this cap as the effective bound.
+ */
+export const MAX_UNKNOWN_SIZE_DOWNLOAD_BYTES = 17_179_869_184
+
 export interface DownloadInput {
   readonly url: string
   readonly dest: string
   readonly sha256?: string
   readonly size?: number
+  /** Test seam: overrides the unknown-size cap for this call. Production callers leave it unset. */
+  readonly limit?: number
   readonly onProgress?: (received: number, total: number | undefined) => void
 }
 
@@ -297,6 +332,9 @@ export interface DownloadInput {
 export const download = Effect.fn("MessagingEmbedding.download")(function* (input: DownloadInput) {
   const http = yield* HttpClient.HttpClient
   const part = `${input.dest}.part`
+  // The effective bound: the known size when there is one, else the unknown-size cap. Every check
+  // below uses it, so no call shape reaches the stream unbounded.
+  const bound = input.size ?? input.limit ?? MAX_UNKNOWN_SIZE_DOWNLOAD_BYTES
   yield* Effect.tryPromise({ try: () => mkdir(path.dirname(input.dest), { recursive: true }), catch: toError })
   const existing = yield* Effect.promise(() =>
     stat(part).then(
@@ -304,6 +342,13 @@ export const download = Effect.fn("MessagingEmbedding.download")(function* (inpu
       () => 0,
     ),
   )
+  // A part already larger than the bound can never verify; drop it instead of resuming from it.
+  if (existing > bound) {
+    yield* Effect.promise(() => rm(part, { force: true }))
+    return yield* Effect.fail(
+      new Error(`download from ${input.url} is larger than expected: part already holds ${existing} of ${bound} bytes`),
+    )
+  }
   const resumed = createHash("sha256")
   if (existing > 0 && input.sha256)
     yield* Effect.tryPromise({ try: (signal) => hashFile(part, resumed, signal), catch: toError })
@@ -328,32 +373,59 @@ export const download = Effect.fn("MessagingEmbedding.download")(function* (inpu
   const total =
     totalFromRange(response.headers["content-range"]) ??
     (Number.isFinite(length) && length > 0 ? start + length : input.size)
+  // Fail fast on a declared length above the bound, before a single body byte is read.
+  if (total !== undefined && total > bound) {
+    yield* Effect.promise(() => rm(part, { force: true }))
+    return yield* Effect.fail(
+      new Error(
+        `download from ${input.url} is larger than expected: declared ${total} bytes, expected at most ${bound}`,
+      ),
+    )
+  }
   const progress = { received: start }
   input.onProgress?.(progress.received, total)
 
-  yield* Effect.acquireUseRelease(
-    Effect.tryPromise({ try: () => open(part, append ? "a" : "w"), catch: toError }),
-    (handle) =>
-      Stream.runForEach(response.stream, (chunk) =>
-        Effect.tryPromise({ try: () => handle.write(chunk), catch: toError }).pipe(
-          Effect.map(() => {
-            if (input.sha256) hash.update(chunk)
-            progress.received += chunk.byteLength
-            input.onProgress?.(progress.received, total)
-          }),
-        ),
-      ).pipe(Effect.mapError(toError)),
-    (handle) => Effect.promise(() => handle.close()),
+  // Bound the stream itself: chunked or undeclared-length bodies carry no header to pre-check, so
+  // each chunk is measured before it is written and the download aborts the moment it passes the
+  // bound. The oversized part is deleted, never left behind as a resumable download.
+  let oversized = false
+  const streamed = yield* Effect.exit(
+    Effect.acquireUseRelease(
+      Effect.tryPromise({ try: () => open(part, append ? "a" : "w"), catch: toError }),
+      (handle) =>
+        Stream.runForEach(response.stream, (chunk) => {
+          if (progress.received + chunk.byteLength > bound) {
+            oversized = true
+            return Effect.fail(
+              new Error(`download from ${input.url} is larger than expected: received more than ${bound} bytes`),
+            )
+          }
+          return Effect.tryPromise({ try: () => handle.write(chunk), catch: toError }).pipe(
+            Effect.map(() => {
+              if (input.sha256) hash.update(chunk)
+              progress.received += chunk.byteLength
+              input.onProgress?.(progress.received, total)
+            }),
+          )
+        }).pipe(Effect.mapError(toError)),
+      (handle) => Effect.promise(() => handle.close()),
+    ),
   )
+  if (streamed._tag === "Failure") {
+    const cause = streamed.cause
+    if (oversized) yield* Effect.promise(() => rm(part, { force: true }))
+    return yield* Effect.failCause(cause)
+  }
   return yield* finish(input, part, hash, progress.received)
 })
 
 const finish = Effect.fnUntraced(function* (input: DownloadInput, part: string, hash: Hash, received: number) {
   const digest = input.sha256 ? hash.digest("hex") : undefined
+  // Digest and size are independent requirements: a matching digest does not excuse a wrong size.
   const failure =
     digest !== undefined && digest !== input.sha256
       ? `sha256 mismatch for ${input.url}: expected ${input.sha256}, got ${digest}`
-      : digest === undefined && input.size !== undefined && received !== input.size
+      : input.size !== undefined && received !== input.size
         ? `size mismatch for ${input.url}: expected ${input.size} bytes, got ${received}`
         : undefined
   if (failure) {
@@ -547,13 +619,18 @@ const layer = (options: Options) =>
           ),
         ).pipe(Effect.map((entry) => (entry === undefined ? undefined : path.join(dir, entry))))
 
-      const installServer = Effect.fnUntraced(function* (asset: { readonly name: string; readonly sha256: string }) {
+      const installServer = Effect.fnUntraced(function* (asset: {
+        readonly name: string
+        readonly sha256: string
+        readonly size: number
+      }) {
         const archive = path.join(llamaRoot, asset.name)
         state.phase = "downloading"
         yield* download({
           url: `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${asset.name}`,
           dest: archive,
           sha256: asset.sha256,
+          size: asset.size,
           onProgress: track(asset.name),
         })
         const staging = `${llamaDir}.tmp`
@@ -596,7 +673,22 @@ const layer = (options: Options) =>
         if (local.path) return local.path
         const dest = path.join(global.cache, "models", local.file)
         const present = yield* Effect.promise(() => exists(dest))
-        if (present) return dest
+        if (present) {
+          // A cached file is trusted only when it still matches the model's integrity metadata;
+          // a mismatch (or an unreadable file) is deleted and downloaded fresh, never served as-is.
+          const valid = yield* Effect.tryPromise({
+            try: async (signal) => {
+              if (local.size !== undefined && (await stat(dest)).size !== local.size) return false
+              if (!local.sha256) return true
+              const hash = createHash("sha256")
+              await hashFile(dest, hash, signal)
+              return hash.digest("hex") === local.sha256
+            },
+            catch: toError,
+          }).pipe(Effect.orElseSucceed(() => false))
+          if (valid) return dest
+          yield* Effect.promise(() => rm(dest, { force: true }))
+        }
         if (!local.url) return yield* Effect.fail(new Error(`No download URL for ${local.name}`))
         state.phase = "downloading"
         yield* download({
@@ -627,12 +719,34 @@ const layer = (options: Options) =>
           const base = HttpClientRequest.post(`${target.url}/embeddings`).pipe(HttpClientRequest.bodyJsonUnsafe(body))
           const response = yield* http.execute(target.key ? HttpClientRequest.bearerToken(base, target.key) : base)
           if (response.status !== 200) {
-            const text = yield* response.text.pipe(Effect.orElseSucceed(() => ""))
+            // Bounded read (#1079): an over-cap error body degrades to the status-only error below
+            // (empty text) instead of buffering whole; small bodies still surface their first 500 chars.
+            const text = yield* Effect.scoped(
+              collectBoundedResponseBody(
+                response,
+                embeddingErrorMaxResponseBytes,
+                () => new Error(`embeddings error response exceeded ${embeddingErrorMaxResponseBytes} bytes`),
+              ),
+            ).pipe(
+              Effect.map((body) => body.toString("utf8")),
+              Effect.orElseSucceed(() => ""),
+            )
             return yield* Effect.fail(
-              new Error(`HTTP ${response.status} from ${target.url}/embeddings: ${text.slice(0, 500)}`),
+              new Error(`HTTP ${response.status} from ${target.url}/embeddings: ${Text.truncate(text, 500)}`),
             )
           }
-          const decoded = yield* HttpClientResponse.schemaBodyJson(EmbeddingResponse)(response)
+          // Bounded read (#1079): collect the body under the cap first (declared-length pre-check plus
+          // in-flight bound), then decode the bounded bytes instead of schemaBodyJson on the raw response.
+          const raw = yield* Effect.scoped(
+            collectBoundedResponseBody(
+              response,
+              embeddingMaxResponseBytes,
+              () => new Error(`embeddings response exceeded ${embeddingMaxResponseBytes} bytes`),
+            ),
+          )
+          const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(EmbeddingResponse))(
+            raw.toString("utf8"),
+          )
           if (decoded.data.length !== input.length)
             return yield* Effect.fail(new Error(`expected ${input.length} embeddings, got ${decoded.data.length}`))
           return decoded.data
@@ -682,13 +796,13 @@ const layer = (options: Options) =>
           const tail = { text: "" }
           yield* Stream.runForEach(Stream.decodeText(handle.stderr), (text) =>
             Effect.sync(() => {
-              tail.text = (tail.text + text).slice(-4096)
+              tail.text = Text.truncateTail(tail.text + text, 4096)
             }),
           ).pipe(Effect.ignore, Effect.forkScoped)
           const exited = handle.exitCode.pipe(
             Effect.mapError(toError),
             Effect.flatMap((code) =>
-              Effect.fail(new Error(`llama-server exited with code ${code}: ${tail.text.trim().slice(-1000)}`)),
+              Effect.fail(new Error(`llama-server exited with code ${code}: ${Text.truncateTail(tail.text.trim(), 1000)}`)),
             ),
           )
           const endpoint = `http://127.0.0.1:${port}`
@@ -700,7 +814,7 @@ const layer = (options: Options) =>
             Effect.timeoutOrElse({
               duration: "180 seconds",
               orElse: () =>
-                Effect.fail(new Error(`llama-server did not become healthy: ${tail.text.trim().slice(-1000)}`)),
+                Effect.fail(new Error(`llama-server did not become healthy: ${Text.truncateTail(tail.text.trim(), 1000)}`)),
             }),
           )
           yield* Effect.raceFirst(health, exited)
@@ -799,9 +913,18 @@ const layer = (options: Options) =>
       const select: Interface["select"] = Effect.fn("MessagingEmbedding.select")(function* (choice) {
         if (!choice.tier && !choice.url && !choice.path) return
         const current = typeof state.input === "string" ? { tier: state.input } : (state.input ?? {})
+        const currentUrl = "url" in current ? current.url : undefined
+        const currentPath = "path" in current ? current.path : undefined
+        // sha256/size pin one specific source file: replacing the source clears them, while
+        // re-selecting the identical url/path keeps them.
+        const replaces =
+          choice.tier !== undefined ||
+          ((choice.url !== undefined || choice.path !== undefined) &&
+            (choice.url !== currentUrl || choice.path !== currentPath))
         yield* configure(
           new ConfigMessaging.Embedding({
             ...current,
+            ...(replaces ? { sha256: undefined, size: undefined } : {}),
             ...(choice.tier ? { tier: choice.tier, url: undefined, path: undefined } : {}),
             ...(choice.url || choice.path ? { url: choice.url, path: choice.path } : {}),
           }),
@@ -897,7 +1020,7 @@ const layer = (options: Options) =>
         if (!current) return yield* new UnavailableError({ message: describe() })
         const prefix = kind === "query" ? (current.query ?? "") : ""
         const inputs = texts.map((text) => {
-          const clipped = text.slice(0, current.limit)
+          const clipped = Text.truncate(text, current.limit)
           return prefix + (clipped.trim() === "" ? " " : clipped)
         })
         const batches = Array.from({ length: Math.ceil(inputs.length / BATCH) }, (_, index) =>

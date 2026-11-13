@@ -67,11 +67,15 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/amazon-bedrock-mantle", () => import("@opencode/ai/providers/amazon-bedrock-mantle")],
   ["@opencode/ai/providers/anthropic", () => import("@opencode/ai/providers/anthropic")],
   ["@opencode/ai/providers/anthropic-compatible", () => import("@opencode/ai/providers/anthropic-compatible")],
+  ["@opencode/ai/providers/antigravity", () => import("@opencode/ai/providers/antigravity")],
   ["@opencode/ai/providers/azure", () => import("@opencode/ai/providers/azure")],
   ["@opencode/ai/providers/azure/chat", () => import("@opencode/ai/providers/azure/chat")],
   ["@opencode/ai/providers/azure/responses", () => import("@opencode/ai/providers/azure/responses")],
   ["@opencode/ai/providers/baseten", () => import("@opencode/ai/providers/baseten")],
   ["@opencode/ai/providers/cerebras", () => import("@opencode/ai/providers/cerebras")],
+  ["@opencode/ai/providers/claude-code", () => import("@opencode/ai/providers/claude-code")],
+  ["@opencode/ai/providers/muse-direct", () => import("@opencode/ai/providers/muse-direct")],
+  ["@opencode/ai/providers/commandcode", () => import("@opencode/ai/providers/commandcode")],
   ["@opencode/ai/providers/cloudflare-ai-gateway", () => import("@opencode/ai/providers/cloudflare-ai-gateway")],
   ["@opencode/ai/providers/cloudflare-workers-ai", () => import("@opencode/ai/providers/cloudflare-workers-ai")],
   ["@opencode/ai/providers/cohere", () => import("@opencode/ai/providers/cohere")],
@@ -129,6 +133,7 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/openrouter", () => import("@opencode/ai/providers/openrouter")],
   ["@opencode/ai/providers/togetherai", () => import("@opencode/ai/providers/togetherai")],
   ["@opencode/ai/providers/venice", () => import("@opencode/ai/providers/venice")],
+  ["@opencode/ai/providers/vibe", () => import("@opencode/ai/providers/vibe")],
   ["@opencode/ai/providers/vercel-ai-gateway", () => import("@opencode/ai/providers/vercel-ai-gateway")],
   ["@opencode/ai/providers/vercel-ai-gateway/chat", () => import("@opencode/ai/providers/vercel-ai-gateway/chat")],
   [
@@ -188,7 +193,36 @@ const CORE_KEYS = ["chunkTimeout", "compaction", "encoding", "fetch", "headerTim
 const PROVIDER_ONLY_KEYS = ["chunkTimeout", "headerTimeout", "timeout", "transport"] as const
 
 export function nativeSettings(settings: Settings): Settings {
-  return Struct.omit(settings, CORE_KEYS)
+  const base = Struct.omit(settings, CORE_KEYS)
+  // #2203: the v1 config dialect spells effort `reasoning_effort`, and
+  // model/variant overlays nest it under an `options` key. Native
+  // providers (and their protocol option schemas, which strip unknown
+  // keys) accept only the camel `reasoningEffort`, so the v1 spellings
+  // were silently dropped and sessions ran at the default effort.
+  // Normalize once here — the single choke point every native
+  // provider's settings pass through — with muse-direct's precedence
+  // (#1872): top-level camel wins, then top-level snake, then the
+  // nested spellings. muse-direct's local normalization stays and is
+  // idempotent against this output.
+  const options = isRecord(base.options) ? base.options : undefined
+  const effort = [
+    base.reasoningEffort,
+    base.reasoning_effort,
+    options?.reasoningEffort,
+    options?.reasoning_effort,
+  ].find((value): value is string => typeof value === "string" && value !== "")
+  if (effort === undefined && !("reasoning_effort" in base) && options === undefined) return base
+  const result: Record<string, unknown> = { ...base }
+  delete result.reasoning_effort
+  if (options !== undefined) {
+    const nested: Record<string, unknown> = { ...options }
+    delete nested.reasoningEffort
+    delete nested.reasoning_effort
+    if (Object.keys(nested).length > 0) result.options = nested
+    else delete result.options
+  }
+  if (effort !== undefined) result.reasoningEffort = effort
+  return result as Settings
 }
 
 export function modelSettings(settings: Settings | undefined) {
@@ -207,9 +241,18 @@ export const DEFAULT_TIMEOUT_MS = 300_000
  */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 900_000
 
-/** One timeout setting without a default; invalid values are dropped. */
+/** Largest timeout the raw timers on the AISDK route can honour (2^31 - 1 ms, ~24.8 days): `setTimeout` clamps a
+ * delay above it to ~1 ms and `AbortSignal.timeout` throws on a non-finite delay, so a larger configured value
+ * would invert its meaning — a request meant to get more time would fail instantly (#972). Every route resolves
+ * its timeouts through `timeout()` below, so clamping there keeps the native route (Effect Durations, which
+ * have no such limit) behaving the same as the AISDK route. */
+export const MAX_TIMEOUT_MS = 2_147_483_647
+
+/** One timeout setting without a default; invalid values are dropped, oversized values clamp to MAX_TIMEOUT_MS. */
 export function timeout(value: unknown) {
-  return Option.getOrUndefined(decodeTimeout(value))
+  const decoded = Option.getOrUndefined(decodeTimeout(value))
+  if (decoded === undefined || decoded === false) return decoded
+  return Math.min(decoded, MAX_TIMEOUT_MS)
 }
 
 /** Request timeouts from provider settings, resolved for every route. `timeout` has no default. */

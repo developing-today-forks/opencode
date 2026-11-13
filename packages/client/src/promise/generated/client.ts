@@ -109,6 +109,21 @@ import type {
   ModelDefaultOutput,
   GenerateTextInput,
   GenerateTextOutput,
+  ServerCompletionsChatInput,
+  ServerCompletionsChatOutput,
+  ServerCompletionsResponsesInput,
+  ServerCompletionsResponsesOutput,
+  ServerCompletionsEmbeddingsInput,
+  ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsMessagesInput,
+  ServerCompletionsMessagesOutput,
+  ServerCompletionsSystemoneInput,
+  ServerCompletionsSystemoneOutput,
+  ServerCompletionsModelsOutput,
+  ServerCompletionsModelInput,
+  ServerCompletionsModelOutput,
+  ServerCompletionsModelRefInput,
+  ServerCompletionsModelRefOutput,
   ProviderListInput,
   ProviderListOutput,
   ProviderGetInput,
@@ -307,6 +322,8 @@ export interface ClientOptions {
   readonly baseUrl: string
   readonly fetch?: typeof globalThis.fetch
   readonly headers?: RequestInit["headers"]
+  /** Deadline in milliseconds for a non-SSE request, composed with any caller signal (AbortSignal.any). Defaults to defaultRequestTimeoutMs; a non-finite, non-positive or absent value takes the default. SSE subscriptions carry no total deadline. */
+  readonly requestTimeout?: number
 }
 
 export interface RequestOptions {
@@ -333,8 +350,31 @@ interface RequestDescriptor {
 
 const maxSseEventBytes = 16 * 1024 * 1024
 
+const maxJsonBodyBytes = 16 * 1024 * 1024
+
+/** Default deadline for a non-SSE request, in milliseconds (#1385): a stalled or slow-dripping server otherwise hangs a signal-less request forever. 120_000 matches this package's own bound for waiting on a service promise (service-timing.ts defaultEnsureTiming.promiseTimeout). The composed signal stays live through the body read, so the deadline covers headers and body alike. */
+const defaultRequestTimeoutMs = 120_000
+
+/** Files are user-sized, so the binary path allows a larger cap than a JSON body; it matches the app's media ingest limit. */
+const maxBinaryBodyBytes = 256 * 1024 * 1024
+
 export function make(options: ClientOptions) {
   const fetch = options.fetch ?? globalThis.fetch
+
+  const requestTimeout =
+    options.requestTimeout !== undefined && Number.isFinite(options.requestTimeout) && options.requestTimeout > 0
+      ? options.requestTimeout
+      : defaultRequestTimeoutMs
+
+  // Non-SSE requests only: the SSE path keeps no total deadline, so a healthy long-lived stream is never killed. A caller signal still aborts independently of the deadline.
+  const withDeadline = (requestOptions?: RequestOptions): RequestOptions => {
+    // Runtimes without AbortSignal.timeout get no client deadline rather than a throw; a caller signal still applies on its own (#1562).
+    if (typeof AbortSignal.timeout !== "function") return requestOptions ?? {}
+    const timeout = AbortSignal.timeout(requestTimeout)
+    return Object.assign({}, requestOptions, {
+      signal: requestOptions?.signal ? AbortSignal.any([requestOptions.signal, timeout]) : timeout,
+    })
+  }
 
   const prepare = (descriptor: RequestDescriptor, requestOptions?: RequestOptions) => {
     // A leading slash would replace any path prefix on baseUrl, so join relative to it.
@@ -384,9 +424,9 @@ export function make(options: ClientOptions) {
   }
 
   const request = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {
-    const response = await execute(descriptor, requestOptions)
+    const response = await execute(descriptor, withDeadline(requestOptions))
     if (response.status !== descriptor.successStatus) return responseError(response, descriptor)
-    if (descriptor.binary) return new Uint8Array(await response.arrayBuffer()) as A
+    if (descriptor.binary) return (await binary(response)) as A
     if (descriptor.empty) {
       try {
         await response.body?.cancel()
@@ -621,6 +661,7 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/session`,
+            query: { directory: input?.["directory"] },
             body: {
               id: input?.["id"],
               parentID: input?.["parentID"],
@@ -631,6 +672,7 @@ export function make(options: ClientOptions) {
               metadata: input?.["metadata"],
               permissions: input?.["permissions"],
               subagentPolicy: input?.["subagentPolicy"],
+              detached: input?.["detached"],
             },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
@@ -1028,7 +1070,7 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/interrupt`,
-            query: { resume: input["resume"] },
+            query: { resume: input["resume"], force: input["force"] },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,
@@ -1197,6 +1239,101 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+    },
+    "server.completions": {
+      chat: (input: ServerCompletionsChatInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsChatOutput>(
+          {
+            method: "POST",
+            path: `/v1/chat/completions`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      responses: (input: ServerCompletionsResponsesInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsResponsesOutput>(
+          {
+            method: "POST",
+            path: `/v1/responses`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      embeddings: (input: ServerCompletionsEmbeddingsInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsEmbeddingsOutput>(
+          {
+            method: "POST",
+            path: `/v1/embeddings`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      messages: (input: ServerCompletionsMessagesInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsMessagesOutput>(
+          {
+            method: "POST",
+            path: `/v1/messages`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      systemone: (input: ServerCompletionsSystemoneInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsSystemoneOutput>(
+          {
+            method: "POST",
+            path: `/v1/systemone`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      models: (requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelsOutput>(
+          {
+            method: "GET",
+            path: `/v1/models`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      model: (input: ServerCompletionsModelInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelOutput>(
+          {
+            method: "GET",
+            path: `/v1/models/${encodeURIComponent(input.id)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      modelRef: (input: ServerCompletionsModelRefInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsModelRefOutput>(
+          {
+            method: "GET",
+            path: `/v1/models/${encodeURIComponent(input.provider)}/${encodeURIComponent(input.model)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
     },
     provider: {
       list: (input?: ProviderListInput, requestOptions?: RequestOptions) =>
@@ -2622,10 +2759,42 @@ async function json(response: Response): Promise<unknown> {
     } catch {}
     throw new ClientError("UnsupportedContentType", { detail: response.headers.get("content-type") })
   }
-  let text: string
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > maxJsonBodyBytes) {
+    try {
+      void response.body?.cancel()?.catch(() => {})
+    } catch {}
+    throw new ClientError("ResponseTooLarge")
+  }
+  let text = ""
   try {
-    text = await response.text()
+    if (response.body === null) {
+      text = await response.text()
+      if (new TextEncoder().encode(text).byteLength > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")
+    } else {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let bytes = 0
+      try {
+        while (true) {
+          const next = await reader.read()
+          if (next.done) {
+            text += decoder.decode()
+            break
+          }
+          bytes += next.value.byteLength
+          if (bytes > maxJsonBodyBytes) throw new ClientError("ResponseTooLarge")
+          text += decoder.decode(next.value, { stream: true })
+        }
+      } finally {
+        try {
+          void reader.cancel().catch(() => {})
+        } catch {}
+        reader.releaseLock()
+      }
+    }
   } catch (cause) {
+    if (cause instanceof ClientError) throw cause
     throw new ClientError("Transport", { cause })
   }
   if (text === "") throw new ClientError("MalformedResponse")
@@ -2647,6 +2816,48 @@ function declared(body: DeclaredErrorBody) {
   const error = Object.assign(new Error(body.message ?? body.data?.message), body)
   if (body._tag) error.name = body._tag
   return error
+}
+
+async function binary(response: Response): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > maxBinaryBodyBytes) {
+    try {
+      void response.body?.cancel()?.catch(() => {})
+    } catch {}
+    throw new ClientError("ResponseTooLarge")
+  }
+  if (response.body === null) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")
+    return bytes
+  }
+  const reader = response.body.getReader()
+  const chunks: Array<Uint8Array> = []
+  let bytes = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      bytes += next.value.byteLength
+      if (bytes > maxBinaryBodyBytes) throw new ClientError("ResponseTooLarge")
+      chunks.push(next.value)
+    }
+  } catch (cause) {
+    if (cause instanceof ClientError) throw cause
+    throw new ClientError("Transport", { cause })
+  } finally {
+    try {
+      void reader.cancel().catch(() => {})
+    } catch {}
+    reader.releaseLock()
+  }
+  const merged = new Uint8Array(bytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
 }
 
 function isContentType(response: Response, expected: string) {

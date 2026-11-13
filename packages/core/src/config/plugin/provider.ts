@@ -1,6 +1,7 @@
 export * as ConfigProviderPlugin from "./provider.js"
 
 import { define } from "@opencode/plugin/effect/plugin"
+import type { ModelEditor } from "@opencode/plugin/effect/model"
 import { Document, type Entry } from "@opencode/schema/config"
 import { ConfigProvider } from "@opencode/schema/config/provider"
 import { Money } from "@opencode/schema/money"
@@ -11,6 +12,7 @@ import { ModelRoute } from "../../model-route.js"
 import { Provider } from "../../provider.js"
 import { Variant } from "../../variant.js"
 import { configuredInstances } from "../../plugin/provider/instance.js"
+import { settingsConflicts } from "../../plugin/provider/configured.js"
 import { ConfigEntryObserver } from "./entry-observer.js"
 
 export const Plugin = define({
@@ -20,9 +22,22 @@ export const Plugin = define({
     const loaded = yield* ConfigEntryObserver.observe(
       config,
       ctx.event,
-      ["providers"],
+      ["providers", "model"],
       ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload())),
     )
+    // Loud startup warning for package-seating conflicts (#1858): the first document
+    // declaring a provider's package seats it; a later document naming a different
+    // package for the same provider has its settings for that provider ignored in
+    // the transforms below (and in foldSettings), so it cannot hijack the provider.
+    for (const conflict of settingsConflicts(loaded.entries))
+      yield* Effect.logWarning(
+        "config declares a conflicting package for a provider; the conflicting document's settings for that provider are ignored",
+        {
+          providerID: conflict.providerID,
+          seatedPackage: conflict.seatedPackage,
+          conflictingPackage: conflict.conflictingPackage,
+        },
+      )
     yield* ctx.integration.transform((integrations) => {
       const instances = configuredInstances(loaded.entries)
       for (const [id, provider] of configuredProviders(loaded.entries)) {
@@ -71,13 +86,18 @@ export const Plugin = define({
       // later document's baseURL is seen, so a per-document gate lets that clone resurrect
       // the pin the later document was meant to replace (#501).
       const baseURLProviders = new Set(
-        items.filter(([, item]) => item.settings?.baseURL !== undefined).map(([id]) => id),
+        items.filter(([, item, conflict]) => !conflict && item.settings?.baseURL !== undefined).map(([id]) => id),
       )
-      for (const [id, item] of items) {
+      for (const [id, item, conflict] of items) {
         const providerID = id
         const current = providers.get(providerID)
-        const source = providers.get(item.canonical ?? current?.provider.canonical ?? providerID)
-        const changed = item.canonical !== undefined && item.canonical !== current?.provider.canonical
+        // A document that lost the package seat contributes nothing to the seated provider,
+        // identity included: its canonical neither remaps the provider nor selects the clone
+        // source (#2202). A conflicted canonical once resurrected the seated provider's
+        // models from a provider it does not own.
+        const canonical = conflict ? undefined : item.canonical
+        const source = providers.get(canonical ?? current?.provider.canonical ?? providerID)
+        const changed = canonical !== undefined && canonical !== current?.provider.canonical
         // The model-routes plugin owns the route provider and returns early when a record
         // already exists, so creating one here would suppress every pool. Its per-model
         // settings are still recorded below and applied by the model transform, after
@@ -93,14 +113,16 @@ export const Plugin = define({
             // An instance is available once its own account is connected, unless config supplies the key.
             if (!instances.has(Provider.ID.make(providerID)) || item.settings?.apiKey !== undefined)
               provider.activation = "enabled"
-            if (item.canonical !== undefined) provider.canonical = item.canonical
-            if (item.name) provider.name = item.name
-            if (item.package !== undefined) provider.package = item.package
-            if (item.compatibility !== undefined)
+            if (canonical !== undefined) provider.canonical = canonical
+            if (!conflict && item.name) provider.name = item.name
+            if (!conflict && item.package !== undefined) provider.package = item.package
+            if (!conflict && item.compatibility !== undefined)
               provider.compatibility = { ...provider.compatibility, ...item.compatibility }
-            if (item.settings !== undefined) provider.settings = Provider.mergeOverlay(provider.settings, item.settings)
-            if (item.headers !== undefined) provider.headers = Provider.mergeHeaders(provider.headers, item.headers)
-            if (item.body !== undefined) provider.body = Provider.mergeOverlay(provider.body, item.body)
+            if (!conflict && item.settings !== undefined)
+              provider.settings = Provider.mergeOverlay(provider.settings, item.settings)
+            if (!conflict && item.headers !== undefined)
+              provider.headers = Provider.mergeHeaders(provider.headers, item.headers)
+            if (!conflict && item.body !== undefined) provider.body = Provider.mergeOverlay(provider.body, item.body)
           })
         // A provider-level baseURL replaces the catalog URL of every model of the provider, not only
         // the models config names (the per-model deletion in the loop below): catalog models such as
@@ -162,90 +184,127 @@ export const Plugin = define({
           // A route setting names a pool the routes plugin built; never let it create
           // a stand-in model for a pool that does not exist.
           if (providerID === ModelRoute.PROVIDER_ID && !models.get(providerID, id)) continue
-          const source = definition.models.get(id)
-          const inherit = source?.inherit || !models.get(providerID, id)
-          models.update(providerID, id, (model) => {
-            if (inherit && source?.base) {
-              Object.assign(model, structuredClone(source.base))
-              if (item.package !== undefined) model.package = undefined
-              if (definition.baseURL && model.settings) delete model.settings.baseURL
-            }
-            if (config.family !== undefined) model.family = config.family
-            if (config.name) model.name = config.name
-            if (config.modelID !== undefined) model.modelID = config.modelID
-            if (config.releaseDate !== undefined) {
-              const released = Model.parseReleaseDate(config.releaseDate)
-              if (released !== undefined) model.time = { released }
-            }
-            if (config.compatibility !== undefined)
-              model.compatibility = { ...model.compatibility, ...config.compatibility }
-            if (config.package !== undefined) model.package = config.package
-            if (config.settings !== undefined) model.settings = Provider.mergeOverlay(model.settings, config.settings)
-            if (config.headers !== undefined) model.headers = Provider.mergeHeaders(model.headers, config.headers)
-            if (config.body !== undefined) model.body = Provider.mergeOverlay(model.body, config.body)
-            if (config.capabilities !== undefined)
-              model.capabilities = Model.mergeCapabilities(config.capabilities, model.capabilities)
-            if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
-            // Configured reasoning replaces the base variants; configured variants still overlay them below.
-            if (config.capabilities?.reasoning !== undefined)
-              model.variants = [
-                ...Variant.resolve(
-                  { ...model, package: model.package ?? models.provider.get(providerID)?.provider.package },
-                  Variant.supports(config.capabilities.reasoning),
-                ),
-              ]
-            if (config.variants !== undefined) {
-              model.variants ??= []
-              for (const variant of config.variants) {
-                let existing = model.variants.find((item) => item.id === variant.id)
-                if (!existing) {
-                  existing = { id: variant.id }
-                  model.variants.push(existing)
-                }
-                if (variant.settings !== undefined)
-                  existing.settings = Provider.mergeOverlay(existing.settings, variant.settings)
-                if (variant.headers !== undefined)
-                  existing.headers = Provider.mergeHeaders(existing.headers, variant.headers)
-                if (variant.body !== undefined) existing.body = Provider.mergeOverlay(existing.body, variant.body)
-              }
-            }
-            if (config.cost !== undefined) {
-              model.cost = (Array.isArray(config.cost) ? config.cost : [config.cost]).map((cost) => ({
-                tier: cost.tier && { ...cost.tier },
-                input: cost.input,
-                output: cost.output,
-                cache: {
-                  read: cost.cache?.read ?? Money.USDPerMillionTokens.zero,
-                  write: cost.cache?.write ?? Money.USDPerMillionTokens.zero,
-                },
-              }))
-            }
-            if (config.disabled !== undefined) model.enabled = !config.disabled
-          })
-          // Inherited variants are spelled for the base model's package, so a package override needs fresh ones.
-          // A base without variants has no reasoning support to respell.
-          const repackaged =
-            source?.base !== undefined &&
-            source.base.variants.length > 0 &&
-            models.get(providerID, id)?.package !== source.base.package
-          if (config.variants === undefined && config.capabilities?.reasoning === undefined && (!source?.base || repackaged))
-            models.update(providerID, id, (model) => {
-              const pkg = model.package ?? models.provider.get(providerID)?.provider.package
-              // Without a package there is no protocol to respell for — Variant.resolve
-              // would return [] and destroy variants the model already carries, such as
-              // a route pool's routeVariants (pools deliberately have no package; their
-              // provider record carries the empty-string package of Provider.Info.empty).
-              if (!pkg) return
-              model.variants = [...Variant.resolve({ ...model, package: pkg })]
-            })
+          applyModelConfig(models, item, definition, providerID, id, config)
         }
       }
     })
   }),
 })
 
+/** Applies one configured provider model's overrides (name, limits, variants, cost,
+ * disabled/hidden, overlays) onto a model in the editor, inheriting the recorded base
+ * model when the definition says to. The provider plugin's model transform applies
+ * this to every configured model; the model-routes plugin applies it to a route it
+ * creates after that transform has run (#1001), so a newly created route receives
+ * exactly the overrides an already-built route receives. */
+export function applyModelConfig(
+  models: ModelEditor,
+  item: ConfigProvider.Info,
+  definition: {
+    readonly providerID: string
+    readonly baseURL: boolean
+    readonly models: ReadonlyMap<string, { readonly inherit: boolean; readonly base?: Model.Info }>
+  },
+  providerID: string,
+  id: string,
+  config: NonNullable<ConfigProvider.Info["models"]>[string],
+) {
+        const source = definition.models.get(id)
+        const inherit = source?.inherit || !models.get(providerID, id)
+        models.update(providerID, id, (model) => {
+          if (inherit && source?.base) {
+            Object.assign(model, structuredClone(source.base))
+            if (item.package !== undefined) model.package = undefined
+            if (definition.baseURL && model.settings) delete model.settings.baseURL
+          }
+          if (config.family !== undefined) model.family = config.family
+          if (config.name) model.name = config.name
+          if (config.modelID !== undefined) model.modelID = config.modelID
+          if (config.releaseDate !== undefined) {
+            const released = Model.parseReleaseDate(config.releaseDate)
+            if (released !== undefined) model.time = { released }
+          }
+          if (config.compatibility !== undefined)
+            model.compatibility = { ...model.compatibility, ...config.compatibility }
+          if (config.package !== undefined) model.package = config.package
+          if (config.settings !== undefined) model.settings = Provider.mergeOverlay(model.settings, config.settings)
+          if (config.headers !== undefined) model.headers = Provider.mergeHeaders(model.headers, config.headers)
+          if (config.body !== undefined) model.body = Provider.mergeOverlay(model.body, config.body)
+          if (config.capabilities !== undefined)
+            model.capabilities = Model.mergeCapabilities(config.capabilities, model.capabilities)
+          if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
+          // Configured reasoning replaces the base variants; configured variants still overlay them below.
+          if (config.capabilities?.reasoning !== undefined)
+            model.variants = [
+              ...Variant.resolve(
+                { ...model, package: model.package ?? models.provider.get(providerID)?.provider.package },
+                Variant.supports(config.capabilities.reasoning),
+              ),
+            ]
+          if (config.variants !== undefined) {
+            model.variants ??= []
+            for (const variant of config.variants) {
+              let existing = model.variants.find((item) => item.id === variant.id)
+              if (!existing) {
+                existing = { id: variant.id }
+                model.variants.push(existing)
+              }
+              if (variant.settings !== undefined)
+                existing.settings = Provider.mergeOverlay(existing.settings, variant.settings)
+              if (variant.headers !== undefined)
+                existing.headers = Provider.mergeHeaders(existing.headers, variant.headers)
+              if (variant.body !== undefined) existing.body = Provider.mergeOverlay(existing.body, variant.body)
+            }
+          }
+          if (config.cost !== undefined) {
+            model.cost = (Array.isArray(config.cost) ? config.cost : [config.cost]).map((cost) => ({
+              tier: cost.tier && { ...cost.tier },
+              input: cost.input,
+              output: cost.output,
+              cache: {
+                read: cost.cache?.read ?? Money.USDPerMillionTokens.zero,
+                write: cost.cache?.write ?? Money.USDPerMillionTokens.zero,
+              },
+            }))
+          }
+          if (config.disabled !== undefined) model.enabled = !config.disabled
+          if (config.hidden !== undefined) model.hidden = config.hidden
+        })
+        // Inherited variants are spelled for the base model's package, so a package override needs fresh ones.
+        // A base without variants has no reasoning support to respell.
+        const repackaged =
+          source?.base !== undefined &&
+          source.base.variants.length > 0 &&
+          models.get(providerID, id)?.package !== source.base.package
+        if (config.variants === undefined && config.capabilities?.reasoning === undefined && (!source?.base || repackaged))
+          models.update(providerID, id, (model) => {
+            const pkg = model.package ?? models.provider.get(providerID)?.provider.package
+            // Without a package there is no protocol to respell for — Variant.resolve
+            // would return [] and destroy variants the model already carries, such as
+            // a route pool's routeVariants (pools deliberately have no package; their
+            // provider record carries the empty-string package of Provider.Info.empty).
+            if (!pkg) return
+            model.variants = [...Variant.resolve({ ...model, package: pkg })]
+          })
+}
+
 function configuredProviders(entries: readonly Entry[]) {
-  return entries
-    .filter((entry): entry is Document => entry.type === "document")
-    .flatMap((file) => Object.entries(file.info.providers ?? {}))
+  // Package seating (#1858): the first document declaring a provider's package
+  // seats it; a later document declaring a different package for the same
+  // provider is flagged conflicted so its package/settings are not applied.
+  const seated = new Map<string, string>()
+  const result: Array<[string, ConfigProvider.Info, boolean]> = []
+  for (const entry of entries) {
+    if (entry.type !== "document") continue
+    for (const [id, info] of Object.entries(entry.info.providers ?? {})) {
+      let conflict = false
+      if (info.package !== undefined) {
+        const current = seated.get(id)
+        if (current === undefined) seated.set(id, info.package)
+        else if (current !== info.package) conflict = true
+      }
+      result.push([id, info, conflict])
+    }
+  }
+  return result
 }

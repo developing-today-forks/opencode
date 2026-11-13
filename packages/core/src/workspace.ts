@@ -3,7 +3,7 @@ export * as Workspace from "./workspace.js"
 import { Workspace } from "@opencode/schema/workspace"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { eq } from "drizzle-orm"
-import { Clock, Context, Deferred, Duration, Effect, Exit, FiberSet, Layer, Ref, Schedule, Schema, Scope } from "effect"
+import { Clock, Context, Deferred, Duration, Effect, Exit, Fiber, FiberSet, Layer, Ref, Schedule, Schema, Scope } from "effect"
 import { systemError } from "effect/PlatformError"
 import { make } from "effect/process/ChildProcessSpawner"
 import type { EnvironmentDriver } from "./environment/driver.js"
@@ -13,6 +13,10 @@ import { Database } from "./database/database.js"
 import { KeyedMutex } from "./effect/keyed-mutex.js"
 import { WorkspaceDriver } from "./workspace/driver.js"
 import { WorkspaceTable } from "./workspace/sql.js"
+
+const SNAPSHOT_INTERVAL = Duration.toMillis(Duration.hours(23))
+const SNAPSHOT_RETENTION = Duration.toMillis(Duration.days(7))
+const SNAPSHOT_RETRY_DELAY = Duration.toMillis(Duration.minutes(15))
 
 export const ID = Workspace.ID
 export type ID = Workspace.ID
@@ -71,6 +75,12 @@ interface Connection {
 
 type ReadinessError = NotFound | WorkspaceDriver.Error | WorkspaceDriver.ProviderNotFound
 
+interface ProvisionAttempt {
+  readonly deferred: Deferred.Deferred<Info, ReadinessError>
+  waiters: number
+  fiber?: Fiber.Fiber<void>
+}
+
 export const configured = (options: Options = {}) =>
   makeGlobalNode({
     service: Service,
@@ -86,8 +96,13 @@ const layer = (options: Options) =>
       const registry = yield* WorkspaceDriver.RegistryService
       const lifetime = yield* Scope.Scope
       const connections = new Map<ID, Connection>()
+      // Workspaces already driven through suspendForIdle with no live connection
+      // (boot reconciliation or the poll path) — never suspend the same idle
+      // episode twice in one process. Cleared when a connection opens.
+      const suspendedPersisted = new Set<ID>()
+      const unsupportedSnapshotProviders = new Set<string>()
       // Destroy cancels the racing provision body by settling the deferred.
-      const attempts = new Map<ID, Deferred.Deferred<Info, ReadinessError>>()
+      const attempts = new Map<ID, ProvisionAttempt>()
       const locks = KeyedMutex.makeUnsafe<ID>()
       const fork = yield* FiberSet.makeRuntime<never, void, never>()
       const idleThreshold = Duration.toMillis(options.idleThreshold ?? Duration.minutes(20))
@@ -115,36 +130,54 @@ const layer = (options: Options) =>
 
       const provision = Effect.fn("Workspace.provision")((workspaceID: ID) =>
         Effect.suspend(() => {
-          const existing = attempts.get(workspaceID)
-          if (existing) return Deferred.await(existing)
-
-          const attempt = Deferred.makeUnsafe<Info, ReadinessError>()
-          attempts.set(workspaceID, attempt)
-          fork(
-            locks
-              .withLock(workspaceID)(
-                Effect.gen(function* () {
-                  const row = yield* load(workspaceID)
-                  if (row.binding) return info(row, row.binding)
-                  const driver = yield* registry.get(row.provider)
-                  const result = yield* driver.create({ workspaceID })
-                  yield* saveBinding(workspaceID, result.binding)
-                  return info(row, result.binding)
-                }),
-              )
-              .pipe(
-                Effect.raceFirst(Deferred.await(attempt)),
-                Effect.onExit((exit) =>
-                  Effect.sync(() => {
-                    if (attempts.get(workspaceID) === attempt) attempts.delete(workspaceID)
-                    Deferred.doneUnsafe(attempt, exit)
+          let attempt = attempts.get(workspaceID)
+          if (!attempt) {
+            const created: ProvisionAttempt = {
+              deferred: Deferred.makeUnsafe<Info, ReadinessError>(),
+              waiters: 0,
+            }
+            attempts.set(workspaceID, created)
+            created.fiber = fork(
+              locks
+                .withLock(workspaceID)(
+                  Effect.gen(function* () {
+                    const row = yield* load(workspaceID)
+                    if (row.binding) return info(row, row.binding)
+                    const driver = yield* registry.get(row.provider)
+                    const result = yield* driver.create({ workspaceID })
+                    yield* saveBinding(workspaceID, result.binding)
+                    return info(row, result.binding)
                   }),
+                )
+                .pipe(
+                  Effect.raceFirst(Deferred.await(created.deferred)),
+                  Effect.onExit((exit) =>
+                    Effect.sync(() => {
+                      if (attempts.get(workspaceID) === created) attempts.delete(workspaceID)
+                      Deferred.doneUnsafe(created.deferred, exit)
+                    }),
+                  ),
+                  Effect.exit,
+                  Effect.asVoid,
                 ),
-                Effect.exit,
-                Effect.asVoid,
-              ),
+            )
+            attempt = created
+          }
+          attempt.waiters += 1
+          return Deferred.await(attempt.deferred).pipe(
+            Effect.onExit(() =>
+              Effect.sync(() => {
+                attempt.waiters -= 1
+                if (attempt.waiters > 0) return
+                if (attempts.get(workspaceID) !== attempt) return
+                // The last waiter left a live attempt: nobody needs its result,
+                // so cancel the shared provisioning fiber instead of letting it
+                // persist a binding no caller is waiting for (#2287).
+                attempts.delete(workspaceID)
+                if (attempt.fiber) fork(Fiber.interrupt(attempt.fiber))
+              }),
+            ),
           )
-          return Deferred.await(attempt)
         }),
       )
 
@@ -155,7 +188,7 @@ const layer = (options: Options) =>
         const row = yield* load(workspaceID)
         // Bindings are persisted before provision resolves and never nulled; a raced
         // destroy deletes the whole row and surfaces as NotFound from load above.
-        if (!row.binding) return yield* Effect.die(`workspace ${workspaceID} has no binding after provision`)
+        if (!row.binding) return yield* Effect.die(new Error(`workspace ${workspaceID} has no binding after provision`))
         const driver = yield* registry.get(row.provider)
         const persistBinding = (binding: WorkspaceDriver.Binding) => saveBinding(workspaceID, binding)
         const scope = yield* Scope.fork(lifetime)
@@ -179,6 +212,7 @@ const layer = (options: Options) =>
           scope,
         }
         connections.set(workspaceID, connection)
+        suspendedPersisted.delete(workspaceID)
         yield* db
           .update(WorkspaceTable)
           .set({ last_used_at: now })
@@ -214,9 +248,111 @@ const layer = (options: Options) =>
                   .run()
                   .pipe(Effect.orDie)
                 connections.delete(workspaceID)
+                suspendedPersisted.add(workspaceID)
                 yield* Scope.close(connection.scope, Exit.void)
               }).pipe(Effect.catchCause((cause) => Effect.logError("workspace idle suspension failed", cause))),
             ),
+          { concurrency: "unbounded", discard: true },
+        )
+        // Boot reconciliation: the loop above only sees live connections, which
+        // is empty at process start, so persisted bound rows orphaned by a
+        // restart are reconciled here — on the first (boot) pass and every
+        // poll pass after it. Race safety: reconciliation takes the same
+        // per-workspace lock as connect/open and re-checks inside it, so a
+        // racing connect either completed first (live connection present or
+        // last_used_at fresh — skip) or waits on the lock and then wakes
+        // cleanly from the post-suspend binding, the deliberate racing-spawn
+        // semantics documented in the poll path. Unbound rows are untouched.
+        const rows = yield* db.select().from(WorkspaceTable).all().pipe(Effect.orDie)
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            Effect.suspend(() => {
+              if (!row.binding || connections.has(row.id) || suspendedPersisted.has(row.id)) return Effect.void
+              if (now - row.last_used_at < idleThreshold) return Effect.void
+              return locks.withLock(row.id)(
+                Effect.gen(function* () {
+                  if (connections.has(row.id) || suspendedPersisted.has(row.id)) return
+                  const fresh = yield* find(row.id)
+                  if (!fresh?.binding) return
+                  if (now - fresh.last_used_at < idleThreshold) return
+                  const driver = yield* registry.get(fresh.provider)
+                  yield* driver.suspendForIdle({
+                    workspaceID: row.id,
+                    binding: fresh.binding,
+                    saveBinding: (binding) => saveBinding(row.id, binding),
+                  })
+                  suspendedPersisted.add(row.id)
+                }).pipe(Effect.catchCause((cause) => Effect.logError("workspace boot idle suspension failed", cause))),
+              )
+            }),
+          { concurrency: "unbounded", discard: true },
+        )
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            Effect.suspend(() => {
+              if (!row.binding) return Effect.void
+              return locks.withLock(row.id)(
+                Effect.gen(function* () {
+                  const fresh = yield* find(row.id)
+                  if (!fresh?.binding) return
+                  const snapshotNow = yield* Clock.currentTimeMillis
+                  if (fresh.last_snapshot_at !== null && snapshotNow - fresh.last_snapshot_at < SNAPSHOT_INTERVAL)
+                    return
+                  if (fresh.snapshot_retry_at !== null && fresh.snapshot_retry_at > snapshotNow) return
+
+                  const driver = yield* registry.get(fresh.provider)
+                  if (!driver.snapshot) {
+                    if (!unsupportedSnapshotProviders.has(fresh.provider)) {
+                      unsupportedSnapshotProviders.add(fresh.provider)
+                      yield* Effect.logWarning("workspace safety snapshots are unsupported by provider", {
+                        provider: fresh.provider,
+                      })
+                    }
+                    return
+                  }
+
+                  yield* driver
+                    .snapshot({
+                      workspaceID: fresh.id,
+                      binding: fresh.binding,
+                      now: snapshotNow,
+                      retentionMs: SNAPSHOT_RETENTION,
+                    })
+                    .pipe(
+                      Effect.tap(() =>
+                        db
+                          .update(WorkspaceTable)
+                          .set({ last_snapshot_at: snapshotNow, snapshot_retry_at: null })
+                          .where(eq(WorkspaceTable.id, fresh.id))
+                          .run()
+                          .pipe(Effect.orDie),
+                      ),
+                      Effect.catchCause((cause) =>
+                        Effect.gen(function* () {
+                          const retryAt = (yield* Clock.currentTimeMillis) + SNAPSHOT_RETRY_DELAY
+                          yield* db
+                            .update(WorkspaceTable)
+                            .set({ snapshot_retry_at: retryAt })
+                            .where(eq(WorkspaceTable.id, fresh.id))
+                            .run()
+                            .pipe(Effect.orDie)
+                          yield* Effect.logError("workspace safety snapshot failed", {
+                            workspaceID: fresh.id,
+                            provider: fresh.provider,
+                            cause,
+                          })
+                        }),
+                      ),
+                    )
+                }).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logError("workspace safety snapshot rotation failed", { workspaceID: row.id, cause }),
+                  ),
+                ),
+              )
+            }),
           { concurrency: "unbounded", discard: true },
         )
       }).pipe(Effect.repeat(Schedule.spaced(options.pollInterval ?? Duration.minutes(1))), Effect.forkScoped)
@@ -325,7 +461,7 @@ const layer = (options: Options) =>
           const attempt = attempts.get(workspaceID)
           if (attempt) {
             attempts.delete(workspaceID)
-            Deferred.doneUnsafe(attempt, Exit.fail(new NotFound({ workspaceID })))
+            Deferred.doneUnsafe(attempt.deferred, Exit.fail(new NotFound({ workspaceID })))
           }
           return yield* locks.withLock(workspaceID)(
             Effect.gen(function* () {
@@ -355,7 +491,6 @@ const layer = (options: Options) =>
 
 export const node = configured()
 
-// TODO(workspace-plan): add the boot janitor and ~23h safety snapshot rotation in a later PR.
 // TODO(workspace-plan): make cold wake interruptible with a re-pin loop against janitor races.
 // TODO(workspace-plan): consider extracting a keyed shared-attempt helper (join/cancel, drop-on-settle) beside
 // KeyedMutex at end-of-series consolidation; filesystem/search.ts and session/run-coordinator.ts hand-roll the same

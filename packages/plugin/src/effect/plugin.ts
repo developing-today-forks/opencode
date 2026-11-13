@@ -28,6 +28,17 @@ export interface Context {
   readonly app: App
   readonly location: Location.Info
   readonly options: PluginOptions
+  /**
+   * URL of the active server listener (for example `http://127.0.0.1:4096`).
+   * Undefined when no listener is active, such as embedded SDK hosts.
+   *
+   * In-process domain calls are already authenticated, which is the documented
+   * equivalent of v1's `client`: prefer `ctx.session`, `ctx.model`, and the
+   * other domains over raw HTTP. Use this only when a raw HTTP(S) URL is
+   * needed, such as opening the server in a browser or handing an address to
+   * a subprocess.
+   */
+  readonly serverUrl: string | undefined
   readonly agent: AgentDomain
   readonly aisdk: AISDKDomain
   readonly command: CommandDomain

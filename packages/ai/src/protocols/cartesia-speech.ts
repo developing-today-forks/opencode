@@ -78,7 +78,7 @@ const CONTAINERS: Readonly<Record<string, "raw" | "wav" | "mp3">> = { pcm: "raw"
 const outputFormat = Effect.fnUntraced(function* (request: MediaProtocol.Addressed<Request>) {
   const sse = usesSse(request)
   const format = request.format ?? (sse ? "pcm" : "mp3")
-  const container = CONTAINERS[format]
+  const container = Object.hasOwn(CONTAINERS, format) ? CONTAINERS[format] : undefined
   if (container === undefined)
     return yield* route.unsupported(
       "media.format",

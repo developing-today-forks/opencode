@@ -64,11 +64,24 @@ client loop across a handover saw no refused connection and no failed request, w
 without a supervisor's socket refused connections on every restart. The control code path is the same
 binary without `LISTEN_FDS`, so it binds the port itself as before.
 
+Verified under a real systemd user session (systemd 261, `Linger=yes`) on 2026-10-28, with a socket
+unit (`ListenStream=127.0.0.1:4319`) and a `Type=notify` service whose `ExecStart` runs the launcher,
+so the process that sends `READY=1` is the server child rather than the unit's main pid:
+`NotifyAccess=all` accepts it, and the socket unit holds the listener across `systemctl --user
+restart`, which is the handover. Two generations under a 10 ms request loop on a fresh connection saw
+no refused connection and no failed request, and the journal shows `Started` for each generation with
+`opencode: ready` from the child. The unit and its output are recorded on issue #81.
+
+The teardown race is closed. A connection the predecessor accepted in the last instant before it
+closed could get a reset when its request arrived after teardown began: the drain tracked only
+requests whose headers had been parsed, and the Bun listener dropped idle connections as soon as it
+closed, so a connection that had connected but not yet sent its request was reset. Measured before
+the fix, a fresh connection every 5 ms across ten `systemctl --user restart` handovers saw 4 resets in
+1851 requests (0.22%), and the handover order alone, with the successor ready before the predecessor
+stops, saw 1 in 7376. The drain now keeps serving connections the listener already accepted for a
+bounded linger (500 ms) before closing them, and waits for any request that arrives during the
+linger. `packages/cli/test/serve-handover.test.ts` covers it with "a drain answers a request on a
+connection the server accepted before it began", which fails without the drain change.
+
 Still open:
-- Systemd units: `Type=notify` needs `NotifyAccess=all`, because the notifying process is the server
-  child, not the unit's main pid, when the wrapper starts it. Not verified under a real systemd user
-  session. The tests stand in for systemd with a socket the test process owns and a fake notify socket.
-- Residual race: a connection the predecessor accepted in the last instant before it closes can get a
-  `503` (`service_stopping`) or a reset when its request arrives after teardown has begun. The
-  handover runs (about a thousand requests) showed none; the control showed one in each run.
 - Session state: restarts still interrupt sessions that outlive the grace period; see the section above.

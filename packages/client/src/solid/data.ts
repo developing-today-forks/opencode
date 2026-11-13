@@ -21,7 +21,7 @@ import type {
   PermissionRequest,
   PermissionReplyInput,
   Project,
-  ProviderInfo,
+  ProviderInfoWithModels,
   ReferenceInfo,
   SessionMessageInfo,
   SessionMessageAssistant,
@@ -101,7 +101,7 @@ type LocationData = {
   mcpServer?: McpServer[]
   mcpResource?: McpResource[]
   model?: ModelInfo[]
-  provider?: ProviderInfo[]
+  provider?: ProviderInfoWithModels[]
   reference?: ReferenceInfo[]
   websearch?: WebSearchProvider[]
   // Currently running shell commands for this location, keyed by shell id. Entries are removed
@@ -570,8 +570,12 @@ export function createData(config: CreateDataInput) {
   // its children as soon as it resolves, and every walk shares one listing limit. `seen` holds the sessions
   // already listed, so every session is listed once and a parent cycle still ends the walk. Below the direct
   // children the walk is best effort: a branch whose listing fails is left to live events rather than failing
-  // the sync and closing the view. The walk resolves to whether every listing succeeded.
-  async function syncDescendants(parents: SessionInfo[], seen: Set<string>): Promise<boolean> {
+  // the sync and closing the view. The walk resolves to whether every listing succeeded, and whether any
+  // listed snapshot was dropped only for a covering read still in flight (#1053).
+  async function syncDescendants(
+    parents: SessionInfo[],
+    seen: Set<string>,
+  ): Promise<{ complete: boolean; droppedPending: boolean }> {
     const branches = await Promise.all(
       parents
         .filter((parent) => {
@@ -584,13 +588,18 @@ export function createData(config: CreateDataInput) {
           const listed = await descendantListing(() =>
             listChildren({ parentID: parent.id, order: "desc", limit: CHILD_PAGE }),
           ).catch(() => undefined)
-          if (!listed) return false
+          if (!listed) return { complete: false, droppedPending: false }
           const children = listed.filter((child) => !seen.has(child.id))
+          const droppedPending = children.some(pendingCover)
           publishSessions(children.filter(unread), generation)
-          return syncDescendants(children, seen)
+          const nested = await syncDescendants(children, seen)
+          return { complete: nested.complete, droppedPending: droppedPending || nested.droppedPending }
         }),
     )
-    return branches.every(Boolean)
+    return {
+      complete: branches.every((branch) => branch.complete),
+      droppedPending: branches.some((branch) => branch.droppedPending),
+    }
   }
 
   // A listing fills in a session this client holds no info for, even while that session's own read is in flight: if
@@ -600,6 +609,14 @@ export function createData(config: CreateDataInput) {
   // replace it.
   function unread(session: SessionInfo) {
     return !store.session.info[session.id] || !sync.current(`session:${session.id}`)
+  }
+
+  // A snapshot `unread` drops only because a covering read is still in flight is not
+  // safely covered (#1053): that read may fail and publish nothing, leaving the older
+  // snapshot in the store with nobody set to replace it. A covering read that has
+  // already settled has published, so a snapshot it displaced is not at risk.
+  function pendingCover(session: SessionInfo) {
+    return !unread(session) && sync.pending(`session:${session.id}`)
   }
 
   // `generation` is the sync generation when the snapshot was requested. One requested before the latest full
@@ -623,20 +640,20 @@ export function createData(config: CreateDataInput) {
     })
   }
 
-  // Walk parentID upward through loaded session info to the family root. When a
-  // parent's info is missing, that missing ID is the furthest-known ancestor and
-  // is returned so orphan subtrees group under it until the parent arrives. A
-  // seen set guards against parent cycles, stopping at the last non-repeating
-  // ancestor.
+  // Walk parentID or fork.sessionID upward through loaded session info to the
+  // family root. When an ancestor's info is missing, that missing ID is the
+  // furthest-known ancestor and is returned so orphan subtrees group under it
+  // until the ancestor arrives. A seen set guards against cycles, stopping at
+  // the last non-repeating ancestor.
   function resolveRoot(sessionID: string) {
     let current = sessionID
-    let parentID = store.session.info[sessionID]?.parentID
+    let parentID = store.session.info[sessionID]?.parentID ?? store.session.info[sessionID]?.fork?.sessionID
     const seen = new Set([sessionID])
     while (parentID) {
       if (seen.has(parentID)) break
       seen.add(parentID)
       current = parentID
-      parentID = store.session.info[parentID]?.parentID
+      parentID = store.session.info[parentID]?.parentID ?? store.session.info[parentID]?.fork?.sessionID
     }
     return current
   }
@@ -779,6 +796,7 @@ export function createData(config: CreateDataInput) {
           setStore("session", "info", event.data.sessionID, {
             cost: event.data.cost,
             tokens: event.data.tokens,
+            ...(event.data.costAuthoritative ? { costAuthoritative: event.data.costAuthoritative } : {}),
           })
         return
       case "session.agent.selected": {
@@ -1745,7 +1763,13 @@ export function createData(config: CreateDataInput) {
           throw error
         })
       },
-      /** With `children`, also loads every descendant session at any depth, so the family index is complete. */
+      /**
+       * With `children`, loads the whole family: every descendant session at any depth, plus the
+       * missing ancestors by ID (best effort), so the family index is complete from either end.
+       * A plain sync deliberately does not walk ancestors: the TUI's family discovery walks them
+       * itself and retries failed reads with backoff, which a walk inside a plain sync would
+       * consume and defeat.
+       */
       sync(sessionID: string, options?: { children?: boolean }) {
         return sync.run(options?.children ? `session.family:${sessionID}` : `session:${sessionID}`, async () => {
           const generation = sync.generation()
@@ -1753,9 +1777,70 @@ export function createData(config: CreateDataInput) {
             api().session.get({ sessionID }),
             options?.children ? listChildren({ parentID: sessionID, order: "desc", limit: CHILD_PAGE }) : [],
           ])
-          publishSessions([info, ...children.filter(unread)], generation)
+          // Ancestors are never listed by the descendant walk, so a session opened directly
+          // (a deep link into a nested subagent, #631) holds no info for them: resolveRoot
+          // stops at the first missing parent, the family groups under the wrong root, and
+          // the ancestor trail truncates. A family sync reads the missing parents by ID,
+          // best effort: a parent that cannot be read leaves the walk at the furthest-known
+          // ancestor, exactly what resolveRoot already tolerates.
+          const ancestors: SessionInfo[] = []
+          let ancestorsComplete = true
+          if (options?.children) {
+            const seen = new Set([sessionID])
+            let parentID = info.parentID
+            while (parentID && !seen.has(parentID)) {
+              seen.add(parentID)
+              const known = store.session.info[parentID]
+              if (known) {
+                parentID = known.parentID
+                continue
+              }
+              const parent = await api()
+                .session.get({ sessionID: parentID })
+                .catch(() => undefined)
+              if (!parent || parent.id !== parentID) {
+                // A parent that cannot be read truncates the walk: the family
+                // is not kept, so the next sync retries the missing ancestor
+                // instead of grouping under the wrong root.
+                ancestorsComplete = false
+                break
+              }
+              ancestors.push(parent)
+              parentID = parent.parentID
+            }
+          }
+          // An ancestor the walk read may already be in the store by publish time: it arrived
+          // mid-walk (a live event refresh, another sync) and is newer than the snapshot the
+          // walk holds, so publish only the ancestors the store still lacks (#1038) -- the
+          // same fill-only rule publishSessions applies to a stale generation.
+          // The target itself has the same exposure on a family sync (#1051): it runs under
+          // the family key, so a plain sync of the target runs concurrently under its own
+          // key, and one that publishes during the ancestor walk holds a newer snapshot
+          // than this sync's first read. Guard the target the way children are guarded --
+          // a plain sync does not need the guard, since its own key is the one `unread`
+          // checks and its read is by construction the covering one.
+          // The target and the direct children have the same exposure as the listed
+          // descendants in syncDescendants: a snapshot dropped only because a covering
+          // read is still in flight may never be replaced if that read fails (#1053).
+          const droppedPending = options?.children ? [info, ...children].some(pendingCover) : false
+          publishSessions(
+            [
+              ...(options?.children ? [info].filter(unread) : [info]),
+              ...ancestors.filter((ancestor) => !store.session.info[ancestor.id]),
+              ...children.filter(unread),
+            ],
+            generation,
+          )
           // A walk that skipped a failed branch is not kept, so the next sync lists the tree again.
-          if (options?.children && !(await syncDescendants(children, new Set([sessionID]))))
+          // The same applies to a walk that dropped a snapshot for a covering read still
+          // in flight: it is not kept, so the next sync re-reads the dropped session.
+          const descendants = options?.children
+            ? await syncDescendants(children, new Set([sessionID]))
+            : { complete: true, droppedPending: false }
+          if (
+            options?.children &&
+            (!ancestorsComplete || !descendants.complete || descendants.droppedPending || droppedPending)
+          )
             sync.invalidate(`session.family:${sessionID}`)
         })
       },

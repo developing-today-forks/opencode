@@ -6,7 +6,7 @@ import { Location } from "@opencode/schema/location"
 import { Database } from "../database/database.js"
 import { LocationServiceMap } from "../location-service-map.js"
 import { Snapshot } from "../snapshot.js"
-import { PATCH_CONTEXT_LINES } from "../vcs/patch.js"
+import { diffContext } from "../vcs/patch.js"
 import { MessageNotFoundError } from "./error.js"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
@@ -132,7 +132,7 @@ export const turn = Effect.fn("SessionDiff.turn")(function* (
     return yield* snapshot.diff({
       from: Snapshot.ID.make(from),
       to: Snapshot.ID.make(to),
-      context: input.context ?? PATCH_CONTEXT_LINES,
+      context: diffContext(input.context),
     })
   }).pipe(Effect.provide(locations.get(location)))
 })

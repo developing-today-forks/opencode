@@ -1,14 +1,12 @@
 export * as Session from "./session.js"
 
-import { Context, DateTime, Effect, Fiber, Option, Scope } from "effect"
-import type { Entry } from "@opencode/schema/config"
+import { DateTime, Effect, Fiber, Option, Scope } from "effect"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Permission } from "@opencode/schema/permission"
 import { Event } from "@opencode/schema/event"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Bus } from "../bus.js"
-import { Config } from "../config.js"
 import { Database } from "../database/database.js"
 import { Instance } from "../instance/service.js"
 import { LocationServiceMap } from "../location-service-map.js"
@@ -32,6 +30,7 @@ import { SessionRevert } from "./revert.js"
 import { SessionShell } from "./shell.js"
 import { SessionSkill } from "./skill.js"
 import { ModelGovernance } from "./model-governance.js"
+import { GovernanceConfig } from "./governance-config.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 
@@ -104,21 +103,8 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     yield* bus.publish(SessionEvent.SubagentPolicyUpdated, { sessionID, subagentPolicy: input.subagentPolicy })
   })
-  // Governance reads agent definitions from the session location's config
-  // entries, but only when the location's services are already initialized:
-  // session operations never initialize a location just to read them. An
-  // uninitialized location has no definition layer; session policies still
-  // apply.
-  const governanceEntries = (session: SessionSchema.Info) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        if (locations === undefined) return [] as Entry[]
-        const context = yield* locations.contextEffectOption(session.location)
-        if (Option.isNone(context)) return [] as Entry[]
-        const config = Context.getOption(context.value, Config.Service)
-        return config._tag === "Some" ? yield* config.value.entries() : ([] as Entry[])
-      }),
-    ).pipe(Effect.orElseSucceed(() => [] as Entry[]))
+  // Governance inputs (config entries + provider catalog) come from the one
+  // shared construction in governance-config.ts: GovernanceConfig.load.
   const switchAgent = Effect.fn("Session.switchAgent")(function* (
     sessionID: SessionSchema.ID,
     input: { agent: Agent.ID; model?: Model.Ref },
@@ -130,14 +116,21 @@ export const make = Effect.fn("Session.make")(function* () {
     // the switch, else its current model — assertAllowed falls back to the
     // incoming agent's configured default, then the parent's model, when
     // neither exists.
-    if (session.parentID) {
-      const parent = yield* get(session.parentID)
-      const entries = yield* governanceEntries(session)
-      yield* ModelGovernance.assertAllowed({ get }, { entries: () => Effect.succeed(entries) }, {
-        parent,
-        agent: input.agent,
-        model: input.model ?? session.model,
-      })
+    // A fork has no parentID but is a child of its source for governance
+    // (#505), so its switches are checked against the source's chain.
+    const governanceParentID = session.parentID ?? session.fork?.sessionID
+    if (governanceParentID) {
+      const parent = yield* get(governanceParentID)
+      const { entries, catalog } = yield* GovernanceConfig.load(locations, session.location)
+      yield* ModelGovernance.assertAllowed(
+        { get },
+        { entries: () => Effect.succeed(entries), catalog: () => Effect.succeed(catalog) },
+        {
+          parent,
+          agent: input.agent,
+          model: input.model ?? session.model,
+        },
+      )
     }
     yield* bus.publish(SessionEvent.AgentSelected, { sessionID, agent: input.agent, previous: session.agent })
   })
@@ -153,15 +146,21 @@ export const make = Effect.fn("Session.make")(function* () {
     )
       return
     // A child session may only switch to a model its subtree's governance
-    // allows; top-level sessions are unchecked.
-    if (session.parentID) {
-      const parent = yield* get(session.parentID)
-      const entries = yield* governanceEntries(session)
-      yield* ModelGovernance.assertAllowed({ get }, { entries: () => Effect.succeed(entries) }, {
-        parent,
-        agent: session.agent,
-        model: input.model,
-      })
+    // allows; top-level sessions are unchecked. A fork is governed as a
+    // child of its source (#505), as in switchAgent above.
+    const governanceParentID = session.parentID ?? session.fork?.sessionID
+    if (governanceParentID) {
+      const parent = yield* get(governanceParentID)
+      const { entries, catalog } = yield* GovernanceConfig.load(locations, session.location)
+      yield* ModelGovernance.assertAllowed(
+        { get },
+        { entries: () => Effect.succeed(entries), catalog: () => Effect.succeed(catalog) },
+        {
+          parent,
+          agent: session.agent,
+          model: input.model,
+        },
+      )
     }
     yield* bus.publish(SessionEvent.ModelSelected, { sessionID, model: input.model, previous: session.model })
   })
@@ -374,8 +373,13 @@ export const make = Effect.fn("Session.make")(function* () {
       ),
   )
   const interrupt = Effect.fn("Session.interrupt")(
-    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) =>
-      Effect.uninterruptible(execution.interrupt(sessionID, options)),
+    (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean; readonly force?: boolean }) =>
+      Effect.uninterruptible(
+        execution.interrupt(
+          sessionID,
+          options?.resume !== undefined ? { resume: options.resume } : undefined,
+        ),
+      ),
   )
   const stage = Effect.fn("Session.revert.stage")(function* (
     sessionID: SessionSchema.ID,

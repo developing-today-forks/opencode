@@ -13,7 +13,20 @@ import { Money } from "@opencode/schema/money"
 
 const decodeRevert = Schema.decodeUnknownSync(PersistedRevert)
 
-export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.Info {
+export type AuthoritativeUsage = {
+  readonly costUsd: number
+  readonly cacheSavedUsd: number
+  readonly input: number
+  readonly output: number
+  readonly reasoning: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+}
+
+export function fromRow(
+  row: typeof SessionTable.$inferSelect,
+  authoritative?: AuthoritativeUsage,
+): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: SessionSchema.ID.make(row.id),
     projectID: Project.ID.make(row.project_id),
@@ -35,6 +48,18 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
         }
       : undefined,
     cost: Money.USD.make(row.cost),
+    costAuthoritative: authoritative
+      ? {
+          cost: Money.USD.make(authoritative.costUsd),
+          cacheSavings: Money.USD.make(authoritative.cacheSavedUsd),
+          tokens: {
+            input: authoritative.input,
+            output: authoritative.output,
+            reasoning: authoritative.reasoning,
+            cache: { read: authoritative.cacheRead, write: authoritative.cacheWrite },
+          },
+        }
+      : undefined,
     tokens: {
       input: row.tokens_input,
       output: row.tokens_output,
@@ -52,6 +77,7 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
     metadata: row.metadata ?? undefined,
     subagentPolicy: row.subagent_policy ?? undefined,
     permissions: row.permission ?? undefined,
+    detached: row.detached ? true : undefined,
     revert: row.revert ? decodeRevert(row.revert) : undefined,
     outcome: row.idle_outcome ?? undefined,
     time: {

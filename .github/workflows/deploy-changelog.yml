@@ -1,12 +1,6 @@
 name: deploy-changelog
 
 on:
-  push:
-    branches:
-      - dev
-    paths:
-      - services/changelog/**
-      - .github/workflows/deploy-changelog.yml
   workflow_dispatch:
 
 concurrency:

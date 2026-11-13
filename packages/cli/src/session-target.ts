@@ -97,6 +97,9 @@ export function parseSessionTargetModel(value?: string, aliases?: ModelAlias.Ali
       resolved = ModelAlias.resolve(aliases, value)
     } catch {}
   }
+  // A bare alias has no slash yet: pass it through in the provider field so the
+  // server can expand it against the effective aliases it has loaded.
+  if (!resolved.includes("/")) return { providerID: resolved, id: "" }
   const model = Model.Ref.parse(resolved)
   return { providerID: model.providerID, id: model.id, variant: model.variant }
 }

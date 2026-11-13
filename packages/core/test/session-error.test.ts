@@ -55,7 +55,8 @@ describe("toSessionError", () => {
           }),
         ),
       ),
-    ).toEqual({ type: "provider.unsupported-operation", message: "no compact endpoint" })
+      // code#7073 step 4: the outcome also records the provider the reason names.
+    ).toEqual({ type: "provider.unsupported-operation", message: "no compact endpoint", provider: "provider" })
     expect(
       toSessionError(
         llm(
@@ -282,7 +283,7 @@ describe("toSessionError", () => {
     expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false])
   })
 
-  test("honors provider retry header overrides", () => {
+  test("classification overrides provider retry header (#2225)", () => {
     const http = (headers: Record<string, string>) =>
       new HttpContext({
         url: "https://example.com",
@@ -290,6 +291,7 @@ describe("toSessionError", () => {
         headers,
       })
 
+    // A wire x-should-retry: false cannot suppress a retryable class.
     expect(
       SessionRunnerRetry.isRetryable(
         llm(
@@ -299,11 +301,12 @@ describe("toSessionError", () => {
           }),
         ),
       ),
-    ).toBeFalse()
+    ).toBeTrue()
+    // A wire x-should-retry: true cannot force a never-retry class.
     expect(
       SessionRunnerRetry.isRetryable(
         llm(new InvalidRequestError({ message: "retry", http: http({ "x-should-retry": "true" }) })),
       ),
-    ).toBeTrue()
+    ).toBeFalse()
   })
 })

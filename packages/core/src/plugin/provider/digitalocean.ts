@@ -11,6 +11,8 @@ import { Model } from "../../model.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import type { PluginInternal } from "../internal.js"
+import { MAX_EXPIRES_IN_SECONDS } from "./expires.js"
+import { serverSeconds } from "../../util/number.js"
 
 const providerID = Provider.ID.make("digitalocean")
 const integrationID = Integration.ID.make("digitalocean")
@@ -20,6 +22,10 @@ const clientID = "b1a6c5158156caac821fd1b30253ca8acb52454a48fa744420e41889cb589f
 const authorizeEndpoint = "https://cloud.digitalocean.com/v1/oauth/authorize"
 const routersEndpoint = "https://api.digitalocean.com/v2/gen-ai/models/routers"
 const callbackPort = 1456
+/** Byte cap on the token POST body the callback page sends to the loopback
+ * server (#1954): the legitimate body is a few hundred bytes of JSON; this
+ * matches the callback page error-excerpt cap (oauth/page.ts). */
+export const MAX_CALLBACK_BODY_BYTES = 64 * 1024
 const callbackPath = "/auth/callback"
 const tokenPath = "/auth/token"
 const RoutersResponse = Schema.Struct({
@@ -36,6 +42,29 @@ const decodeCallback = Schema.decodeUnknownOption(
     }),
   ),
 )
+
+/** Server-supplied `expires_in` seconds, restricted to a plain unsigned
+ * decimal integer spelling (the #715/#724 grammar family): spellings like
+ * "1e3", "0x10", "3600junk", or "3600.9" are not reinterpreted — they yield
+ * NaN and the caller applies its 30-day fallback (#771). A well-spelled but
+ * implausibly large value — the classic millisecond-scale lifetime — is
+ * clamped to the shared sane bound (#899, expires.ts): stored verbatim it
+ * would fabricate an expiry the consumer trusts for weeks. */
+export const expiresInSeconds = (raw: string | undefined): number => {
+  const text = (raw ?? "0").trim()
+  // The spelling grammar stays here (#771): an invalid spelling yields NaN
+  // outright, because serverSeconds has a single fallback and this site's
+  // pinned returns differ per input class - NaN for an invalid spelling,
+  // 0 for a spelled "0" / absent value. A well-spelled value is normalised
+  // by serverSeconds (#994) with fallback 0, so "0" and absent still return
+  // 0, and an oversized (millisecond-scale) value clamps to the bound.
+  if (!/^\d+$/.test(text)) return Number.NaN
+  return serverSeconds(Number.parseInt(text, 10), {
+    fallback: 0,
+    max: MAX_EXPIRES_IN_SECONDS,
+    oversized: "clamp",
+  })
+}
 
 const oauth = {
   integrationID,
@@ -59,9 +88,28 @@ const oauth = {
           return
         }
         if (request.method === "POST" && url.pathname === tokenPath) {
+          // Bounded read (#1954): the bootstrap page POSTs a few hundred bytes of
+          // JSON built from the URL hash, so cap the accumulated body as chunks
+          // arrive (the callback page excerpt cap, page.ts) instead of
+          // buffering an unbounded body into Buffer.concat.
           const chunks: Buffer[] = []
-          request.on("data", (chunk: Buffer) => chunks.push(chunk))
+          let size = 0
+          let oversized = false
+          request.on("data", (chunk: Buffer) => {
+            if (oversized) return
+            size += chunk.byteLength
+            if (size > MAX_CALLBACK_BODY_BYTES) {
+              oversized = true
+              const message = "OAuth callback body too large"
+              Effect.runFork(Deferred.fail(token, new Error(message)))
+              response.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }))
+              request.destroy()
+              return
+            }
+            chunks.push(chunk)
+          })
           request.on("end", () => {
+            if (oversized) return
             const body = Option.getOrUndefined(decodeCallback(Buffer.concat(chunks).toString("utf8")))
             const error = body?.error_description || body?.error
             const access = body?.access_token
@@ -71,7 +119,7 @@ const oauth = {
               response.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }))
               return
             }
-            const expires = Number.parseInt(body.expires_in ?? "0", 10)
+            const expires = expiresInSeconds(body.expires_in)
             Effect.runFork(
               Deferred.succeed(token, {
                 access,

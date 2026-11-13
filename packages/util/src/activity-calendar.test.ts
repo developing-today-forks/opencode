@@ -126,6 +126,28 @@ describe("activity calendar", () => {
     expect(calendar.weeks[0][0].level).toBe(2)
   })
 
+  test("ignores activity outside the requested range when ranking intensity", () => {
+    const base = {
+      from: new Date(2026, 9, 19).getTime(),
+      to: new Date(2026, 9, 26).getTime(),
+      maxWeeks: 53,
+      activity: [
+        { date: "2026-10-20", steps: 10 },
+        { date: "2026-10-21", steps: 5 },
+      ],
+    }
+    const outlier = {
+      ...base,
+      activity: [...base.activity, { date: "2020-01-01", steps: 100_000 }],
+    }
+    const levelByDate = (calendar: ReturnType<typeof activityCalendar>) =>
+      Object.fromEntries(calendar.weeks.flat().map((day) => [day.date, day.level]))
+    expect(levelByDate(activityCalendar(outlier))).toEqual(levelByDate(activityCalendar(base)))
+    const levels = levelByDate(activityCalendar(outlier))
+    expect(levels["2026-10-20"]).toBe(4)
+    expect(levels["2026-10-21"]).toBe(2)
+  })
+
   test("returns an empty calendar for an empty range", () => {
     expect(activityCalendar({ ...input, to: input.from, activity: [] })).toEqual({
       weeks: [],

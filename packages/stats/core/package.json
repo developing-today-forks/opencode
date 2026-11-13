@@ -27,6 +27,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@opencode/util": "workspace:*",
     "@planetscale/database": "1.19.0",
     "drizzle-orm": "catalog:",
     "effect": "catalog:",

@@ -1,10 +1,11 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { validateRoutes } from "@opentunnel/client/effect"
 import { Service, type Info } from "@opencode/client/effect/service"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
-import { Deferred, Effect, FileSystem, Schedule, Schema } from "effect"
+import { Deferred, Effect, FileSystem, Layer, Schedule, Schema } from "effect"
 import { NetAddress } from "effect/net"
 import { TestClock } from "effect/testing"
 import fs from "node:fs/promises"
@@ -15,7 +16,8 @@ import { ServiceRegistration } from "../src/services/service-registration"
 import { isolatedEnv, transpilerCache } from "./fixture/environment"
 import { testEffect } from "../../core/test/lib/effect"
 
-const it = testEffect(NodeFileSystem.layer)
+const fileSystemLayer = Layer.provideMerge(FSUtil.layer, NodeFileSystem.layer)
+const it = testEffect(fileSystemLayer)
 
 test("managed service ports are stable per installation channel", () => {
   expect(ServiceConfig.defaultPort("latest", "linux")).toBe(0xc0de)
@@ -41,11 +43,34 @@ test("managed service ports on Windows stay below the range Windows reserves", (
   expect(ports.filter((port) => port.linux < 0xc000 && port.windows !== port.linux)).toEqual([])
 })
 
+test("service port accepts only plain decimal spellings (#875)", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-port-config-"))
+  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)))
+  try {
+    for (const value of ["0x10", "1e3", "8080.0", "+8080", "0", "65536", "abc", "80junk", ""]) {
+      await expect(run(ServiceConfig.set("port", value))).rejects.toThrow("Port must be between 1 and 65535")
+      // A rejected spelling writes nothing (and so never stops the service).
+      expect(await run(ServiceConfig.read())).toEqual({})
+    }
+    await run(ServiceConfig.set("port", "8080"))
+    expect(await run(ServiceConfig.read())).toEqual({ port: 8080 })
+    // Surrounding whitespace is trimmed before the decimal check.
+    await run(ServiceConfig.set("port", " 65535 "))
+    expect(await run(ServiceConfig.read())).toEqual({ port: 65535 })
+    await run(ServiceConfig.set("port", "1"))
+    expect(await run(ServiceConfig.read())).toEqual({ port: 1 })
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test("service disabled accepts only booleans without changing configuration on invalid input", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-disabled-config-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)))
   try {
     expect(await run(ServiceConfig.get("disabled"))).toBe("false")
     await expect(run(ServiceConfig.set("disabled", "yes"))).rejects.toThrow("Disabled must be true or false")
@@ -63,8 +88,8 @@ test("service disabled accepts only booleans without changing configuration on i
 test("service remote accepts only booleans and persists across set and unset", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-config-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)))
   try {
     expect(await run(ServiceConfig.get("remote"))).toBe("false")
     await expect(run(ServiceConfig.set("remote", "on"))).rejects.toThrow("Remote must be true or false")
@@ -82,8 +107,8 @@ test("service remote accepts only booleans and persists across set and unset", a
 test("remote access route is random, stable once created, hidden, and forgotten when remote is turned off", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-route-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)))
   try {
     const route = await run(ServiceConfig.remote())
     // The SDK rejects invalid route names, which would keep the service from ever attaching.
@@ -109,8 +134,8 @@ test("remote access route is random, stable once created, hidden, and forgotten 
 test("reading a config with remote access stored as a boolean repairs it in place and keeps other settings", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-legacy-"))
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
-  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | FSUtil.Service>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)))
   const file = path.join(root, "config", ServiceConfig.filename())
   try {
     await fs.mkdir(path.dirname(file), { recursive: true })
@@ -142,7 +167,7 @@ test("local channel stores service config with the local service filename", asyn
     await Effect.runPromise(
       ServiceConfig.set("hostname", "127.0.0.2").pipe(
         Effect.provide(Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })),
-        Effect.provide(NodeFileSystem.layer),
+        Effect.provide(fileSystemLayer),
       ),
     )
     expect(await Bun.file(path.join(root, "config", "service-local.json")).json()).toEqual({
@@ -161,21 +186,21 @@ test("service config manages environment variables", async () => {
     await Effect.runPromise(
       ServiceConfig.set("env", "OPENCODE_SERVICE_ENV_TEST", "configured").pipe(
         Effect.provide(layer),
-        Effect.provide(NodeFileSystem.layer),
+        Effect.provide(fileSystemLayer),
       ),
     )
     expect(
       await Effect.runPromise(
         ServiceConfig.get("env", "OPENCODE_SERVICE_ENV_TEST").pipe(
           Effect.provide(layer),
-          Effect.provide(NodeFileSystem.layer),
+          Effect.provide(fileSystemLayer),
         ),
       ),
     ).toBe("configured")
     expect(
       (
         await Effect.runPromise(
-          ServiceConfig.options().pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)),
+          ServiceConfig.options().pipe(Effect.provide(layer), Effect.provide(fileSystemLayer)),
         )
       ).env,
     ).toEqual({ OPENCODE_SERVICE_ENV_TEST: "configured" })
@@ -183,7 +208,7 @@ test("service config manages environment variables", async () => {
     await Effect.runPromise(
       ServiceConfig.unset("env", "OPENCODE_SERVICE_ENV_TEST").pipe(
         Effect.provide(layer),
-        Effect.provide(NodeFileSystem.layer),
+        Effect.provide(fileSystemLayer),
       ),
     )
     expect(await Bun.file(path.join(root, "config", "service-local.json")).json()).toEqual({})
@@ -708,7 +733,7 @@ test("service registration replaces a stale owner with the bound address", async
         id: "owner",
         file: registration,
         shutdown: Effect.never,
-      }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)),
+      }).pipe(Effect.scoped, Effect.provide(fileSystemLayer)),
     )
     expect(await Bun.file(registration).json()).toEqual({
       id: "owner",
@@ -717,7 +742,7 @@ test("service registration replaces a stale owner with the bound address", async
       pid: process.pid,
       password: "secret",
     })
-    await Effect.runPromise(cleanup.pipe(Effect.provide(NodeFileSystem.layer)))
+    await Effect.runPromise(cleanup.pipe(Effect.provide(fileSystemLayer)))
     expect(await Bun.file(registration).exists()).toBe(false)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
@@ -756,6 +781,93 @@ test("a failed service stays registered and owns the selected port until stopped
     await fs.rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+test("same-version contender logs that this build is already current and leaves the incumbent alone", async () => {
+  const service = await startManagedService("opencode-service-already-current-")
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: serviceEnv(service.root),
+    stderr: "pipe",
+    stdout: "pipe",
+  })
+  try {
+    expect(await Promise.race([contender.exited, Bun.sleep(20_000).then(() => undefined)])).toBe(0)
+    const output = (await new Response(contender.stdout).text()) + (await new Response(contender.stderr).text())
+    expect(output).toContain(
+      `managed service version ${service.info.version} (pid ${service.info.pid}) is already running; this build is already current`,
+    )
+    expect((await waitForInfo(service.registration)).id).toBe(service.info.id)
+    expect(service.owner.exitCode).toBe(null)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
+    await stopManagedService(service)
+  }
+}, 45_000)
+
+test("a deliberate serve --service on a different version takes over the incumbent (code#8255)", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-takeover-"))
+  const port = await availablePort()
+  // The starter's own channel registration file, resolved the way ServiceConfig resolves it
+  // (service-local.json under the test channel; service-prod.json for a prod-channel build).
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
+  const env = serviceEnv(root)
+  const entry = path.join(import.meta.dir, "../src/index.ts")
+  const old = Bun.spawn([process.execPath, "--define", 'OPENCODE_VERSION:"2.0.0-old"', entry, "serve", "--service"], {
+    env,
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  let contender: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined
+  try {
+    const before = await waitForInfo(registration, (info) => info.version === "2.0.0-old")
+    contender = Bun.spawn([process.execPath, entry, "serve", "--service"], { env, stderr: "pipe", stdout: "pipe" })
+    const after = await waitForInfo(registration, (info) => info.version === OPENCODE_VERSION && info.id !== before.id)
+    expect(after.pid).toBe(contender.pid)
+    expect(after.pid).not.toBe(before.pid)
+    expect(await waitForExit(old)).toBe(true)
+    expect(contender.exitCode).toBe(null)
+
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+    const output = await new Response(contender.stdout).text()
+    expect(output).toContain("2.0.0-old")
+    expect(output).toContain(`taking over with version ${OPENCODE_VERSION}`)
+  } finally {
+    old.kill("SIGTERM")
+    await old.exited
+    contender?.kill("SIGTERM")
+    if (contender) await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
+
+test("an unreadable registration is not an incumbent: a service start proceeds to bind", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-unreadable-registration-"))
+  const port = await availablePort()
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(root, "config", "opencode", ServiceConfig.filename()), JSON.stringify({ port }))
+  await fs.mkdir(path.dirname(registration), { recursive: true })
+  await fs.writeFile(registration, "{")
+  const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env: serviceEnv(root),
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  try {
+    const info = await waitForInfo(registration, (found) => found.version === OPENCODE_VERSION)
+    expect(info.pid).toBe(contender.pid)
+    expect(contender.exitCode).toBe(null)
+    await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
+    expect(await waitForExit(contender)).toBe(true)
+  } finally {
+    contender.kill("SIGTERM")
+    await contender.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 45_000)
 
 async function waitForInfo(file: string, accept: (info: Info) => boolean = () => true) {
   for (let attempt = 0; attempt < 400; attempt++) {

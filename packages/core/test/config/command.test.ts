@@ -90,6 +90,11 @@ describe("ConfigCommandPlugin.Plugin", () => {
       expected: "First alpha beta. Rest gamma delta.",
     },
     { template: "$ARGUMENTS / $ARGUMENTS", input: "$& $$", expected: "$& $$ / $& $$" },
+    // $0 is not a positional placeholder (#736): it stays as written instead of expanding
+    // to "undefined" (or, alone, to just the last argument).
+    { template: "Run $0 $1", input: "hello world", expected: "Run $0 hello world" },
+    { template: "Run $0", input: "world", expected: "Run $0\n\nworld" },
+    { template: "Run $00 $1", input: "hello", expected: "Run $00 hello" },
   ]) {
     it.live(`interpolates ${JSON.stringify(item.template)} with literal input ${JSON.stringify(item.input)}`, () =>
       Effect.gen(function* () {

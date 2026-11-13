@@ -1,5 +1,44 @@
 import { query } from "@solidjs/router"
 
+const CHANGELOG_FETCH_TIMEOUT_MS = 8_000
+// 20 releases with full markdown bodies run to roughly 4 MB at a high
+// estimate (200 KB per body); 8 MiB gives that twofold headroom.
+const CHANGELOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/** Stream a response body with a hard size cap; an abort cancels the read. */
+async function readCappedBody(response: Response, signal: AbortSignal) {
+  if (!response.body) return ""
+  const reader = response.body.getReader()
+  const abort = () => void reader.cancel(signal.reason).catch(() => undefined)
+  signal.addEventListener("abort", abort, { once: true })
+  try {
+    signal.throwIfAborted()
+    const chunks: Uint8Array[] = []
+    let size = 0
+    while (true) {
+      const result = await reader.read()
+      signal.throwIfAborted()
+      if (result.done) break
+      size += result.value.byteLength
+      if (size > CHANGELOG_MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => undefined)
+        throw new Error("Changelog response exceeded size limit")
+      }
+      chunks.push(result.value)
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return new TextDecoder().decode(bytes)
+  } finally {
+    signal.removeEventListener("abort", abort)
+    reader.releaseLock()
+  }
+}
+
 type Release = {
   tag_name: string
   name: string
@@ -39,7 +78,9 @@ export type ChangelogData = {
 }
 
 export async function loadChangelog(): Promise<ChangelogData> {
+  const signal = AbortSignal.timeout(CHANGELOG_FETCH_TIMEOUT_MS)
   const response = await fetch("https://api.github.com/repos/anomalyco/opencode/releases?per_page=20", {
+    signal,
     headers: {
       Accept: "application/vnd.github.v3+json",
       "User-Agent": "OpenCode-Console",
@@ -53,7 +94,9 @@ export async function loadChangelog(): Promise<ChangelogData> {
 
   if (!response?.ok) return { ok: false, releases: [] }
 
-  const data = await response.json().catch(() => undefined)
+  const data = await readCappedBody(response, signal)
+    .then((text) => JSON.parse(text) as unknown)
+    .catch(() => undefined)
   if (!Array.isArray(data)) return { ok: false, releases: [] }
 
   const releases = (data as Release[]).map((release) => {

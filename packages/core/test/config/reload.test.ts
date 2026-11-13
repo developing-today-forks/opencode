@@ -391,8 +391,15 @@ function title(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
+// The poll budget must cover the whole reload chain -- filesystem watcher delivery,
+// the skill plugin's 100ms debounce, and a rescan -- on a loaded runner. At 100 attempts
+// (~1s) this expires intermittently on CI (#551: a 1360ms failure on an unrelated PR;
+// the .agents skills variant takes ~0.9s on an unloaded laptop), and the sibling
+// waitUntil helpers in this directory already allow 200 attempts. 300 attempts (~3s)
+// gives the chain headroom while a genuinely stuck reload still fails inside the
+// test timeout instead of passing silently.
 const waitUntil = Effect.fnUntraced(function* (condition: Effect.Effect<boolean>) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 300; attempt++) {
     if (yield* condition) return
     yield* Effect.sleep("10 millis")
   }

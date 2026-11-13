@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { providerMessage } from "../src/route/executor.js"
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect"
 import { Headers, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Socket } from "effect/socket"
@@ -38,6 +39,66 @@ const expectAIError = (error: unknown) => {
 const largeProviderMessage = `Upstream request failed: ${"validation failed; ".repeat(1_000)}`
 
 describe("RequestExecutor", () => {
+  it.effect("bounds declared and streamed oversized status bodies by bytes", () =>
+    Effect.gen(function* () {
+      const prefix = "x".repeat(64 * 1024)
+      const streamed = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(prefix.slice(0, 32000)))
+          controller.enqueue(new TextEncoder().encode(prefix.slice(32000) + "extra"))
+          controller.close()
+        },
+      })
+      for (const [body, headers] of [
+        [prefix + "extra", { "content-length": "1000000" }],
+        [streamed, {}],
+      ] as const) {
+        const error = yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          return yield* executor.execute(request).pipe(Effect.flip)
+        }).pipe(Effect.provide(fixedResponse(body, { status: 503, headers })))
+        expect(error.reason.body).toBe(prefix)
+        expect(error.reason._tag).toBe("ProviderInternal")
+      }
+    }),
+  )
+
+  it.effect("stops reading an endless status body at the cap", () =>
+    Effect.gen(function* () {
+      let pulls = 0
+      let cancelled = false
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++
+          controller.enqueue(new Uint8Array(8192).fill(120))
+        },
+        cancel() {
+          cancelled = true
+        },
+      })
+      const error = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(request).pipe(Effect.flip)
+      }).pipe(Effect.provide(fixedResponse(body, { status: 503 })))
+      expect(error.reason.body).toBe("x".repeat(64 * 1024))
+      expect(pulls).toBeLessThanOrEqual(9)
+      expect(cancelled).toBeTrue()
+    }),
+  )
+
+  it.effect("classifies small status bodies without truncation", () =>
+    Effect.gen(function* () {
+      const body = '{"error":{"message":"Rate limited","type":"rate_limit_error"}}'
+      const error = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(request).pipe(Effect.flip)
+      }).pipe(Effect.provide(fixedResponse(body, { status: 429 })))
+      expect(error.reason._tag).toBe("RateLimit")
+      expect(error.reason.body).toBe(body)
+      expect(error.message).toBe("Rate limited")
+    }),
+  )
+
   it.effect("preserves externally captured HTTP errors without inventing response context", () =>
     Effect.sync(() => {
       const cause = new Error("upstream request failed")
@@ -525,6 +586,28 @@ describe("RequestExecutor", () => {
     ),
   )
 
+  it.effect("records a __proto__ rate-limit window as an own entry", () =>
+    Effect.gen(function* () {
+      const executor = yield* RequestExecutor.Service
+      const error = yield* executor.execute(request).pipe(Effect.flip)
+
+      expectAIError(error)
+      if (error.reason._tag !== "RateLimit") throw new Error("expected rate-limit details")
+      expect(Object.hasOwn(error.reason.rateLimit.remaining, "__proto__")).toBe(true)
+      expect(error.reason.rateLimit.remaining?.["__proto__"]).toBe("5")
+    }).pipe(
+      Effect.provide(
+        fixedResponse("rate limited", {
+          status: 429,
+          headers: {
+            "x-ratelimit-limit-requests": "100",
+            "x-ratelimit-remaining-__proto__": "5",
+          },
+        }),
+      ),
+    ),
+  )
+
   it.effect("extracts Anthropic-style rate-limit diagnostics", () =>
     Effect.gen(function* () {
       const executor = yield* RequestExecutor.Service
@@ -978,6 +1061,82 @@ describe("WebSocket channel execution", () => {
     }),
   )
 
+  it.effect("retains a synchronous burst of small frames in order", () =>
+    Effect.gen(function* () {
+      class BurstSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close() {}
+      }
+      const socket = new BurstSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      Array.from({ length: 2048 }, (_, index) => String(index)).forEach((data) =>
+        socket.dispatchEvent(new MessageEvent("message", { data })),
+      )
+
+      expect(yield* connection.messages.pipe(Stream.take(2048), Stream.runCollect)).toEqual(
+        Array.from({ length: 2048 }, (_, index) => String(index)),
+      )
+      yield* connection.close
+    }),
+  )
+
+  it.effect("accepts the exact byte limit and fails/closes when the next frame overflows it", () =>
+    Effect.gen(function* () {
+      const closed: Array<{ code: number; reason: string }> = []
+      class BoundedSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close(code: number, reason: string) {
+          closed.push({ code, reason })
+        }
+      }
+      const socket = new BoundedSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(16 * 1024 * 1024) }))
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(16 * 1024 * 1024) }))
+      expect(closed).toEqual([])
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(1) }))
+
+      const error = yield* connection.messages.pipe(Stream.runDrain, Effect.flip)
+      expect(error.reason).toMatchObject({ _tag: "Transport", code: "buffer-overflow", phase: "receive" })
+      expect(closed).toEqual([{ code: 1009, reason: "Inbound buffer exceeded" }])
+      yield* connection.close
+    }),
+  )
+
+  it.effect("bounds overhead from empty frames even when the byte limit is not reached", () =>
+    Effect.gen(function* () {
+      const closed: Array<{ code: number; reason: string }> = []
+      class BoundedSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close(code: number, reason: string) {
+          closed.push({ code, reason })
+        }
+      }
+      const socket = new BoundedSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      Array.from({ length: 4096 }, () => socket.dispatchEvent(new MessageEvent("message", { data: "" })))
+      expect(closed).toEqual([])
+      socket.dispatchEvent(new MessageEvent("message", { data: "" }))
+
+      const error = yield* connection.messages.pipe(Stream.runDrain, Effect.flip)
+      expect(error.reason).toMatchObject({ _tag: "Transport", code: "buffer-overflow", phase: "receive" })
+      expect(closed).toEqual([{ code: 1009, reason: "Inbound buffer exceeded" }])
+      yield* connection.close
+    }),
+  )
+
   it.effect("uses HTTP when no per-call WebSocket executor is provided", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(sseEvents(...frames))))
@@ -1045,4 +1204,22 @@ describe("WebSocket channel execution", () => {
       expect(yield* Ref.get(commits)).toBe(0)
     }),
   )
+})
+
+describe("providerMessage well-formedness (#1977)", () => {
+  const astral = "\u{1F600}"
+  test("drops a straddling pair whole at the 2000 excerpt cut", () => {
+    const out = providerMessage(500, "a".repeat(1999) + astral + "b".repeat(100))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.includes(astral)).toBe(false)
+    expect(out.endsWith("\u2026")).toBe(true)
+  })
+  test("keeps a pair that ends exactly at the cut", () => {
+    const out = providerMessage(500, "a".repeat(1998) + astral + "b".repeat(100))
+    expect(out.isWellFormed()).toBe(true)
+    expect(out.includes(astral)).toBe(true)
+  })
+  test("leaves short bodies untouched", () => {
+    expect(providerMessage(500, "boom " + astral)).toContain("boom " + astral)
+  })
 })

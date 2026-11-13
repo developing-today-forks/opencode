@@ -5,6 +5,7 @@ import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { Effect } from "effect"
 import { SessionSystemPrompt } from "../session/system-prompt.js"
+import DELEGATION_PROMPT from "../session/runner/prompt/delegation.txt"
 
 import PROMPT_GPT from "./system-prompt/gpt.txt"
 import PROMPT_ASTRA from "./system-prompt/gpt-astra.txt"
@@ -59,7 +60,33 @@ export const MetaPlugin = make("opencode.prompt.meta", (model) => {
   return PROMPT_META.replaceAll("{{MODEL_NAME}}", model.name)
 })
 
-export const Plugins = [OpenAIPlugin, AnthropicPlugin, KimiPlugin, ArceePlugin, MetaPlugin] as const
+// DeepSeek has no family prompt file of its own (#1888): it serves under the
+// generic Kimi template, which carries the shared delegation stance, instead of
+// matching no family at all and getting no family prompt.
+export const DeepSeekPlugin = make("opencode.prompt.deepseek", (model) =>
+  model.id.toLowerCase().includes("deepseek") ? PROMPT_KIMI : undefined,
+)
+
+// The shared delegation guidance (#1887/#1888), rendered by the base and family prompts.
+export const DELEGATION_GUIDANCE = DELEGATION_PROMPT.trim()
+
+const FAMILY_MATCHES = ["gpt", "claude", "kimi", "trinity", "muse", "deepseek"] as const
+
+// Fallback for models no family matches (#1888): they keep the base system
+// prompt, with the delegation stance appended — the base policy, never nothing.
+export const fallbackDelegationPrompt = (model: Model.Info): string | undefined => {
+  const id = model.id.toLowerCase()
+  if (FAMILY_MATCHES.some((family) => id.includes(family))) return undefined
+  return DELEGATION_GUIDANCE
+}
+
+export const FallbackPlugin = make(
+  "opencode.prompt.fallback",
+  (model) => fallbackDelegationPrompt(model),
+  "append",
+)
+
+export const Plugins = [OpenAIPlugin, AnthropicPlugin, KimiPlugin, ArceePlugin, MetaPlugin, DeepSeekPlugin, FallbackPlugin] as const
 
 function make(
   id: string,

@@ -42,6 +42,19 @@ test("server.info decodes the readiness response", async () => {
   })
 })
 
+test("server.connect defaults to an explicit JSON Accept header", async () => {
+  const httpClient = HttpClient.make((request) => {
+    expect(request.headers.accept).toBe("application/json")
+    return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ token: "session-token" })))
+  })
+  const result = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    return yield* client.server.connect({ code: "pairing-code" })
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+
+  expect(result).toEqual({ token: "session-token" })
+})
+
 test("vcs.base decodes nullable review-base metadata", async () => {
   const location = { directory: "/repo", project: { id: "global", directory: "/repo", canonical: "/repo" } }
   const base = {
@@ -140,7 +153,7 @@ test("event.subscribe exposes and decodes the native Effect event stream", async
   )
   const events = await Effect.gen(function* () {
     const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
-    return yield* client.event.subscribe().pipe(Stream.runCollect)
+    return yield* client.event.subscribe().pipe(Stream.take(2), Stream.runCollect)
   }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
 
   expect(Array.from(events).map((event) => event.type)).toEqual(["server.connected", "session.model.selected"])
@@ -169,7 +182,9 @@ test("shared event source runs with the Effect context captured by make", async 
       Effect.provideService(Token, "captured"),
     ),
   )
-  expect((await Effect.runPromise(Stream.runCollect(client.event.subscribe())))[0]).toEqual(connected)
+  expect((await Effect.runPromise(Stream.runCollect(client.event.subscribe().pipe(Stream.take(1)))))[0]).toEqual(
+    connected,
+  )
 })
 
 test("event.subscribe reports each SSE id and resumes after the last one a consumer took", async () => {
@@ -193,16 +208,17 @@ test("event.subscribe reports each SSE id and resumes after the last one a consu
   )
 
   // server.connected carries no id, so three events leave inst:2 as the last one consumed.
-  const first = await Effect.runPromise(Stream.runCollect(client.event.subscribe().pipe(Stream.take(3))))
-  expect(first.map((event) => event.type)).toEqual([
+  // The first body then ends: the subscription reconnects on its own (#2321)
+  // and resumes from inst:2, so one subscription yields both bodies' events.
+  const events = await Effect.runPromise(Stream.runCollect(client.event.subscribe().pipe(Stream.take(5))))
+  expect(events.map((event) => event.type)).toEqual([
     "server.connected",
     "session.model.selected",
     "session.model.selected",
+    "server.connected",
+    "session.model.selected",
   ])
-  const second = await Effect.runPromise(Stream.runCollect(client.event.subscribe()))
-
   expect(lastEventIDs).toEqual([null, "inst:2"])
-  expect(second.map((event) => event.type)).toEqual(["server.connected", "session.model.selected"])
 })
 
 test("event.subscribe does not advance the cursor past an event that was never taken", async () => {
@@ -222,7 +238,7 @@ test("event.subscribe does not advance the cursor past an event that was never t
   )
 
   await Effect.runPromise(Stream.runCollect(client.event.subscribe().pipe(Stream.take(1))))
-  await Effect.runPromise(Stream.runCollect(client.event.subscribe()))
+  await Effect.runPromise(Stream.runCollect(client.event.subscribe().pipe(Stream.take(3))))
 
   expect(lastEventIDs).toEqual([null, null])
 })

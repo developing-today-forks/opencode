@@ -7,16 +7,28 @@ import { Headers } from "effect/http"
 import { AISDKNative } from "@opencode/core/aisdk-native"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
+import { Database } from "@opencode/core/database/database"
 import { Compatibility, ID, Info, Model, VariantID } from "@opencode/core/model"
+import { ModelPlan } from "@opencode/core/model-plan"
 import { Provider } from "@opencode/core/provider"
 import { Variant } from "@opencode/core/variant"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { ModelResolver } from "@opencode/core/model-resolver"
 import { ModelRoute } from "@opencode/core/model-route"
-import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
+import type { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { RouteAttemptTable } from "@opencode/core/model-route-log/sql"
+import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { AISDK } from "@opencode/core/aisdk"
 import { Npm } from "@opencode/util/npm"
-import { it } from "./lib/effect"
+import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Global } from "@opencode/util/global"
+import { it, testEffect } from "./lib/effect"
+import { withTempDir } from "./fixture/tmpdir"
+
+const itWithRouteLog = testEffect(LayerNode.compile(LayerNode.group([ModelRouteLog.node, Database.node])))
 
 interface ModelOptions {
   readonly providerID?: Provider.ID
@@ -1639,6 +1651,8 @@ describe("ModelResolver routes", () => {
   const withResolver = <A, E>(
     leaves: ReadonlyArray<ReturnType<typeof leaf>>,
     run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
+    integration?: unknown,
+    dataDir?: string,
   ) => {
     const provider = Provider.Info.make({
       ...Provider.Info.empty(leaves[0].providerID),
@@ -1653,13 +1667,18 @@ describe("ModelResolver routes", () => {
           Layer.mock(Model.Service, {
             get: (providerID, id) =>
               Effect.succeed(leaves.find((item) => item.providerID === providerID && item.id === id)),
+            all: () => Effect.succeed(leaves),
           }),
-          Layer.mock(Integration.Service, {
-            revision: () => 0,
-            connection: { active: () => Effect.undefined },
-          } as never),
+          Layer.mock(
+            Integration.Service,
+            (integration ?? {
+              revision: () => 0,
+              connection: { active: () => Effect.undefined },
+            }) as never,
+          ),
           Layer.mock(Npm.Service, {}),
           Layer.mock(AISDK.Service, {} as never),
+          Layer.succeed(Global.Service, Global.make(dataDir === undefined ? {} : { data: dataDir })),
         ),
       ),
     )
@@ -1673,7 +1692,653 @@ describe("ModelResolver routes", () => {
   const ordered = {
     nodes: [{ selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] }],
   }
+  const single = { nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }] }
   const targetOf = (resolved: ModelResolver.Resolved) => String(resolved.routing?.target.providerID)
+
+  it.effect("carries each target's declared cache format into the resolved model's compatibility", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], {
+      ...ordered,
+      targetCacheFormats: [{ cacheFormat: "anthropic" }, { cacheFormat: "alibaba" }],
+    })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(route)
+        expect(first.model.compatibility?.cacheFormat).toBe("anthropic")
+        const next = yield* first.routing!.fallback()
+        expect(next?.model.compatibility?.cacheFormat).toBe("alibaba")
+      }),
+    )
+  })
+
+  it.effect("carries the route's declared system prompt into the resolution (#1413)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered, system: "You are a persona." })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(route)
+        expect(first.routing?.system).toBe("You are a persona.")
+        const next = yield* first.routing!.fallback()
+        expect(next?.routing?.system).toBe("You are a persona.")
+      }),
+    )
+  })
+
+  // #1720: a configured provider route registers direct-addressing models under its own
+  // provider id; the resolver routes any definition-carrying model, whatever its provider.
+  it.effect("resolves a direct provider-route model through its members and falls over (#1720)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const direct = Info.make({
+      ...routed([a, b], { ...ordered, id: "mistral-plan/luna" }),
+      providerID: Provider.ID.make("mistral-plan"),
+      id: ID.make("luna"),
+    })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(direct)
+        expect(targetOf(first)).toBe("pa")
+        expect(first.routing?.routeID).toBe(ID.make("mistral-plan/luna"))
+        const next = yield* first.routing!.fallback()
+        expect(next ? targetOf(next) : undefined).toBe("pb")
+      }),
+    )
+  })
+
+  // #7073: a session launched on a bare provider model got no routing, so the
+  // runner's failover cascade never engaged and a startup provider error was
+  // terminal. When a configured route lists the direct model as a target, the
+  // direct resolution carries that route's routing and its fallback enters
+  // the route cascade behind the direct target.
+  it.effect("attaches the containing route to a direct model so startup errors can fail over (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b, c, route], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(a)
+        expect(String(first.ref.providerID)).toBe("pa")
+        expect(first.routing?.routeID).toBe(ID.make("pool"))
+        expect(targetOf(first)).toBe("pa")
+        const next = yield* first.routing!.fallback()
+        expect(next ? targetOf(next) : undefined).toBe("pb")
+        const plain = yield* resolver.resolveModel(c)
+        expect(plain.routing).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("names the provider-route id when a direct provider-route model has no targets (#1720)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const direct = Info.make({
+      ...routed([a], { ...single, targets: [], targetVariants: [], nodes: [], id: "mistral-plan/luna" }),
+      providerID: Provider.ID.make("mistral-plan"),
+      id: ID.make("luna"),
+    })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        const error = yield* resolver.resolveModel(direct).pipe(Effect.flip)
+        expect(error.message).toBe("No model is available for route mistral-plan/luna")
+      }),
+    )
+  })
+
+  it.effect("a target's declared cache format overrides the model's own compatibility", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      compatibility: { cacheFormat: "alibaba" },
+    })
+    const route = routed([a], { ...single, targetCacheFormats: [{ cacheFormat: "anthropic" }] })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        const resolved = yield* resolver.resolveModel(route)
+        expect(resolved.model.compatibility?.cacheFormat).toBe("anthropic")
+      }),
+    )
+  })
+
+  // #1014 PR2: a session seated on a sub-route re-enters through a parent route
+  // that nests it when the sub-route exhausts, instead of dying on the sub-route.
+  const routeAs = (id: string, leaves: ReadonlyArray<ReturnType<typeof leaf>>, extra: Record<string, unknown>) => {
+    const targets = leaves.map((item) => ModelRoute.ref({ providerID: item.providerID, model: item.id }))
+    return Info.make({
+      ...model(undefined),
+      providerID: ModelRoute.PROVIDER_ID,
+      id: ID.make(id),
+      settings: {
+        [ModelRoute.SETTING]: {
+          id,
+          targets,
+          targetVariants: targets.map(() => ({})),
+          health: ModelRoute.policy(),
+          attempts: 1,
+          ...extra,
+        },
+      },
+    })
+  }
+
+  const withCascadeResolver = <A, E>(
+    leaves: ReadonlyArray<ReturnType<typeof leaf>>,
+    routes: ReadonlyArray<ReturnType<typeof routeAs>>,
+    run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
+    integration?: unknown,
+  ) => {
+    const provider = Provider.Info.make({
+      ...Provider.Info.empty(leaves[0].providerID),
+      activation: "enabled",
+      package: Provider.aisdk("@ai-sdk/openai"),
+      settings: { apiKey: "key" },
+    })
+    const catalog = [...routes, ...leaves]
+    const layer = ModelResolver.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Provider.Service, { get: () => Effect.succeed(provider) }),
+          Layer.mock(Model.Service, {
+            get: (providerID, id) =>
+              Effect.succeed(catalog.find((item) => item.providerID === providerID && item.id === id)),
+            available: () => Effect.succeed(catalog),
+            all: () => Effect.succeed(catalog),
+          }),
+          Layer.mock(
+            Integration.Service,
+            (integration ?? {
+              revision: () => 0,
+              connection: { active: () => Effect.undefined },
+            }) as never,
+          ),
+          Layer.mock(Npm.Service, {}),
+          Layer.mock(AISDK.Service, {} as never),
+        ),
+      ),
+    )
+    return withConfigEnv({}, () =>
+      Effect.gen(function* () {
+        return yield* run(yield* ModelResolver.Service)
+      }).pipe(Effect.provide(layer)),
+    )
+  }
+
+  const subAndParent = () => {
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const sub = routeAs("sub", [a, b], {
+      nodes: [{ selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] }],
+    })
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    return { a, b, c, sub, parent }
+  }
+
+  it.effect("cascades to the nesting parent route when a sub-route's fallback exhausts (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(String(second?.routing?.routeID)).toBe("sub")
+        expect(targetOf(second!)).toBe("pb")
+        // The sub-route is exhausted: the cascade re-enters through the parent,
+        // whose only untried leaf is the one outside the nested subtree.
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("parent")
+        expect(targetOf(third!)).toBe("pc")
+        // Every candidate in the chain has been tried: the cascade stops cleanly.
+        const fourth = yield* third!.routing!.fallback()
+        expect(fourth).toBeUndefined()
+      }),
+    )
+  })
+
+  // #7073 case (b): the session's route nests a leaf group (a provider route with
+  // two members) and a sibling leaf outside the group. The first target fails with
+  // an Authentication error and fails over inside the group; the second fails with
+  // an unclassified InvalidRequest (HTTP 404). The cascade must continue to the
+  // sibling leaf in the same route — in the incident it stopped at the 404 even
+  // though candidates remained, and the session died.
+  const groupAndSibling = (selection: "ordered" | "weighted") => {
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const d = leaf("pd")
+    const sub = routeAs("sub", [a, b, c], {
+      nodes: [
+        { selection, weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "leafgroup", selection, weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    const parent = routeAs("parent", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 3 }] },
+        {
+          routeID: "sub",
+          selection: "ordered",
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    })
+    return { a, b, c, d, sub, parent }
+  }
+
+  it.effect("case (b): a failover inside a nested group continues to the sibling leaf in the same route (#7073)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, d, sub, parent } = groupAndSibling("ordered")
+    return withCascadeResolver([a, b, c, d], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        // First target fails (Authentication): failover stays inside the group.
+        const second = yield* first.routing!.fallback()
+        expect(String(second?.routing?.routeID)).toBe("sub")
+        expect(targetOf(second!)).toBe("pb")
+        // Second target fails (unclassified InvalidRequest 404): the group is
+        // exhausted, but the route's sibling leaf outside the group must serve.
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("sub")
+        expect(targetOf(third!)).toBe("pc")
+        // Only once the whole route is exhausted does the cascade climb to the parent.
+        const fourth = yield* third!.routing!.fallback()
+        expect(String(fourth?.routing?.routeID)).toBe("parent")
+        expect(targetOf(fourth!)).toBe("pd")
+        const fifth = yield* fourth!.routing!.fallback()
+        expect(fifth).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("case (b) weighted: a failover inside a nested weighted group continues to the sibling leaf (#7073)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, d, sub, parent } = groupAndSibling("weighted")
+    return withCascadeResolver([a, b, c, d], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        const seen = new Set<string>([targetOf(first)])
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        seen.add(targetOf(second!))
+        // After both group members are tried, the sibling leaf must be produced
+        // by the next fallback regardless of weighted draw order inside the group.
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeDefined()
+        expect(seen.has(targetOf(third!))).toBe(false)
+        expect(["pa", "pb", "pc"]).toContain(targetOf(third!))
+        expect(targetOf(third!)).toBe("pc")
+      }),
+    )
+  })
+
+  // #7073 case (b), incident order: the route's first child is a plain leaf
+  // (the _claude target), then a provider-route group with two members
+  // (opencode-go.drewrypope, opencode-go.popesdrew), then a sibling leaf.
+  // Auth failover leaf -> group member 1 worked in the incident; the 404 on
+  // group member 1 then had to continue to group member 2 — it did not.
+  it.effect("case (b) incident order: leaf -> provider group member 1 -> member 2 -> sibling (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const d = leaf("pd")
+    const sub = routeAs("sub", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { node: 1 }, { leaf: 3 }] },
+        {
+          providerRoute: "opencode-go-plans",
+          selection: "ordered",
+          weights: [1, 1],
+          children: [{ leaf: 1 }, { leaf: 2 }],
+        },
+      ],
+    })
+    return withCascadeResolver([a, b, c, d], [sub], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(targetOf(second!)).toBe("pb")
+        const third = yield* second!.routing!.fallback()
+        expect(targetOf(third!)).toBe("pc")
+        const fourth = yield* third!.routing!.fallback()
+        expect(targetOf(fourth!)).toBe("pd")
+        const fifth = yield* fourth!.routing!.fallback()
+        expect(fifth).toBeUndefined()
+      }),
+    )
+  })
+
+  // #7073 case (b), route-store verdict: at the 404's fallback every untried
+  // target in the route was cooling or quota-walled (popesdrew's credential
+  // benched ~7.8h, the luna credential ~57s out), so the ready-only fallback
+  // returned undefined and the turn died — while initial resolution would
+  // have seated a last-resort candidate rather than refuse. The fallback
+  // cascade now ends with the same last-resort pass.
+  it.effect("case (b): fallback seats a last-resort candidate when every remaining target is walled (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const walled = routeAs("pool", [a, b, c], {
+      nodes: [{ selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+    })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withCascadeResolver([a, b, c], [walled], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(walled)
+        expect(targetOf(first)).toBe("pa")
+        // Both remaining targets wall off with failure benches (the incident's
+        // walls were credential/target cooldowns, not quota verdicts): no
+        // ready candidate remains anywhere.
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now())
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        // The fallback seats a last-resort candidate instead of refusing.
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        expect(["pb", "pc"]).toContain(targetOf(second!))
+        // Progression continues through the usable set and then terminates.
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeDefined()
+        expect(targetOf(third!)).not.toBe(targetOf(second!))
+        const fourth = yield* third!.routing!.fallback()
+        expect(fourth).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("case (b): the last resort prefers a merely-cooling target over a quota-dead one (#7073)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const walled = routeAs("pool", [a, b, c], {
+      nodes: [{ selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+    })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withCascadeResolver([a, b, c], [walled], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(walled)
+        expect(targetOf(first)).toBe("pa")
+        // pb is quota-dead; pc is only failure-cooling. The last resort must
+        // seat pc — quota-dead targets are de-preferred in every scope.
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        expect(targetOf(second!)).toBe("pc")
+      }),
+    )
+  })
+
+  // Ported from model-route-mock-provider.test.ts (#1806): the incident's fatal
+  // resolution happened one altitude up — a wall inside the nested route, then the
+  // chain re-resolving the parent. The route-level driver deliberately does not
+  // reproduce the resolver cascade; this harness does.
+  it.effect("route chains: a wall inside a nested route does not strand the parent route's untried members (#1806)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        // The wall lands inside the nested route mid-session: both of the sub-route's
+        // members are quota-benched, so the sub-route has no servable target.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        // The fallback cascades to the parent instead of dying on the sub-route, and
+        // the parent's untried healthy member serves — no no-candidates resolution.
+        const rescued = yield* first.routing!.fallback()
+        expect(String(rescued?.routing?.routeID)).toBe("parent")
+        expect(targetOf(rescued!)).toBe("pc")
+        // Everything in the chain is now tried or walled: the cascade stops cleanly.
+        const done = yield* rescued!.routing!.fallback()
+        expect(done).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("route chains: a nested member whose active credential is walled serves on its sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const activated: string[] = []
+    let activeB = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) =>
+        Effect.succeed({ id, connections: String(id) === "pb" ? [conn("cred-a"), conn("cred-b")] : [] }),
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pb" ? conn(activeB) : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeB = String(id)
+          }),
+      },
+    }
+    return withCascadeResolver(
+      [a, b, c],
+      [sub, parent],
+      (resolver) =>
+        Effect.gen(function* () {
+          const first = yield* resolver.resolveModel(sub)
+          expect(targetOf(first)).toBe("pa")
+          // pa walls mid-session; pb's *active* credential is known-full, but its
+          // stored sibling is healthy — pb must not be judged by cred-a alone.
+          ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+          ModelRoute.observeCredentialQuota(targetB, "cred-a", {
+            planID: "pb-plan",
+            window: "monthly",
+            providerID: "pb",
+            percent: 100,
+            remaining: 0,
+            resetAt: Date.now() + 3_600_000,
+            observedAt: Date.now(),
+            stale: false,
+          })
+          const rescued = yield* first.routing!.fallback()
+          expect(String(rescued?.routing?.routeID)).toBe("sub")
+          expect(targetOf(rescued!)).toBe("pb")
+          expect(String(rescued?.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
+    )
+  })
+
+  it.effect("cascades on initial resolution when a sub-route has no servable target (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    // The sub-route's leaves are not in the catalog the resolver can load, so the
+    // within-route pass selects and discards both, then the parent serves its
+    // remaining leaf with the tried leaves excluded by ref.
+    return withCascadeResolver([c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const resolved = yield* resolver.resolveModel(sub)
+        expect(String(resolved.routing?.routeID)).toBe("parent")
+        expect(targetOf(resolved)).toBe("pc")
+        expect(String(a.providerID)).toBe("pa")
+        expect(String(b.providerID)).toBe("pb")
+      }),
+    )
+  })
+
+  it.effect("cascades to the nearest ancestor when a grandparent also nests the sub-route (#1014)", () => {
+    ModelRoute.resetHealth()
+    const { a, b, c, sub, parent } = subAndParent()
+    const d = leaf("pd")
+    const grandparent = routeAs("grandparent", [a, b, c, d], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ node: 1 }, { node: 2 }, { leaf: 3 }] },
+        {
+          routeID: "parent",
+          selection: "ordered",
+          weights: [1, 1, 1],
+          children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }],
+        },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    // The grandparent comes first in the catalog: catalog order must not win
+    // over nesting proximity.
+    return withCascadeResolver([a, b, c, d], [grandparent, sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        const second = yield* first.routing!.fallback()
+        const third = yield* second!.routing!.fallback()
+        expect(String(third?.routing?.routeID)).toBe("parent")
+        expect(targetOf(third!)).toBe("pc")
+        // Only once the parent is exhausted does the cascade climb to the grandparent.
+        const fourth = yield* third!.routing!.fallback()
+        expect(String(fourth?.routing?.routeID)).toBe("grandparent")
+        expect(targetOf(fourth!)).toBe("pd")
+      }),
+    )
+  })
+
+  it.effect("does not cascade into a parent that cannot serve the requested variant (#1014)", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("high") }],
+    })
+    const b = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pb"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("high") }],
+    })
+    const c = leaf("pc")
+    const sub = Info.make({
+      ...routeAs("sub", [a, b], {
+        nodes: [{ selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] }],
+      }),
+      variants: [{ id: VariantID.make("high") }],
+    })
+    // The parent route does not offer `high` (no variants advertised): entering
+    // it would serve pc at its default settings, silently dropping the variant.
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub, VariantID.make("high"))
+        expect(targetOf(first)).toBe("pa")
+        const second = yield* first.routing!.fallback()
+        expect(targetOf(second!)).toBe("pb")
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("a speculative fallback does not consume the parent route for the primary's own fallback (#1014)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const sub = routeAs("sub", [a], {
+      nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+    })
+    const parent = routeAs("parent", [a, b, c], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1, 1], children: [{ node: 1 }, { leaf: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1], children: [{ leaf: 0 }] },
+      ],
+    })
+    return withCascadeResolver([a, b, c], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(targetOf(first)).toBe("pa")
+        // Hedge exploration: the primary's fallback is called speculatively and
+        // lands in the parent.
+        const hedge = yield* first.routing!.fallback()
+        expect(String(hedge?.routing?.routeID)).toBe("parent")
+        expect(targetOf(hedge!)).toBe("pb")
+        // The race settles back on the primary: its own fallback must still be
+        // able to enter the parent, and from there reach the parent's last leaf.
+        const next = yield* first.routing!.fallback()
+        expect(String(next?.routing?.routeID)).toBe("parent")
+        const last = yield* next!.routing!.fallback()
+        expect(targetOf(last!)).toBe("pc")
+      }),
+    )
+  })
+
+  it.effect("surfaces the typed load error when a parentless route's targets all fail to load (#1014)", () => {
+    ModelRoute.resetHealth()
+    const broken = model(Provider.aisdk("@ai-sdk/openai-compatible"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { baseURL: "https://${OPENCODE_5256_UNSET_HOST}/v1" },
+    })
+    const solo = routeAs("solo", [broken], {
+      nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+    })
+    return withCascadeResolver([broken], [solo], (resolver) =>
+      Effect.gen(function* () {
+        const failure = yield* resolver.resolveModel(solo).pipe(Effect.flip)
+        // Not RouteUnavailableError: the actionable initialization failure is
+        // preserved through the cascade boundary.
+        expect(failure._tag).toBe("SessionRunnerModel.UnresolvedProviderVariablesError")
+      }),
+    )
+  })
+
+  it.effect("leaves compatibility unchanged when the route declares no cache format", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      compatibility: { cacheFormat: "alibaba" },
+    })
+    const route = routed([a], { ...single })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        const resolved = yield* resolver.resolveModel(route)
+        expect(resolved.model.compatibility?.cacheFormat).toBe("alibaba")
+      }),
+    )
+  })
 
   it.effect("skips a target that is over budget, cooling or skipped, and uses it as a last resort", () => {
     ModelRoute.resetHealth()
@@ -1697,6 +2362,240 @@ describe("ModelResolver routes", () => {
         ModelRoute.resetHealth()
         ModelRoute.failed(ModelRoute.ref({ providerID: "pa", model: a.id }), ModelRoute.policy(), Date.now())
         expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+      }),
+    )
+  })
+
+  it.effect("last resort prefers a merely cooling target over a quota-benched one (code#8086)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // pa answers quota exhaustion: the bench is the only signal it has, and it
+        // is quota-dead. pb fails ordinarily and is merely cooling. Both fall out
+        // of the ready set, but the last resort serves pb despite the order -
+        // seating pa would spend the turn on a leg that has already answered 100%.
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pa", model: a.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pb", model: b.id }), ModelRoute.policy(), Date.now())
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+      }),
+    )
+  })
+
+  it.effect("last resort still serves a quota-benched target when nothing undead remains (code#8086)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // Every target quota-dead: the preference has nothing to prefer, and the
+        // pool still cannot run out - the usable set itself answers, in order.
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pa", model: a.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pb", model: b.id }), ModelRoute.policy(), Date.now(), { quota: true })
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+      }),
+    )
+  })
+
+  it.live("admits exactly one half-open probe when a quota window reset learned after the bench passes (#1123)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], ordered)
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // A quota bench planted with no known reset runs on the generic ladder.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+        // The provider's window reset (5h wall in the incident) is learned after the bench,
+        // from the quota feed, and it passes while the bench still has most of a day to run.
+        const resetAt = Date.now() + 250
+        ModelRoute.observeProviderQuota(
+          targetA,
+          {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: Date.now(),
+            stale: false,
+          },
+          Date.now(),
+        )
+        yield* Effect.sleep("400 millis")
+        // Rollover admits pa again — as the single probe.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        // While that probe is outstanding no second attempt is admitted to pa.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+        // The probe succeeds: pa is fully unbenched, long before the ladder would have expired.
+        ModelRoute.completed(targetA, ModelRoute.policy(), {
+          firstTokenMs: 100,
+          responseMs: 500,
+          tokensPerSecond: 30,
+        })
+        expect(ModelRoute.cooldownUntil(targetA)).toBe(0)
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+      }),
+    )
+  })
+
+  it.live("stamps the probe claim it spends on the resolution, and a release hands it back (#1478)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], ordered)
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        const resetAt = Date.now() + 250
+        ModelRoute.observeProviderQuota(
+          targetA,
+          {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: Date.now(),
+            stale: false,
+          },
+          Date.now(),
+        )
+        yield* Effect.sleep("400 millis")
+        const probe = yield* resolver.resolveModel(route)
+        expect(targetOf(probe)).toBe("pa")
+        expect(probe.routing?.probeClaim).toBeDefined()
+        // An ordinary resolution spends no claim and carries none.
+        const ordinary = yield* resolver.resolveModel(route)
+        expect(targetOf(ordinary)).toBe("pb")
+        expect(ordinary.routing?.probeClaim).toBeUndefined()
+        // The owner hands the unattempted claim back: the probe is due again while the
+        // bench itself is still in force, and the next resolution claims it afresh.
+        const claim = probe.routing!.probeClaim!
+        expect(ModelRoute.releaseBenchProbe(targetA, claim.credentialID, claim.claimedAt, claim.token)).toBe(true)
+        expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
+        expect(ModelRoute.cooldownUntil(targetA)).toBeGreaterThan(Date.now())
+        const again = yield* resolver.resolveModel(route)
+        expect(targetOf(again)).toBe("pa")
+        expect(again.routing?.probeClaim?.claimedAt).toBeGreaterThanOrEqual(claim.claimedAt)
+      }),
+    )
+  })
+
+  it.live("a load failure settles both probe scopes of the pick (#1486)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const cred = "cred-load"
+    const conn = {
+      type: "credential" as const,
+      id: Credential.ID.make(cred),
+      label: cred,
+      method: "key" as const,
+    }
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn] }),
+      connection: {
+        active: () => Effect.succeed(conn),
+        resolve: () => Effect.fail(new Error("credential boom")),
+        activate: () => Effect.void,
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const policy = ModelRoute.policy()
+          const now = Date.now()
+          for (let index = 0; index < 8; index++) {
+            ModelRoute.failed(targetA, policy, now + index, { quota: true })
+            ModelRoute.failed(targetA, policy, now + index, { quota: true }, cred)
+          }
+          const resetAt = now + 250
+          const snapshot = {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: now,
+            stale: false,
+          }
+          ModelRoute.observeProviderQuota(targetA, snapshot, now)
+          ModelRoute.observeCredentialQuota(targetA, cred, snapshot, now)
+          yield* Effect.sleep("400 millis")
+          expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
+          expect(ModelRoute.probeDue(targetA, cred)).toBe(true)
+          // The pick claims both scopes, then load fails on the credential.
+          const error = yield* resolver.resolveModel(route).pipe(Effect.flip)
+          expect(error).toBeDefined()
+          // Both scopes settled: benched with no outstanding claim left behind.
+          expect(ModelRoute.cooldownUntil(targetA)).toBeGreaterThan(Date.now())
+          expect(ModelRoute.credentialCooldownUntil(targetA, cred)).toBeGreaterThan(Date.now())
+          expect(ModelRoute.probeDue(targetA, undefined)).toBe(false)
+          expect(ModelRoute.probeDue(targetA, cred)).toBe(false)
+          expect(ModelRoute.activeBenches(Date.now()).some((bench) => bench.probeClaimed)).toBe(false)
+        }),
+      integration,
+    )
+  })
+
+  it.live("lets a due half-open probe recover a quota-exhausted pool, then restores the pool exclusion (#1390)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const outside = leaf("pc")
+    const route = routed([a, b, outside], {
+      nodes: [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+        { routeID: "sub", selection: "ordered", weights: [1, 1], children: [{ leaf: 0 }, { leaf: 1 }] },
+      ],
+    })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b, outside], (resolver) =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const resetAt = now + 250
+        ModelRoute.failed(targetA, ModelRoute.policy(), now, { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), now, { quota: true })
+        for (const [target, providerID] of [[targetA, "pa"], [targetB, "pb"]] as const)
+          ModelRoute.observeProviderQuota(
+            target,
+            {
+              planID: "plan",
+              window: "five-hours",
+              providerID,
+              percent: 100,
+              remaining: 0,
+              resetAt: providerID === "pa" ? resetAt : resetAt + 30_000,
+              observedAt: now + 1,
+              stale: false,
+            },
+            now + 1,
+          )
+
+        // Before pa's reset, neither bench is probe-eligible and the pool stays pulled.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pc")
+        yield* Effect.sleep("400 millis")
+
+        // pa's reset has passed: the pool no longer counts that due probe as exhaustion,
+        // so it is selected even though the other pool member remains quota-benched.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        // Once pa's probe is claimed, its bench counts again alongside pb's not-yet-due
+        // bench, restoring the hard pool exclusion while the probe is outstanding.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pc")
       }),
     )
   })
@@ -1900,6 +2799,58 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("skips a route target whose ceiling the request does not fit", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.resetSelection()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], {
+      ...ordered,
+      limit: { context: 120_000 },
+      targetLimits: [{ context: 100_000 }, { context: 200_000 }],
+    })
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => {
+      events.push(event)
+    })
+    return Effect.ensuring(
+      withResolver([a, b], (resolver) =>
+        Effect.gen(function* () {
+          // Effective ceilings are min(route cap, leaf ceiling): 100k for pa, 120k for pb.
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-limit-small", 50_000))).toBe("pa")
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-limit-big", 110_000))).toBe("pb")
+          // The skip is attributed to the limit specifically in the resolved-route dump.
+          const decision = events.find((event) => event.kind === "decision" && event.row.chosen === "pb/test-model")
+          expect(decision?.row).toMatchObject({
+            candidates: ["pb/test-model"],
+            detail: { excluded: [{ candidate: "pa/test-model", reason: "over-limit" }] },
+          })
+          // Without a request size every target stays eligible, as before.
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-limit-plain"))).toBe("pa")
+        }),
+      ),
+      Effect.sync(() => ModelRouteLog.setSink(undefined)),
+    )
+  })
+
+  it.effect("does not restore an over-limit target as a last resort", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.resetSelection()
+    const a = leaf("pa")
+    const route = routed([a], { ...single, targetLimits: [{ context: 100_000 }] })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        // The only target's ceiling is below the request: resolution fails rather than
+        // falling back to the over-limit target.
+        const exit = yield* Effect.exit(resolver.resolveModel(route, undefined, "s-too-big", 110_000))
+        expect(exit._tag).toBe("Failure")
+        if (exit._tag === "Failure") expect(exit.cause).toBeDefined()
+        // A request that fits still resolves to the target.
+        expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-fits", 90_000))).toBe("pa")
+      }),
+    )
+  })
+
   it.effect("gives each new session its own target in round-robin mode and keeps it", () => {
     ModelRoute.resetHealth()
     ModelRoute.resetSelection()
@@ -1916,6 +2867,638 @@ describe("ModelResolver routes", () => {
         expect(targetOf(yield* resolver.resolveModel(route, undefined, "s1"))).toBe(one)
         expect(targetOf(yield* resolver.resolveModel(route, undefined, "s2"))).toBe(two)
       }),
+    )
+  })
+
+  it.effect("credentialFallback activates the next eligible credential and re-resolves the same target (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const activated: string[] = []
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn("cred-a"), conn("cred-b")] }),
+      connection: {
+        active: () => Effect.succeed(conn(activeID)),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeID = String(id)
+          }),
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          expect(String(resolved.routing?.credentialID)).toBe("cred-a")
+          const switched = yield* resolved.routing!.credentialFallback!()
+          expect(activated).toEqual(["cred-b"])
+          expect(targetOf(switched!)).toBe("pa")
+          expect(String(switched?.routing?.credentialID)).toBe("cred-b")
+          // The chain remembers every credential it has served: cred-a stays excluded
+          // even though nothing health-based blocks it, so the walk cannot cycle back
+          // and forth between two credentials — it ends and route fallback runs (#1379).
+          const rotated = yield* switched!.routing!.credentialFallback!()
+          expect(activated).toEqual(["cred-b"])
+          expect(rotated).toBeUndefined()
+        }),
+      integration,
+    )
+  })
+
+  it.effect("credentialFallback re-derives account-scoped headers from the activated credential (#870)", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      headers: { "chatgpt-account-id": "acct-a" },
+    })
+    const route = routed([a], { ...single })
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "oauth" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn("cred-a"), conn("cred-b")] }),
+      connection: {
+        active: () => Effect.succeed(conn(activeID)),
+        resolve: (connection: { id: Credential.ID }) =>
+          Effect.succeed(
+            Credential.OAuth.make({
+              type: "oauth",
+              methodID: Integration.MethodID.make("chatgpt-browser"),
+              access: `token-${String(connection.id)}`,
+              refresh: "refresh",
+              expires: Date.now() + 60_000,
+              metadata: { accountID: String(connection.id) === "cred-a" ? "acct-a" : "acct-b" },
+            }),
+          ),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activeID = String(id)
+          }),
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          expect(String(resolved.routing?.credentialID)).toBe("cred-a")
+          expect(resolved.model.route.defaults.headers).toMatchObject({ "chatgpt-account-id": "acct-a" })
+          const switched = yield* resolved.routing!.credentialFallback!()
+          expect(String(switched?.routing?.credentialID)).toBe("cred-b")
+          // The retry is built on cred-b's token AND cred-b's account header: the catalog
+          // source's stale acct-a header must not survive the switch (#870).
+          expect(switched!.model.route.defaults.headers).toMatchObject({ "chatgpt-account-id": "acct-b" })
+        }),
+      integration,
+    )
+  })
+
+  it.effect("credentialFallback does not add an account header to a catalog that never carried one (#870)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "oauth" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn("cred-a"), conn("cred-b")] }),
+      connection: {
+        active: () => Effect.succeed(conn(activeID)),
+        resolve: (connection: { id: Credential.ID }) =>
+          Effect.succeed(
+            Credential.OAuth.make({
+              type: "oauth",
+              methodID: Integration.MethodID.make("chatgpt-browser"),
+              access: `token-${String(connection.id)}`,
+              refresh: "refresh",
+              expires: Date.now() + 60_000,
+              metadata: { accountID: String(connection.id) === "cred-a" ? "acct-a" : "acct-b" },
+            }),
+          ),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activeID = String(id)
+          }),
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          const switched = yield* resolved.routing!.credentialFallback!()
+          expect(String(switched?.routing?.credentialID)).toBe("cred-b")
+          // The leaf's catalog has no chatgpt-account-id (its credentials are key fixtures in
+          // other tests, but the header rule is provider-agnostic): the switch must not invent
+          // one from cred-b's accountID metadata.
+          expect(switched!.model.route.defaults.headers).not.toHaveProperty("chatgpt-account-id")
+        }),
+      integration,
+    )
+  })
+
+  it.effect("credentialFallback excludes the serving credential, not one another session activated (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const activated: string[] = []
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn("cred-a"), conn("cred-b")] }),
+      connection: {
+        active: () => Effect.succeed(conn(activeID)),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeID = String(id)
+          }),
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          expect(String(resolved.routing?.credentialID)).toBe("cred-a")
+          // The serving credential fails on quota and is benched; meanwhile another
+          // session activates cred-b, so cred-b is the *active* credential by the time
+          // this session's fallback runs.
+          ModelRoute.failed(
+            ModelRoute.ref({ providerID: "pa", model: a.id }),
+            ModelRoute.policy(),
+            Date.now(),
+            { quota: true },
+            "cred-a",
+          )
+          activeID = "cred-b"
+          // The fallback must still offer cred-b: it excludes the credential that
+          // served this resolution (cred-a, also credential-cooling), not the
+          // currently active one.
+          const switched = yield* resolved.routing!.credentialFallback!()
+          expect(String(switched?.routing?.credentialID)).toBe("cred-b")
+          expect(targetOf(switched!)).toBe("pa")
+        }),
+      integration,
+    )
+  })
+
+  it.effect("serving attribution comes from the load itself, not the earlier active snapshot (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const activated: string[] = []
+    let activeReads = 0
+    let current = "cred-b"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) => Effect.succeed({ id, connections: [conn("cred-a"), conn("cred-b")] }),
+      connection: {
+        // The ready filter's snapshot reads the active credential first (cred-a); a
+        // concurrent session then activates cred-b, so the load itself serves on cred-b.
+        active: () =>
+          Effect.sync(() => {
+            activeReads += 1
+            return conn(activeReads === 1 ? "cred-a" : current)
+          }),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            current = String(id)
+          }),
+      },
+    }
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          // Attribution names the credential the request was actually built with.
+          expect(String(resolved.routing?.credentialID)).toBe("cred-b")
+          // And the fallback excludes that serving credential, so it offers cred-a —
+          // with snapshot attribution it would have excluded cred-a and retried the
+          // exhausted cred-b.
+          const switched = yield* resolved.routing!.credentialFallback!()
+          expect(activated).toEqual(["cred-a"])
+          expect(String(switched?.routing?.credentialID)).toBe("cred-a")
+        }),
+      integration,
+    )
+  })
+
+  itWithRouteLog.effect("quota snapshots from disjoint routes are both fed within one TTL (#1339)", () =>
+    withTempDir(({ path }) =>
+      Effect.gen(function* () {
+        ModelRoute.resetHealth()
+        ModelRoute.resetQuotaFeed()
+        const now = Date.now()
+        const providers = ["quota-a1", "quota-a2", "quota-b1", "quota-b2"]
+        const store = providers.reduce(
+          (current, providerID) =>
+            ModelPlan.upsertPlan(
+              current,
+              {
+                providerID,
+                label: providerID,
+                coverage: "subscription",
+                quotas: [{ name: "hour", unit: "requests", limit: 1, windowHours: 1 }],
+                status: "active",
+              },
+              new Date(now).toISOString(),
+            ).store,
+          ModelPlan.emptyStore(),
+        )
+        ModelPlan.writeStore(store, path)
+
+        const db = (yield* Database.Service).db
+        yield* db
+          .insert(RouteAttemptTable)
+          .values(
+            providers.map((providerID) => ({
+              time_started: now - 1,
+              time_ended: now,
+              session_id: `session-${providerID}`,
+              route_id: `route-${providerID}`,
+              provider_id: providerID,
+              model_id: "luna",
+              outcome: "success",
+              output_started: true,
+            })),
+          )
+          .run()
+
+        const route = (providers: [string, string, string], poolID: string) => {
+          const leaves = providers.map(leaf)
+          return routed(leaves, {
+            nodes: [
+              { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 2 }] },
+              {
+                routeID: poolID,
+                providerRoute: poolID,
+                selection: "ordered",
+                weights: [1, 1],
+                children: [{ leaf: 0 }, { leaf: 1 }],
+              },
+            ],
+          })
+        }
+        const routeA = route(["quota-a1", "quota-a2", "quota-a-fallback"], "quota-pool-a")
+        const routeB = route(["quota-b1", "quota-b2", "quota-b-fallback"], "quota-pool-b")
+        const definitionA = ModelRoute.definition(routeA)!
+        const definitionB = ModelRoute.definition(routeB)!
+        const allProviders = [...providers, "quota-a-fallback", "quota-b-fallback"]
+
+        yield* withResolver(
+          allProviders.map(leaf),
+          (resolver) =>
+            Effect.gen(function* () {
+              // No pool verdict exists to consult (Drew, 2026-11-07): the feed's
+              // effect is per provider \u2014 route A's providers are gated by their
+              // own snapshots, route B's are not fed yet, and resolution lands on
+              // A's individually-clear fallback leaf.
+              const resolvedA = yield* resolver.resolveModel(routeA)
+              expect(targetOf(resolvedA)).toBe("quota-a-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionA.targets[1])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeUndefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeUndefined()
+
+              const resolvedB = yield* resolver.resolveModel(routeB)
+              expect(targetOf(resolvedB)).toBe("quota-b-fallback")
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[0])).toBeDefined()
+              expect(ModelRoute.providerQuotaBlocked(definitionB.targets[1])).toBeDefined()
+            }),
+          undefined,
+          path,
+        )
+      }).pipe(Effect.ensuring(Effect.sync(() => ModelRoute.resetHealth()))),
+    ),
+  )
+
+  it.effect("the gathered plant fires in a resolution whose gate pass fed first (code#8086)", () =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      ModelRoute.resetQuotaFeed()
+      // The live antigravity shape: one fresh gathered entry, the leaf's own
+      // weekly window at 100% with its reset ahead. The snapshot sits where the
+      // server reads it — the aggregator state dir beside the state root; the
+      // suite's test home (script/test.ts) roots both under os.homedir().
+      const aggregator = path.join(os.homedir(), ".local", "state", "pm-aggregator")
+      const snapshotPath = path.join(aggregator, "quota-current.json")
+      const previous = yield* Effect.tryPromise(() => fs.readFile(snapshotPath, "utf8")).pipe(
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      )
+      try {
+        yield* Effect.tryPromise(() => fs.mkdir(aggregator, { recursive: true }))
+        const now = Date.now()
+        const snapshot = {
+          version: 1,
+          generatedAt: new Date(now).toISOString(),
+          source: "opencode-quota",
+          providers: [
+            {
+              providerId: "planted-grav",
+              state: "ok",
+              measuredAt: new Date(now).toISOString(),
+              windows: [],
+              usage: {
+                windows: {},
+                models: {
+                  "test-model": {
+                    windows: {
+                      weekly: { usedPercent: 100, remainingPercent: 0, resetAt: now + 3 * 86_400_000 },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        }
+        yield* Effect.tryPromise(() => fs.writeFile(snapshotPath, JSON.stringify(snapshot)))
+        const a = leaf("planted-grav")
+        const b = leaf("planted-fallback")
+        const route = routed([a, b], { ...ordered })
+        const targetA = ModelRoute.ref({ providerID: "planted-grav", model: a.id })
+        yield* withResolver([a, b], (resolver) =>
+          Effect.gen(function* () {
+            // Nothing has attempted the walled leaf, so nothing holds it out yet.
+            expect(ModelRoute.skipped(targetA)).toBe(false)
+            // One resolution: the gate pass feeds first (consuming the gate's own
+            // stamps), then the gathered pass must STILL be due — and plant.
+            const resolved = yield* resolver.resolveModel(route)
+            expect(targetOf(resolved)).toBe("planted-fallback")
+            expect(ModelRoute.skipped(targetA)).toBe(true)
+            expect(
+              ModelRoute.activeAdjustments().some(
+                (item) => item.id === "quota-model:planted-grav:test-model" && item.quotaSkipOrigin === "proactive",
+              ),
+            ).toBe(true)
+          }),
+        )
+      } finally {
+        yield* Effect.tryPromise(async () => {
+          if (previous === undefined) await fs.rm(snapshotPath, { force: true })
+          else await fs.writeFile(snapshotPath, previous)
+        }).pipe(Effect.ignore)
+      }
+    }).pipe(Effect.ensuring(Effect.sync(() => ModelRoute.resetHealth()))),
+  )
+
+  it.effect("a known-full active credential takes its target out of the route until a good read (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const conn = { type: "credential" as const, id: Credential.ID.make("cred-a"), label: "lab", method: "key" as const }
+    const integration = {
+      revision: () => 0,
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pa" ? conn : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+      },
+    }
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const snapshot = (percent: number): QuotaSnapshot.Snapshot => ({
+      planID: "pa-plan",
+      window: "monthly",
+      providerID: "pa",
+      percent,
+      remaining: percent >= 100 ? 0 : 50,
+      resetAt: Date.now() + 3_600_000,
+      observedAt: Date.now(),
+      stale: false,
+    })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", snapshot(100))
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", snapshot(40))
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        }),
+      integration,
+    )
+  })
+
+  it.effect("a known-full credential is the last resort when nothing else remains (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const conn = { type: "credential" as const, id: Credential.ID.make("cred-a"), label: "lab", method: "key" as const }
+    const integration = {
+      revision: () => 0,
+      connection: {
+        active: () => Effect.succeed(conn),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+      },
+    }
+    ModelRoute.observeCredentialQuota(ModelRoute.ref({ providerID: "pa", model: a.id }), "cred-a", {
+      planID: "pa-plan",
+      window: "monthly",
+      providerID: "pa",
+      percent: 100,
+      remaining: 0,
+      resetAt: Date.now() + 3_600_000,
+      observedAt: Date.now(),
+      stale: false,
+    })
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          // Only target in the route: the gate yields rather than refusing the turn.
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        }),
+      integration,
+    )
+  })
+
+  it.effect("an over-limit non-full target does not mask a known-full last resort that fits (#6)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], {
+      ...ordered,
+      targetLimits: [{ context: 200_000 }, { context: 100_000 }],
+    })
+    const conn = { type: "credential" as const, id: Credential.ID.make("cred-a"), label: "lab", method: "key" as const }
+    const integration = {
+      revision: () => 0,
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pa" ? conn : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+      },
+    }
+    ModelRoute.observeCredentialQuota(ModelRoute.ref({ providerID: "pa", model: a.id }), "cred-a", {
+      planID: "pa-plan",
+      window: "monthly",
+      providerID: "pa",
+      percent: 100,
+      remaining: 0,
+      resetAt: Date.now() + 3_600_000,
+      observedAt: Date.now(),
+      stale: false,
+    })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          // pa's credential is known-full but pa fits the request; pb is not quota-blocked
+          // but its ceiling is below the request. The last resort is pa: an over-limit
+          // target is unusable, so it cannot count as the non-full alternative that
+          // excludes the known-full credential.
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s-mask", 110_000))).toBe("pa")
+        }),
+      integration,
+    )
+  })
+
+  // #1806 mechanism 3: the ready filter judged a multi-credential leaf by its single
+  // active credential, so a leaf whose active credential was quota-blocked or
+  // credential-cooling was excluded even when a stored sibling could serve it.
+  const multiCredIntegration = (blocked: "quota" | "none") => {
+    const activated: string[] = []
+    let activeID = "cred-a"
+    const conn = (id: string) => ({
+      type: "credential" as const,
+      id: Credential.ID.make(id),
+      label: id,
+      method: "key" as const,
+    })
+    const integration = {
+      revision: () => 0,
+      get: (id: Integration.ID) =>
+        Effect.succeed({ id, connections: String(id) === "pa" ? [conn("cred-a"), conn("cred-b")] : [] }),
+      connection: {
+        active: (id: Integration.ID) => Effect.succeed(String(id) === "pa" ? conn(activeID) : undefined),
+        resolve: () => Effect.succeed(Credential.Key.make({ type: "key", key: "secret" })),
+        activate: (id: Credential.ID) =>
+          Effect.sync(() => {
+            activated.push(String(id))
+            activeID = String(id)
+          }),
+      },
+    }
+    void blocked
+    return { integration, activated }
+  }
+  const fullSnapshot = (providerID: string): QuotaSnapshot.Snapshot => ({
+    planID: `${providerID}-plan`,
+    window: "monthly",
+    providerID,
+    percent: 100,
+    remaining: 0,
+    resetAt: Date.now() + 3_600_000,
+    observedAt: Date.now(),
+    stale: false,
+  })
+
+  it.effect("a leaf whose active credential is quota-blocked serves on a stored sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const { integration, activated } = multiCredIntegration("quota")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          // Served on the active credential while it is healthy.
+          const first = yield* resolver.resolveModel(route)
+          expect(String(first.routing?.credentialID)).toBe("cred-a")
+          // The active credential becomes known-full: the leaf must not be judged
+          // by it alone — the stored sibling serves, activated before the load.
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", fullSnapshot("pa"))
+          const resolved = yield* resolver.resolveModel(route)
+          expect(targetOf(resolved)).toBe("pa")
+          expect(String(resolved.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
+    )
+  })
+
+  it.effect("a leaf whose active credential is credential-cooling serves on a stored sibling credential (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const route = routed([a], { ...single })
+    const { integration, activated } = multiCredIntegration("none")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const now = Date.now()
+    for (let index = 0; index < 8; index++)
+      ModelRoute.failed(targetA, ModelRoute.policy(), now + index, { quota: true }, "cred-a")
+    expect(ModelRoute.credentialCooldownUntil(targetA, "cred-a")).toBeGreaterThan(Date.now())
+    return withResolver(
+      [a],
+      (resolver) =>
+        Effect.gen(function* () {
+          const resolved = yield* resolver.resolveModel(route)
+          expect(targetOf(resolved)).toBe("pa")
+          expect(String(resolved.routing?.credentialID)).toBe("cred-b")
+          expect(activated).toEqual(["cred-b"])
+        }),
+      integration,
+    )
+  })
+
+  it.effect("a leaf is out when every stored credential that could serve it is blocked (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const { integration, activated } = multiCredIntegration("quota")
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver(
+      [a, b],
+      (resolver) =>
+        Effect.gen(function* () {
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+          ModelRoute.observeCredentialQuota(targetA, "cred-a", fullSnapshot("pa"))
+          ModelRoute.observeCredentialQuota(targetA, "cred-b", fullSnapshot("pa"))
+          expect(targetOf(yield* resolver.resolveModel(route))).toBe("pb")
+          expect(activated).toEqual([])
+        }),
+      integration,
     )
   })
 })

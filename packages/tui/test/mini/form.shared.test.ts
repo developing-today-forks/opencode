@@ -47,6 +47,29 @@ describe("Mini form state", () => {
     })
   })
 
+  test("rejects non-decimal numeric spellings and empty required answers (#844)", () => {
+    const form = request([
+      { key: "count", type: "integer", required: true },
+      { key: "rate", type: "number" },
+    ])
+    let state = createFormBodyState(form)
+    state = formCommitInput(state, form, "0x10")
+    expect(state.error).toBe("Expected a number")
+    expect(state.answers.count).toBeUndefined()
+    state = formCommitInput(state, form, "")
+    expect(state.error).toBe("Answer required")
+    state = formCommitInput(state, form, "42")
+    expect(state.error).toBe("")
+    expect(state.answers.count).toBe(42)
+    state = formSetField(state, form, 1)
+    state = formCommitInput(state, form, "1e3")
+    expect(state.error).toBe("Expected a number")
+    expect(state.answers.rate).toBeUndefined()
+    state = formCommitInput(state, form, "")
+    expect(state.error).toBe("")
+    expect(state.answers.rate).toBeUndefined()
+  })
+
   test("rejects invalid and deliberately unsupported shapes", () => {
     const invalid = request([
       { key: "required", type: "string", required: true },

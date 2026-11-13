@@ -1,4 +1,5 @@
 diff --git a/dist/dev.cjs b/dist/dev.cjs
+index 11f3095f53b18183fe4b18230593cb8c7324a2d9..d4fbb2bb706b41b1b19eabe8cb3d9d61aa979028 100644
 --- a/dist/dev.cjs
 +++ b/dist/dev.cjs
 @@ -1009,18 +1009,21 @@ function cleanNode(node) {
@@ -27,6 +28,7 @@ diff --git a/dist/dev.cjs b/dist/dev.cjs
    if (Transition && Transition.running) node.tState = 0;else node.state = 0;
    delete node.sourceMap;
 diff --git a/dist/dev.js b/dist/dev.js
+index ea05c500b9dc9e64dd40f9cdfbd056e0c8c00be2..093bb7c1f11be903363c97a3d917ee128d6636ad 100644
 --- a/dist/dev.js
 +++ b/dist/dev.js
 @@ -1007,18 +1007,21 @@ function cleanNode(node) {
@@ -55,6 +57,7 @@ diff --git a/dist/dev.js b/dist/dev.js
    if (Transition && Transition.running) node.tState = 0;else node.state = 0;
    delete node.sourceMap;
 diff --git a/dist/server.cjs b/dist/server.cjs
+index 989ec19c128c179f7f227647ba7fc68d499abca2..df19676c003b1f34a679a5cb3843471fcd03547a 100644
 --- a/dist/server.cjs
 +++ b/dist/server.cjs
 @@ -127,12 +127,14 @@ function onCleanup(fn) {
@@ -75,6 +78,7 @@ diff --git a/dist/server.cjs b/dist/server.cjs
  }
  function catchError(fn, handler) {
 diff --git a/dist/server.js b/dist/server.js
+index 1455ee9b0e3c1fd41c27e884284f5f245286db5c..23ff7d2eb6c93ab4c500a251778d84d7bea08ea9 100644
 --- a/dist/server.js
 +++ b/dist/server.js
 @@ -125,12 +125,14 @@ function onCleanup(fn) {
@@ -95,6 +99,7 @@ diff --git a/dist/server.js b/dist/server.js
  }
  function catchError(fn, handler) {
 diff --git a/dist/solid.cjs b/dist/solid.cjs
+index 5fcf6a71996e852a2db79d97835a3e93da563a08..e1b375f323f485e53a94f0273fd01cc9992f5518 100644
 --- a/dist/solid.cjs
 +++ b/dist/solid.cjs
 @@ -964,18 +964,21 @@ function cleanNode(node) {
@@ -123,6 +128,7 @@ diff --git a/dist/solid.cjs b/dist/solid.cjs
    if (Transition && Transition.running) node.tState = 0;else node.state = 0;
  }
 diff --git a/dist/solid.js b/dist/solid.js
+index 7bf60d44650787f3afcd4242f53207d1087a962a..5f25cc7c8e559285afc57bc47de5cd7b47b8b6eb 100644
 --- a/dist/solid.js
 +++ b/dist/solid.js
 @@ -962,18 +962,21 @@ function cleanNode(node) {
@@ -150,3 +156,16 @@ diff --git a/dist/solid.js b/dist/solid.js
    }
    if (Transition && Transition.running) node.tState = 0;else node.state = 0;
  }
+diff --git a/package.json b/package.json
+index baf27f78ae4d1653f2656f6fb1dc37330dc456a1..724d2c48c42a0864cfc1e2fe3fa60827c9bca658 100644
+--- a/package.json
++++ b/package.json
+@@ -86,7 +86,7 @@
+     },
+     "./jsx-dev-runtime": {
+       "types": "./types/jsx.d.ts",
+-      "default": "./dist/solid.js"
++      "default": "./dist/dev.js"
+     },
+     "./store": {
+       "worker": {

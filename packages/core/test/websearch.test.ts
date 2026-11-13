@@ -293,6 +293,12 @@ describe("WebSearch", () => {
     { header: "invalid", millis: 60_000 },
     { header: "", millis: 60_000 },
     { header: "-1", millis: 60_000 },
+    { header: "2026-02-30T00:00:00Z", millis: 60_000 },
+    { header: "2026-13-01T00:00:00Z", millis: 60_000 },
+    { header: "2026-01-01T24:00:00Z", millis: 60_000 },
+    { header: "1970-01-01T00:02:00Z", millis: 120_000 },
+    { header: "999999999", millis: 900_000 },
+    { header: "Fri, 01 Jan 9999 00:00:00 GMT", millis: 900_000 },
   ].forEach(({ header, millis }) => {
     it.effect(`respects Retry-After ${JSON.stringify(header)} and recovers after cooldown`, () =>
       Effect.gen(function* () {

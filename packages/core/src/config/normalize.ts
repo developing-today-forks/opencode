@@ -30,7 +30,6 @@ import { ConfigMigrateV1 } from "../v1/config/migrate.js"
 import { ModelAlias } from "../model-alias.js"
 import { ModelRouteMatch } from "../model-route-match.js"
 import { ModelRouteSchedule } from "../model-route-schedule.js"
-import { PositiveInt } from "../schema.js"
 
 export interface Diagnostic {
   readonly kind: "conflict" | "invalid" | "unsupported"
@@ -266,8 +265,11 @@ function normalizeMcp(input: Record<string, unknown>, encoded: Record<string, un
   const nativeServers: Record<string, unknown> = {}
   const timeout: Record<string, unknown> = {}
   if (isRecord(input.experimental) && own(input.experimental, "mcp_timeout")) {
+    // The legacy value lands on the catalog and execution leaves, so it decodes
+    // with a leaf of the bounded timeout config and takes the same
+    // setTimeout-cliff cap (#1077) instead of a bare PositiveInt.
     const value = decodeEncoded(
-      PositiveInt,
+      ConfigMCP.Timeout.fields.catalog,
       input.experimental.mcp_timeout,
       ["experimental", "mcp_timeout"],
       diagnostics,
@@ -501,51 +503,92 @@ function normalizeExperimental(
         )
         if (value !== undefined) result.shell_timeout = value
       }
-      if (own(experimental, "model_route_tuning")) {
-        unknownKeys(
-          experimental.model_route_tuning,
-          ConfigModelRoutes.Tuning.fields,
-          ["experimental", "model_route_tuning"],
-          diagnostics,
-        )
+      if (own(experimental, "model_route_demotion")) {
         const value = decodeEncoded(
-          ConfigExperimental.Info.fields.model_route_tuning,
-          withValidNotes(experimental.model_route_tuning, ["experimental", "model_route_tuning"], diagnostics),
-          ["experimental", "model_route_tuning"],
+          ConfigExperimental.Info.fields.model_route_demotion,
+          experimental.model_route_demotion,
+          ["experimental", "model_route_demotion"],
           diagnostics,
         )
-        if (value !== undefined) result.model_route_tuning = value
+        if (value !== undefined) result.model_route_demotion = value
       }
-      if (own(experimental, "model_route_log")) {
-        unknownKeys(
-          experimental.model_route_log,
-          ConfigModelRoutes.Log.fields,
-          ["experimental", "model_route_log"],
-          diagnostics,
-        )
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.model_route_log,
-          experimental.model_route_log,
-          ["experimental", "model_route_log"],
-          diagnostics,
-        )
-        if (value !== undefined) result.model_route_log = value
+      // Routing config (#1140): the canonical shape is `experimental.routes.*`; the flat
+      // `experimental.model_routes` / `provider_routes` / `model_route_*` keys are the
+      // deprecated spellings of the same keys and fold into the nested shape here, so
+      // every downstream consumer reads exactly one shape. The flat keys stay accepted
+      // (the deployed config and external file readers use them); when both spellings
+      // name the same key, the nested value wins and the conflict is diagnosed, per key.
+      const routesInput = isRecord(experimental.routes) ? experimental.routes : undefined
+      if (own(experimental, "routes") && !routesInput) invalid(["experimental", "routes"], diagnostics)
+      // A typo'd container key (routes.modles) would otherwise drop silently: the fold below
+      // only reads the seven known fields, so enumerate the rest by name like tuning/log do.
+      if (routesInput) unknownKeys(routesInput, ConfigExperimental.Routes.fields, ["experimental", "routes"], diagnostics)
+      const routes: Record<string, unknown> = {}
+      const routeSources = <T>(
+        flatKey: string,
+        nestedKey: string,
+        decode: (value: unknown, path: string[]) => T | undefined,
+      ): T | undefined => {
+        const flat = own(experimental, flatKey) ? decode(experimental[flatKey], ["experimental", flatKey]) : undefined
+        const nested =
+          routesInput && own(routesInput, nestedKey)
+            ? decode(routesInput[nestedKey], ["experimental", "routes", nestedKey])
+            : undefined
+        return prefer(flat, nested, ["experimental", "routes", nestedKey], diagnostics) as T | undefined
       }
-      if (own(experimental, "model_routes")) {
-        const resolvedRoutes = resolveRouteTargets(experimental.model_routes, aliases)
-        const value = decodeMap(
-          resolvedRoutes,
+      const mapValue =
+        <S extends Schema.Codec<unknown, unknown, never>>(schema: S, item: (value: unknown) => unknown = (v) => v) =>
+        (value: unknown, path: string[]) => {
+          const decoded = decodeMap(item(value), schema, path, diagnostics, decodeEncoded)
+          return Object.keys(decoded).length || (isRecord(value) && !Object.keys(value).length) ? decoded : undefined
+        }
+      const tuningValue = (value: unknown, path: string[]) => {
+        unknownKeys(value, ConfigModelRoutes.Tuning.fields, path, diagnostics)
+        return decodeEncoded(
+          ConfigExperimental.Routes.fields.tuning,
+          withValidNotes(value, path, diagnostics),
+          path,
+          diagnostics,
+        )
+      }
+      const logValue = (value: unknown, path: string[]) => {
+        unknownKeys(value, ConfigModelRoutes.Log.fields, path, diagnostics)
+        return decodeEncoded(ConfigExperimental.Routes.fields.log, value, path, diagnostics)
+      }
+      const models = routeSources("model_routes", "models", (value, path) => {
+        if (value === undefined) return undefined
+        const decoded = decodeMap(
+          resolveRouteTargets(value, aliases),
           ConfigModelRoutes.Route,
-          ["experimental", "model_routes"],
+          path,
           diagnostics,
           decodeRoute,
         )
-        if (
-          Object.keys(value).length ||
-          (isRecord(experimental.model_routes) && !Object.keys(experimental.model_routes).length)
-        )
-          result.model_routes = value
-      }
+        return Object.keys(decoded).length || (isRecord(value) && !Object.keys(value).length) ? decoded : undefined
+      })
+      if (models !== undefined) routes.models = models
+      const providers = routeSources(
+        "provider_routes",
+        "providers",
+        mapValue(ConfigModelRoutes.ProviderRoute),
+      )
+      if (providers !== undefined) routes.providers = providers
+      const schedules = routeSources("model_route_schedules", "schedules", (value, path) => {
+        const decoded = decodeList(value, ConfigModelRoutes.GlobalSchedule, path, diagnostics, decodeGlobalSchedule)
+        return decoded.length || Array.isArray(value) ? decoded : undefined
+      })
+      if (schedules !== undefined) routes.schedules = schedules
+      const windows = routeSources("model_route_windows", "windows", mapValue(ConfigModelRoutes.Window))
+      if (windows !== undefined) routes.windows = windows
+      const tuning = routeSources("model_route_tuning", "tuning", tuningValue)
+      if (tuning !== undefined) routes.tuning = tuning
+      const log = routeSources("model_route_log", "log", logValue)
+      if (log !== undefined) routes.log = log
+      const settings = routeSources("model_route_settings", "settings", (value, path) => {
+        unknownKeys(value, ConfigModelRoutes.Settings.fields, path, diagnostics)
+        return decodeEncoded(ConfigExperimental.Routes.fields.settings, value, path, diagnostics)
+      })
+      if (settings !== undefined) routes.settings = settings
       if (own(experimental, "aliases") && !encoded.aliases) {
         const value = decodeEncoded(
           ConfigAlias.Info,
@@ -558,17 +601,7 @@ function normalizeExperimental(
           encoded.aliases = value
         }
       }
-      if (own(experimental, "model_route_schedules")) {
-        const value = decodeList(
-          experimental.model_route_schedules,
-          ConfigModelRoutes.GlobalSchedule,
-          ["experimental", "model_route_schedules"],
-          diagnostics,
-          decodeGlobalSchedule,
-        )
-        if (value.length || Array.isArray(experimental.model_route_schedules))
-          result.model_route_schedules = value
-      }
+      if (Object.keys(routes).length || routesInput !== undefined) result.routes = routes
     }
   }
   if (Object.keys(result).length || (isRecord(input.experimental) && !Object.keys(input.experimental).length))
@@ -613,37 +646,37 @@ function resolveModelString(model: unknown, aliases?: ModelAlias.Aliases): unkno
 
 function resolveEntryModels(map: unknown, aliases?: ModelAlias.Aliases): unknown {
   if (!isRecord(map) || !aliases) return map
-  const res: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(map)) {
-    if (isRecord(v) && typeof v.model === "string") {
-      res[k] = { ...v, model: resolveModelString(v.model, aliases) }
-    } else {
-      res[k] = v
-    }
-  }
-  return res
+  // Object.fromEntries defines keys as data properties, so an entry named
+  // "__proto__" is preserved instead of mutating the result's prototype.
+  return Object.fromEntries(
+    Object.entries(map).map(([k, v]) => [
+      k,
+      isRecord(v) && typeof v.model === "string" ? { ...v, model: resolveModelString(v.model, aliases) } : v,
+    ]),
+  )
 }
 
 function resolveRouteTargets(routes: unknown, aliases?: ModelAlias.Aliases): unknown {
   if (!isRecord(routes) || !aliases) return routes
-  const res: Record<string, unknown> = {}
-  for (const [k, route] of Object.entries(routes)) {
-    if (isRecord(route) && Array.isArray(route.targets)) {
-      const targets = route.targets.map((target) => {
-        if (typeof target === "string") {
-          return resolveModelString(target, aliases)
-        }
-        if (isRecord(target) && typeof target.model === "string") {
-          return { ...target, model: resolveModelString(target.model, aliases) }
-        }
-        return target
-      })
-      res[k] = { ...route, targets }
-    } else {
-      res[k] = route
-    }
-  }
-  return res
+  // Object.fromEntries, as in resolveEntryModels: a route named "__proto__"
+  // must stay an entry, not become the result's prototype.
+  return Object.fromEntries(
+    Object.entries(routes).map(([k, route]) => {
+      if (isRecord(route) && Array.isArray(route.targets)) {
+        const targets = route.targets.map((target) => {
+          if (typeof target === "string") {
+            return resolveModelString(target, aliases)
+          }
+          if (isRecord(target) && typeof target.model === "string") {
+            return { ...target, model: resolveModelString(target.model, aliases) }
+          }
+          return target
+        })
+        return [k, { ...route, targets }]
+      }
+      return [k, route]
+    }),
+  )
 }
 
 function normalizeWatcher(input: Record<string, unknown>, encoded: Record<string, unknown>, diagnostics: Diagnostic[]) {
@@ -921,9 +954,6 @@ function decodeEncoded<S extends Schema.Codec<unknown, unknown, never, never>>(
   return undefined
 }
 
-/** A pool is skipped whole when nothing could ever join it or a matching key is malformed. Dropping only
- * the bad key could widen the pool, for an exclude that no longer applies. Keys the decode drops and
- * schedules the router will skip are reported too, though the pool still loads with them. */
 function decodeRoute(
   schema: typeof ConfigModelRoutes.Route,
   value: unknown,
@@ -974,8 +1004,9 @@ function scheduleProblems(
   const skipped = schedule.id ? `skipped schedule ${schedule.id}` : "skipped schedule"
   if (schedule.factor === undefined && schedule.weight === undefined)
     diagnostics.push({ kind: "invalid", path, message: `${skipped}: it has neither factor nor weight` })
-  const window = ModelRouteSchedule.read(schedule.when)
-  if (Result.isFailure(window))
+  const window =
+    typeof schedule.when === "string" ? undefined : ModelRouteSchedule.read(schedule.when)
+  if (window !== undefined && Result.isFailure(window))
     window.failure.forEach((problem) =>
       diagnostics.push({
         kind: "invalid",
@@ -1024,7 +1055,6 @@ function droppedKeys(raw: unknown, decoded: unknown, path: string[], diagnostics
     diagnostics.push({ kind: "invalid", path: [...path, key], message: "omitted unknown setting" })
   })
 }
-
 function canonical<S extends Schema.Codec<unknown, unknown, never, never>>(schema: S, value: unknown) {
   return plain(
     Option.getOrThrow(

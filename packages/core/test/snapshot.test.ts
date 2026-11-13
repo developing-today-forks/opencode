@@ -340,6 +340,48 @@ describe("Snapshot", () => {
     ),
   )
 
+  testEffect(Layer.empty).live("normalises a negative, fractional or non-finite diff context before it reaches git", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          const body = Array.from({ length: 20 }, (_, index) => `line-${index}`).join("\n") + "\n"
+          yield* Effect.promise(async () => {
+            await fs.mkdir(project)
+            await fs.writeFile(path.join(project, "file.txt"), body)
+            await initGit(project, true)
+          })
+          yield* Effect.gen(function* () {
+            const snapshot = yield* Snapshot.Service
+            const before = yield* snapshot.capture()
+            yield* Effect.promise(() =>
+              fs.writeFile(path.join(project, "file.txt"), body.replace("line-10", "changed")),
+            )
+            const after = yield* snapshot.capture()
+            if (!before || !after) throw new globalThis.Error("capture failed")
+            const diff = (context: number) => snapshot.diff({ from: before, to: after, context })
+            const negative = yield* diff(-1)
+            expect(negative[0]?.patch).toContain("changed")
+            expect(negative[0]?.patch).not.toContain("\n line-9")
+            const fractional = yield* diff(1.5)
+            expect(fractional[0]?.patch).toContain("\n line-9")
+            expect(fractional[0]?.patch).not.toContain("line-0")
+            const nan = yield* diff(Number.NaN)
+            expect(nan[0]?.patch).toContain("line-0")
+            expect(nan[0]?.patch).toContain("line-19")
+            const infinite = yield* diff(Number.POSITIVE_INFINITY)
+            expect(infinite[0]?.patch).toContain("line-0")
+            expect(infinite[0]?.patch).toContain("line-19")
+            const valid = yield* diff(3)
+            expect(valid[0]?.patch).toContain("\n line-7")
+            expect(valid[0]?.patch).not.toContain("line-0")
+          }).pipe(Effect.provide(snapshotLayer(tmp.path, project)))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   // dezren39/nix#665: the earlier tree holds `features/design.md`, which check-ignore rejects once `features` is a symlink.
   const posix = process.platform === "win32" ? testEffect(Layer.empty).live.skip : testEffect(Layer.empty).live
   posix("captures and lists a tracked directory replaced by a symlink", () =>

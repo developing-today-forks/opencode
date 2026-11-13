@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { createConnection } from "node:net"
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { it } from "../../core/test/lib/effect"
@@ -198,34 +199,132 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
 
     const browser = yield* pair
     expect(browser.expires_in).toBe(300)
-    const redirect = yield* request(`/auth/connect/${browser.code}`, { headers: { accept: "text/html" } })
+    const connectUrl = "/auth/connect/" + browser.code
+    // A browser GET is a landing page, never a redemption (#2307): a
+    // link preview fetching the URL first must not consume the code.
+    const preview = yield* request(connectUrl, { headers: { accept: "text/html" } })
+    expect(preview.status).toBe(200)
+    expect(yield* Effect.promise(() => preview.text())).toContain("Pair this browser")
+    const landing = yield* request(connectUrl, { headers: { accept: "text/html" } })
+    expect(landing.status).toBe(200)
+    // The intended browser redeems with the explicit confirmation POST.
+    const redirect = yield* request(connectUrl, { method: "POST", headers: { accept: "text/html" } })
     expect(redirect.status).toBe(302)
     expect(redirect.headers.get("location")).toBe("/")
     const setCookie = redirect.headers.get("set-cookie") ?? ""
-    expect(setCookie).toContain(`opencode_session_${new URL(base).port}=`)
+    expect(setCookie).toContain("opencode_session_" + new URL(base).port + "=")
     expect(setCookie).toContain("HttpOnly")
     expect(setCookie).toContain("SameSite=Lax")
     const cookie = setCookie.split(";")[0]
 
-    const reused = yield* request(`/auth/connect/${browser.code}`, { headers: { accept: "text/html" } })
+    // Redemption stays single-use: neither a POST replay nor a GET
+    // of the spent link signs anyone in again.
+    const replayed = yield* request(connectUrl, { method: "POST", headers: { accept: "text/html" } })
+    expect(replayed.status).toBe(401)
+    const reused = yield* request(connectUrl, { headers: { accept: "text/html" } })
     expect(reused.status).toBe(401)
     expect(yield* Effect.promise(() => reused.text())).toContain("opencode pair")
 
     expect((yield* request("/api/info", { headers: { cookie } })).status).toBe(200)
     expect((yield* request("/api/info", { headers: { cookie, origin: base } })).status).toBe(200)
     expect((yield* request("/api/info", { headers: { cookie, origin: "http://127.0.0.1:1" } })).status).toBe(401)
+    const httpsOrigin = `https://${new URL(base).host}`
+    expect((yield* request("/api/info", { headers: { cookie, origin: httpsOrigin } })).status).toBe(401)
+    expect(
+      (yield* request("/api/info", { headers: { cookie, origin: httpsOrigin, "x-forwarded-proto": "https" } }))
+        .status,
+    ).toBe(401)
     expect((yield* request("/api/info", { headers: { cookie: `${cookie}x` } })).status).toBe(401)
 
+    // Concurrent redemption attempts still redeem exactly once:
+    // single-use must hold under races, not just sequentially.
+    const raced = yield* pair
+    const attempts = yield* Effect.promise(() =>
+      Promise.all([
+        fetch(new URL("/auth/connect/" + raced.code, base), {
+          method: "POST",
+          redirect: "manual",
+          headers: { accept: "text/html" },
+        }),
+        fetch(new URL("/auth/connect/" + raced.code, base), {
+          method: "POST",
+          redirect: "manual",
+          headers: { accept: "text/html" },
+        }),
+      ]),
+    )
+    expect(attempts.map((attempt) => attempt.status).sort()).toEqual([302, 401])
+    yield* Effect.promise(() => Promise.all(attempts.map((attempt) => attempt.arrayBuffer())))
+
     const client = yield* pair
-    const redeemed = yield* request(`/auth/connect/${client.code}`)
+    // Unclassified GETs (wildcard Accept, as sent by link previews
+    // and scanners) must not redeem either (#2307): only an explicit
+    // Accept: application/json marks the API-client flow.
+    const scanned = yield* request(`/auth/connect/${client.code}`, { headers: { accept: "*/*" } })
+    expect(scanned.status).toBe(200)
+    expect(yield* Effect.promise(() => scanned.text())).toContain("Pair this browser")
+    yield* Effect.forEach(
+      [
+        "application/jsonp",
+        "application/*",
+        "application/json;q=0",
+        "*/*;q=1, application/json;q=0",
+        "text/html, Application/JSON",
+      ],
+      (accept) =>
+        Effect.gen(function* () {
+          const preview = yield* request(`/auth/connect/${client.code}`, { headers: { accept } })
+          expect(preview.status).toBe(200)
+          expect(yield* Effect.promise(() => preview.text())).toContain("Pair this browser")
+        }),
+      { concurrency: 1 },
+    )
+    // Fetch always supplies Accept: */*, even when headers are omitted.
+    // Send raw HTTP to verify a genuinely absent Accept header is safe too.
+    const url = new URL(`/auth/connect/${client.code}`, base)
+    const unclassified = yield* Effect.promise(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          const socket = createConnection({ host: url.hostname, port: Number(url.port) })
+          let response = ""
+          socket.on("connect", () =>
+            socket.end(`GET ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`),
+          )
+          socket.on("data", (chunk) => (response += chunk.toString()))
+          socket.on("end", () => resolve(response))
+          socket.on("error", reject)
+        }),
+    )
+    expect(unclassified).toContain("HTTP/1.1 200")
+    expect(unclassified).toContain("Pair this browser")
+    const caseInsensitive = yield* request(`/auth/connect/${client.code}`, {
+      headers: { accept: "Application/JSON; q=0.5" },
+    })
+    expect(caseInsensitive.status).toBe(200)
+    expect(yield* Effect.promise(() => caseInsensitive.json())).toHaveProperty("token")
+    expect(
+      (yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })).status,
+    ).toBe(401)
+    const apiClient = yield* pair
+    const redeemed = yield* request(`/auth/connect/${apiClient.code}`, { headers: { accept: "application/json" } })
     expect(redeemed.status).toBe(200)
     const session = (yield* Effect.promise(() => redeemed.json())) as { token: string }
     expect(
       (yield* request("/api/info", { headers: { authorization: `Basic ${btoa(`opencode:${session.token}`)}` } }))
         .status,
     ).toBe(200)
-    expect((yield* request(`/auth/connect/${client.code}`)).status).toBe(401)
-    expect((yield* request("/auth/connect/unknown")).status).toBe(401)
+    expect(
+      (yield* request(`/auth/connect/${client.code}`, { headers: { accept: "application/json" } })).status,
+    ).toBe(401)
+    expect((yield* request("/auth/connect/unknown", { headers: { accept: "application/json" } })).status).toBe(401)
+
+    const postClient = yield* pair
+    const postRedeemed = yield* request(`/auth/connect/${postClient.code}`, {
+      method: "POST",
+      headers: { accept: "application/json, text/html;q=0" },
+    })
+    expect(postRedeemed.status).toBe(200)
+    expect(yield* Effect.promise(() => postRedeemed.json())).toHaveProperty("token")
   }),
 )
 

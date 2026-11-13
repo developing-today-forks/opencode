@@ -7,6 +7,7 @@ import { SessionSchema } from "../schema.js"
 import type { Promotable } from "../inbox.js"
 import type { AgentNotFoundError, MessageDecodeError, StepFailedError } from "../error.js"
 import { SessionRunnerModel } from "./model.js"
+import type { SessionStep } from "./step.js"
 import type { Instructions } from "../../instructions/index.js"
 
 export type RunError =
@@ -18,7 +19,11 @@ export type RunError =
   | Instructions.InitializationBlocked
   | FileSystem.DirectoryNotFoundError
 
-export type Continuation = { readonly step: number }
+export type Continuation = {
+  readonly step: number
+  /** The response link this step's continuation carries, restored when the drain resumes at a new Location. */
+  readonly link?: SessionStep.ContinuationLink
+}
 
 export type DrainResult = Data.TaggedEnum<{
   Complete: {}

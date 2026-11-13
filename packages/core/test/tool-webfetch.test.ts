@@ -48,10 +48,21 @@ const toolLayer = (replacements: LayerNode.Replacements = []) =>
   ])
 const it = testEffect(toolLayer([LayerNodePlatform.httpClient.replace(http)]))
 const live = testEffect(toolLayer())
+const deniedResources = new Set<string>()
+const denyingPermission = permissionLayer({
+  assert: (input) =>
+    Effect.gen(function* () {
+      assertions.push(input)
+      if (input.resources.some((resource) => deniedResources.has(resource)))
+        return yield* new Permission.BlockedError({ rules: [], permission: input.action, resources: input.resources })
+    }),
+})
+const liveDenying = testEffect(toolLayer([Permission.node.replace(denyingPermission)]))
 
 const reset = () => {
   requests.length = 0
   assertions.length = 0
+  deniedResources.clear()
   respond = () => Effect.succeed(new Response("hello", { headers: { "content-type": "text/plain" } }))
 }
 
@@ -372,6 +383,19 @@ describe("WebFetchTool helpers", () => {
     )
   })
 
+  test("parses ordered list start and value with HTML integer grammar, not radix auto-detection", () => {
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="0x10"><li>a</li><li>b</li></ol>`)).toBe(`0. a\n\n1. b`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="-0x10"><li>a</li><li>b</li></ol>`)).toBe(`0. a\n\n1. b`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol><li value="0x20">a</li><li>b</li></ol>`)).toBe(`0. a\n\n1. b`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="3"><li>a</li><li>b</li></ol>`)).toBe(`3. a\n\n4. b`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="08"><li>a</li></ol>`)).toBe(`8. a`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="1e2"><li>a</li></ol>`)).toBe(`1. a`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="-2"><li>a</li><li>b</li></ol>`)).toBe(`-2. a\n\n-1. b`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol><li>a</li></ol>`)).toBe(`1. a`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="x"><li>a</li></ol>`)).toBe(`1. a`)
+    expect(WebFetchTool.convertHTMLToMarkdown(`<ol><li value="x">a</li><li>b</li></ol>`)).toBe(`1. a\n\n2. b`)
+  })
+
   test("indents child lists from the actual parent marker width", () => {
     expect(WebFetchTool.convertHTMLToMarkdown(`<ol start="100"><li>outer<ul><li>inner</li></ul></li></ol>`)).toBe(
       `100. outer\n\n     - inner`,
@@ -456,7 +480,7 @@ describe("WebFetchTool registration", () => {
     }),
   )
 
-  live.effect("follows redirects while approving only the requested URL", () => {
+  live.effect("follows redirects after approving each destination", () => {
     const received: Array<Record<string, string | null>> = []
     return Effect.acquireUseRelease(
       Effect.sync(() =>
@@ -487,6 +511,13 @@ describe("WebFetchTool registration", () => {
           })
           expect(assertions).toMatchObject([
             { sessionID, action: "webfetch", resources: [url], save: ["*"], metadata: { url, format: "text" } },
+            {
+              sessionID,
+              action: "webfetch",
+              resources: [new URL("/target", server.url).toString()],
+              save: ["*"],
+              metadata: { url: new URL("/target", server.url).toString(), format: "text" },
+            },
           ])
           expect(received).toEqual(
             Array.from({ length: 2 }, () => ({
@@ -500,6 +531,140 @@ describe("WebFetchTool registration", () => {
       (server) => Effect.promise(() => server.stop(true)),
     )
   })
+
+  live.effect("checks permission for a cross-origin redirect destination before fetching it", () => {
+    const hits = { source: 0, target: 0 }
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const target = Bun.serve({
+          port: 0,
+          fetch: () => {
+            hits.target++
+            return new Response("cross-origin", { headers: { "content-type": "text/plain" } })
+          },
+        })
+        const source = Bun.serve({
+          port: 0,
+          fetch: () => {
+            hits.source++
+            return new Response("", {
+              status: 302,
+              headers: { location: new URL("/target", target.url).toString() },
+            })
+          },
+        })
+        return { source, target }
+      }),
+      ({ source, target }) =>
+        Effect.gen(function* () {
+          reset()
+          const registry = yield* Tool.Service
+          const url = new URL("/redirect", source.url).toString()
+          const destination = new URL("/target", target.url).toString()
+
+          expect(yield* executeTool(registry, call({ url, format: "text" }))).toMatchObject({
+            status: "completed",
+            content: [{ type: "text", text: "cross-origin" }],
+          })
+          expect(assertions.map((item) => item.resources)).toEqual([[url], [destination]])
+          expect(hits).toEqual({ source: 1, target: 1 })
+        }),
+      ({ source, target }) => Effect.promise(() => Promise.all([source.stop(true), target.stop(true)])),
+    )
+  })
+
+  liveDenying.effect("does not fetch a cross-origin redirect destination that permission denies", () => {
+    const hits = { source: 0, target: 0 }
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const target = Bun.serve({
+          port: 0,
+          fetch: () => {
+            hits.target++
+            return new Response("secret", { headers: { "content-type": "text/plain" } })
+          },
+        })
+        const source = Bun.serve({
+          port: 0,
+          fetch: () => {
+            hits.source++
+            return new Response("", {
+              status: 302,
+              headers: { location: new URL("/private", target.url).toString() },
+            })
+          },
+        })
+        return { source, target }
+      }),
+      ({ source, target }) =>
+        Effect.gen(function* () {
+          reset()
+          const registry = yield* Tool.Service
+          const url = new URL("/redirect", source.url).toString()
+          const destination = new URL("/private", target.url).toString()
+          deniedResources.add(destination)
+
+          expect(yield* executeTool(registry, call({ url, format: "text" }))).toEqual({
+            status: "error",
+            error: { type: "permission.rejected", message: "Permission denied: webfetch" },
+          })
+          expect(assertions.map((item) => item.resources)).toEqual([[url], [destination]])
+          expect(hits).toEqual({ source: 1, target: 0 })
+        }),
+      ({ source, target }) => Effect.promise(() => Promise.all([source.stop(true), target.stop(true)])),
+    )
+  })
+
+  it.effect("fails closed when redirects loop past the hop limit", () =>
+    Effect.gen(function* () {
+      reset()
+      respond = () => Effect.succeed(new Response("", { status: 302, headers: { location: "/loop" } }))
+      const registry = yield* Tool.Service
+      const url = "https://example.com/start"
+
+      expect(yield* executeTool(registry, call({ url, format: "text" }))).toEqual({
+        status: "error",
+        error: {
+          type: "unknown",
+          message: `Too many redirects: exceeded ${WebFetchTool.MAX_REDIRECTS} redirects`,
+        },
+      })
+      expect(requests).toHaveLength(WebFetchTool.MAX_REDIRECTS + 1)
+      expect(assertions.map((item) => item.resources)).toEqual([[url], ["https://example.com/loop"]])
+    }),
+  )
+
+  it.effect("rejects a redirect to a non-HTTP scheme before fetching it", () =>
+    Effect.gen(function* () {
+      reset()
+      respond = () => Effect.succeed(new Response("", { status: 302, headers: { location: "file:///etc/passwd" } }))
+      const registry = yield* Tool.Service
+      const url = "https://example.com/start"
+
+      expect(yield* executeTool(registry, call({ url, format: "text" }))).toEqual({
+        status: "error",
+        error: { type: "unknown", message: "URL must use http:// or https://" },
+      })
+      expect(requests).toHaveLength(1)
+      expect(assertions.map((item) => item.resources)).toEqual([[url]])
+    }),
+  )
+
+  it.effect("rejects a malformed redirect location before fetching it", () =>
+    Effect.gen(function* () {
+      reset()
+      respond = () => Effect.succeed(new Response("", { status: 302, headers: { location: "http://[::1" } }))
+      const registry = yield* Tool.Service
+      const url = "https://example.com/start"
+
+      expect(yield* executeTool(registry, call({ url, format: "text" }))).toEqual({
+        status: "error",
+        error: { type: "unknown", message: "Invalid redirect Location header: http://[::1" },
+      })
+      expect(requests).toHaveLength(1)
+      expect(assertions.map((item) => item.resources)).toEqual([[url]])
+    }),
+  )
 
   it.effect("rejects non-HTTP schemes before permission or transport", () =>
     Effect.gen(function* () {

@@ -41,15 +41,23 @@ type Inline =
       name: Skill.Name
     }
 
+function positiveLine(value: string | null): number | undefined {
+  // Only plain unsigned decimal spellings are line numbers; absent params and
+  // anything else (hex, exponent, signed, fractional, whitespace-padded) are not.
+  if (value === null || !/^\d+$/.test(value)) return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
 function selectionFromFileUrl(url: string): Extract<Inline, { type: "file" }>["selection"] {
   const queryIndex = url.indexOf("?")
 
   if (queryIndex === -1) return undefined
   const params = new URLSearchParams(url.slice(queryIndex + 1))
-  const startLine = Number(params.get("start"))
-  const endLine = Number(params.get("end"))
+  const startLine = positiveLine(params.get("start"))
+  const endLine = positiveLine(params.get("end"))
 
-  if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return undefined
+  if (startLine === undefined || endLine === undefined) return undefined
 
   return {
     startLine,

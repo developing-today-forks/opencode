@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, spyOn } from "bun:test"
 import { catalogIdentity } from "./catalog-identity"
 
 describe("stats catalog identity", () => {
@@ -46,5 +46,65 @@ describe("stats catalog identity", () => {
     expect(() => catalogIdentity({ models: {}, providers: { opencode: { models: { model: {} } } } })).toThrow(
       "Model catalog has no canonical OpenCode offerings",
     )
+  })
+})
+
+describe("catalog identity fetch", () => {
+  // A fresh module instance per run (unique import query) so --rerun-each runs,
+  // which re-evaluate this file in the same process, never observe a previous
+  // run's module-level identity cache.
+  test("fails softly on stalled and oversized bodies and accepts a healthy catalog", async () => {
+    const timeout = spyOn(AbortSignal, "timeout")
+    const fetcher = spyOn(globalThis, "fetch")
+    const { loadCatalogIdentity } = await import(`./catalog-identity.ts?fetch=${Date.now()}-${Math.random()}`)
+    try {
+      let readStarted!: () => void
+      const bodyReadStarted = new Promise<void>((resolve) => {
+        readStarted = resolve
+      })
+      const controller = new AbortController()
+      timeout.mockReturnValue(controller.signal)
+      fetcher.mockResolvedValue(
+        new Response(
+          new ReadableStream(
+            {
+              pull() {
+                readStarted()
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+        ),
+      )
+      const stalled = loadCatalogIdentity()
+      await bodyReadStarted
+      controller.abort()
+      expect((await stalled).stale).toBe(true)
+
+      timeout.mockRestore()
+      let pulls = 0
+      let cancelled = false
+      fetcher.mockResolvedValue(new Response(new ReadableStream({
+        pull(stream) {
+          pulls++
+          stream.enqueue(new Uint8Array(1024 * 1024))
+        },
+        cancel() { cancelled = true },
+      })))
+      expect((await loadCatalogIdentity()).stale).toBe(true)
+      expect(cancelled).toBe(true)
+      expect(pulls).toBeLessThan(40)
+
+      fetcher.mockResolvedValue(Response.json({
+        models: { "lab/model": {} },
+        providers: { opencode: { models: { model: { canonical_model_id: "lab/model" } } } },
+      }))
+      const result = await loadCatalogIdentity()
+      expect(result.stale).toBe(false)
+      expect(result.catalog?.offerings.get("opencode/model")).toBe("lab")
+    } finally {
+      timeout.mockRestore()
+      fetcher.mockRestore()
+    }
   })
 })

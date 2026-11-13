@@ -76,8 +76,12 @@ const locations = makeGlobalNode({
               replacements: [Bus.node.replace(Layer.succeed(Bus.Service, bus))],
             }),
             Layer.mock(Image.Service, {
-              normalize: (_resource, content) =>
-                Effect.succeed(content.content.length > 5 * 1024 * 1024 ? { ...content, content: "AA==" } : content),
+              normalize: (resource, content) =>
+                content.mime === "image/heic" || content.mime === "image/heif"
+                  ? Effect.fail(new Image.DecodeError({ resource }))
+                  : Effect.succeed(
+                      content.content.length > 5 * 1024 * 1024 ? { ...content, content: "AA==" } : content,
+                    ),
             }),
             Layer.mock(Snapshot.Service, {
               capture: () => Effect.undefined,
@@ -375,6 +379,33 @@ describe("Session.prompt", () => {
     }),
   )
 
+  it.effect("ignores non-decimal file URL line ranges instead of reinterpreting them", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const directory = yield* tmpdirScoped("opencode-session-prompt-")
+      const source = path.join(directory.path, "lines.txt")
+      const content = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n")
+      yield* Effect.promise(() => Bun.write(source, content))
+
+      const promptWith = (query: string) =>
+        session.prompt({
+          sessionID,
+          text: "Inspect this",
+          files: [{ uri: `${pathToFileURL(source).href}?${query}`, name: "lines.txt" }],
+          resume: false,
+        })
+      const textOf = (data: string | undefined) => Buffer.from(data ?? "", "base64").toString("utf8")
+
+      // A valid plain-decimal range slices exactly as before.
+      expect(textOf((yield* promptWith("start=2&end=3")).payload.files?.[0]?.data)).toBe("line 2\nline 3")
+      // Hex spellings Number() would reinterpret (0x10 -> line 16) are treated as absent: the whole file.
+      expect(textOf((yield* promptWith("start=0x10&end=0x12")).payload.files?.[0]?.data)).toBe(content)
+      // Exponent and fractional-with-zero spellings are likewise absent, not reinterpreted.
+      expect(textOf((yield* promptWith("start=1e1&end=5.0")).payload.files?.[0]?.data)).toBe(content)
+    }),
+  )
+
   it.effect("materializes directories as directory attachments", () =>
     Effect.gen(function* () {
       yield* setup
@@ -429,6 +460,44 @@ describe("Session.prompt", () => {
       ])
       const stored = yield* admitted(message.id)
       expect(stored?.type === "user" ? stored.payload.files : undefined).toEqual(message.payload.files)
+    }),
+  )
+
+  it.effect("passes HEIC and HEIF attachments through without Photon decoding", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const directory = yield* tmpdirScoped("opencode-session-prompt-")
+
+      for (const [brand, mime] of [
+        ["heic", "image/heic"],
+        ["mif1", "image/heif"],
+      ]) {
+        const source = path.join(directory.path, `${brand}.bin`)
+        const bytes = Buffer.concat([
+          Buffer.from([0, 0, 0, 16]),
+          Buffer.from("ftyp"),
+          Buffer.from(brand),
+          Buffer.alloc(4),
+        ])
+        yield* Effect.promise(() => Bun.write(source, bytes))
+
+        const message = yield* session.prompt({
+          sessionID,
+          text: "Inspect this image",
+          files: [{ uri: pathToFileURL(source).href }],
+          resume: false,
+        })
+
+        expect(message.payload.files).toEqual([
+          {
+            data: bytes.toString("base64"),
+            mime,
+            source: { type: "uri", uri: pathToFileURL(source).href },
+            name: `${brand}.bin`,
+          },
+        ])
+      }
     }),
   )
 
@@ -505,6 +574,82 @@ describe("Session.prompt", () => {
         uri: "image.png",
         message: "Invalid attachment data URL: image.png",
       })
+    }),
+  )
+
+  it.effect("materializes binary non-base64 data URL attachments byte-wise (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = "data:application/octet-stream,%FF%00%41"
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Inspect this",
+        files: [{ uri, name: "blob.bin" }],
+        resume: false,
+      })
+
+      // %FF%00%41 materializes as exactly those bytes (base64 /wBB), the
+      // same expectation as the migration mirror case in
+      // v1-migration.test.ts (#1529); before the fix the prompt was
+      // rejected as an invalid data URL.
+      expect(message.payload.files).toEqual([
+        {
+          data: "/wBB",
+          mime: "application/octet-stream",
+          source: { type: "inline" },
+          name: "blob.bin",
+        },
+      ])
+    }),
+  )
+
+  it.effect("keeps UTF-8 non-base64 data URL attachments byte-identical (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const uri = "data:text/plain,caf%C3%A9 %E2%82%AC"
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Inspect this",
+        files: [{ uri, name: "note.txt" }],
+        resume: false,
+      })
+
+      expect(message.payload.files).toEqual([
+        {
+          data: Buffer.from("caf\u00e9 \u20ac", "utf8").toString("base64"),
+          mime: "text/plain",
+          source: { type: "inline" },
+          name: "note.txt",
+        },
+      ])
+    }),
+  )
+
+  it.effect("rejects malformed percent escapes in non-base64 data URLs (#1539)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+
+      for (const uri of ["data:application/octet-stream,%ZZ", "data:application/octet-stream,trailing%"]) {
+        const error = yield* session
+          .prompt({
+            sessionID,
+            text: "Inspect this",
+            files: [{ uri, name: "bad.bin" }],
+            resume: false,
+          })
+          .pipe(Effect.flip)
+
+        expect(error).toMatchObject({
+          _tag: "Session.AttachmentError",
+          uri: "bad.bin",
+          message: "Invalid attachment data URL: bad.bin",
+        })
+      }
     }),
   )
 

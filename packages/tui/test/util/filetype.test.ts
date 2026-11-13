@@ -16,6 +16,13 @@ describe("util.filetype", () => {
     expect(parsers.parsers.some((parser) => languages.every((language) => language === parser.filetype))).toBe(true)
   })
 
+  test("documents why HTML embedded-language injections are not configured", () => {
+    const html = parsers.parsers.find((parser) => parser.filetype === "html")
+
+    expect(html?.queries.injections).toBeUndefined()
+    expect(html?.injectionMapping).toBeUndefined()
+  })
+
   test("uses none for missing filenames", () => {
     expect(filetype()).toBe("none")
     expect(filetype("")).toBe("none")

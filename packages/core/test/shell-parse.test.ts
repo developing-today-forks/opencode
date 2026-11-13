@@ -19,6 +19,29 @@ describe("ShellParse", () => {
     })
   })
 
+  test("prototype-named command heads fall through to the unknown-head prefix (#792)", async () => {
+    // A plain ARITY index reads through Object.prototype: "constructor" resolved to the
+    // inherited Object function and "__proto__" to Object.prototype, so prefix() returned
+    // [] and the saved "always allow" pattern was " *", which can never match a command.
+    for (const options of [undefined, { portable: true }]) {
+      expect(
+        await Effect.runPromise(ShellParse.scan("constructor foo.txt", "/bin/bash", "/workspace", options)),
+      ).toEqual({ commands: [{ resource: "constructor foo.txt", save: "constructor *" }], directories: [] })
+      expect(await Effect.runPromise(ShellParse.scan("__proto__ x", "/bin/bash", "/workspace", options))).toEqual({
+        commands: [{ resource: "__proto__ x", save: "__proto__ *" }],
+        directories: [],
+      })
+      // Known commands keep their exact arities.
+      expect(await Effect.runPromise(ShellParse.scan("git status", "/bin/bash", "/workspace", options))).toEqual({
+        commands: [{ resource: "git status", save: "git status *" }],
+        directories: [],
+      })
+    }
+    expect(await Effect.runPromise(ShellParse.scanPortable("constructor foo.txt", "/bin/bash", "/workspace"))).toEqual(
+      { commands: [{ resource: "constructor foo.txt", save: "constructor *" }], directories: [] },
+    )
+  })
+
   test("defaults to portable scanning when parser wasm assets are empty", async () => {
     const result = await Effect.runPromise(
       ShellParse.scan("git status && npm run test -- --watch", "/bin/bash", "/workspace", {

@@ -25,33 +25,46 @@ const tokenSharingMessages = {
     "This ChatGPT connection isn't authorized for this request. Reconnect to ChatGPT or choose another connection.",
 }
 
-export function toSessionError(cause: unknown): SessionError.Error {
+export interface SessionErrorContext {
+  /** The integration method that minted the credential which served the failed request
+   * (#1119), when the caller knows it (the session runner does, via the resolved model).
+   * Method-specific error classification is gated on it: without it, a diagnosis that
+   * names a credential method is never asserted from an error body alone. */
+  readonly credentialMethodID?: string
+  /** The model that served the failed request, when the caller knows it (the session
+   * runner does, via the resolved model). Recorded on the outcome for provider
+   * errors whose reason does not name a provider/model itself (auth, invalid
+   * request), so a startup provider death names its endpoint/model (code#7073). */
+  readonly model?: { readonly providerID: string; readonly id: string }
+}
+
+export function toSessionError(cause: unknown, context?: SessionErrorContext): SessionError.Error {
   if (cause instanceof AIError) {
     switch (cause.reason._tag) {
       case "RateLimit":
-        return providerError("provider.rate-limit", cause.reason)
+        return providerError("provider.rate-limit", cause.reason, context)
       case "Authentication":
-        return providerError("provider.auth", cause.reason)
+        return providerError("provider.auth", cause.reason, context)
       case "QuotaExceeded":
-        return providerError("provider.quota", cause.reason)
+        return providerError("provider.quota", cause.reason, context)
       case "ContentPolicy":
-        return providerError("provider.content-filter", cause.reason)
+        return providerError("provider.content-filter", cause.reason, context)
       case "Transport":
-        return providerError("provider.transport", cause.reason)
+        return providerError("provider.transport", cause.reason, context)
       case "ProviderInternal":
-        return providerError("provider.internal", cause.reason)
+        return providerError("provider.internal", cause.reason, context)
       case "InvalidProviderOutput":
-        return providerError("provider.invalid-output", cause.reason)
+        return providerError("provider.invalid-output", cause.reason, context)
       case "InvalidRequest":
-        return providerError("provider.invalid-request", cause.reason)
+        return providerError("provider.invalid-request", cause.reason, context)
       case "UnsupportedOperation":
-        return providerError("provider.unsupported-operation", cause.reason)
+        return providerError("provider.unsupported-operation", cause.reason, context)
       case "NoRoute":
-        return providerError("provider.no-route", cause.reason)
+        return providerError("provider.no-route", cause.reason, context)
       case "UnknownProvider":
-        return providerError("provider.unknown", cause.reason)
+        return providerError("provider.unknown", cause.reason, context)
       case "Timeout":
-        return providerError("provider.timeout", cause.reason)
+        return providerError("provider.timeout", cause.reason, context)
       default: {
         const exhaustive: never = cause.reason
         return exhaustive
@@ -64,7 +77,7 @@ export function toSessionError(cause: unknown): SessionError.Error {
     if (cause.error === undefined) return { type: "tool.execution", message: cause.message }
     // The canonical error is the sole model-visible representation, so a cause
     // with no message must not erase the tool's curated failure message.
-    const unwrapped = toSessionError(cause.error)
+    const unwrapped = toSessionError(cause.error, context)
     return unwrapped.message === "" ? { ...unwrapped, type: "tool.execution", message: cause.message } : unwrapped
   }
   if (cause instanceof StepFailedError) return cause.error
@@ -94,12 +107,46 @@ export function contentFilterError(summary: string, reason: FinishReasonDetails)
   }
 }
 
-function providerError(type: string, reason: AIError["reason"]): SessionError.Error {
+/**
+ * A platform-API 401 reporting missing scopes (api.responses.write / resource.invoke) means the
+ * active token-sharing credential holds a token minted by a different sign-in flow (#1119, the
+ * code#3216 incident): name the mismatch instead of surfacing a generic provider auth failure.
+ * Only called when the serving credential's method is known to be chatgpt-token-sharing —
+ * the same scopes error from an API-key or legacy Codex connection is a different problem,
+ * and rewriting it would replace its real diagnostic with wrong instructions.
+ */
+function credentialMethodMismatchMessage(body: string | undefined, status: number | undefined): string | undefined {
+  if (!body || (status !== 401 && !body.includes("missing_scopes"))) return undefined
+  if (!/missing[^"]*scopes/i.test(body)) return undefined
+  const missing = ["api.responses.write", "resource.invoke"].filter((scope) => body.includes(scope))
+  if (missing.length === 0) return undefined
+  return (
+    `Credential-method mismatch: the active OpenAI credential uses method chatgpt-token-sharing, ` +
+    `but its token is missing the scopes (${missing.join(", ")}) required by https://api.openai.com/v1. ` +
+    `The token was likely minted by a different sign-in flow (for example Codex browser/headless). ` +
+    `Reconnect with token sharing, or switch to the credential that matches this token.`
+  )
+}
+
+function providerError(type: string, reason: AIError["reason"], context?: SessionErrorContext): SessionError.Error {
   const status = reason.http?.status
+  // Facts the reason itself carries win (no-route names provider+model); the
+  // caller's serving model fills the rest. The HTTP context URL stays unexposed:
+  // it is a runtime diagnostic, not outcome state (see the HTTP-status test).
+  const named = reason as { provider?: unknown; model?: unknown }
+  const provider = typeof named.provider === "string" ? named.provider : context?.model?.providerID
+  const model = typeof named.model === "string" ? named.model : context?.model?.id
   return {
     type,
-    message: Object.entries(tokenSharingMessages).find(([code]) => reason.body?.includes(code))?.[1] ?? reason.message,
+    message:
+      (context?.credentialMethodID === "chatgpt-token-sharing"
+        ? credentialMethodMismatchMessage(reason.body, status)
+        : undefined) ??
+      Object.entries(tokenSharingMessages).find(([code]) => reason.body?.includes(code))?.[1] ??
+      reason.message,
     ...(status === undefined ? {} : { status }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     ...(reason.body === undefined ? {} : { response: { body: reason.body } }),
   }
 }

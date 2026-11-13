@@ -34,6 +34,19 @@ export { Revert }
 export const ForkBoundary = SessionFork.Boundary
 export type ForkBoundary = SessionFork.Boundary
 
+export interface AuthoritativeCost extends Schema.Schema.Type<typeof AuthoritativeCost> {}
+/**
+ * Authoritative session cost: the success-only sum over the route_attempt ledger
+ * (catalog prices recorded per attempt). Unlike `cost` — the projector's fold of
+ * step usage, which also counts title/compaction usage that has no route_attempt
+ * row — this counts only attempts that finished successfully.
+ */
+export const AuthoritativeCost = Schema.Struct({
+  cost: Money.USD,
+  cacheSavings: Money.USD,
+  tokens: TokenUsage.Info,
+}).annotate({ identifier: "Session.AuthoritativeCost" })
+
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
@@ -46,6 +59,8 @@ export const Info = Schema.Struct({
   agent: Agent.ID.pipe(optional),
   model: Model.Ref.pipe(optional),
   cost: Money.USD,
+  /** Success-only route_attempt totals (#7); absent until the session has a successful attempt. */
+  costAuthoritative: AuthoritativeCost.pipe(optional),
   tokens: TokenUsage.Info,
   /** Outcome of the last completed execution, recorded at `time.idle`. Absent until a run reaches a terminal transition. */
   outcome: Schema.Literals(["succeeded", "failed", "interrupted"]).pipe(optional),
@@ -64,6 +79,12 @@ export const Info = Schema.Struct({
   subagentPolicy: SubagentPolicy.pipe(optional),
   /** Evaluated after the agent's rules; the last matching rule wins. */
   permissions: Permission.Ruleset.pipe(optional),
+  /**
+   * Detached (non-interactive) mode: nobody is attached to answer forms, so the `question` tool is
+   * unavailable to this session and, by inheritance, to every session in its subtree. Absent means
+   * interactive. Not clearable once set.
+   */
+  detached: Schema.Literal(true).pipe(optional),
   revert: Revert.pipe(optional),
 }).annotate({ identifier: "Session.Info" })
 

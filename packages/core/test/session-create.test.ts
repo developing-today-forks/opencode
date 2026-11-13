@@ -349,6 +349,31 @@ describe("Session.create", () => {
     }),
   )
 
+  it.effect("stores the governance-checked model on a model-less child", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const model = Model.Ref.make({
+        id: Model.ID.make("sonnet"),
+        providerID: Provider.ID.anthropic,
+      })
+      const parent = yield* session.create({ location, model })
+      // No explicit model: governance checks the child against the parent's
+      // model, so creation stores that checked model on the child — the
+      // runner must not fall back to the global default for it (#507).
+      const child = yield* session.create({ parentID: parent.id })
+      expect(child.model).toMatchObject(model)
+      expect(child.model?.id).toBe(model.id)
+      expect(child.model?.providerID).toBe(model.providerID)
+      // An explicit child model still wins over the inherited checked model.
+      const explicit = Model.Ref.make({
+        id: Model.ID.make("haiku"),
+        providerID: Provider.ID.anthropic,
+      })
+      const chosen = yield* session.create({ parentID: parent.id, model: explicit })
+      expect(chosen.model).toMatchObject(explicit)
+    }),
+  )
+
   it.effect("stores creation metadata and inherits it through children and forks", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service
@@ -427,6 +452,33 @@ describe("Session.create", () => {
         yield* session.setPermissions({ sessionID: Session.ID.create(), permissions: replaced }).pipe(Effect.flip),
       ).toBeInstanceOf(Session.NotFoundError)
     }),
+  )
+
+  it.effect(
+    "stores detached mode, inherits it through every child and fork, and leaves interactive sessions untouched",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const bus = yield* Bus.Service
+        const { db } = yield* Database.Service
+
+        const interactive = yield* session.create({ location })
+        expect(interactive.detached).toBeUndefined()
+        expect((yield* session.create({ parentID: interactive.id })).detached).toBeUndefined()
+
+        const detached = yield* session.create({ location, detached: true })
+        expect(detached.detached).toBe(true)
+        expect((yield* session.get(detached.id)).detached).toBe(true)
+
+        // The mode reaches every depth; it has no off value, so a child cannot opt out.
+        const child = yield* session.create({ parentID: detached.id })
+        const grandchild = yield* session.create({ parentID: child.id })
+        expect([child.detached, grandchild.detached]).toEqual([true, true])
+
+        yield* session.prompt({ sessionID: detached.id, text: "Fork context", resume: false })
+        yield* SessionInbox.promote(db, bus, detached.id, "steer")
+        expect((yield* session.fork({ sessionID: detached.id })).detached).toBe(true)
+      }),
   )
 
   it.effect("inherits location from an existing parent when omitted", () =>
@@ -1454,7 +1506,10 @@ describe("SessionTransfer", () => {
           text: `[redacted:text:${sourceMessageID}]`,
           skills: [{ id: "effect", name: "[redacted:skill-name:0]", text: "[redacted:skill:0]" }],
         },
-        { id: errorMessageID, error: { type: "test_error", message: "Original error" } },
+        {
+          id: errorMessageID,
+          error: { type: "test_error", message: "[redacted:error-message:" + errorMessageID + "]" },
+        },
       ])
 
       yield* session.prompt({ sessionID, text: "Continue", resume: false })
@@ -1466,6 +1521,115 @@ describe("SessionTransfer", () => {
         "user",
       ])
       expect(yield* Bus.latestSequence(db, sessionID)).toBe(4)
+    }),
+  )
+
+  it.effect("redacts SessionError payloads in sanitized exports", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const transfer = yield* SessionTransfer.Service
+      const template = yield* session.create({ location, title: "Error redaction" })
+      const sessionID = Session.ID.create()
+      const assistantID = SessionMessage.ID.create()
+      const idleID = SessionMessage.ID.create()
+      const model = Model.Ref.make({ id: Model.ID.make("model"), providerID: Provider.ID.make("provider") })
+
+      yield* transfer.import({
+        data: {
+          info: { ...template, id: sessionID },
+          messages: [
+            {
+              id: assistantID,
+              type: "assistant",
+              agent: Agent.ID.make("build"),
+              model,
+              content: [
+                {
+                  type: "tool",
+                  id: "call_error",
+                  name: "bash",
+                  state: {
+                    status: "error",
+                    input: { command: "ls" },
+                    error: {
+                      type: "tool_error",
+                      message: "Tool secret",
+                      status: 500,
+                      response: { body: "Tool body secret" },
+                    },
+                  },
+                  time: { created: DateTime.makeUnsafe(10) },
+                },
+              ],
+              error: {
+                type: "provider_error",
+                message: "Assistant secret",
+                status: 429,
+                response: { body: "Assistant body secret" },
+              },
+              retry: {
+                attempt: 2,
+                at: DateTime.makeUnsafe(11),
+                error: { type: "retry_error", message: "Retry secret", response: { body: "Retry body secret" } },
+              },
+              time: { created: DateTime.makeUnsafe(10), completed: DateTime.makeUnsafe(12) },
+            },
+            {
+              id: idleID,
+              type: "idle",
+              outcome: "failed",
+              error: { type: "idle_error", message: "Idle secret", response: { body: "Idle body secret" } },
+              time: { created: DateTime.makeUnsafe(13) },
+            },
+          ],
+        },
+        location,
+      })
+
+      const exported = yield* transfer.export({ sessionID })
+      expect(JSON.stringify(exported)).toContain("Assistant secret")
+      expect(JSON.stringify(exported)).toContain("Tool body secret")
+
+      const sanitized = yield* transfer.export({ sessionID, sanitize: true })
+      const serialized = JSON.stringify(sanitized)
+      for (const secret of [
+        "Assistant secret",
+        "Assistant body secret",
+        "Retry secret",
+        "Retry body secret",
+        "Tool secret",
+        "Tool body secret",
+        "Idle secret",
+        "Idle body secret",
+      ])
+        expect(serialized).not.toContain(secret)
+      expect(sanitized.messages).toMatchObject([
+        {
+          id: assistantID,
+          error: {
+            type: "provider_error",
+            status: 429,
+            message: "[redacted:error-message:" + assistantID + "]",
+            response: { body: "[redacted:error-response-body:" + assistantID + "]" },
+          },
+          retry: {
+            attempt: 2,
+            error: { type: "retry_error", message: "[redacted:error-message:" + assistantID + "]" },
+          },
+          content: [
+            {
+              state: {
+                status: "error",
+                error: { type: "tool_error", status: 500, message: "[redacted:error-message:" + assistantID + "]" },
+              },
+            },
+          ],
+        },
+        {
+          id: idleID,
+          error: { type: "idle_error", message: "[redacted:error-message:" + idleID + "]" },
+        },
+      ])
     }),
   )
 

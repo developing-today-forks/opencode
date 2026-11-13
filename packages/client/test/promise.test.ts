@@ -13,6 +13,7 @@ test("exposes every standard HTTP API group", () => {
     "message",
     "model",
     "generate",
+    "server.completions",
     "provider",
     "integration",
     "mcp",
@@ -96,6 +97,20 @@ test("requests keep a path prefix on baseUrl", async () => {
 
   await client.server.info()
   expect(request?.url).toBe("http://localhost:8888/ws/abc/api/info")
+})
+
+test("server.connect defaults to an explicit JSON Accept header", async () => {
+  let request: Request | undefined
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async (input, init) => {
+      request = input instanceof Request ? input : new Request(input, init)
+      return Response.json({ token: "session-token" })
+    },
+  })
+
+  expect(await client.server.connect({ code: "pairing-code" })).toEqual({ token: "session-token" })
+  expect(request?.headers.get("accept")).toBe("application/json")
 })
 
 test("requests join against the base URL pathname", async () => {
@@ -434,6 +449,45 @@ test("file.read returns binary content from the public HTTP contract", async () 
   expect(request?.url).toBe(
     "http://localhost:3000/api/fs/read/src/a%20b%23c.ts?location%5Bdirectory%5D=%2Ftmp%2Fproject",
   )
+})
+
+test("file.read rejects a binary body whose declared length is above the size limit", async () => {
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(new Uint8Array([104, 105]), {
+        headers: { "content-length": String(256 * 1024 * 1024 + 1) },
+      }),
+  })
+
+  await expect(client.file.read({ path: "big.bin", location: { directory: "/tmp/project" } })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
+})
+
+test("file.read rejects a binary body that streams past the size limit", async () => {
+  // Reusing one chunk keeps the test's own footprint small; the client still counts every byte it receives.
+  const chunk = new Uint8Array(1024 * 1024)
+  let sent = 0
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent > 256 * 1024 * 1024) return controller.close()
+            sent += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+        }),
+      ),
+  })
+
+  await expect(client.file.read({ path: "big.bin", location: { directory: "/tmp/project" } })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
 })
 
 test("all worktree operations require a project ID", async () => {
@@ -945,6 +999,61 @@ test("event.subscribe rejects an SSE event above the size limit", async () => {
   await expect(client.event.subscribe()[Symbol.asyncIterator]().next()).rejects.toMatchObject({
     name: "ClientError",
     reason: "SseEventTooLarge",
+  })
+})
+
+test("request rejects a JSON body whose declared length is above the size limit", async () => {
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(JSON.stringify({ data: { text: "pong" } }), {
+        headers: { "content-type": "application/json", "content-length": String(16 * 1024 * 1024 + 1) },
+      }),
+  })
+
+  await expect(client.generate.text({ prompt: "ping" })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
+})
+
+test("request rejects a JSON body that streams past the size limit", async () => {
+  const chunk = new TextEncoder().encode("x".repeat(1024 * 1024))
+  let sent = 0
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (sent > 16 * 1024 * 1024) return controller.close()
+            sent += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+  })
+
+  await expect(client.generate.text({ prompt: "ping" })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
+  })
+})
+
+test("declared error bodies above the size limit surface as ResponseTooLarge", async () => {
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async () =>
+      Response.json(
+        { _tag: "ServiceUnavailableError", service: "vcs", message: "No review base available" },
+        { status: 503, headers: { "content-length": String(16 * 1024 * 1024 + 1) } },
+      ),
+  })
+
+  await expect(client.vcs.diff({ mode: "committed" })).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "ResponseTooLarge",
   })
 })
 

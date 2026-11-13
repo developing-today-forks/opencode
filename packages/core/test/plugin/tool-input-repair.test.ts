@@ -269,6 +269,31 @@ describe("tool input repair plugin", () => {
     }),
   )
 
+  it.effect("leaves non-decimal number spellings unrepaired for number and integer targets", () =>
+    Effect.gen(function* () {
+      const rejected = ["0x10", "0b101", "0o17", "1e3", "+42", "5.", " 42 ", "Infinity", "NaN", "-Infinity", ".5", "-"]
+      for (const spelling of rejected) {
+        const input = { number: spelling, integer: spelling }
+        const event = yield* run(input, object({ number: { type: "number" }, integer: { type: "integer" } }))
+        expect(event.input).toEqual(input)
+      }
+
+      const accepted = yield* run(
+        { number: "20", negative: "-3", fraction: "2.5", integer: "-42" },
+        object({
+          number: { type: "number" },
+          negative: { type: "number" },
+          fraction: { type: "number" },
+          integer: { type: "integer" },
+        }),
+      )
+      expect(accepted.input).toEqual({ number: 20, negative: -3, fraction: 2.5, integer: -42 })
+
+      const fractional = yield* run({ integer: "2.5" }, object({ integer: { type: "integer" } }))
+      expect(fractional.input).toEqual({ integer: "2.5" })
+    }),
+  )
+
   it.effect("wraps compatible scalars after repairing array items", () =>
     Effect.gen(function* () {
       const event = yield* run(

@@ -25,9 +25,15 @@ export const defaultEnsureTiming: EnsureTiming = {
 
 // A server drains running sessions for OPENCODE_SHUTDOWN_GRACE_MS before it exits; the stop path
 // must outwait that drain, so it mirrors the server's default and reads the same variable.
-function serverShutdownGrace() {
-  const value = Number(process.env.OPENCODE_SHUTDOWN_GRACE_MS)
-  return Number.isFinite(value) && value >= 0 ? value : 30_000
+export function serverShutdownGrace() {
+  // Mirror of shutdownGrace() in packages/cli/src/server-process.ts; the two copies must agree,
+  // because this stop path has to outwait the server's drain. A blank value is absent, not an
+  // authored 0 (#874): bare Number() reads "" as 0 and also accepts hex and exponent spellings,
+  // so only a plain non-negative decimal (surrounding whitespace trimmed) names a duration;
+  // anything else falls back to the default.
+  const raw = process.env.OPENCODE_SHUTDOWN_GRACE_MS?.trim()
+  const value = raw && /^\d+$/.test(raw) ? Number(raw) : Number.NaN
+  return Number.isFinite(value) ? value : 30_000
 }
 
 export function ensureTiming(options: object) {

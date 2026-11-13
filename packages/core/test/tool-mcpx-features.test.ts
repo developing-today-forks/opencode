@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
-import { findClosestTool, levenshteinDistance, analyzeArgumentMismatch, attemptParameterRepair } from "../src/tool/plugin/mcpx-diagnose.js"
+import { findClosestTool, levenshteinDistance, analyzeArgumentMismatch, attemptParameterRepair, diagnoseMcpxScript } from "../src/tool/plugin/mcpx-diagnose.js"
 import {
   generateSubagentSessionID,
   registerLease,
@@ -132,6 +132,32 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
     expect(match?.distance).toBe(1)
   })
 
+  it("repairs a bracket-notation typo containing a regex group metacharacter without throwing (#2280)", async () => {
+    // Oracle: diagnosis returns normally and the repaired source is the input
+    // with exactly the bracket-quoted call name replaced by the closest tool.
+    const source = `await tools["search"]["gre(p"]({ q: "x" })`
+    const result = await diagnoseMcpxScript(source, ["grep", "search_files"])
+    expect(result.typoHint).toContain("grep")
+    expect(result.repairedSource).toBe(`await tools["search"]["grep"]({ q: "x" })`)
+  })
+
+  it("repairs only the call-name span for a bracket-notation typo containing a quantifier (#2280)", async () => {
+    // Oracle: same-spelled text in a comment and a string literal is untouched;
+    // only the erroneous tool-call name is rewritten.
+    const source = ["// grep does the thing", "const label = \"grep\"", `await tools["search"]["grep+"]({ q: label })`].join("\n")
+    const result = await diagnoseMcpxScript(source, ["grep"])
+    expect(result.repairedSource).toBe(
+      ["// grep does the thing", "const label = \"grep\"", `await tools["search"]["grep"]({ q: label })`].join("\n"),
+    )
+  })
+
+  it("still repairs an identifier-form typo at the call site (#2280)", async () => {
+    const source = `await tools.search.grepp({ q: "x" })`
+    const result = await diagnoseMcpxScript(source, ["grep"])
+    expect(result.typoHint).toContain("grep")
+    expect(result.repairedSource).toBe(`await tools.search.grep({ q: "x" })`)
+  })
+
   it("detects shape mismatches and auto-repairs parameter types", () => {
     const schema = {
       type: "object",
@@ -152,6 +178,79 @@ describe("Feature 4: Self-Healing & Diagnostics", () => {
     expect(repair.repaired).toBe(true)
     expect(repair.repairedParams?.timeout).toBe(5000)
     expect(repair.repairedParams?.active).toBe(true)
+  })
+
+  it("does not floor non-integer strings for integer parameters", () => {
+    const schema = {
+      type: "object",
+      properties: { count: { type: "integer" } },
+      required: ["count"],
+    }
+
+    for (const value of ["3.9", "-1.9", "-1.1"]) {
+      const repair = attemptParameterRepair(schema, { count: value })
+      expect(repair.repaired).toBe(false)
+      expect(repair.repairedParams).toBeUndefined()
+    }
+
+    // Already-integer strings keep coercing. "3.0" no longer does: it is not
+    // an integer spelling under the plain-decimal grammar (#769).
+    for (const [value, expected] of [["42", 42], ["-2", -2]] as const) {
+      const repair = attemptParameterRepair(schema, { count: value })
+      expect(repair.repaired).toBe(true)
+      expect(repair.repairedParams?.count).toBe(expected)
+    }
+  })
+
+  it("does not repair non-finite strings for number or integer parameters", () => {
+    const numberSchema = {
+      type: "object",
+      properties: { ratio: { type: "number" } },
+      required: ["ratio"],
+    }
+    const integerSchema = {
+      type: "object",
+      properties: { count: { type: "integer" } },
+      required: ["count"],
+    }
+
+    for (const value of ["Infinity", "-Infinity", "NaN"]) {
+      expect(attemptParameterRepair(numberSchema, { ratio: value }).repaired).toBe(false)
+      expect(attemptParameterRepair(integerSchema, { count: value }).repaired).toBe(false)
+    }
+
+    // A finite fractional string still coerces for a number parameter.
+    const repair = attemptParameterRepair(numberSchema, { ratio: "1.5" })
+    expect(repair.repaired).toBe(true)
+    expect(repair.repairedParams?.ratio).toBe(1.5)
+    expect(JSON.parse(JSON.stringify(repair.repairedParams))).toEqual({ ratio: 1.5 })
+  })
+
+  it("pins the plain-decimal grammar: non-decimal spellings are left unrepaired (#769)", () => {
+    const numberSchema = {
+      type: "object",
+      properties: { ratio: { type: "number" } },
+      required: ["ratio"],
+    }
+    const integerSchema = {
+      type: "object",
+      properties: { count: { type: "integer" } },
+      required: ["count"],
+    }
+
+    // Spellings Number() would reinterpret are not plain decimals, so neither
+    // parameter kind coerces them (previously "0x10" -> 16 and "1e3" -> 1000).
+    for (const value of ["0x10", "0b101", "0o17", "1e3", "1e-1", "+42", "5."]) {
+      expect(attemptParameterRepair(integerSchema, { count: value }).repaired).toBe(false)
+      expect(attemptParameterRepair(numberSchema, { ratio: value }).repaired).toBe(false)
+    }
+    // Integer "3.0" is not an integer spelling and stays unrepaired, aligned
+    // with ToolInputRepair; a number parameter still coerces it to 3.
+    expect(attemptParameterRepair(integerSchema, { count: "3.0" }).repaired).toBe(false)
+    expect(attemptParameterRepair(numberSchema, { ratio: "3.0" }).repairedParams?.ratio).toBe(3)
+    // Plain decimals keep coercing for both kinds.
+    expect(attemptParameterRepair(integerSchema, { count: "42" }).repairedParams?.count).toBe(42)
+    expect(attemptParameterRepair(numberSchema, { ratio: "42" }).repairedParams?.ratio).toBe(42)
   })
 })
 

@@ -3,7 +3,6 @@ import {
   AIError,
   CompactionPart,
   CompactionCheckpointResponse,
-  HttpContext,
   LLMEvent,
   LLMRequest,
   Message,
@@ -14,6 +13,8 @@ import {
   InvalidProviderOutputError,
   InvalidRequestError,
   RateLimitError,
+  ContentPolicyError,
+  QuotaExceededError,
   UnknownProviderError,
 } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
@@ -21,6 +22,7 @@ import { AnthropicMessages, OpenAIResponses } from "@opencode/ai/protocols"
 import { compileRequest } from "@opencode/ai/route/client"
 import { TestLLM } from "@opencode/ai/testing"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
+import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -76,6 +78,7 @@ import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { Location } from "@opencode/core/location"
 import { Provider } from "@opencode/core/provider"
 import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
@@ -157,6 +160,65 @@ test("calculates step cost using the matching context tier", () => {
       { input: 80, output: 10, reasoning: 2, cache: { read: 20, write: 1 } },
     ),
   ).toBeCloseTo(0.0002926)
+})
+
+test("calculates cache savings as cache reads at the input price minus the cache-read price", () => {
+  const costs = [
+    {
+      input: Money.USDPerMillionTokens.make(3),
+      output: Money.USDPerMillionTokens.make(15),
+      cache: {
+        read: Money.USDPerMillionTokens.make(0.3),
+        write: Money.USDPerMillionTokens.make(3.75),
+      },
+    },
+  ]
+  // 1M cache-read tokens: (3 - 0.3) USD saved.
+  expect(
+    SessionUsage.calculateCacheSavings(costs, {
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 1_000_000, write: 0 },
+    }),
+  ).toBeCloseTo(2.7)
+  // Zero-cache case: no cache reads, no savings, whatever the prices.
+  expect(
+    SessionUsage.calculateCacheSavings(costs, {
+      input: 1_000_000,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    }),
+  ).toBe(Money.USD.zero)
+})
+
+test("cache savings use the same context tier as step cost", () => {
+  expect(
+    SessionUsage.calculateCacheSavings(
+      [
+        {
+          input: Money.USDPerMillionTokens.make(1),
+          output: Money.USDPerMillionTokens.make(2),
+          cache: {
+            read: Money.USDPerMillionTokens.make(0.1),
+            write: Money.USDPerMillionTokens.make(0.5),
+          },
+        },
+        {
+          tier: { type: "context", size: 100 },
+          input: Money.USDPerMillionTokens.make(3),
+          output: Money.USDPerMillionTokens.make(4),
+          cache: {
+            read: Money.USDPerMillionTokens.make(0.2),
+            write: Money.USDPerMillionTokens.make(0.6),
+          },
+        },
+      ],
+      // Context is 101, so the tier applies: 20 cache reads x (3 - 0.2) / 1M.
+      { input: 80, output: 10, reasoning: 2, cache: { read: 20, write: 1 } },
+    ),
+  ).toBeCloseTo(0.000056)
 })
 
 test("ignores malformed model cost fields", () => {
@@ -1040,6 +1102,270 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(1)
     expect(started).toBe(0)
     expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the primary")
+  })
+
+  scenario("switches to the next credential on a quota failure before failing over to another target", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), options)
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    yield* s.llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    yield* s.llm.push(TestLLM.text("from the second credential", "t1"))
+    yield* s.resume
+
+    expect(switches).toBe(1)
+    expect(fallbacks).toBe(0)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("switched-credential")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the second credential")
+    // The failure benched the serving credential, not the target itself.
+    expect(ModelRoute.credentialCoolingDown(s.routing.target, Credential.ID.make("cred-lab"))).toBe(true)
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+  })
+
+  scenario("keeps walking to the next credential on repeated quota failures in one assistant message", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    const third = SessionRunnerModel.resolved(testModel("third-credential"), options)
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), {
+      ...options,
+      routing: {
+        routeID: Model.ID.make("pool"),
+        target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+        policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+        attempts: 1,
+        credentialID: Credential.ID.make("cred-personal"),
+        credentialFallback: () => Effect.sync(() => (switches++, third)),
+        fallback: () => Effect.sync(() => (fallbacks++, backup)),
+      },
+    })
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    yield* s.llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+    yield* s.llm.push(
+      TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "also out of quota" }) })),
+    )
+    yield* s.llm.push(TestLLM.text("from the third credential", "t1"))
+    yield* s.resume
+
+    // Proximity order (#1014): the second quota failure tries the next credential on the
+    // same provider before moving to a different target; switches walk the eligible
+    // credentials and stop only when none remain.
+    expect(switches).toBe(2)
+    expect(fallbacks).toBe(0)
+    expect(s.requests).toHaveLength(3)
+    expect(String(s.requests[2]?.model.id)).toBe("third-credential")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the third credential")
+  })
+
+  scenario("does not switch credential on a non-quota failure", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), options)
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    yield* s.llm.push(TestLLM.failAfter(streamDisconnected()))
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    expect(switches).toBe(0)
+    expect(fallbacks).toBe(1)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+  })
+
+  scenario("fails over on a content-policy rejection without benching or gating the target", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let switches = 0
+    let fallbacks = 0
+    const switched = SessionRunnerModel.resolved(testModel("switched-credential"), options)
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 3,
+      credentialID: Credential.ID.make("cred-lab"),
+      credentialFallback: () => Effect.sync(() => (switches++, switched)),
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    // The wording is quota-bait on purpose: a policy rejection must not enter the quota
+    // path through the broad exhaustion text heuristics (#1084).
+    yield* s.llm.push(
+      TestLLM.failAfter(
+        new AIError({
+          reason: new ContentPolicyError({ message: "blocked: quota exhausted, insufficient credits" }),
+        }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    // No same-target retry and no credential switch: the request fails straight over.
+    expect(switches).toBe(0)
+    expect(fallbacks).toBe(1)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    // The rejection left route health and quota state untouched.
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.credentialCoolingDown(s.routing.target, Credential.ID.make("cred-lab"))).toBe(false)
+    expect(ModelRoute.steady(s.routing.target, Credential.ID.make("cred-lab"))).toBe(true)
+  })
+
+  scenario("keeps the target at full health across ten consecutive content-policy rejections", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      fallback: () => Effect.succeed(backup),
+    }
+    for (let i = 0; i < 10; i++) {
+      yield* s.llm.push(
+        TestLLM.failAfter(new AIError({ reason: new ContentPolicyError({ message: "blocked by policy" }) })),
+      )
+      yield* s.llm.push(TestLLM.text(`backup answer ${i}`, `t${i}`))
+      yield* s.runPrompt(`Prompt ${i}`)
+    }
+    expect(s.requests).toHaveLength(20)
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.steady(s.routing.target)).toBe(true)
+  })
+
+  scenario("releases the probe claim when a probe attempt ends in a content-filter finish", function* (s) {
+    ModelRoute.resetHealth()
+    const target = ModelRoute.ref({ providerID: "fake", model: "fake-model" })
+    const benchPolicy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+    const now = Date.now()
+    // The probe falls due at the quota window reset a minute out; every probeDue/claim
+    // call below is evaluated at that reset instead of sleeping (this harness runs on a
+    // TestClock, so a real sleep would never advance).
+    const resetAt = now + 60_000
+    const full = {
+      planID: "plan",
+      window: "five-hours",
+      providerID: "fake",
+      percent: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: now,
+      stale: false,
+    } as const
+    // Bench both scopes the pick will claim (target and its serving credential), then arm
+    // each bench with the quota window reset that makes its probe due (#1620).
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true })
+    for (let i = 0; i < 8; i++) ModelRoute.failed(target, benchPolicy, now + i, { quota: true }, "cred-lab")
+    ModelRoute.observeProviderQuota(target, full, now)
+    ModelRoute.observeCredentialQuota(target, "cred-lab", full, now)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    const claimedAt = resetAt
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-lab", claimedAt, token)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(false)
+
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let fallbacks = 0
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target,
+      // fixed: failover only — the benched target's failure history must not trigger
+      // a hedge race against the fallback in this scenario.
+      autonomy: "fixed",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      credentialID: Credential.ID.make("cred-lab"),
+      probeClaim: { claimedAt, token, credentialID: Credential.ID.make("cred-lab") },
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "content-filter", raw: "SAFETY" } },
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+      ),
+    )
+    expect((yield* s.runPrompt("Probe the benched target").pipe(Effect.flip)).message).toBe(
+      "Provider blocked the response",
+    )
+
+    // No failover and no health accounting for a policy finish — but the claim is settled:
+    // the bench stands and both scopes are probe-eligible again instead of stranded
+    // behind the outstanding claim until the bench expires.
+    expect(fallbacks).toBe(0)
+    expect(s.requests).toHaveLength(1)
+    expect(ModelRoute.coolingDown(target)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-lab", resetAt)).toBe(true)
+    ModelRoute.resetHealth()
   })
 
   scenario("generates the title while the first model step is still running", function* (s) {
@@ -2815,31 +3141,27 @@ describe("SessionRunnerLLM", () => {
     })
   })
 
-  for (const header of [false, true]) {
-    scenario(`stops compaction retries through the ${header ? "provider header" : "retry hook"}`, function* (s) {
+  for (const rejected of [false, true]) {
+    scenario(`stops compaction retries through the ${rejected ? "classification" : "retry hook"}`, function* (s) {
       yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
       yield* s.runPrompt("Earlier question")
       s.requests.length = 0
       const hooks = yield* PluginHooks.Service
       yield* hooks.register("session", "retry", (event) =>
         Effect.sync(() => {
-          expect(event.decision.retry).toBe(!header)
+          expect(event.decision.retry).toBe(!rejected)
           event.decision = { retry: false }
         }),
       )
       yield* s.llm.push(
         Stream.fail(
-          header
+          rejected
             ? new AIError({
                 reason: new TransportError({
                   message: "Connection closed",
                   transport: "http",
                   operation: "read",
-                  http: new HttpContext({
-                    url: "https://example.com",
-                    status: 200,
-                    headers: { "x-should-retry": "false" },
-                  }),
+                  delivery: "rejected",
                 }),
               })
             : incompleteStream(),
@@ -2851,7 +3173,7 @@ describe("SessionRunnerLLM", () => {
       expect(s.requests).toHaveLength(1)
       expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
         status: "failed",
-        error: { type: header ? "provider.transport" : "provider.invalid-output" },
+        error: { type: rejected ? "provider.transport" : "provider.invalid-output" },
       })
     })
   }
@@ -5772,6 +6094,116 @@ describe("SessionRunnerLLM", () => {
       expect(yield* recordedEventTypes(sessionID)).not.toContain("session.retry.scheduled.1")
     })
   }
+
+  scenario("links output token limit continuations to the attempt that started the response", function* (s) {
+    const recorded: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => recorded.push(event))
+    yield* Effect.addFinalizer(() => Effect.sync(() => ModelRouteLog.setSink(undefined)))
+    const truncated = (id: string, text: string) =>
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.textStart({ id }),
+        LLMEvent.textDelta({ id, text }),
+        LLMEvent.textEnd({ id }),
+      )
+    yield* s.llm.push(
+      truncated("partial", "Partial"),
+      truncated("more", "More"),
+      TestLLM.text("Finished", "finished"),
+    )
+
+    yield* s.runPrompt("Complete the response")
+
+    const attempts = recorded.flatMap((event) => (event.kind === "attempt" ? [event] : []))
+    expect(attempts).toHaveLength(3)
+    const [root, first, second] = attempts
+    const rootMessageID = root?.row.assistant_message_id ?? undefined
+    expect(root?.continuationOfMessageID).toBeUndefined()
+    expect(root?.row.continuation_index).toBeUndefined()
+    expect(rootMessageID).toBeDefined()
+    expect(first?.continuationOfMessageID).toBe(rootMessageID)
+    expect(first?.row.continuation_index).toBe(1)
+    expect(first?.row.assistant_message_id).not.toBe(rootMessageID)
+    // The second chunk names the response's first attempt, not the chunk before it.
+    expect(second?.continuationOfMessageID).toBe(rootMessageID)
+    expect(second?.row.continuation_index).toBe(2)
+    expect(second?.row.assistant_message_id).not.toBe(first?.row.assistant_message_id)
+  })
+
+  scenario("keeps the continuation link when a truncated response runs a local tool first", function* (s) {
+    const recorded: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => recorded.push(event))
+    yield* Effect.addFinalizer(() => Effect.sync(() => ModelRouteLog.setSink(undefined)))
+    // A local tool that never settles forces the truncated step to end so the tool can be settled, and the
+    // response continues in the next step.
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.toolInputStart({ id: "call-incomplete", name: "echo" }),
+        LLMEvent.toolInputDelta({ id: "call-incomplete", name: "echo", text: '{"text":"partial' }),
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+        LLMEvent.textEnd({ id: "partial" }),
+      ),
+      TestLLM.text("Finished", "finished"),
+    )
+
+    yield* s.runPrompt("Complete the response")
+
+    const attempts = recorded.flatMap((event) => (event.kind === "attempt" ? [event] : []))
+    expect(attempts).toHaveLength(2)
+    const [root, continuation] = attempts
+    const rootMessageID = root?.row.assistant_message_id ?? undefined
+    expect(root?.row.continuation_index).toBeUndefined()
+    expect(rootMessageID).toBeDefined()
+    expect(continuation?.continuationOfMessageID).toBe(rootMessageID)
+    expect(continuation?.row.continuation_index).toBe(1)
+  })
+
+  scenario("keeps the continuation link when a move hands off before the continued step", function* (s) {
+    const recorded: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => recorded.push(event))
+    yield* Effect.addFinalizer(() => Effect.sync(() => ModelRouteLog.setSink(undefined)))
+    // The truncated step ends with the link and the next step continues the response, but a move delivered in
+    // between hands the drain off to a new Location first, so the link has to travel in the drain result.
+    yield* s.admit("Echo before moving")
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.toolCall({ id: "call-move", name: "echo", input: { text: "moving" } }),
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+        LLMEvent.textEnd({ id: "partial" }),
+      ),
+      TestLLM.text("Continued", "continued-after-move"),
+    )
+    const tools = yield* s.blockTools()
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* tools.started
+    yield* s.sessionInbox.admit({
+      id: SessionMessage.ID.create(),
+      sessionID,
+      item: {
+        type: "move",
+        payload: {
+          location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+          projectID: Project.ID.global,
+        },
+        delivery: "steer",
+      },
+    })
+    yield* tools.release
+    yield* Fiber.join(run)
+
+    const attempts = recorded.flatMap((event) => (event.kind === "attempt" ? [event] : []))
+    expect(attempts).toHaveLength(2)
+    const [root, continuation] = attempts
+    const rootMessageID = root?.row.assistant_message_id ?? undefined
+    expect(root?.row.continuation_index).toBeUndefined()
+    expect(rootMessageID).toBeDefined()
+    expect(continuation?.continuationOfMessageID).toBe(rootMessageID)
+    expect(continuation?.row.continuation_index).toBe(1)
+  })
 
   for (const tools of ["hosted", "unfinished"] as const) {
     scenario(`caps output token limit continuations and resets for new input (${tools})`, function* (s) {

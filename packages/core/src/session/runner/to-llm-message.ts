@@ -8,11 +8,13 @@ import {
   type ProviderMetadata,
 } from "@opencode/ai"
 import type { Model } from "@opencode/schema/model"
+import type { Content as ToolContent } from "@opencode/schema/tool"
 import { Option, Schema } from "effect"
 import { fileURLToPath } from "url"
 import { SessionMessage } from "../message.js"
 import { SessionProviderContext } from "../provider-context.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
+import { validateToolFile } from "./tool-result-content.js"
 
 const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
@@ -103,6 +105,10 @@ const userAttachmentContent = (files: readonly FileAttachment[]) => {
 
 const decodeToolInput = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 
+const materializeToolContent = (
+  content: Extract<SessionMessage.AssistantTool["state"], { status: "completed" }>["content"],
+): ToolContent[] => content.map((part) => (part.type === "file" ? validateToolFile(part) : part))
+
 const providerMetadata = (
   provider: string,
   state: Record<string, unknown> | undefined,
@@ -124,8 +130,8 @@ const toolCall = (tool: SessionMessage.AssistantTool, providerMetadata: Provider
 
 const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: ProviderMetadata | undefined) => {
   if (tool.state.status === "completed") {
-    // TODO: Materialize remote and managed URIs before provider-history lowering.
-    const content = tool.state.content
+    // Tool-result URIs are materialized at request-history lowering so persisted tool results stay portable.
+    const content = materializeToolContent(tool.state.content)
     const single = content.length === 1 ? content[0] : undefined
     return ToolResultPart.make({
       id: tool.id,

@@ -18,6 +18,45 @@ const SECURITY = {
   "Referrer-Policy": "strict-origin-when-cross-origin",
 }
 
+/**
+ * Hard cap on the upstream changelog body. The real CHANGELOG.md is
+ * ~123 KB today (measured 2026-11-01); 1 MiB leaves generous headroom
+ * for growth while bounding memory. The 5s fetch deadline bounds
+ * duration, not bytes, so the body is read through the capped reader
+ * below (#1250, the #1158 duration-not-bytes pattern).
+ */
+export const CHANGELOG_MAX_BYTES = 1024 * 1024
+
+/** Read a changelog response body with a hard size cap; an over-cap read cancels the body and throws. */
+async function readCappedChangelog(response: Response): Promise<string> {
+  const declared = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > CHANGELOG_MAX_BYTES) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error(`Changelog response too large (${declared} bytes)`)
+  }
+  if (!response.body) throw new Error("Changelog response had no body")
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > CHANGELOG_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined)
+      throw new Error(`Changelog response exceeded ${CHANGELOG_MAX_BYTES} bytes`)
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
+}
+
 type Context = Pick<ExecutionContext, "waitUntil">
 
 async function refresh(cache: Cache | undefined) {
@@ -26,7 +65,8 @@ async function refresh(cache: Cache | undefined) {
     signal: AbortSignal.timeout(5000),
   }).catch(() => undefined)
   if (!response?.ok) return
-  const markdown = await response.text()
+  const markdown = await readCappedChangelog(response).catch(() => undefined)
+  if (markdown === undefined) return
   await cache?.put(
     CACHE_KEY,
     new Response(markdown, {

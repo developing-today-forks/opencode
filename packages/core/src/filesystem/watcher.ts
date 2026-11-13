@@ -6,14 +6,25 @@ import type ParcelWatcher from "@parcel/watcher"
 import { FileSystem } from "@opencode/schema/filesystem"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
-import { Cause, Context, Effect, Layer, PubSub, RcMap, Schema, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Option, PubSub, RcMap, Schema, Stream } from "effect"
+import { Bus } from "../bus.js"
 import { lazy } from "../util/lazy.js"
-import { watch } from "node:fs"
+import { existsSync, watch } from "node:fs"
 import path from "path"
 import loadBinding from "./watcher-binding.js"
 
 const SUBSCRIBE_TIMEOUT_MS = 10_000
-export const Event = { Updated: FileSystem.Event.Changed }
+export const Event = { Updated: FileSystem.Event.Changed, Degraded: FileSystem.Event.Degraded }
+
+/** Why a directory watch could not be established, in user-presentable classes (#797). */
+export type DegradedCause = "timeout" | "inotify-limit" | "unsupported" | "error"
+
+export function classifySubscribeFailure(cause: Cause.Cause<unknown>): DegradedCause {
+  const pretty = Cause.pretty(cause)
+  if (pretty.includes("TimeoutException") || pretty.includes("TimeoutError")) return "timeout"
+  if (pretty.includes("ENOSPC") || /inotify/i.test(pretty)) return "inotify-limit"
+  return "error"
+}
 
 const watcher = lazy((): typeof ParcelWatcher | undefined => {
   try {
@@ -53,7 +64,11 @@ type Target = {
 
 export interface NativeInterface {
   readonly subscribe: (
-    input: Target & { readonly publish: (update: Update) => void },
+    input: Target & {
+      readonly publish: (update: Update) => void
+      /** Called once when no watch could be established for a directory, with the failure class. */
+      readonly degraded?: (cause: DegradedCause) => void
+    },
   ) => Effect.Effect<Subscription | undefined>
 }
 
@@ -90,6 +105,18 @@ export const layer = (options?: Options) =>
       }
       const native = yield* Native
 
+      // A directory that cannot be watched at all is a user-visible state, not
+      // just a log line (#797): publish it on the Bus in the FileSystem event
+      // family, the channel LocationWatcher already uses for filesystem.changed.
+      // The Bus is captured when this layer is built (the RcMap lookup runs in
+      // a build-time context, so a runtime serviceOption there would never see
+      // it); contexts built without one keep the log line only.
+      const bus = yield* Effect.serviceOption(Bus.Service)
+      const publishDegraded = (directory: string, cause: DegradedCause) =>
+        Option.isNone(bus)
+          ? Effect.void
+          : bus.value.publish(FileSystem.Event.Degraded, { directory, cause }).pipe(Effect.ignoreCause)
+
       // Keys compare structurally (effect Equal), so equivalent watches share one entry.
       const watchers = yield* RcMap.make({
         lookup: (key: Target) =>
@@ -99,6 +126,7 @@ export const layer = (options?: Options) =>
               native.subscribe({
                 ...key,
                 publish: (update) => PubSub.publishUnsafe(pubsub, update),
+                degraded: (cause) => Effect.runFork(publishDegraded(key.target, cause)),
               }),
               (subscription) =>
                 subscription
@@ -221,7 +249,7 @@ export const nativeLayer = Layer.succeed(
           return { unsubscribe: () => Promise.resolve(subscription.close()), backend: "node" }
         })
       }
-      return subscribeDirectory(watcher(), getBackend(), input.target, input.ignore, input.publish)
+      return subscribeDirectory(watcher(), getBackend(), input.target, input.ignore, input.publish, input.degraded)
     },
   }),
 )
@@ -229,7 +257,7 @@ export const nativeLayer = Layer.succeed(
 export const nativeNode = makeGlobalNode({ service: Native, layer: nativeLayer, deps: [] })
 
 export function configured(options?: Options) {
-  return makeGlobalNode({ service: Service, layer: layer(options), deps: [nativeNode] })
+  return makeGlobalNode({ service: Service, layer: layer(options), deps: [nativeNode, Bus.node] })
 }
 
 export const node = configured()
@@ -240,12 +268,15 @@ function subscribeDirectory(
   directory: string,
   ignore: readonly string[],
   publish: (update: Update) => void,
+  degraded?: (cause: DegradedCause) => void,
 ): Effect.Effect<Subscription | undefined> {
   if (!native || !backend) {
-    return Effect.logError("watcher backend not supported", { directory, platform: process.platform }).pipe(
-      Effect.as(undefined),
-    )
+    // The Parcel binding can be unavailable even on supported platforms
+    // (e.g. its native library fails to load), which must not silently end
+    // every directory watch: fall back to node's recursive fs.watch (#773).
+    return fallBackToNode(directory, ignore, publish, degraded, "unsupported")
   }
+
   const callback: ParcelWatcher.SubscribeCallback = (error, updates) => {
     if (error) Effect.runFork(Effect.logError("watcher callback failed", { error }))
     for (const update of updates) publish(update)
@@ -263,11 +294,94 @@ function subscribeDirectory(
       }),
     ),
     Effect.timeout(SUBSCRIBE_TIMEOUT_MS),
-    Effect.catchCause((cause) =>
-      Effect.logError("failed to subscribe", {
+    Effect.catchCause((cause) => {
+      // Scope shutdown interrupting a pending subscribe is not a failure:
+      // no fallback, no degraded signal.
+      if (
+        Cause.hasInterrupts(cause) &&
+        !Cause.pretty(cause).includes("TimeoutException") &&
+        !Cause.pretty(cause).includes("TimeoutError")
+      )
+        return Effect.succeed(undefined)
+      const reason = classifySubscribeFailure(cause)
+      return Effect.logError("failed to subscribe", {
         directory,
         cause: Cause.pretty(cause),
-      }).pipe(Effect.as(undefined)),
-    ),
+      }).pipe(Effect.andThen(fallBackToNode(directory, ignore, publish, degraded, reason)))
+    }),
   )
+}
+
+/** The #773 node fallback, tried whenever the Parcel subscribe cannot be used or
+ * fails (missing binding, timeout, inotify exhaustion, ...). When it also cannot
+ * watch, the failure is surfaced through `degraded` instead of ending silently. */
+function fallBackToNode(
+  directory: string,
+  ignore: readonly string[],
+  publish: (update: Update) => void,
+  degraded: ((cause: DegradedCause) => void) | undefined,
+  reason: DegradedCause,
+): Effect.Effect<Subscription | undefined> {
+  return Effect.gen(function* () {
+    let failure = reason
+    const subscription = yield* Effect.sync(() => subscribeDirectoryWithNode(directory, ignore, publish)).pipe(
+      Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          failure = classifySubscribeFailure(cause)
+        }).pipe(
+          Effect.andThen(
+            Effect.logError("watcher node fallback failed", { directory, cause: Cause.pretty(cause) }),
+          ),
+          Effect.as(undefined),
+        ),
+      ),
+    )
+    if (subscription) {
+      yield* Effect.logInfo("watcher using node fallback", { directory, reason })
+      return subscription
+    }
+    degraded?.(failure)
+    return undefined
+  })
+}
+
+/** Recursive directory watch on node's fs.watch, used when Parcel is unavailable.
+ * Exported so tests can pin the fallback's delivery semantics directly (#968);
+ * production subscriptions reach it through fallBackToNode. */
+export function subscribeDirectoryWithNode(
+  directory: string,
+  ignore: readonly string[],
+  publish: (update: Update) => void,
+): Subscription | undefined {
+  // Parcel ignore entries are literal names ("node_modules") or subtree
+  // globs ("**/{node_modules,.git}/**"); both reduce to segment names here.
+  const ignored = new Set<string>()
+  for (const entry of ignore) {
+    const braces = entry.match(/\*\*\/\{([^}]+)\}\/\*\*/)
+    if (braces) {
+      for (const name of braces[1].split(",")) ignored.add(name)
+      continue
+    }
+    const name = entry.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")
+    if (name && !/[*{}]/.test(name)) ignored.add(name)
+  }
+  let subscription: ReturnType<typeof watch>
+  try {
+    subscription = watch(directory, { recursive: true }, (event, file) => {
+      if (!file) return
+      const relative = file.toString()
+      if (relative.split(path.sep).some((segment) => ignored.has(segment))) return
+      const full = path.join(directory, relative)
+      // fs.watch cannot distinguish create from delete on a rename; the
+      // path's existence at delivery time is the available signal.
+      publish({ path: full, type: event === "rename" ? (existsSync(full) ? "create" : "delete") : "update" })
+    })
+  } catch {
+    // Recursive watching is unavailable on this platform/runtime.
+    return undefined
+  }
+  subscription.on("error", (error: unknown) =>
+    Effect.runFork(Effect.logError("watcher callback failed", { path: directory, error })),
+  )
+  return { unsubscribe: () => Promise.resolve(subscription.close()), backend: "node" }
 }

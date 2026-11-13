@@ -8,6 +8,7 @@ import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
 import { WellKnown } from "@opencode/core/wellknown"
 import { location } from "./fixture/location"
+import { withEnv } from "./fixture/env"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(FetchHttpClient.layer)
@@ -53,6 +54,98 @@ it.live("loads embedded and remote configuration", () =>
           { model: "remote/model" },
         ])
       }),
+    (server) => Effect.promise(() => server.stop(true)),
+  ),
+)
+
+it.live("substitutes env references by own property, not through the prototype chain", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const seen: Array<{ path: string; authorization: string | null }> = []
+      return {
+        seen,
+        server: Bun.serve({
+          port: 0,
+          fetch(request) {
+            const url = new URL(request.url)
+            if (url.pathname === "/.well-known/opencode") {
+              return Response.json({
+                remote_config: {
+                  url: `${url.origin}/config/{env:constructor}`,
+                  headers: { authorization: "Bearer-{env:toString}" },
+                },
+              })
+            }
+            if (url.pathname.startsWith("/config/")) {
+              const authorization = request.headers.get("authorization")
+              seen.push({ path: url.pathname, authorization })
+              if (url.pathname === "/config/" && authorization === "Bearer-") {
+                return Response.json({ model: "remote/unset" })
+              }
+              if (url.pathname === "/config/c-real" && authorization === "Bearer-h-real") {
+                return Response.json({ model: "remote/real" })
+              }
+            }
+            return new Response("Not found", { status: 404 })
+          },
+        }),
+      }
+    }),
+    ({ server, seen }) =>
+      Effect.gen(function* () {
+        const origin = server.url.origin
+        // Prototype names with nothing set resolve as unset in both url and
+        // headers, never as the inherited Object.prototype members.
+        expect(yield* WellKnown.resolve({ origin, variables: {} })).toEqual([{ model: "remote/unset" }])
+        expect(seen[0]?.path).toBe("/config/")
+        expect(seen[0]?.authorization).toBe("Bearer-")
+        // Genuinely set under a prototype name substitutes its real value.
+        expect(
+          yield* WellKnown.resolve({
+            origin,
+            variables: Object.fromEntries([
+              ["constructor", "c-real"],
+              ["toString", "h-real"],
+            ]),
+          }),
+        ).toEqual([{ model: "remote/real" }])
+        expect(seen[1]?.path).toBe("/config/c-real")
+        expect(seen[1]?.authorization).toBe("Bearer-h-real")
+      }),
+    ({ server }) => Effect.promise(() => server.stop(true)),
+  ),
+)
+
+it.live("substitutes real process.env values", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() =>
+      Bun.serve({
+        port: 0,
+        fetch(request) {
+          const url = new URL(request.url)
+          if (url.pathname === "/.well-known/opencode") {
+            return Response.json({
+              remote_config: {
+                url: `${url.origin}/env/{env:OPENCODE_WELLKNOWN_TEST_TOKEN}`,
+                headers: { authorization: "Bearer {env:OPENCODE_WELLKNOWN_TEST_TOKEN}" },
+              },
+            })
+          }
+          if (url.pathname === "/env/from-env" && request.headers.get("authorization") === "Bearer from-env") {
+            return Response.json({ model: "remote/env" })
+          }
+          return new Response("Not found", { status: 404 })
+        },
+      }),
+    ),
+    (server) =>
+      withEnv({ OPENCODE_WELLKNOWN_TEST_TOKEN: "from-env" }, () =>
+        Effect.gen(function* () {
+          expect(yield* WellKnown.resolve({ origin: server.url.origin, variables: {} })).toEqual([
+            { model: "remote/env" },
+          ])
+        }),
+      ),
     (server) => Effect.promise(() => server.stop(true)),
   ),
 )

@@ -1,8 +1,8 @@
 import { EOL } from "node:os"
-import { readFile, rename, writeFile } from "node:fs/promises"
 import { Effect } from "effect"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 import { Config } from "../../../config"
@@ -13,7 +13,7 @@ export default Runtime.handler(
   Effect.fn("cli.plugin.remove")(function* (input) {
     const global = yield* Global.Service
     const configPath = yield* Effect.promise(() => resolveConfigPath(global.config))
-    const server = yield* Effect.promise(() => removePluginConfig(configPath, input.package))
+    const server = yield* removePluginConfig(configPath, input.package)
     const config = yield* Config.Service
     const info = yield* config.get()
     const tui = configured(info.plugins, input.package)
@@ -33,11 +33,11 @@ export default Runtime.handler(
   }),
 )
 
-export async function removePluginConfig(configPath: string, spec: string) {
-  const text = await readFile(configPath, "utf8").catch((error) => {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined
-    throw error
-  })
+export const removePluginConfig = Effect.fnUntraced(function* (configPath: string, spec: string) {
+  const fs = yield* FSUtil.Service
+  const text = yield* fs.readFileString(configPath).pipe(
+    Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)),
+  )
   if (text === undefined) return false
   const errors: ParseError[] = []
   const config: unknown = parse(text, errors, { allowTrailingComma: true })
@@ -58,11 +58,11 @@ export async function removePluginConfig(configPath: string, spec: string) {
       },
     ),
   )
-  const temporary = configPath + ".tmp"
-  await writeFile(temporary, updated.endsWith("\n") ? updated : updated + "\n", { mode: 0o600 })
-  await rename(temporary, configPath)
+  yield* fs.writeAtomic(configPath, updated.endsWith("\n") ? updated : updated + "\n", {
+    modePolicy: "owner-capped",
+  })
   return true
-}
+})
 
 function configured(plugins: readonly unknown[] | undefined, spec: string) {
   return plugins?.some((entry) => matches(entry, spec)) ?? false

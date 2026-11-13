@@ -23,6 +23,8 @@ import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { App } from "@opencode/core/app"
 import { Agent } from "@opencode/core/agent"
+import { Model } from "@opencode/core/model"
+import { ModelRoute } from "@opencode/core/model-route"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Money } from "@opencode/schema/money"
@@ -246,6 +248,21 @@ it.effect("auto compaction estimates current content against the buffered prompt
     // Another provider's usage is not trusted either.
     const foreign = { ...assistant, model: { ...assistant.model, providerID: Provider.ID.make("other") } }
     expect(SessionCompaction.estimateContext({ ...grown, messages: [foreign] })).toBe(21)
+    // #891: the pre-resolution sizing that feeds route ceilings accepts any provider's
+    // anchor — a routed session's previous turn was served by one of the route's leaves —
+    // and returns undefined for an empty history, so an unknown size never filters.
+    const history = (messages: SessionContext.Loaded["messages"]) =>
+      SessionCompaction.estimateHistoryRequest({
+        agent: grown.agent,
+        model: { ref: grown.model.ref, capabilities: grown.model.capabilities },
+        tools: grown.tools,
+        initial: grown.initial,
+        messages,
+      })
+    expect(history([])).toBeUndefined()
+    expect(history(grown.messages)).toBe(90_000)
+    expect(history([foreign])).toBe(89_000)
+    expect(history([interrupted])).toBe(21)
     expect(
       SessionCompaction.estimateContext({
         ...grown,
@@ -589,6 +606,64 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
   }),
 )
 
+it.effect("compaction preserves a hooked prior summary when flattening older exchanges", () =>
+  Effect.gen(function* () {
+    requests = []
+    const hooks = yield* PluginHooks.Service
+    const store = yield* SessionStore.Service
+    const session = yield* insertSession(Session.ID.make("ses_hooked_summary_flatten"))
+    const prior = Schema.decodeUnknownSync(SessionMessage.CompactionCompleted)({
+      id: SessionMessage.ID.create(),
+      type: "compaction",
+      status: "completed",
+      reason: "auto",
+      summary: "Original summary",
+      recent: "Previously summarized recent context",
+      time: { created: 0, completed: 0 },
+    })
+    const user = (text: string) =>
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text,
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+    const messages = [
+      prior,
+      user(`old exchange one ${"x".repeat(400_000)}`),
+      user(`old exchange two ${"x".repeat(400_000)}`),
+      user(`old exchange three ${"x".repeat(400_000)}`),
+      user("latest exchange"),
+    ]
+    yield* hooks.register("session", "compaction", (event) =>
+      Effect.sync(() => {
+        const checkpoint = event.messages[0]
+        if (!checkpoint) return
+        event.messages[0] = {
+          ...checkpoint,
+          content: checkpoint.content.map((part) =>
+            part.type === "text" ? { ...part, text: part.text.replace("Original summary", "Edited summary") } : part,
+          ),
+        }
+      }),
+    )
+
+    expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
+
+    expect(requests).toHaveLength(1)
+    const request = JSON.stringify(requests[0]?.messages)
+    expect(request).toContain("Edited summary")
+    expect(request).not.toContain("Original summary")
+    expect(request).toContain("old exchange three")
+    expect(request).not.toContain("old exchange one")
+    expect(request).not.toContain("old exchange two")
+    expect(request).not.toContain("Previously summarized recent context")
+    expect(yield* store.context(session.id)).toMatchObject([
+      { type: "compaction", summary: "## Objective\n- manual summary", recent: "[User]: latest exchange" },
+    ])
+  }),
+)
+
 it.effect("native compaction fails without a model call on a route that cannot compact", () =>
   Effect.gen(function* () {
     requests = []
@@ -642,5 +717,92 @@ it.effect("forked session compaction reuses the fork root prompt cache key", () 
 
     expect(requests).toHaveLength(1)
     expect(requests[0]?.promptCacheKey).toBe(rootID)
+  }),
+)
+
+let claimedCompactionModel: SessionRunnerModel.Resolved | undefined
+const claimModels = Layer.mock(SessionRunnerModel.Service)({
+  resolve: () => Effect.succeed(claimedCompactionModel ?? resolved),
+})
+const itClaim = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      Bus.node,
+      Agent.node,
+      SessionProjector.node,
+      SessionStore.node,
+      SessionCompaction.node,
+      SessionModelRequest.node,
+      PluginHooks.node,
+    ]),
+    [
+      Bus.node.replace(Bus.configured({ persist: true })),
+      llmClient.replace(client),
+      Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+      SessionRunnerModel.node.replace(claimModels),
+    ],
+  ),
+)
+
+itClaim.live("manual compaction releases a fresh resolution's probe claim on nothing-to-compact (#1486)", () =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    requests = []
+    const target = ModelRoute.ref({ providerID: "test", model: "summary-model" })
+    const policy = ModelRoute.policy()
+    const now = Date.now()
+    for (let index = 0; index < 8; index++) ModelRoute.failed(target, policy, now + index, { quota: true })
+    const resetAt = now + 250
+    ModelRoute.observeProviderQuota(
+      target,
+      {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    yield* Effect.sleep("400 millis")
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    // The compaction agent resolves a different model, spending the bench's probe claim.
+    const claimedAt = Date.now()
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, claimedAt, token)).toBe(true)
+    claimedCompactionModel = SessionRunnerModel.resolved(model, {
+      capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+      cost,
+      limit: { context: 200_000, output: 32_000 },
+      routing: {
+        routeID: Model.ID.make("compaction-route"),
+        target,
+        policy,
+        attempts: 1,
+        fallback: () => Effect.succeed(undefined),
+        probeClaim: { claimedAt, token },
+      },
+    })
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) => {
+      editor.update(Agent.ID.make("compaction"), (agent) => {
+        agent.model = Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make("other-model") })
+      })
+    })
+    const session = yield* insertSession(Session.ID.make("ses_compaction_probe_release"))
+    expect(yield* compactManually(session, [])).toEqual({
+      status: "failed",
+      error: { type: "compaction.unavailable", message: "Nothing to compact yet" },
+    })
+    claimedCompactionModel = undefined
+    expect(requests).toHaveLength(0)
+    // The bench stands, but the probe is due again instead of stranded behind the claim.
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now())
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true)
+    ModelRoute.resetHealth()
   }),
 )

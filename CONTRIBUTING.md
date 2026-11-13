@@ -22,7 +22,7 @@ New providers should rarely require OpenCode changes. Add the provider to [model
 
 ## Development
 
-OpenCode requires Bun 1.3 or newer. From the repository root:
+OpenCode requires Bun 1.4.2 or newer. CI uses the exact version pinned in `package.json` (`bun@1.4.2`); current Bun releases work as well — the test suites, including the Solid component suites in `packages/ui`, `packages/session-ui`, and `packages/app`, are verified against both the pinned version and current Bun. From the repository root:
 
 ```bash
 bun install

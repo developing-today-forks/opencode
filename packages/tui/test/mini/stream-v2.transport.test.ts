@@ -789,6 +789,7 @@ describe("V2 mini transport", () => {
     const snapshots = ui.events.flatMap((event) => (event.type === "stream.subagent" ? [event.state] : []))
 
     expect(snapshots.at(-1)?.tabs.map((item) => item.sessionID)).toEqual(["ses_child", "ses_grandchild"])
+    expect(snapshots.at(-1)?.tabs.map((item) => item.parentID)).toEqual(["ses_1", "ses_child"])
     expect(snapshots.at(-1)?.forms.map((item) => item.id)).toEqual(["frm_child", "frm_grandchild"])
     expect(
       ui.events.find(

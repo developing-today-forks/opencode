@@ -47,6 +47,11 @@ type Frame = {
 
 type Chunk = string | { raw: string }
 
+const parseHTMLInteger = (value: string) => {
+  const match = /^[\t\n\f\r ]*([+-]?\d+)/.exec(value)
+  return match ? Number.parseInt(match[1], 10) : Number.NaN
+}
+
 export const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
 const CONTENT_BYTES = MAX_MARKDOWN_BYTES - 64 * 1024
 
@@ -400,7 +405,7 @@ export function convertHTMLToMarkdown(html: string) {
       }
       if (name === "ul" || name === "ol") {
         suspendLink(frame)
-        const start = Number.parseInt(attributes.start ?? "1")
+        const start = parseHTMLInteger(attributes.start ?? "1")
         frame.list = { ordered: name === "ol", next: Number.isNaN(start) ? 1 : start, previous: activeList }
         activeList = frame.list
         block()
@@ -408,7 +413,7 @@ export function convertHTMLToMarkdown(html: string) {
       }
       if (name === "li") {
         block()
-        const value = Number.parseInt(attributes.value ?? "")
+        const value = parseHTMLInteger(attributes.value ?? "")
         if (activeList?.ordered && !Number.isNaN(value)) activeList.next = value
         const marker = activeList?.ordered ? `${activeList.next++}.` : "-"
         const prefix = `${(activeItem?.indent ?? "").slice(0, 24)}${marker} `

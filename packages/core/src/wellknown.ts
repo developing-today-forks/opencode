@@ -8,6 +8,7 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { Bus } from "./bus.js"
 import { KV } from "./kv.js"
+import { ownValue } from "./util/record.js"
 
 export interface Auth extends Schema.Schema.Type<typeof Auth> {}
 export const Auth = Schema.Struct({
@@ -85,7 +86,15 @@ const resolveEntry = Effect.fnUntraced(function* (entry: Entry, variables: Reado
   if (!entry.manifest.remote_config) return configs
 
   const substitute = (value: string) =>
-    value.replace(/\{env:([^}]+)\}/g, (_, name: string) => variables[name] ?? process.env[name] ?? "")
+    value.replace(
+      /\{env:([^}]+)\}/g,
+      (_, name: string) =>
+        // Own-property resolution only: a plain lookup reads through the prototype
+        // chain, so {env:constructor} would inject the Object function source
+        // into the fetched URL/headers instead of resolving as unset.
+        ownValue(variables, name) ?? ownValue(process.env, name) ??
+        "",
+    )
   const url = substitute(entry.manifest.remote_config.url)
   const headers = Object.fromEntries(
     Object.entries(entry.manifest.remote_config.headers ?? {}).map(([key, value]) => [key, substitute(value)]),

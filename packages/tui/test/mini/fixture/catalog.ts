@@ -7,6 +7,7 @@ export function catalogProvider(id: string, name: string): ProviderListOutput["d
     name,
     activation: "auto",
     package: "",
+    models: [],
   }
 }
 

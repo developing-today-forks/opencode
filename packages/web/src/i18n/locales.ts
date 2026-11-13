@@ -88,7 +88,7 @@ function parse(input: string) {
 export function exactLocale(input: string) {
   const value = parse(input)
   if (!value) return null
-  if (value in localeAlias) {
+  if (Object.hasOwn(localeAlias, value)) {
     return localeAlias[value as keyof typeof localeAlias]
   }
 
@@ -106,7 +106,7 @@ export function matchLocale(input: string) {
     return "zh-cn"
   }
 
-  if (value in localeAlias) {
+  if (Object.hasOwn(localeAlias, value)) {
     return localeAlias[value as keyof typeof localeAlias]
   }
 

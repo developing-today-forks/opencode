@@ -6,6 +6,7 @@ import type { DeepMutable } from "./types.js"
 
 export interface ModelEditor {
   /** Candidates from available providers, including models disabled by earlier transforms. */
+  ids(providerID: string): readonly string[]
   list(providerID?: string): readonly DeepMutable<Model.Info>[]
   get(providerID: string, modelID: string): DeepMutable<Model.Info> | undefined
   /** Edits raw model overrides; cannot create an unavailable provider. */

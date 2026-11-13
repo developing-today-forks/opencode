@@ -58,6 +58,111 @@ function runtimeRequirePlugin(): Plugin {
   }
 }
 
+/**
+ * The Node bundle must not inline native-binding packages whose loaders
+ * dynamically require a platform .node file: @rollup/plugin-commonjs cannot
+ * resolve those requires, so the bundle throws during initialisation and
+ * EVERY command dies before --version (#1615). onnxruntime-node arrives via
+ * @opencode/core's embeddings-native (a lazy `await import` that
+ * inlineDynamicImports flattens into the startup graph) and via
+ * @huggingface/transformers, which also statically imports sharp.
+ *
+ * The default embedding registration is native-onnx after the deliberate
+ * #1690 flip. Per #1792's triaged contract, native-onnx embeddings are
+ * explicitly unsupported in this Node bundle; core checks the build marker
+ * and rejects at the embeddings surface before reaching these bindings.
+ * The keyring package has the same native-loader shape. Its target-specific
+ * addon is extracted as a SEA asset and loaded lazily by a virtual adapter;
+ * Rollup never sees the platform .node file, and Node artifacts retain
+ * Secret Service lookup.
+ */
+function nativeStubPlugin(): Plugin {
+  const message =
+    "native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)"
+  return {
+    name: "opencode:native-stub",
+    enforce: "pre",
+    resolveId(id) {
+      if (id === "onnxruntime-node") return "\0opencode:onnxruntime-node-stub"
+      if (id === "sharp") return "\0opencode:sharp-stub"
+      if (id === "@napi-rs/keyring") return "\0opencode:keyring-runtime"
+    },
+    transform(code, id) {
+      // @huggingface/transformers loads onnxruntime-node through a runtime
+      // createRequire (src/backends/onnx-node.js), which resolveId cannot
+      // intercept: left alone it requires the real package from beside the
+      // bundle at startup and throws MODULE_NOT_FOUND. Rewrite that loader
+      // to the same stub, like runtimeRequirePlugin rewrites Turndown.
+      const normalized = id.replaceAll("\\", "/")
+      if (normalized.endsWith("/@huggingface/transformers/src/backends/onnx-node.js"))
+        return `const unavailable = () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") }
+class Tensor { constructor() { unavailable() } }
+const InferenceSession = { create: unavailable }
+export default { InferenceSession, Tensor, env: {} }`
+      // The published package resolves to its prebuilt dist bundle, where
+      // the same loader survives as a single requireFromHere call assigned
+      // to onnx_node_default: swap just that call for the stub object.
+      if (!normalized.endsWith("/@huggingface/transformers/dist/transformers.node.mjs")) return
+      const stub = `({ InferenceSession: { create: () => { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, Tensor: class { constructor() { throw new Error("native bindings (onnxruntime-node/sharp) are unavailable in the Node bundle; native-onnx embeddings are unsupported here, use the Bun build (#1792)") } }, env: {} })`
+      const transformed = code.replace('requireFromHere("onnxruntime-node")', stub)
+      if (transformed === code) this.error("Failed to rewrite the transformers onnxruntime-node loader")
+      return transformed
+    },
+    load(id) {
+      if (id === "\0opencode:onnxruntime-node-stub")
+        return `const unavailable = () => { throw new Error(${JSON.stringify(message)}) }
+class Tensor { constructor() { unavailable() } }
+const InferenceSession = { create: unavailable }
+const env = {}
+export { InferenceSession, Tensor, env }
+export default { InferenceSession, Tensor, env }`
+      if (id === "\0opencode:sharp-stub") return `export default () => { throw new Error(${JSON.stringify(message)}) }`
+      if (id === "\0opencode:keyring-runtime")
+        return `import { createRequire } from "node:module"
+import path from "node:path"
+
+const load = () => {
+  const assets = process.env.OPENCODE_NODE_ASSETS_DIR
+  const addon = process.env.OPENCODE_NODE_KEYRING_PATH
+  if (!assets || !addon) throw new Error("The Node artifact is missing its platform keyring addon")
+  return createRequire(path.join(assets, "keyring-loader.cjs"))(addon)
+}
+
+export class AsyncEntry {
+  constructor(...args) {
+    return new (load().AsyncEntry)(...args)
+  }
+}`
+    },
+  }
+}
+
+/** The target keyring addon must be an extracted asset, never a Rollup input. */
+function nativeStubGraphPlugin(target: NodeTarget): Plugin {
+  return {
+    name: "opencode:native-stub-graph",
+    generateBundle() {
+      const ids = Array.from(this.getModuleIds(), (id) => id.replaceAll("\\", "/"))
+      const leaked = ids.filter(
+        (id) =>
+          id.includes("/node_modules/onnxruntime-node/") ||
+          id.includes("/node_modules/sharp/") ||
+          id.includes("/node_modules/@napi-rs/keyring"),
+      )
+      if (leaked.length > 0)
+        this.error(
+          `Node bundle graph contains native-binding packages that crash it at startup (#1615): ${leaked.join(", ")}`,
+        )
+      if (!ids.some((id) => id.includes("opencode:onnxruntime-node-stub")))
+        this.error("Node bundle graph is missing the onnxruntime-node stub")
+      if (!ids.some((id) => id.includes("opencode:keyring-runtime")))
+        this.error("Node bundle graph is missing the keyring runtime adapter")
+      if (target.platform === "linux" && !target.keyringAsset)
+        this.error("Linux Node bundle target is missing its keyring addon asset")
+    },
+  }
+}
+
 function simulationGraphPlugin(): Plugin {
   return {
     name: "opencode:simulation-graph",
@@ -231,6 +336,7 @@ if (__ocIsSea()) {
   }
 }
 process.env.OPENCODE_NODE_ASSETS_DIR = __ocAssetRoot
+${input.target.keyringAsset ? `process.env.OPENCODE_NODE_KEYRING_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.keyringAsset)})` : ""}
 process.env.OTUI_ASSET_ROOT = __ocAssetRoot
 process.env.OPENCODE_NODE_PTY_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.nodePtyEntryAsset)})
 process.env.OPENCODE_PARCEL_WATCHER_PATH = __ocPath.join(__ocAssetRoot, ${JSON.stringify(input.target.parcelWatcherAsset)})
@@ -264,6 +370,8 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       rawTextPlugin(),
       runtimeRequirePlugin(),
       fffNodePlugin(),
+      nativeStubPlugin(),
+      nativeStubGraphPlugin(input.target),
       simulationGraphPlugin(),
       solid({
         solid: {
@@ -281,6 +389,7 @@ export function mainConfig(input: NodeBuildInput): UserConfig {
       OPENCODE_ARTIFACT: JSON.stringify("cli-node"),
       ...(input.highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(input.highlights) } : {}),
       OPENCODE_LIBC: input.target.platform === "linux" ? JSON.stringify("glibc") : "undefined",
+      "process.env.OPENCODE_NODE_BUNDLE": JSON.stringify("1"),
       FFF_LIBC: input.target.platform === "linux" ? JSON.stringify("gnu") : "undefined",
       "process.env.WS_NO_BUFFER_UTIL": JSON.stringify("1"),
     },

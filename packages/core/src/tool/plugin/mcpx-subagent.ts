@@ -61,6 +61,7 @@ export type DaemonCaller = (
   method?: string,
   body?: any,
   headers?: Record<string, string>,
+  timeoutMs?: number,
 ) => Promise<any>
 
 let daemonCallerOverride: DaemonCaller | undefined

@@ -16,8 +16,8 @@ export const name = "route_stats"
 
 export const description = `Read how routed models (opencode-route/*) have actually performed, to explain a routing problem or tune it.
 
-Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; request and token usage; and the adjustments in force.
-It also returns each pool: its configuration, and per member how often it was offered and chosen, how often its new-session draws matched its weight, why it was left out (cooldown, provider limit, budget, user skip), and its latency, speed, errors and request sizes. Set \`route\` to one pool id to narrow that view. The tuner's notes come back too.
+Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; the active benches with which leaves are benched, until when, and why (including any known quota reset and probe state); request and token usage; and the adjustments in force.
+It also returns each pool: its configuration, and per member how often it was offered and chosen, how often its new-session draws matched its weight, why it was left out (cooldown, provider limit, budget, user skip, context limit), and its latency, speed, errors and request sizes. Set \`route\` to one pool id to narrow that view. The tuner's notes come back too.
 It lists suggested adjustments derived from that history (a high failure rate, repeated quota errors, unusually slow first output). Set \`apply\` to true to put the suggestions in force; they only lower a target's share or skip it, expire in 30 minutes, and are replaced by the next run. Apply them only when asked to tune routing or when the data clearly shows a problem.`
 
 export const Input = Schema.Struct({
@@ -30,6 +30,7 @@ export const Input = Schema.Struct({
 export type Input = typeof Input.Type
 
 export const Output = Schema.Struct({
+  benches: Schema.Array(Schema.Unknown),
   targets: Schema.Array(Schema.Unknown),
   hedges: Schema.Array(Schema.Unknown),
   predictions: Schema.Array(Schema.Unknown),
@@ -44,6 +45,8 @@ export const Output = Schema.Struct({
 export interface Source {
   readonly routes: ReadonlyMap<string, ConfigModelRoutes.Route>
   readonly notes: readonly string[]
+  /** The Location directory whose quota gate judges tuning predictions (#1461). */
+  readonly location?: string
 }
 
 const NO_SOURCE: Source = { routes: new Map(), notes: [] }
@@ -96,25 +99,34 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
         ...row,
         cooldownSeconds: Math.max(0, Math.round((ModelRoute.cooldownUntil(ref, now) - now) / 1000)),
         // What the provider last said about its rate-limit windows, and how long that holds the target.
-        rateLimit: summarizeRateLimit(ModelRoute.rateLimitOf(ref), now),
-        heldBackSeconds: Math.max(0, Math.round((ModelRoute.limitedUntil(ref, now) - now) / 1000)),
+        rateLimit: summarizeRateLimit(ModelRoute.rateLimitOfAny(ref), now),
+        heldBackSeconds: Math.max(0, Math.round((ModelRoute.limitedUntilAny(ref, now) - now) / 1000)),
         usedLastMinute: used.minute,
         usedLastDay: used.day,
       }
     })
-    const predictions = ModelRouteTuning.predict({ hourly, errors, now })
+    const predictions = ModelRouteTuning.predict({ hourly, errors, now, location: source.location })
     const suggestions = ModelRouteTuning.suggest({ stats, errors, now })
     const pools = new Map<string, ModelRouteReview.Configured>()
     for (const [id, route] of source.routes) {
       if (routeID === undefined || id === routeID) pools.set(id, ModelRouteReview.configured(route))
     }
     return {
+      benches: ModelRoute.activeBenches(now),
+      // The #1828 availability readout: every stop in force (benches, quota gates and
+      // balance holds, rate-limit windows, infra holds) with its class and resume rule.
+      // Absence of a provider here means it is available.
+      availability: ModelRoute.availability(now),
       targets,
       hedges,
       predictions,
       errors: errors.map((error) => ({ ...error, lastMessage: error.lastMessage?.slice(0, MESSAGE_LIMIT) ?? null })),
       suggestions,
-      adjustments: ModelRoute.activeAdjustments(now),
+      // Only adjustments that apply to this Location are in force for it (#1461):
+      // a tuning result computed under another Location's policy is not its rule.
+      adjustments: ModelRoute.activeAdjustments(now).filter(
+        (item) => item.location === undefined || item.location === source.location,
+      ),
       routes: ModelRouteReview.summarize({ attempts, decisions, configured: pools }),
       notes: [...source.notes],
       noDatabase: Option.isNone(read),
@@ -154,6 +166,7 @@ const describeRoute = (route: ModelRouteReview.RouteSummary) => {
 const describeMember = (member: ModelRouteReview.Member) => {
   const parts: string[] = []
   if (member.configuredWeight !== null) parts.push(`weight ${member.configuredWeight}`)
+  if (member.configuredLimit !== null) parts.push(`ceiling ${member.configuredLimit}`)
   if (member.attempts === 0 && member.offered === 0 && Object.keys(member.excluded).length === 0) {
     return `  ${member.target}: ${parts.join(", ") || "not listed"}, no traffic in this window`
   }
@@ -168,7 +181,11 @@ const describeMember = (member: ModelRouteReview.Member) => {
   parts.push(`offered ${member.offered}, chosen ${member.chosen}`)
   if (member.takeRate !== null)
     parts.push(
-      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, weight promised ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
+      `won ${member.drawsWon} of ${member.draws} new-session draws (${Math.round(member.takeRate * 100)}%, expected ${member.expectedShare === null ? "n/a" : `${Math.round(member.expectedShare * 100)}%`})`,
+    )
+  if (member.weightLayers)
+    parts.push(
+      `weight layers: base ${member.weightLayers.base}, scheduled ${member.weightLayers.scheduled}, prefer ${member.weightLayers.prefer}, adjustment ${member.weightLayers.adjustment}, final ${member.weightLayers.demotion}${member.weightLayers.gate ? `, gate: ${member.weightLayers.gate}` : ""}`,
     )
   if (Object.keys(member.excluded).length > 0) parts.push(`excluded: ${counts(member.excluded)}`)
   if (Object.keys(member.errorTags).length > 0) parts.push(`errors: ${counts(member.errorTags)}`)
@@ -188,6 +205,10 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>, applied: n
   for (const row of report.targets)
     lines.push(
       `${row.providerID}/${row.modelID}: ${row.attempts} attempts, ${row.failures} failed, ${row.timeouts} timed out, first output ${row.avgFirstTokenMs === null ? "n/a" : `${Math.round(row.avgFirstTokenMs)}ms`}, ${row.avgTokensPerSecond === null ? "n/a" : `${row.avgTokensPerSecond.toFixed(1)} tok/s`}${row.cooldownSeconds > 0 ? `, cooling ${row.cooldownSeconds}s` : ""}${row.heldBackSeconds > 0 ? `, held back ${row.heldBackSeconds}s by the provider's rate limit` : ""}${rateLimitText(row.rateLimit)}; used ${row.usedLastDay.requests} requests / ${row.usedLastDay.tokens} tokens in 24h`,
+    )
+  for (const bench of report.benches)
+    lines.push(
+      `benched: ${bench.providerID}/${bench.modelID}${bench.credentialID ? ` credential:${bench.credentialID}` : ""} until ${new Date(bench.until).toISOString()} (${bench.reason}, ${bench.consecutiveFailures} consecutive failures${bench.quotaResetAt !== undefined ? `, quota reset ${new Date(bench.quotaResetAt).toISOString()}` : ""}${bench.probeClaimed ? ", probe in flight" : bench.probeDue ? ", probe due" : ""})`,
     )
   for (const error of report.errors)
     lines.push(
@@ -243,12 +264,15 @@ export const add = (editor: ToolEditor, permission: Permission.Interface, source
         }
         return {
           output: {
+            benches: report.benches,
             targets: report.targets,
             hedges: report.hedges,
             predictions: report.predictions,
             errors: report.errors,
             suggestions: report.suggestions,
-            adjustments: ModelRoute.activeAdjustments(),
+            adjustments: ModelRoute.activeAdjustments().filter(
+              (item) => item.location === undefined || item.location === source().location,
+            ),
             routes: report.routes,
             notes: report.notes,
           },

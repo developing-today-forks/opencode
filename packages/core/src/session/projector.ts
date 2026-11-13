@@ -24,6 +24,7 @@ import { Project } from "@opencode/schema/project"
 import { AbsolutePath, RelativePath } from "../schema.js"
 import type { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
+import { ModelRouteLog } from "../model-route-log.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -100,6 +101,10 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
     .get()
     .pipe(Effect.orDie)
   if (!row) return
+  // Refresh the authoritative (success-only route_attempt) totals alongside the
+  // projector fold (#7): attempts are recorded during the step, so by the time a
+  // step's usage is published the ledger already holds the finished attempt.
+  const authoritative = (yield* ModelRouteLog.authoritativeSessionUsage(db, [sessionID]))[0]
   yield* bus.publish(SessionEvent.UsageUpdated, {
     sessionID,
     cost: Money.USD.make(row.cost),
@@ -109,6 +114,18 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
       reasoning: row.reasoning,
       cache: { read: row.cacheRead, write: row.cacheWrite },
     },
+    costAuthoritative: authoritative
+      ? {
+          cost: Money.USD.make(authoritative.costUsd),
+          cacheSavings: Money.USD.make(authoritative.cacheSavedUsd),
+          tokens: {
+            input: authoritative.input,
+            output: authoritative.output,
+            reasoning: authoritative.reasoning,
+            cache: { read: authoritative.cacheRead, write: authoritative.cacheWrite },
+          },
+        }
+      : undefined,
   })
 })
 
@@ -171,6 +188,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
       metadata: parent.metadata,
       subagent_policy: parent.subagent_policy,
       permission: parent.permission,
+      detached: parent.detached,
       version: parent.version,
       cost: 0,
       tokens_input: 0,
@@ -463,6 +481,7 @@ const layer = Layer.effectDiscard(
             metadata: event.data.metadata,
             subagent_policy: event.data.subagentPolicy,
             permission: event.data.permissions,
+            detached: event.data.detached,
             version: event.data.version,
             time_created: event.created,
             time_updated: event.created,
@@ -639,6 +658,7 @@ const layer = Layer.effectDiscard(
             ? {
                 id: input.id,
                 type: "user",
+                delivery: input.delivery,
                 metadata: input.payload.metadata,
                 text: input.payload.text,
                 files: input.payload.files,
@@ -649,6 +669,7 @@ const layer = Layer.effectDiscard(
             : {
                 id: input.id,
                 type: "synthetic",
+                delivery: input.delivery,
                 text: input.payload.text,
                 description: input.payload.description,
                 metadata: input.payload.metadata,

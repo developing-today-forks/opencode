@@ -1,4 +1,5 @@
 name: release-github-action
+# CI tier policy: .github/ci-policy.md (fast PR tier, full main tier).
 # RUNNER-SWITCH (2026-10-18): runners in this workflow were switched from Blacksmith to
 # GitHub-hosted at Drew's direction. To switch back, grep the repo for RUNNER-SWITCH and
 # swap each commented Blacksmith line back in for the active line under it. To choose per
@@ -28,7 +29,20 @@ on:
         type: boolean
         default: false
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+concurrency:
+  # This workflow runs ONLY on manual dispatch, and dispatches must serialize:
+  # the release step reads the latest github-v* tag and computes its successor,
+  # so two dispatches at once can pick the same next version and race the
+  # tag/publish. All dispatches share one group keyed by workflow + ref, are
+  # never cancelled mid-publish, and queue instead (queue: max keeps every
+  # dispatch waiting rather than dropping all but one pending run).
+  # This deviates from the standard pattern's run_id keying (design
+  # ci-fast-pr-full-main §4 / .github/ci-policy.md) on purpose: that keying is
+  # for push/tag-triggered publish workflows, and a run_id group is unique per
+  # run, so for a dispatch-only workflow it serializes nothing (#1035).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write

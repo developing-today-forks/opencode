@@ -1,6 +1,7 @@
 export * as SessionSystemPrompt from "./system-prompt.js"
 
 import PROMPT from "./runner/prompt/system.txt"
+import DELEGATION_PROMPT from "./runner/prompt/delegation.txt"
 
 export function make(tools: string[]) {
   return render(PROMPT, tools)
@@ -24,5 +25,7 @@ export function render(prompt: string, tools: string[]) {
       "- Use the edit tool for targeted changes to existing text files. It replaces the exact text in `oldString` with `newString`, and the values must differ. By default, `oldString` must occur exactly once. If it occurs multiple times, include more surrounding context to make it unique or set `replaceAll` to true to replace every occurrence.",
     )
   }
-  return prompt.replace("${OPENCODE_TOOL_GUIDANCE}", instructions.join("\n"))
+  return prompt
+    .replace("${OPENCODE_DELEGATION_GUIDANCE}", DELEGATION_PROMPT.trim())
+    .replace("${OPENCODE_TOOL_GUIDANCE}", instructions.join("\n"))
 }

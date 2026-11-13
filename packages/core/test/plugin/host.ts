@@ -11,7 +11,8 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { WebSearch } from "@opencode/core/websearch"
 import { Effect, Stream } from "effect"
 
-type Overrides = Partial<Omit<Plugin.Context, "options" | "session">> & {
+type Overrides = Partial<Omit<Plugin.Context, "options" | "serverUrl" | "session">> & {
+  readonly serverUrl?: Plugin.Context["serverUrl"]
   readonly session?: Partial<Plugin.Context["session"]>
 }
 export function host(overrides: Overrides = {}): Plugin.Context {
@@ -28,6 +29,7 @@ export function host(overrides: Overrides = {}): Plugin.Context {
         },
       }),
     options: {},
+    serverUrl: overrides.serverUrl ?? undefined,
     rpc:
       overrides.rpc ??
       Object.assign(
@@ -194,6 +196,7 @@ export function host(overrides: Overrides = {}): Plugin.Context {
     },
     session: {
       hook: overrides.session?.hook ?? (() => Effect.die("unused session.hook")),
+      list: overrides.session?.list ?? (() => Effect.die("unused session.list")),
       create: overrides.session?.create ?? (() => Effect.die("unused session.create")),
       get: overrides.session?.get ?? (() => Effect.die("unused session.get")),
       remove: overrides.session?.remove ?? (() => Effect.die("unused session.remove")),
@@ -257,15 +260,23 @@ export function agentHost(agent: Agent.Interface): Plugin.Context["agent"] {
 }
 
 export function providerHost(providers: Provider.Interface): Plugin.Context["provider"] {
+  const embedModels = (definition: Provider.Definition) => ({
+    ...definition.provider,
+    models: Array.from(definition.models.values()),
+  })
   return {
-    list: () => providers.available().pipe(Effect.map(located)),
+    list: () =>
+      providers
+        .snapshot()
+        .pipe(Effect.map((snapshot) => located(snapshot.available.map((definition) => embedModels(definition))))),
     get: (input) =>
-      providers.get(Provider.ID.make(input.providerID)).pipe(
-        Effect.flatMap((provider) =>
-          provider === undefined
+      providers.snapshot().pipe(
+        Effect.flatMap((snapshot) => {
+          const definition = snapshot.available.find((item) => item.provider.id === input.providerID)
+          return definition === undefined
             ? Effect.fail(new Error(`Provider not found: ${input.providerID}`))
-            : Effect.succeed(located(provider)),
-        ),
+            : Effect.succeed(located(embedModels(definition)))
+        }),
       ),
     reload: providers.reload,
     transform: (callback) =>
@@ -304,6 +315,7 @@ export function modelHost(models: Model.Interface): Plugin.Context["model"] {
       models.transform((editor) =>
         callback({
           list: (id) => editor.list(id === undefined ? undefined : Provider.ID.make(id)),
+          ids: (providerID) => editor.ids(Provider.ID.make(providerID)),
           get: (providerID, modelID) => editor.get(Provider.ID.make(providerID), Model.ID.make(modelID)),
           update: (providerID, modelID, update) =>
             editor.update(Provider.ID.make(providerID), Model.ID.make(modelID), update),
@@ -345,14 +357,27 @@ export function integrationHost(integration: Integration.Interface): Plugin.Cont
       active: (id) => integration.connection.active(Integration.ID.make(id)),
       resolve: (connection) =>
         integration.connection.resolve(
-          connection.type === "credential" ? { ...connection, id: Credential.ID.make(connection.id) } : connection,
+          connection.type === "credential"
+              ? {
+                  ...connection,
+                  id: Credential.ID.make(connection.id),
+                  methodID: connection.methodID === undefined ? undefined : Integration.MethodID.make(connection.methodID),
+                }
+              : connection,
         ),
       status: (input) =>
         integration.connection.status({
           integrationID: Integration.ID.make(input.integrationID),
           connection:
             input.connection.type === "credential"
-              ? { ...input.connection, id: Credential.ID.make(input.connection.id) }
+              ? {
+                  ...input.connection,
+                  id: Credential.ID.make(input.connection.id),
+                  methodID:
+                    input.connection.methodID === undefined
+                      ? undefined
+                      : Integration.MethodID.make(input.connection.methodID),
+                }
               : input.connection,
           status: input.status,
         }),

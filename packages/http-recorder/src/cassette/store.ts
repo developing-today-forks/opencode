@@ -1,4 +1,5 @@
 import { Context, Effect, FileSystem, Layer, Schema, Semaphore } from "effect"
+import type { PlatformError } from "effect/PlatformError"
 import { existsSync, rmSync } from "node:fs"
 import path from "node:path"
 import { secretFindings, SecretFindingSchema, type SecretFinding } from "../redaction/secrets.js"
@@ -85,6 +86,25 @@ const invalidCassette = (name: string, error: unknown) =>
 const failIfUnsafe = (name: string, findings: ReadonlyArray<SecretFinding>) =>
   findings.length === 0 ? Effect.void : Effect.fail(new UnsafeCassetteError({ cassetteName: name, findings }))
 
+// Local conforming copy of the design #1345 atomic-replace contract
+// (packages/util/src/fs-util.ts renameWithRetry), per the #1348 phase-3
+// precedent for writers that cannot consume the shared primitive:
+// http-recorder is a published leaf package with no @opencode/util
+// dependency, and this layer requires only FileSystem.FileSystem, not
+// FSUtil.Service. Keep the delays and transient-error set in sync with
+// the contract.
+const renameRetryDelays = [10, 25, 50, 100]
+const transientRenameTags = new Set(["PermissionDenied", "Busy"])
+
+const isTransientRenameError = (error: PlatformError) => {
+  const reason = error.reason as { _tag?: string; cause?: unknown }
+  const code = (reason.cause as NodeJS.ErrnoException | undefined)?.code
+  if (code === "EPERM" || code === "EACCES" || code === "EBUSY") return true
+  // Node/Bun platform layers normalise EPERM/EACCES to PermissionDenied
+  // and EBUSY to Busy when no raw errno survives on the cause.
+  return reason._tag !== undefined && transientRenameTags.has(reason._tag)
+}
+
 export const fileSystem = (
   options: { readonly directory?: string } = {},
 ): Layer.Layer<Service, never, FileSystem.FileSystem> =>
@@ -108,6 +128,14 @@ export const fileSystem = (
           })
           return nested.flat()
         })
+      const renameWithRetry = (from: string, to: string, attempt = 0): Effect.Effect<void, PlatformError> =>
+        fs.rename(from, to).pipe(
+          Effect.catch((error: PlatformError) => {
+            const delay = renameRetryDelays[attempt]
+            if (delay === undefined || !isTransientRenameError(error)) return Effect.fail(error)
+            return Effect.sleep(delay).pipe(Effect.flatMap(() => renameWithRetry(from, to, attempt + 1)))
+          }),
+        )
 
       return Service.of({
         read: (name) =>
@@ -136,9 +164,27 @@ export const fileSystem = (
               const target = pathFor(name)
               yield* fs.makeDirectory(path.dirname(target), { recursive: true }).pipe(Effect.orDie)
               const temporary = `${target}.${crypto.randomUUID()}.tmp`
-              yield* fs.writeFileString(temporary, formatCassette(cassette)).pipe(
-                Effect.flatMap(() => fs.rename(temporary, target)),
-                Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.catch(() => Effect.void))),
+              // The temp is created exclusively (wx) at 0600 so a
+              // concurrent writer cannot consume this rename source.
+              // Cleanup removes only a temp this invocation actually
+              // created: a wx collision leaves the other writer's file
+              // untouched.
+              let created = false
+              yield* Effect.gen(function* () {
+                yield* Effect.scoped(
+                  Effect.gen(function* () {
+                    const handle = yield* fs.open(temporary, { flag: "wx", mode: 0o600 })
+                    created = true
+                    yield* handle.writeAll(new TextEncoder().encode(formatCassette(cassette)))
+                  }),
+                )
+                yield* fs.chmod(temporary, 0o600)
+                yield* renameWithRetry(temporary, target)
+                created = false
+              }).pipe(
+                Effect.onError(() =>
+                  created ? fs.remove(temporary, { force: true }).pipe(Effect.ignore) : Effect.void,
+                ),
                 Effect.orDie,
               )
               recorded.set(name, { interactions, findings: interactionFindings })

@@ -1,3 +1,4 @@
+import { toIncomingMessage } from "@effect/platform-node/NodeHttpServerRequest"
 import { ServerAuth } from "../auth"
 import { UnauthorizedError } from "@opencode/protocol/errors"
 import { Authorization } from "@opencode/protocol/middleware/authorization"
@@ -5,6 +6,7 @@ export { Authorization } from "@opencode/protocol/middleware/authorization"
 import { PTY_CONNECT_PATH, PTY_CONNECT_TICKET_QUERY } from "@opencode/protocol/groups/pty"
 import { PERSISTENT_PTY_CONNECT_PATH } from "@opencode/protocol/groups/persistent-pty"
 import { PAIRING_CONNECT_PATH } from "@opencode/protocol/groups/server"
+import { TLSSocket } from "node:tls"
 import { Effect, Layer, Redacted } from "effect"
 import { Base64 } from "effect/encoding"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
@@ -66,7 +68,17 @@ function authorizedSessionCookie(request: HttpServerRequest.HttpServerRequest, c
   if (!token) return false
   // Same-site pages on other ports still send this cookie, so only same-origin requests may use it.
   const origin = request.headers.origin
-  if (origin !== undefined && URL.parse(origin)?.host !== request.headers.host) return false
+  if (origin !== undefined) {
+    const parsed = URL.parse(origin)
+    // The server has no trusted-proxy configuration; use the actual request transport, not forwarded headers.
+    const scheme =
+      request.source instanceof Request
+        ? new URL(request.source.url).protocol
+        : toIncomingMessage(request).socket instanceof TLSSocket
+          ? "https:"
+          : "http:"
+    if (parsed?.host !== request.headers.host || parsed.protocol !== scheme) return false
+  }
   return ServerAuth.verifySession(token, config)
 }
 

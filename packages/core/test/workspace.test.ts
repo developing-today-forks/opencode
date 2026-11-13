@@ -7,15 +7,23 @@ import { WorkspaceDriver } from "@opencode/core/workspace/driver"
 import { WorkspaceTable } from "@opencode/core/workspace/sql"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { eq } from "drizzle-orm"
-import { Deferred, Effect, Fiber, Sink, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Sink, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { ChildProcess } from "effect/process"
 import { ExitCode, make as makeSpawner, makeHandle, ProcessId } from "effect/process/ChildProcessSpawner"
 import { testEffect } from "./lib/effect"
 
 const calls: Array<{ readonly operation: string; readonly binding?: WorkspaceDriver.Binding | null }> = []
+const snapshots: Array<{
+  readonly workspaceID: Workspace.ID
+  readonly binding: WorkspaceDriver.Binding
+  readonly now: number
+  readonly retentionMs: number
+}> = []
+const providerSnapshots: number[] = []
 const memory = makeMemoryDriver()
 let failConnect = false
+let failSnapshot = false
 let create: WorkspaceDriver.Interface["create"] = ({ workspaceID }) =>
   Effect.succeed({ binding: { workspaceID, generation: 0 } })
 let connectDriver: WorkspaceDriver.Interface["connect"] = () => Effect.succeed(memory)
@@ -34,6 +42,15 @@ const driver = WorkspaceDriver.make({
     calls.push({ operation: "suspendForIdle", binding })
     return saveBinding({ ...binding, generation: Number(binding.generation) + 1, suspended: true })
   },
+  snapshot: ({ workspaceID, binding, now, retentionMs }) => {
+    snapshots.push({ workspaceID, binding, now, retentionMs })
+    providerSnapshots.push(now)
+    for (let index = providerSnapshots.length - 1; index >= 0; index--) {
+      if (providerSnapshots[index] < now - retentionMs) providerSnapshots.splice(index, 1)
+    }
+    if (failSnapshot) return Effect.fail(new WorkspaceDriver.Error({ message: "snapshot failed" }))
+    return Effect.void
+  },
   destroy: ({ binding }) => {
     calls.push({ operation: "destroy", binding })
     return Effect.void
@@ -43,13 +60,20 @@ const driver = WorkspaceDriver.make({
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([Database.node, Workspace.configured({ idleThreshold: "5 minutes", pollInterval: "1 minute" })]),
-    [WorkspaceDriver.node.replace(WorkspaceDriver.registryNode({ fake: driver, other: driver }))],
+    [
+      WorkspaceDriver.node.replace(
+        WorkspaceDriver.registryNode({ fake: driver, other: driver, unsupported: { ...driver, snapshot: undefined } }),
+      ),
+    ],
   ),
 )
 
 beforeEach(() => {
   calls.splice(0)
+  snapshots.splice(0)
+  providerSnapshots.splice(0)
   failConnect = false
+  failSnapshot = false
   create = ({ workspaceID }) => Effect.succeed({ binding: { workspaceID, generation: 0 } })
   connectDriver = () => Effect.succeed(memory)
 })
@@ -269,6 +293,41 @@ it.effect("keeps shared provisioning alive when a waiter is interrupted", () =>
     yield* Deferred.succeed(gate.release, undefined)
     expect((yield* Fiber.join(owner)).binding).toEqual({ workspaceID, generation: 0 })
     expect(calls.map((call) => call.operation)).toEqual(["create"])
+  }),
+)
+
+it.effect("interrupts shared provisioning when its last waiter is interrupted and retries cleanly", () =>
+  Effect.gen(function* () {
+    const workspace = yield* Workspace.Service
+    const workspaceID = yield* workspace.create({ provider: "fake" })
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    let createInterrupted = false
+    create = ({ workspaceID }) =>
+      Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            createInterrupted = true
+          }),
+        ),
+        Effect.as({ binding: { workspaceID, generation: 0 } }),
+      )
+
+    const sole = yield* workspace.provision(workspaceID).pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(sole)
+    for (let index = 0; index < 100 && !createInterrupted; index++) yield* Effect.yieldNow
+    expect(createInterrupted).toBe(true)
+    expect(
+      yield* Database.Service.use(({ db }) =>
+        db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+      ).pipe(Effect.orDie),
+    ).toMatchObject({ id: workspaceID, binding: null })
+
+    create = ({ workspaceID }) => Effect.succeed({ binding: { workspaceID, generation: 0 } })
+    expect((yield* workspace.provision(workspaceID)).binding).toEqual({ workspaceID, generation: 0 })
+    expect(calls.map((call) => call.operation)).toEqual(["create", "create"])
   }),
 )
 
@@ -539,5 +598,217 @@ it.effect("surfaces wake failures during file overrides as Environment.Failed", 
         cause: new WorkspaceDriver.Error({ message: "wake failed" }),
       }),
     )
+  }),
+)
+
+const seedRow = (
+  id: Workspace.ID,
+  binding: WorkspaceDriver.Binding | null,
+  lastUsedAt: number,
+  provider = "fake",
+  lastSnapshotAt: number | null = null,
+  snapshotRetryAt: number | null = null,
+) =>
+  Database.Service.use(({ db }) =>
+    db
+      .insert(WorkspaceTable)
+      .values({
+        id,
+        provider,
+        binding,
+        created_at: lastUsedAt,
+        last_used_at: lastUsedAt,
+        last_snapshot_at: lastSnapshotAt,
+        snapshot_retry_at: snapshotRetryAt,
+      })
+      .run(),
+  ).pipe(Effect.orDie)
+
+it.effect("rotates due persisted workspace snapshots without connecting and passes the retention policy", () =>
+  Effect.gen(function* () {
+    const workspaceID = Workspace.ID.create()
+    const binding = { workspaceID, generation: 0 }
+    const retentionMs = Duration.toMillis(Duration.days(7))
+    providerSnapshots.push(-8 * 24 * 60 * 60 * 1000, -6 * 24 * 60 * 60 * 1000)
+    yield* seedRow(workspaceID, binding, 0, "fake", -Duration.toMillis(Duration.hours(24)))
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(snapshots).toEqual([{ workspaceID, binding, now: 0, retentionMs }])
+    expect(providerSnapshots).toEqual([-6 * 24 * 60 * 60 * 1000, 0])
+    expect(calls).toEqual([])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.last_snapshot_at).toBe(0)
+    expect(stored?.snapshot_retry_at).toBeNull()
+  }),
+)
+
+it.effect("does not rotate a fresh persisted workspace snapshot", () =>
+  Effect.gen(function* () {
+    const workspaceID = Workspace.ID.create()
+    yield* seedRow(workspaceID, { workspaceID, generation: 0 }, 0, "fake", 0)
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(snapshots).toEqual([])
+    expect(calls).toEqual([])
+  }),
+)
+
+it.effect("skips drivers without snapshot support and logs only once per provider", () =>
+  Effect.gen(function* () {
+    const workspaceID = Workspace.ID.create()
+    yield* seedRow(workspaceID, { workspaceID, generation: 0 }, 0, "unsupported")
+
+    yield* TestClock.adjust("2 minutes")
+
+    expect(snapshots).toEqual([])
+    expect(calls).toEqual([])
+  }),
+)
+
+it.effect("serializes snapshot rotation with connect and re-reads the persisted binding", () =>
+  Effect.gen(function* () {
+    const workspaceID = Workspace.ID.create()
+    yield* seedRow(workspaceID, { workspaceID, generation: 0 }, 0)
+
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    connectDriver = () =>
+      Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(memory))
+
+    const workspace = yield* Workspace.Service
+    const environment = yield* workspace.connect(workspaceID)
+    const spawned = yield* Effect.scoped(environment.spawner.spawn(ChildProcess.make("snapshot-race"))).pipe(
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    yield* Deferred.await(started)
+
+    const adjusting = yield* TestClock.adjust("1 minute").pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Effect.yieldNow
+    expect(snapshots).toEqual([])
+
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.await(spawned)
+    yield* Fiber.await(adjusting)
+
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots[0]).toMatchObject({ workspaceID, binding: { workspaceID, generation: 0 } })
+    expect(calls.map((call) => call.operation)).toEqual(["connect"])
+  }),
+)
+
+it.effect("retries failed snapshots after a bounded delay without marking them successful", () =>
+  Effect.gen(function* () {
+    const workspaceID = Workspace.ID.create()
+    yield* seedRow(workspaceID, { workspaceID, generation: 0 }, 0)
+    failSnapshot = true
+
+    yield* TestClock.adjust("1 minute")
+
+    let stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+    ).pipe(Effect.orDie)
+    expect(snapshots).toHaveLength(1)
+    expect(stored?.last_snapshot_at).toBeNull()
+    expect(stored?.snapshot_retry_at).toBe(15 * 60 * 1000)
+
+    yield* TestClock.adjust("13 minutes")
+    expect(snapshots).toHaveLength(1)
+
+    yield* TestClock.adjust("1 minute")
+    expect(snapshots).toHaveLength(2)
+    stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.last_snapshot_at).toBeNull()
+    expect(stored?.snapshot_retry_at).toBe(30 * 60 * 1000)
+
+    failSnapshot = false
+    yield* TestClock.adjust("14 minutes")
+    expect(snapshots).toHaveLength(2)
+    yield* TestClock.adjust("1 minute")
+    expect(snapshots).toHaveLength(3)
+    stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.last_snapshot_at).toBe(30 * 60 * 1000)
+    expect(stored?.snapshot_retry_at).toBeNull()
+  }),
+)
+
+it.effect("suspends a stale persisted bound workspace at boot without any connect", () =>
+  Effect.gen(function* () {
+    const stale = Workspace.ID.create()
+    const unbound = Workspace.ID.create()
+    yield* seedRow(stale, { workspaceID: stale, generation: 0 }, -10 * 60 * 1000)
+    yield* seedRow(unbound, null, -10 * 60 * 1000)
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(calls).toEqual([{ operation: "suspendForIdle", binding: { workspaceID: stale, generation: 0 } }])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, stale)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: stale, generation: 1, suspended: true })
+    const untouched = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, unbound)).get(),
+    ).pipe(Effect.orDie)
+    expect(untouched?.binding).toBeNull()
+
+    // The same idle episode is not suspended again on the next poll pass.
+    yield* TestClock.adjust("1 minute")
+    expect(calls.map((call) => call.operation)).toEqual(["suspendForIdle"])
+  }),
+)
+
+it.effect("leaves a fresh persisted bound workspace alone at boot", () =>
+  Effect.gen(function* () {
+    const fresh = Workspace.ID.create()
+    yield* seedRow(fresh, { workspaceID: fresh, generation: 0 }, 0)
+
+    yield* TestClock.adjust("1 minute")
+
+    expect(calls).toEqual([])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, fresh)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: fresh, generation: 0 })
+  }),
+)
+
+it.effect("does not suspend a persisted workspace whose connect races the boot scan", () =>
+  Effect.gen(function* () {
+    const raced = Workspace.ID.create()
+    yield* seedRow(raced, { workspaceID: raced, generation: 0 }, -10 * 60 * 1000)
+
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    connectDriver = () =>
+      Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(memory))
+
+    const workspace = yield* Workspace.Service
+    const environment = yield* workspace.connect(raced)
+    const spawned = yield* Effect.scoped(environment.spawner.spawn(ChildProcess.make("race"))).pipe(
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    // The connect now holds the per-workspace lock inside open().
+    yield* Deferred.await(started)
+
+    const adjusting = yield* TestClock.adjust("1 minute").pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Effect.yieldNow
+    expect(calls.map((call) => call.operation)).toEqual(["connect"])
+
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.await(spawned)
+    yield* Fiber.await(adjusting)
+
+    expect(calls.map((call) => call.operation)).toEqual(["connect"])
+    const stored = yield* Database.Service.use(({ db }) =>
+      db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, raced)).get(),
+    ).pipe(Effect.orDie)
+    expect(stored?.binding).toEqual({ workspaceID: raced, generation: 0 })
   }),
 )

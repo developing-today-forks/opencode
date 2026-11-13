@@ -6,11 +6,6 @@ name: deploy
 # or gate individual steps with if: on the runner.
 
 on:
-  push:
-    branches:
-      - dev
-      - production
-      - beta
   workflow_dispatch:
 
 concurrency:

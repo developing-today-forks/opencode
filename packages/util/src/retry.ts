@@ -32,7 +32,14 @@ function isTransientError(error: unknown, depth = 0): boolean {
 }
 
 export async function retry<T>(operation: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
-  const attempts = options.attempts ?? 3
+  // Normalise attempts to a finite count >= 1: NaN would skip the operation entirely and throw
+  // undefined (the #562 symptom), +Infinity would retry forever, and a fractional count would
+  // never match the loop-exit guard, so it is floored. NaN gets a single attempt; +Infinity
+  // falls back to the default count.
+  const requestedAttempts = options.attempts ?? 3
+  let attempts = Math.max(Math.floor(requestedAttempts), 1)
+  if (Number.isNaN(requestedAttempts)) attempts = 1
+  if (requestedAttempts === Number.POSITIVE_INFINITY) attempts = 3
   const delay = options.delay ?? 500
   const factor = options.factor ?? 2
   const maxDelay = options.maxDelay ?? 10_000

@@ -2097,6 +2097,32 @@ describe("Anthropic Messages route", () => {
     }),
   )
 
+  it.effect("skips streamed blocks whose type only matches an Object prototype key", () =>
+    Effect.gen(function* () {
+      for (const type of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+        const response = yield* LLMClient.generate(request).pipe(
+          Effect.provide(
+            fixedResponse(
+              sseEvents(
+                { type: "message_start", message: { id: "msg_1", usage: { input_tokens: 1, output_tokens: 0 } } },
+                { type: "content_block_start", index: 0, content_block: { type, tool_use_id: "call_1", content: [] } },
+                { type: "content_block_stop", index: 0 },
+                { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+                { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "survived" } },
+                { type: "content_block_stop", index: 1 },
+                { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+                { type: "message_stop" },
+              ),
+            ),
+          ),
+        )
+        expect(response.events.find((event) => event.type === "tool-result")).toBeUndefined()
+        expect(response.text).toBe("survived")
+        expect(response.events.at(-1)).toMatchObject({ type: "finish" })
+      }
+    }),
+  )
+
   it.effect("decodes web_search_tool_result_error as provider-executed error result", () =>
     Effect.gen(function* () {
       const body = sseEvents(

@@ -679,7 +679,11 @@ const hasToolHistory = (messages: ReadonlyArray<LLMRequest["messages"][number]>)
 // explicit `compatibility.maxTokensField` is not set. Aligned with
 // models.dev provider naming: DeepSeek, Moonshot AI, Together AI, ZAI
 // (Zhipu + Coding Plan variants), Nvidia, Cerebras, Chutes, etc. still
-// require `max_tokens`.
+// require `max_tokens`. Model-family defaults for the multi-family gateway
+// doors (cline-pass, opendesign, opencode-go) are NOT detected here: they
+// live as per-model `compatibility` entries in the catalog/config layer
+// (#1824), so a family-shaped model id on any other provider keeps the
+// provider/baseURL behavior below.
 const detectMaxTokensField = (
   provider: string,
   baseURL: string | undefined,
@@ -768,6 +772,14 @@ const detectSupportsStrictMode = (provider: string, baseURL: string | undefined)
   return !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia
 }
 
+// GLM 4.5-family models are excluded from tool streaming. The comparison
+// uses the final id segment so vendor-prefixed ids ("zai/glm-4.5") are
+// excluded exactly like the bare id.
+const isGlmToolStreamExcluded = (modelID: string): boolean => {
+  const segment = modelID.toLowerCase().split("/").pop() ?? ""
+  return segment === "glm-4.5" || segment === "glm-4.5-air" || segment === "glm-4.5-flash" || segment === "glm-4.5v"
+}
+
 const detectZaiToolStream = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
   const p = provider.toLowerCase()
   const url = (baseURL ?? "").toLowerCase()
@@ -779,9 +791,7 @@ const detectZaiToolStream = (provider: string, baseURL: string | undefined, mode
     url.includes("api.z.ai") ||
     url.includes("open.bigmodel.cn")
   if (!isZai) return false
-  const id = modelID.toLowerCase()
-  if (id === "glm-4.5" || id === "glm-4.5-air" || id === "glm-4.5-flash" || id === "glm-4.5v") return false
-  return true
+  return !isGlmToolStreamExcluded(modelID)
 }
 
 const lowerOptions = (request: LLMRequest, supportsStore: boolean) => {
@@ -943,6 +953,17 @@ const toolIndexByID = (
   if (!id) return undefined
   const entry = Object.entries({ ...pendingTools, ...tools }).find(([, tool]) => tool?.id === id)
   return entry ? Number(entry[0]) : undefined
+}
+
+const isCompleteToolInput = (input: string): boolean => {
+  const text = input.trim()
+  if (!text) return false
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 const reasoningDelta = (
@@ -1133,8 +1154,21 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
       const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
       const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
       const fallbackTool = tools[fallback] ?? pendingTools[fallback]
-      const index =
-        tool.index ?? matched ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
+      // Some gateways (OpenDesign GLM-5.3-Flash, #1708) reuse index 0 for a
+      // second parallel call, distinguishing calls only by id. A delta that
+      // carries a new id while its stated index is occupied by a different
+      // call starts a new call at the next free index instead of merging
+      // its arguments into the occupying call.
+      const statedTool = tool.index == null ? undefined : (tools[tool.index] ?? pendingTools[tool.index])
+      const latestTool = latestToolIndex === undefined ? undefined : tools[latestToolIndex]
+      const sparseIndex =
+        !tool.id && tool.index !== undefined && latestToolIndex !== undefined && latestToolIndex !== tool.index && statedTool !== undefined && "input" in statedTool && isCompleteToolInput(statedTool.input) && latestTool !== undefined && !isCompleteToolInput(latestTool.input) ? latestToolIndex : undefined
+      const statedIndex =
+        matched ??
+        (tool.id && statedTool?.id && statedTool.id !== tool.id
+          ? nextToolIndex
+          : (tool.index ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)))
+      const index = sparseIndex !== undefined && statedIndex === tool.index ? sparseIndex : statedIndex
       const current = tools[index]
       const pending = pendingTools[index]
       const id = current?.id ?? pending?.id ?? (tool.id || undefined)

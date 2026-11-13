@@ -150,21 +150,14 @@ export default {
           // "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/html/highlights.scm",
           "https://github.com/tree-sitter/tree-sitter-html/raw/refs/heads/master/queries/highlights.scm",
         ],
-        // TODO: Injections not working for some reason
-        // injections: [
-        //   "https://github.com/tree-sitter/tree-sitter-html/raw/refs/heads/master/queries/injections.scm",
-        // ],
+        // OpenTUI 0.5.17 resolves injected languages from the captured node type,
+        // but tree-sitter-html captures `raw_text` for both script and style bodies
+        // and its `injection.language` query property is not consumed. Mapping
+        // `script_element`/`style_element` therefore cannot select the language.
+        // Follow up in @opentui/core's ParserWorker.processInjections to honor
+        // `injection.language` (or map using the capture's parent node), then add
+        // this query and mapping from tree-sitter-html's injections.scm.
       },
-      // injectionMapping: {
-      //   nodeTypes: {
-      //     script_element: "javascript",
-      //     style_element: "css",
-      //   },
-      //   infoStringMap: {
-      //     javascript: "javascript",
-      //     css: "css",
-      //   },
-      // },
     },
     {
       filetype: "vue",

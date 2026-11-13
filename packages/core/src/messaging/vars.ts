@@ -200,7 +200,7 @@ const layer = Layer.effect(
         for (const [prefix, target] of prefixes) {
           if (!name.startsWith(prefix)) continue
           const key = name.slice(prefix.length)
-          if (!(key in MessagingTemplate.sessionFields)) return undefined
+          if (!Object.hasOwn(MessagingTemplate.sessionFields, key)) return undefined
           const value = yield* target
           return value ? yield* field(value, key) : undefined
         }
@@ -208,7 +208,7 @@ const layer = Layer.effect(
       })
 
       const fact = Effect.fnUntraced(function* (name: string) {
-        if (name in MessagingTemplate.timeVars) return timeValue(name, now)
+        if (Object.hasOwn(MessagingTemplate.timeVars, name)) return timeValue(name, now)
         const scoped = yield* sessionVariable(name)
         if (scoped !== undefined) return scoped
         switch (name) {
@@ -278,7 +278,7 @@ const layer = Layer.effect(
       })
 
       const resolve = Effect.fnUntraced(function* (name: string) {
-        if (args[name] !== undefined) return { value: args[name] }
+        if (Object.hasOwn(args, name) && args[name] !== undefined) return { value: args[name] }
         const value = yield* fact(name)
         if (value !== undefined) return { value }
         const defined = (yield* custom).get(name)
@@ -370,7 +370,7 @@ const layer = Layer.effect(
         ),
         ...Object.fromEntries(
           Object.keys(current.config?.vars ?? {})
-            .filter((name) => !(name in MessagingTemplate.constants))
+            .filter((name) => !Object.hasOwn(MessagingTemplate.constants, name))
             .map((name) => [name, "Configured variable"]),
         ),
       })
@@ -415,13 +415,16 @@ const layer = Layer.effect(
     const set = Effect.fn("MessagingVars.set")(function* (input: Parameters<Interface["set"]>[0]) {
       if (!NAME.test(input.name))
         return yield* new MessagingTemplate.TemplateError({ message: `Invalid variable name: ${input.name}` })
-      if (input.name in MessagingTemplate.contextVars || input.name in MessagingTemplate.timeVars)
+      if (
+        Object.hasOwn(MessagingTemplate.contextVars, input.name) ||
+        Object.hasOwn(MessagingTemplate.timeVars, input.name)
+      )
         return yield* new MessagingTemplate.TemplateError({
           message: `{${input.name}} is computed and cannot be overridden`,
         })
       // Topic names are classified from constants in config only, so a stored override would rename topics
       // without changing their write rules.
-      if (input.name in MessagingTemplate.constants)
+      if (Object.hasOwn(MessagingTemplate.constants, input.name))
         return yield* new MessagingTemplate.TemplateError({
           message: `{${input.name}} is built in; change it under messaging.vars in the config instead`,
         })

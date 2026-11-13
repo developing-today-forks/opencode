@@ -2,7 +2,7 @@ export * as QuestionTool from "./question.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { ToolFailure } from "@opencode/ai"
-import { Effect, Schema } from "effect"
+import { Duration, Effect, Schema } from "effect"
 import { Form } from "../../form.js"
 import { Permission } from "../../permission.js"
 import { Question } from "@opencode/schema/question"
@@ -14,6 +14,12 @@ export const description = `Use this tool when you need to ask the user question
 2. Clarify ambiguous instructions
 3. Get decisions on implementation choices as you work
 4. Offer choices to the user about what direction to take.
+
+Detached and subsession warning:
+- Only call this tool when a user is actually watching this session. In detached, background, or subsession contexts there may be no user watching, and the question can sit unseen indefinitely.
+- Your parent session is NOT notified that you asked. If a parent is waiting on you in the foreground, it blocks until an external actor answers — a question call can stall both you and your parent silently.
+- Sessions launched in detached mode may have this tool disabled entirely; its absence from your tool list is deliberate, not an error.
+- In any detached context, prefer the alternative: record the question in your output or working notes, state the default you chose and why, and keep working.
 
 Usage notes:
 - A "Type your own answer" option is added automatically; don't include a separate option for free form answers
@@ -69,7 +75,16 @@ export const Plugin = {
                 source: { type: "tool", messageID: context.messageID, id: context.id },
               })
               .pipe(
-                Effect.mapError((error) => new ToolFailure({ message: "Permission denied: question", error })),
+                Effect.mapError(
+                  (error) =>
+                    new ToolFailure({
+                      message:
+                        error._tag === "Permission.BlockedError" && error.reason
+                          ? error.reason
+                          : "Permission denied: question",
+                      error,
+                    }),
+                ),
                 Effect.andThen(
                   forms
                     .ask({
@@ -83,6 +98,16 @@ export const Plugin = {
                         toField(input.questions[0], 0),
                         ...input.questions.slice(1).map((question, index) => toField(question, index + 1)),
                       ],
+                    }, {
+                      // Bounded and deduped (#1883): an unanswered question must not stall a
+                      // session (or a foreground parent waiting on it) forever, and a resumed
+                      // session must not re-issue an identical pending question. The timeout
+                      // resolves as a cancelled-with-message state, which the mapping below
+                      // surfaces to the model as ordinary handleable feedback.
+                      timeout: Duration.minutes(10),
+                      timeoutMessage:
+                        "The question was not answered within 10 minutes and has been cancelled. Do not ask it again: record the question, state the default you chose, and continue.",
+                      dedupePending: true,
                     })
                     .pipe(Effect.orDie),
                 ),

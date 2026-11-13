@@ -938,6 +938,12 @@ const ITEM_ID_PREFIX: Readonly<Record<string, string>> = {
   compaction: "cmp",
 }
 
+// `item.type` comes from the provider stream, so the table is read by own property only:
+// a prototype name such as "constructor" or "__proto__" must not mint an ID out of an
+// inherited value (`?? "item"` alone is not enough, inherited values are not nullish).
+const itemIDPrefix = (type: string) =>
+  Object.hasOwn(ITEM_ID_PREFIX, type) ? (ITEM_ID_PREFIX[type] ?? "item") : "item"
+
 // An item without an id adopts the id already open in its output slot,
 // otherwise it gets a locally minted one.
 const resolveItem = (
@@ -951,7 +957,7 @@ const resolveItem = (
   id:
     item.id ??
     (index === undefined ? undefined : state.outputItems[index]) ??
-    `${ITEM_ID_PREFIX[item.type] ?? "item"}_${crypto.randomUUID().replaceAll("-", "")}`,
+    `${itemIDPrefix(item.type)}_${crypto.randomUUID().replaceAll("-", "")}`,
 })
 
 // Registered output slots are authoritative for `item_id` routing, and items

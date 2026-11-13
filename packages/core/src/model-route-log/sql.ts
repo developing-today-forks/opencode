@@ -41,6 +41,10 @@ export const RouteAttemptTable = sqliteTable(
     provider_id: text().notNull(),
     model_id: text().notNull(),
     variant: text(),
+    /** The stored credential that served this attempt, when the call site knows it (#1106). Null for
+     * env-served requests and for attempts recorded before this column existed: unattributed usage
+     * that the quota gate must never assign to a credential. */
+    credential_id: text(),
     /** `success`, `failure`, `timeout`, `interrupted`, `hedged-out` or `resolution-failure`. */
     outcome: text().notNull(),
     error_tag: text(),
@@ -67,6 +71,17 @@ export const RouteAttemptTable = sqliteTable(
     /** What the request cost in USD, from the model's catalog prices and the tokens it used. Null when the request
      * did not finish with usage. Stored with the attempt so the cost outlives the session it belongs to. */
     cost_usd: real(),
+    /** What prompt caching saved on this request in USD: cache-read tokens at the input price minus their
+     * cache-read price, from the same catalog prices as `cost_usd`. Null for attempts recorded before this
+     * column existed or without usage — historical rows carry no pricing snapshot, so their savings are
+     * never reconstructed by guessing later prices. */
+    cache_savings_usd: real(),
+    /** The attempt that started the response this request continued, when a response hit the output token limit and
+     * the session runner asked for the rest. Null for a request that stands on its own. A turn is a root attempt plus
+     * every attempt that names it here, so its tokens and cost can be read as one figure. */
+    continuation_of: integer(),
+    /** 0 for a standalone request, then 1, 2, … for each chunk that continues the root attempt. */
+    continuation_index: integer().default(0),
     /** Provider rate-limit and quota headers or fields, when the error carried them. */
     quota: text({ mode: "json" }).$type<Record<string, unknown>>(),
   },
@@ -74,6 +89,7 @@ export const RouteAttemptTable = sqliteTable(
     index("route_attempt_target_time_idx").on(table.provider_id, table.model_id, table.time_started),
     index("route_attempt_route_time_idx").on(table.route_id, table.time_started),
     index("route_attempt_session_idx").on(table.session_id, table.time_started),
+    index("route_attempt_continuation_idx").on(table.continuation_of),
   ],
 )
 
@@ -90,6 +106,7 @@ export const RouteHealthTable = sqliteTable(
     kind: text().notNull(),
     reason: text(),
     until: integer(),
+    credential_id: text(),
   },
   (table) => [index("route_health_target_time_idx").on(table.provider_id, table.model_id, table.time)],
 )

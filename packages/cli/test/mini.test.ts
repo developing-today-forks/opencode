@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { ClientError, OpenCode } from "@opencode/client/promise"
 import { OPENCODE_VERSION } from "../src/version"
+import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { createMiniConnection, mergeInput as mergeInteractiveInput, resolveMiniTarget } from "../src/mini"
 import { mergeInput as mergeNonInteractiveInput, parseRunModel } from "../src/run/run"
 import { parseSessionTargetModel } from "../src/session-target"
+
+const linuxTest = process.platform === "linux" ? test : test.skip
 
 async function cli(args: string[]) {
   const child = Bun.spawn([process.execPath, "run", "src/index.ts", ...args], {
@@ -111,6 +115,111 @@ describe("mini command", () => {
     expect(mergeNonInteractiveInput("from args", "from stdin")).toBe("from args\nfrom stdin")
     expect(mergeNonInteractiveInput(undefined, "from stdin")).toBe("from stdin")
   })
+
+  test("logs before waiting for piped stdin to reach EOF", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          version: OPENCODE_VERSION,
+          pid: process.pid,
+          urls: [],
+          paths: { tmp: "/tmp/opencode" },
+        })
+      },
+    })
+    const child = Bun.spawn(
+      [process.execPath, "run", "src/index.ts", "--print-logs", "run", "--server", server.url.toString(), "hi"],
+      {
+        cwd: path.join(import.meta.dir, ".."),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const reader = child.stderr.getReader()
+    const decoder = new TextDecoder()
+    let stderr = ""
+
+    try {
+      while (!stderr.includes("Reading stdin until EOF")) {
+        const next = await reader.read()
+        if (next.done) break
+        stderr += decoder.decode(next.value)
+      }
+      expect(stderr).toContain("Reading stdin until EOF; redirect from /dev/null")
+    } finally {
+      await child.stdin.end()
+      server.stop(true)
+      await child.exited
+      reader.releaseLock()
+    }
+  })
+
+  // The mini half of the stdin-read log (PR #767) cannot reuse the plain
+  // subprocess harness of the run test above: mini requires a TTY stdout
+  // (validateMiniTerminal) and a controlling terminal (mini-host), while its
+  // stdin must stay a non-TTY stream held open. On Linux, `script` gives the
+  // child a pty as its stdout and controlling terminal and a FIFO redirected
+  // onto its stdin supplies the held-open pipe, so this still drives the real
+  // `mini` command — handler log wiring included — end to end. There is no
+  // equivalent launcher in the Windows test environment, so the test is
+  // Linux-only; the run test above pins the same diagnostic on every platform.
+  linuxTest(
+    "mini logs before waiting for piped stdin to reach EOF",
+    async () => {
+      const server = Bun.serve({
+        port: 0,
+        fetch() {
+          return Response.json({
+            version: OPENCODE_VERSION,
+            pid: process.pid,
+            urls: [],
+            paths: { tmp: "/tmp/opencode" },
+          })
+        },
+      })
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-mini-stdin-"))
+      const fifo = path.join(directory, "stdin")
+      await Bun.spawn(["mkfifo", fifo]).exited
+      const holder = Bun.spawn(["sh", "-c", `exec sleep 60 > "${fifo}"`])
+      const command = [
+        process.execPath,
+        "run",
+        "src/index.ts",
+        "--print-logs",
+        "mini",
+        "--server",
+        server.url.toString(),
+      ].join(" ")
+      const child = Bun.spawn(["script", "-q", "-e", "-c", `${command} < "${fifo}"`, "/dev/null"], {
+        cwd: path.join(import.meta.dir, ".."),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const reader = child.stdout.getReader()
+      const decoder = new TextDecoder()
+      let output = ""
+
+      try {
+        while (!output.includes("Reading stdin until EOF")) {
+          const next = await reader.read()
+          if (next.done) break
+          output += decoder.decode(next.value)
+        }
+        expect(output.replace(/\u001b\[[0-9;]*m/g, "")).toContain("Reading stdin until EOF; redirect from /dev/null")
+      } finally {
+        holder.kill()
+        child.kill()
+        await child.exited
+        reader.releaseLock()
+        server.stop(true)
+        await fs.rm(directory, { recursive: true, force: true })
+      }
+    },
+    30_000,
+  )
 
   test("parses model variants from the model reference", () => {
     expect(JSON.stringify(parseRunModel("openrouter/openai/gpt-5#high"))).toBe(
