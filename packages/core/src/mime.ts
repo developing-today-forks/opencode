@@ -1,5 +1,7 @@
 export * as Mime from "./mime.js"
 
+import { ownValue } from "./util/record.js"
+
 const FTYP_BRANDS: Readonly<Record<string, string>> = {
   "M4A ": "audio/mp4",
   "M4B ": "audio/mp4",
@@ -21,7 +23,8 @@ export function detect(bytes: Uint8Array) {
     return "image/webp"
   if (bytes.length >= 12 && startsWith(bytes.subarray(4), [0x66, 0x74, 0x79, 0x70])) {
     const brand = String.fromCharCode(...bytes.subarray(8, 12))
-    if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand]
+    const brandType = ownValue(FTYP_BRANDS, brand)
+    if (brandType !== undefined) return brandType
   }
   return isText(bytes) ? "text/plain" : "application/octet-stream"
 }
