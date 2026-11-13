@@ -161,11 +161,28 @@ export const make = Effect.fnUntraced(function* (input: {
             () => current,
             (previous, step) => {
               const next = step.catalog ?? previous
-              return changed(entry.attached, previous, next, step.patch).pipe(Effect.ignore, Effect.as(next))
+              // A failed write must not advance `previous`: keeping it means the next step
+              // re-sends the complete configOptions/availableCommands state for `next`,
+              // instead of the client keeping stale state for the rest of the session.
+              return changed(entry.attached, previous, next, step.patch).pipe(
+                Effect.as(next),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.failCause(cause)
+                    : Effect.logWarning("ACP session update failed", cause).pipe(Effect.as(previous)),
+                ),
+              )
             },
           ),
         )
-      }).pipe(Effect.ignore, Effect.forkIn(entry.scope))
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.void
+            : Effect.logWarning("ACP session follower failed", cause),
+        ),
+        Effect.forkIn(entry.scope),
+      )
       return {
         attached: entry.attached,
         configOptions: configOptions(current, yield* Ref.get(entry.attached.selection)),
