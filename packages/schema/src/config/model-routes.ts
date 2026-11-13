@@ -124,6 +124,41 @@ export class Health extends Schema.Class<Health>("Config.ModelRoute.Health")({
   }).pipe(optional),
 }) {}
 
+/** The parser's day-name table (model-route-schedule.ts DAY_NAMES), restated for the
+ * decode check below (#2041): the parser trims and lower-cases before lookup, so any case
+ * or padding of these names is a parser-accepted form. Set lookup is own-entry only, so
+ * inherited names such as "constructor" never resolve (the parser's #791 rule). */
+const DAY_NAMES: ReadonlySet<string> = new Set([
+  "sun",
+  "sunday",
+  "mon",
+  "monday",
+  "tue",
+  "tuesday",
+  "tues",
+  "wed",
+  "wednesday",
+  "thu",
+  "thursday",
+  "thur",
+  "thurs",
+  "fri",
+  "friday",
+  "sat",
+  "saturday",
+])
+
+/** A weekday in a parser-accepted text form: a day name in any case or padding, or a
+ * numeric string "0" to "6" (zero-padding allowed), mirroring the parser's dayOfWeek. */
+const DayOfWeekText = Schema.String.check(
+  Schema.makeFilter((value: string) => {
+    const text = value.trim().toLowerCase()
+    return /^0?[0-6]$/.test(text) || DAY_NAMES.has(text)
+      ? undefined
+      : `invalid weekday "${value}": expected a day name (sun to saturday, any case) or a number from 0 to 6`
+  }),
+)
+
 const DayOfWeek = Schema.Union([
   Schema.Literals([
     "sun",
@@ -145,18 +180,45 @@ const DayOfWeek = Schema.Union([
     "saturday",
   ]),
   Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 6 })),
+  DayOfWeekText,
 ]).annotate({
-  description: "A weekday as a name or 0 (Sunday) to 6 (Saturday).",
+  description:
+    "A weekday as a name (any case, padding ignored) or a number 0 (Sunday) to 6 (Saturday); numeric strings are accepted.",
 })
+
+/** A day of month in the parser's numeric-string form ("15", "-1", padding ignored),
+ * mirroring the parser's dayOfMonth: an optionally signed integer string whose value
+ * is -1 or 1 to 31. */
+const DayOfMonthText = Schema.String.check(
+  Schema.makeFilter((value: string) => {
+    const text = value.trim()
+    const parsed = /^-?\d+$/.test(text) ? Number(text) : Number.NaN
+    return parsed === -1 || (parsed >= 1 && parsed <= 31)
+      ? undefined
+      : `invalid day of month "${value}": expected 1 to 31, or -1 for the last day of the month`
+  }),
+)
 
 const DayOfMonth = Schema.Union([
   Schema.Literal(-1),
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 31 })),
-]).annotate({ description: "A day of the month, 1 to 31, or -1 for the last day of the month." })
+  DayOfMonthText,
+]).annotate({
+  description: "A day of the month, 1 to 31, or -1 for the last day of the month; numeric strings are accepted.",
+})
 
-const WindowName = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/))
+/** A window name: the parser trims before testing its pattern and stores the trimmed
+ * name, so decode tests the trimmed value too (#2041). */
+const WindowName = Schema.String.check(
+  Schema.makeFilter((value: string) =>
+    /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.trim())
+      ? undefined
+      : `invalid window name "${value}": expected 1 to 128 letters, digits, ".", "_" or "-", starting with a letter or digit`,
+  ),
+)
 
-/** Decode-time validation for the Window string fields (#1681). The oracle is the runtime
+/** Decode-time validation for the Window fields (#1681 for the string fields, #2041 for
+ * the list, day and epoch fields). The oracle is the runtime
  * parser in packages/core/src/model-route-schedule.ts (`ModelRouteSchedule.parse`): every
  * grammar it accepts must decode here, and every string it would reject — dropping the
  * whole window — must fail decode instead, with a diagnostic. Schema must not import Core
@@ -228,12 +290,12 @@ const timezone = (description: string) =>
 class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")({
   daysOfWeek: Schema.Array(DayOfWeek)
     .annotate({
-      description: "Weekdays the window is active on. Empty or unset means every day.",
+      description: "Weekdays the window is active on. Unset means every day; an empty list is invalid.",
     })
     .pipe(optional),
   daysOfMonth: Schema.Array(DayOfMonth)
     .annotate({
-      description: "Days of the month the window is active on. Empty or unset means every day.",
+      description: "Days of the month the window is active on. Unset means every day; an empty list is invalid.",
     })
     .pipe(optional),
   dates: Schema.Array(DateEntry)
@@ -251,26 +313,33 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
   excludeWindows: Schema.Array(WindowName)
     .annotate({
       description:
-        "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion.",
+        "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion. An empty list is invalid.",
     })
     .pipe(optional),
   start: timeOfDay('Local start of the daily window as "HH:mm". Unset means from the start of the day. A start later than the end runs past midnight into the following morning.').pipe(optional),
   end: timeOfDay('Local end of the daily window as "HH:mm", exclusive. Unset means to the end of the day.').pipe(optional),
   timezone: timezone('IANA timezone such as "America/Chicago". Unset means the host\'s local timezone.').pipe(optional),
-  from: PositiveInt.annotate({
+  from: Schema.Finite.annotate({
     description: "Epoch milliseconds before which the window never applies.",
   }).pipe(optional),
-  until: PositiveInt.annotate({
+  until: Schema.Finite.annotate({
     description: "Epoch milliseconds after which the window never applies.",
   }).pipe(optional),
 }) {}
 
 export const Window = WindowClass.check(
   Schema.makeFilter((window: WindowClass) => {
-    // An empty date list is unreadable to the runtime parser, which drops the window (#1681).
+    // An empty list is unreadable to the runtime parser, which drops the window (#1681
+    // for the date lists, #2041 for the day and exclusion lists).
+    if (window.daysOfWeek !== undefined && window.daysOfWeek.length === 0)
+      return "window daysOfWeek must not be empty"
+    if (window.daysOfMonth !== undefined && window.daysOfMonth.length === 0)
+      return "window daysOfMonth must not be empty"
     if (window.dates !== undefined && window.dates.length === 0) return "window dates must not be empty"
     if (window.excludeDates !== undefined && window.excludeDates.length === 0)
       return "window excludeDates must not be empty"
+    if (window.excludeWindows !== undefined && window.excludeWindows.length === 0)
+      return "window excludeWindows must not be empty"
     // Equal start/end after normalization (seconds round down, "9:30" is "09:30") is an
     // empty daily range the runtime parser drops; an all-day window omits both fields.
     if (
