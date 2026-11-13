@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
-import { HttpClient, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { RequestExecutor } from "@opencode/ai/route"
 import { TranscriptionFacade } from "@opencode/core/transcription-facade"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
@@ -145,7 +145,7 @@ const fixtureBody = () =>
     .json()
     .then((recording) => recording.interactions[0].response.body as string)
 
-const facadeWithStub = (respond: (request: HttpClient.HttpClientRequest) => Effect.Effect<HttpClientResponse.HttpClientResponse, never>) => {
+const facadeWithStub = (respond: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<HttpClientResponse.HttpClientResponse, never>) => {
   const stub = HttpClient.make((request) => respond(request))
   const executor = RequestExecutor.layer.pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, stub)))
   return TranscriptionFacade.layer.pipe(Layer.provide(executor))
