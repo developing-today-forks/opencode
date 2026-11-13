@@ -179,6 +179,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
             socket,
             outbox: outbox.queue,
             onDequeued: outbox.release,
+            onOverflow: outbox.whenOverflowed,
             onOpen,
             onMessage: (message) => {
               if (!attachment) return Effect.void

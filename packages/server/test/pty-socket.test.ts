@@ -181,3 +181,54 @@ it.live("stalled writer: retention stays bounded, overflow closes and detaches, 
     expect(other.overflowed()).toBeFalse()
   }),
 )
+
+it.live("overflow with a permanently stalled writer detaches at the deadline without delivery", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>()
+    const inbound = yield* Queue.unbounded<string | Uint8Array, Socket.SocketError>()
+    const outbox = yield* makePtyOutbox(4)
+    const state = { detached: false, written: [] as Outbound[] }
+    const socket = Socket.make({
+      reader: Effect.succeed({
+        pull: Queue.take(inbound).pipe(Effect.map((message) => [message] as const)),
+        upgrade: Socket.SocketUpgradeError.unsupported,
+      }),
+      writer: Effect.succeed({
+        write: (chunk) =>
+          Effect.gen(function* () {
+            // The gate is never released: this writer never accepts another frame.
+            yield* Deferred.await(gate)
+            state.written.push(chunk)
+          }),
+        writeAll: () => Effect.die(new Error("runPtySocket writes frames one at a time")),
+      }),
+    })
+    const fiber = yield* Effect.forkChild(
+      runPtySocket({
+        socket,
+        outbox: outbox.queue,
+        onDequeued: outbox.release,
+        onOverflow: outbox.whenOverflowed,
+        overflowDetachAfterMs: 100,
+        onMessage: () => Effect.void,
+        detach: () => {
+          state.detached = true
+        },
+      }),
+      { startImmediately: true },
+    )
+
+    // The drain takes the first frame and blocks in the stalled writer for good.
+    expect(outbox.offer("aaaa")).toBeTrue()
+    yield* Effect.sleep("50 millis")
+    // Refill the bound, then overflow: the close frame is queued but can never be delivered.
+    expect(outbox.offer("bbbb")).toBeTrue()
+    expect(outbox.offer("cccc")).toBeFalse()
+    expect(outbox.overflowed()).toBeTrue()
+
+    // The overflow deadline detaches the connection even though nothing was ever written.
+    expect(yield* Fiber.await(fiber)).toEqual(Exit.void)
+    expect(state.written).toEqual([])
+    expect(state.detached).toBeTrue()
+  }),
+)

@@ -206,6 +206,7 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
               socket,
               outbox: outbox.queue,
               onDequeued: outbox.release,
+              onOverflow: outbox.whenOverflowed,
               onMessage: (message) =>
                 Effect.sync(() => {
                   if (!attachment) return
