@@ -115,17 +115,26 @@ describe("event.subscribe declared errors", () => {
 })
 
 describe("event.subscribe undeclared responses", () => {
-  test("an undeclared 500 fails with a ClientError that keeps the status and body", async () => {
-    const server = serve(() => new Response("boom", { status: 500, headers: { "content-type": "text/plain" } }))
+  test("an undeclared 503 reconnects instead of failing the subscription", async () => {
+    // failStatus reports an undeclared status as a DecodeError carrying the
+    // response; a 5xx is transient (#2321), so the subscription retries with
+    // backoff and recovers when the endpoint answers with an event stream.
+    let requests = 0
+    const server = serve(() => {
+      requests += 1
+      if (requests <= 2)
+        return new Response("boom", { status: 503, headers: { "content-type": "text/plain" } })
+      return new Response(`data: ${connected("evt_connected")}\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
     try {
-      const error = await subscribeFailure(server.baseUrl)
-
-      expect(error).toBeInstanceOf(ClientError)
-      expect(error.cause).toBeInstanceOf(HttpClientError.HttpClientError)
-      const reason = (error.cause as HttpClientError.HttpClientError).reason
-      expect(reason).toBeInstanceOf(HttpClientError.DecodeError)
-      expect(reason.response.status).toBe(500)
-      expect(await Effect.runPromise(reason.response.text)).toBe("boom")
+      const client = await Effect.runPromise(
+        OpenCode.make({ baseUrl: server.baseUrl }).pipe(Effect.provide(FetchHttpClient.layer)),
+      )
+      const events = await Effect.runPromise(client.event.subscribe().pipe(Stream.take(1), Stream.runCollect))
+      expect(events.map((event) => event.id)).toEqual(["evt_connected"])
+      expect(requests).toBe(3)
     } finally {
       server.stop()
     }
@@ -168,13 +177,13 @@ describe("event.subscribe successful stream", () => {
         OpenCode.make({ baseUrl: server.baseUrl }).pipe(Effect.provide(FetchHttpClient.layer)),
       )
 
-      // server.connected carries no SSE id, so taking two events leaves inst:1 as the cursor.
-      const first = await Effect.runPromise(client.event.subscribe().pipe(Stream.take(2), Stream.runCollect))
-      expect(first.map((event) => event.id)).toEqual(["evt_connected", "evt_a"])
-      const second = await Effect.runPromise(client.event.subscribe().pipe(Stream.runCollect))
-
-      expect(lastEventIDs).toEqual([null, "inst:1"])
-      expect(second.map((event) => event.id)).toEqual(["evt_b"])
+      // One subscription: the first body ends after evt_b, so the subscription
+      // reconnects on its own (#2321) and resumes after the last SSE id a
+      // consumer took (inst:2); the fake server answers the reconnect with a
+      // replay of evt_b, which is why it appears twice.
+      const events = await Effect.runPromise(client.event.subscribe().pipe(Stream.take(4), Stream.runCollect))
+      expect(events.map((event) => event.id)).toEqual(["evt_connected", "evt_a", "evt_b", "evt_b"])
+      expect(lastEventIDs).toEqual([null, "inst:2"])
     } finally {
       server.stop()
     }

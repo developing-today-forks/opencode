@@ -35,9 +35,9 @@
   client reports the id just before yielding the event.
 - `server.connected` does not move the cursor. `server.resync` does, because its id is the head.
 - On reconnect the solid connection loop and the Promise client send the cursor as `Last-Event-ID`. The Effect
-  client (`packages/client/src/effect/client.ts`) keeps the cursor on the client and resumes from it on every
-  `subscribe()`. It has no reconnect loop of its own, so a consumer that wants to resume calls `subscribe()`
-  again.
+  client (`packages/client/src/effect/client.ts`) keeps the cursor on the client, resumes from it on every
+  `subscribe()`, and reconnects automatically with bounded backoff after transient failures and unexpected
+  stream ends (#2321), resuming the same subscription from the last consumed id.
 - The Effect client reads the SSE frames itself. The generated Effect event type has no `id`, so the generated
   stream could not report one.
 
@@ -56,7 +56,7 @@ The generated Promise client was regenerated.
 - **Durable replay is not implemented.** Durable events could also be read from `Bus.log({ aggregateID, after })`
   (`packages/core/src/bus.ts`) once the ring has evicted them. That needs the bus configured with `persist`, which retains durable payloads for log reads. Volatile events such
   as deltas are never persisted, so for them only the ring can replay.
-- **Effect reconnect is manual.** See the cursor rules above.
+- **Effect reconnect is automatic** for transient failures and unexpected stream ends (bounded backoff, resuming from the last consumed id, #2321); terminal protocol/decode and non-retryable HTTP errors still end the subscription. See the cursor rules above.
 
 ### Tests
 

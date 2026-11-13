@@ -403,3 +403,179 @@ test("source activity fans out to every subscriber that asked for it", async () 
   await second.return!()
   await events.connections[0].closed
 })
+
+test("a transport failure reconnects automatically and resumes from the last read id", async () => {
+  const resumes: Array<string | undefined> = []
+  let calls = 0
+  const shared = SharedEvents.make(
+    (signal, _onActivity, resume) => {
+      resumes.push(resume.lastEventID)
+      calls += 1
+      if (calls === 1)
+        return (async function* () {
+          resume.onEventId("inst:1")
+          yield { type: "one" }
+          throw new Error("transport down")
+        })()
+      return (async function* () {
+        resume.onEventId("inst:2")
+        yield { type: "two" }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve()
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+      })()
+    },
+    { reconnect: { shouldRetry: () => true, delay: () => 1 } },
+  )
+  const iterator = shared.subscribe({ lastEventID: "inst:0" })[Symbol.asyncIterator]()
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "one" } })
+  // No second subscribe() call: the same iterator keeps receiving after the failure.
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "two" } })
+  expect(resumes).toEqual(["inst:0", "inst:1"])
+  await iterator.return!()
+})
+
+test("an unexpected clean stream end reconnects automatically", async () => {
+  const resumes: Array<string | undefined> = []
+  let calls = 0
+  const shared = SharedEvents.make(
+    (signal, _onActivity, resume) => {
+      resumes.push(resume.lastEventID)
+      calls += 1
+      if (calls === 1)
+        return (async function* () {
+          resume.onEventId("inst:1")
+          yield { type: "one" }
+        })()
+      return (async function* () {
+        yield { type: "two" }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve()
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+      })()
+    },
+    { reconnect: { shouldRetry: () => false, delay: () => 1 } },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "one" } })
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "two" } })
+  expect(resumes).toEqual([undefined, "inst:1"])
+  await iterator.return!()
+})
+
+test("a terminal failure completes subscribers with the error and does not reconnect", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        yield { type: "one" }
+        throw new Error("terminal decode")
+      })()
+    },
+    { reconnect: { shouldRetry: () => false, delay: () => 1 } },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "one" } })
+  await expect(iterator.next()).rejects.toThrow("terminal decode")
+  expect(calls).toBe(1)
+})
+
+test("leaving during the reconnect backoff cancels the pending reconnect", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        throw new Error("transport down")
+      })()
+    },
+    { reconnect: { shouldRetry: () => true, delay: () => 60_000 } },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  const pending = iterator.next()
+  await Bun.sleep(20)
+  expect(calls).toBe(1)
+  await iterator.return!()
+  expect(await pending).toEqual({ done: true, value: undefined })
+  await Bun.sleep(20)
+  expect(calls).toBe(1)
+})
+
+test("a handshake-only stream that keeps ending grows its backoff", async () => {
+  const attempts: number[] = []
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        yield { type: "server.connected" }
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => true,
+        delay: (attempt) => {
+          attempts.push(attempt)
+          return 1
+        },
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  // The handshake alone never resets the attempt counter, so the delay grows.
+  expect(attempts).toEqual([1, 2])
+  expect(calls).toBe(3)
+  await iterator.return!()
+})
+
+test("a throwing reconnect policy completes subscribers with the thrown error", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        throw new Error("transport down")
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => {
+          throw new Error("policy broke")
+        },
+        delay: () => 1,
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  await expect(iterator.next()).rejects.toThrow("policy broke")
+  expect(calls).toBe(1)
+})
+
+test("a throwing reconnect delay completes subscribers with the thrown error", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        throw new Error("transport down")
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => true,
+        delay: () => {
+          throw new Error("delay broke")
+        },
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  await expect(iterator.next()).rejects.toThrow("delay broke")
+  expect(calls).toBe(1)
+})
