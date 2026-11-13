@@ -1060,6 +1060,82 @@ describe("WebSocket channel execution", () => {
     }),
   )
 
+  it.effect("retains a synchronous burst of small frames in order", () =>
+    Effect.gen(function* () {
+      class BurstSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close() {}
+      }
+      const socket = new BurstSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      Array.from({ length: 2048 }, (_, index) => String(index)).forEach((data) =>
+        socket.dispatchEvent(new MessageEvent("message", { data })),
+      )
+
+      expect(yield* connection.messages.pipe(Stream.take(2048), Stream.runCollect)).toEqual(
+        Array.from({ length: 2048 }, (_, index) => String(index)),
+      )
+      yield* connection.close
+    }),
+  )
+
+  it.effect("accepts the exact byte limit and fails/closes when the next frame overflows it", () =>
+    Effect.gen(function* () {
+      const closed: Array<{ code: number; reason: string }> = []
+      class BoundedSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close(code: number, reason: string) {
+          closed.push({ code, reason })
+        }
+      }
+      const socket = new BoundedSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(16 * 1024 * 1024) }))
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(16 * 1024 * 1024) }))
+      expect(closed).toEqual([])
+      socket.dispatchEvent(new MessageEvent("message", { data: new Uint8Array(1) }))
+
+      const error = yield* connection.messages.pipe(Stream.runDrain, Effect.flip)
+      expect(error.reason).toMatchObject({ _tag: "Transport", code: "buffer-overflow", phase: "receive" })
+      expect(closed).toEqual([{ code: 1009, reason: "Inbound buffer exceeded" }])
+      yield* connection.close
+    }),
+  )
+
+  it.effect("bounds overhead from empty frames even when the byte limit is not reached", () =>
+    Effect.gen(function* () {
+      const closed: Array<{ code: number; reason: string }> = []
+      class BoundedSocket extends EventTarget {
+        readyState = globalThis.WebSocket.OPEN
+        send() {}
+        close(code: number, reason: string) {
+          closed.push({ code, reason })
+        }
+      }
+      const socket = new BoundedSocket()
+      const connection = yield* WebSocketTransport.fromWebSocket(socket, {
+        url: "wss://api.openai.test/v1/responses",
+        headers: Headers.empty,
+      })
+      Array.from({ length: 4096 }, () => socket.dispatchEvent(new MessageEvent("message", { data: "" })))
+      expect(closed).toEqual([])
+      socket.dispatchEvent(new MessageEvent("message", { data: "" }))
+
+      const error = yield* connection.messages.pipe(Stream.runDrain, Effect.flip)
+      expect(error.reason).toMatchObject({ _tag: "Transport", code: "buffer-overflow", phase: "receive" })
+      expect(closed).toEqual([{ code: 1009, reason: "Inbound buffer exceeded" }])
+      yield* connection.close
+    }),
+  )
+
   it.effect("uses HTTP when no per-call WebSocket executor is provided", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(sseEvents(...frames))))
