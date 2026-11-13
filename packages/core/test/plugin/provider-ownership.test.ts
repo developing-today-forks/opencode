@@ -180,11 +180,22 @@ const providerDocument = (providers: Record<string, unknown>) =>
 const applyProviderConfig = Effect.fn(function* (entries: Entry[]) {
   const plugin = yield* Plugin.Service
   const providers = yield* Provider.Service
+  const providerID = Provider.ID.make("claude-code")
+  const catalogModelID = Model.ID.make("catalog-model")
   yield* providers.transform((editor) => {
-    editor.update(Provider.ID.make("claude-code"), (provider) => {
-      provider.name = "Claude Code"
-      provider.package = "@opencode/claude-code"
-      provider.integrationID = Integration.ID.make("claude-code")
+    editor.add({
+      info: {
+        ...Provider.Info.empty(providerID),
+        name: "Claude Code",
+        package: "@opencode/claude-code",
+        integrationID: Integration.ID.make("claude-code"),
+      },
+      models: [
+        {
+          ...Model.Info.default(providerID, catalogModelID),
+          settings: { baseURL: "https://catalog.example/v1" },
+        },
+      ],
     })
   })
   const config = Config.testLayer(entries)
@@ -225,6 +236,26 @@ describe("provider transform package seating (#2202)", () => {
       expect(provider?.compatibility?.supportsStore).toBe(true)
       expect(provider?.compatibility?.supportsStrictMode).toBeUndefined()
       expect(provider?.settings?.baseURL).toBeUndefined()
+      const snapshot = yield* providers.snapshot()
+      const catalogModel = snapshot.records
+        .get(Provider.ID.make("claude-code"))
+        ?.models.get(Model.ID.make("catalog-model"))
+      expect(catalogModel?.settings?.baseURL).toBe("https://catalog.example/v1")
+    }),
+  )
+
+  it.effect("a non-conflicted provider baseURL still replaces catalog model pins", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      yield* applyProviderConfig([
+        providerDocument({ "claude-code": { package: "@opencode/claude-code" } }),
+        providerDocument({ "claude-code": { settings: { baseURL: "https://user.example/v1" } } }),
+      ])
+      const snapshot = yield* providers.snapshot()
+      const catalogModel = snapshot.records
+        .get(Provider.ID.make("claude-code"))
+        ?.models.get(Model.ID.make("catalog-model"))
+      expect(catalogModel?.settings?.baseURL).toBeUndefined()
     }),
   )
 
