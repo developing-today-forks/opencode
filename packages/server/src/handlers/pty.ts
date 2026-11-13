@@ -3,7 +3,7 @@ import { PtyProtocol } from "@opencode/core/pty/protocol"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
-import { Effect, Queue } from "effect"
+import { Effect } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
@@ -17,7 +17,7 @@ import {
 } from "@opencode/protocol/groups/pty"
 import { locationErrors, requestRef, response } from "../location"
 import { PtyEnvironment } from "../pty-environment"
-import { type Outbound, runPtySocket } from "./pty-socket"
+import { makePtyOutbox, runPtySocket } from "./pty-socket"
 
 const ticketScope = Effect.gen(function* () {
   const location = yield* Location.Service
@@ -177,34 +177,36 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
 
             const socket = yield* Effect.orDie(ctx.request.upgrade)
             // TODO: Integrate graceful-shutdown socket tracking before clients migrate to this route.
-            const outbox = yield* Queue.unbounded<Outbound>()
+            const outbox = yield* makePtyOutbox()
             const attachment = yield* pty
               .attach(ctx.params.ptyID, {
                 cursor,
-                onData: (chunk) => Queue.offerUnsafe(outbox, chunk),
-                onEnd: () => Queue.offerUnsafe(outbox, new Socket.CloseEvent(1000)),
+                onData: (chunk) => void outbox.offer(chunk),
+                onEnd: () => void outbox.offer(new Socket.CloseEvent(1000)),
               })
               .pipe(
                 Effect.catchTags({
                   "Pty.NotFoundError": () =>
                     Effect.sync(() => {
-                      Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "session not found"))
+                      void outbox.offer(new Socket.CloseEvent(4404, "session not found"))
                     }),
                   "Pty.ExitedError": () =>
                     Effect.sync(() => {
-                      Queue.offerUnsafe(outbox, new Socket.CloseEvent(4404, "session exited"))
+                      void outbox.offer(new Socket.CloseEvent(4404, "session exited"))
                     }),
                 }),
               )
             if (attachment) {
-              for (const chunk of PtyProtocol.chunks(attachment.replay)) Queue.offerUnsafe(outbox, chunk)
-              Queue.offerUnsafe(outbox, PtyProtocol.metaFrame(attachment.cursor))
+              for (const chunk of PtyProtocol.chunks(attachment.replay)) void outbox.offer(chunk)
+              void outbox.offer(PtyProtocol.metaFrame(attachment.cursor))
               attachment.activate()
             }
 
             yield* runPtySocket({
               socket,
-              outbox,
+              outbox: outbox.queue,
+              onDequeued: outbox.release,
+              onOverflow: outbox.whenOverflowed,
               onMessage: (message) =>
                 Effect.sync(() => {
                   if (!attachment) return
