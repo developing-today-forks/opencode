@@ -8,6 +8,7 @@ describe("ServerInfo.connectionURLs", () => {
       lo: [
         {
           address: "::1",
+          cidr: "::1/128",
           family: "IPv6",
           internal: true,
           netmask: "ffff:ffff:ffff:ffff::",
@@ -18,6 +19,7 @@ describe("ServerInfo.connectionURLs", () => {
       eth0: [
         {
           address: "fe80::1",
+          cidr: "fe80::1/64",
           family: "IPv6",
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
@@ -26,6 +28,7 @@ describe("ServerInfo.connectionURLs", () => {
         },
         {
           address: "fd00::1",
+          cidr: "fd00::1/64",
           family: "IPv6",
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
@@ -34,6 +37,7 @@ describe("ServerInfo.connectionURLs", () => {
         },
         {
           address: "2001:db8::1",
+          cidr: "2001:db8::1/64",
           family: "IPv6",
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
@@ -53,7 +57,7 @@ describe("ServerInfo.connectionURLs", () => {
   test("leaves IPv4 wildcard and specific-hostname results unchanged", () => {
     const interfaces: ReturnType<typeof networkInterfaces> = {
       eth0: [
-        { address: "192.0.2.1", family: "IPv4", internal: false, netmask: "255.255.255.0", mac: "00:00:00:00:00:00" },
+        { address: "192.0.2.1", cidr: "192.0.2.1/24", family: "IPv4", internal: false, netmask: "255.255.255.0", mac: "00:00:00:00:00:00" },
       ],
     }
 
