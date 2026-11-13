@@ -16,6 +16,10 @@ it.live("a parent can list, get, reply to, and cancel forms owned by its descend
       app: { version: "test" },
       database: { path: ":memory:" },
       fs: { filewatcher: false },
+      // Hermetic like every sibling server test: without this the models.dev
+      // refresh intermittently attempts a live fetch of the models catalog,
+      // which the test harness's network guard fails the test for.
+      models: { fetch: false },
     })
     const request = (route: string, init?: RequestInit) =>
       Effect.promise(() => handler(new Request(`http://opencode.local${route}`, init)))

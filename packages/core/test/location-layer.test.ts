@@ -818,7 +818,7 @@ describe("LocationServiceMap", () => {
         Effect.gen(function* () {
           const routes = {
             experimental: {
-              model_routes: { best: { targets: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-6"] } },
+              model_routes: { best: { targets: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"] } },
             },
           }
           yield* Effect.promise(() => fs.writeFile(path.join(plain.path, "opencode.json"), JSON.stringify(routes)))
@@ -846,8 +846,8 @@ describe("LocationServiceMap", () => {
 
           const renamed = yield* inspect(configured.path)
           const unconfigured = yield* inspect(plain.path)
-          // The targets share the high/max reasoning variants, so the pool presents both.
-          expect(unconfigured?.variants.map((variant) => String(variant.id))).toEqual(["high", "max"])
+          // The targets share the low/medium/high/max reasoning variants, so the pool presents all four.
+          expect(unconfigured?.variants.map((variant) => String(variant.id))).toEqual(["low", "medium", "high", "max"])
           // Renaming the pool through the route provider must not clear those variants.
           expect(renamed?.name).toBe("Best pool")
           expect(renamed?.variants.map((variant) => String(variant.id))).toEqual(
