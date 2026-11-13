@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { join } from "node:path"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
@@ -62,7 +63,7 @@ describe("resolveApiKey — env first, then the CLI's login file", () => {
       },
     }
     await expect(resolveApiKey(sources)).resolves.toBe("user_filekey")
-    expect(seenPath).toBe("/fixture/cc-dir/auth.json")
+    expect(seenPath).toBe(join("/fixture/cc-dir", "auth.json"))
   })
 
   test("nothing anywhere resolves to undefined", async () => {
