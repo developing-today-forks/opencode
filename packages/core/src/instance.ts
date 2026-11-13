@@ -16,6 +16,7 @@ import { FileSystem } from "./filesystem.js"
 import { FileSystemSearch } from "./filesystem/search.js"
 import { Generate } from "./generate.js"
 import { Embeddings } from "./embeddings.js"
+import { TranscriptionFacade } from "./transcription-facade.js"
 import { SystemOne } from "./systemone.js"
 import { OpenAIFacadeResponse } from "./openai-facade-response.js"
 import { Form } from "./form.js"
@@ -115,6 +116,7 @@ const nodes = [
   Form.node,
   Generate.node,
   Embeddings.node,
+  TranscriptionFacade.node,
   SystemOne.node,
   OpenAIFacadeResponse.node,
   ReadToolFileSystem.node,

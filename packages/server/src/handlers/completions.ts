@@ -13,6 +13,7 @@ import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
 import { Embeddings } from "@opencode/core/embeddings"
 import { SystemOne } from "@opencode/core/systemone"
+import { transcriptionRoute } from "./transcriptions"
 import { OpenAIFacadeResponse } from "@opencode/core/openai-facade-response"
 
 const streamErrorMessage = (cause: Cause.Cause<unknown>) => {
@@ -302,6 +303,9 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
               }),
             )
           }).pipe(Effect.provide(services), locationErrors),
+      )
+      .handleRaw("completions.transcriptions", (ctx) =>
+        transcriptionRoute(ctx).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw(
         "completions.systemone",
