@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { NodeFileSystem } from "@effect/platform-node"
-import { Context, Effect, FileSystem, Layer } from "effect"
+import { Cause, Context, Effect, Fiber, FileSystem, Layer } from "effect"
 import { systemError } from "effect/PlatformError"
 import fs from "node:fs"
 import os from "node:os"
@@ -455,6 +455,104 @@ describe("FSUtil.writeAtomic conformance (design #1345 probe matrix)", () => {
     await writeAtomic(file, "after", { preserveOwnership: true })
     expect(fs.readFileSync(file, "utf8")).toBe("after")
     if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o7777).toBe(0o2750)
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+})
+
+describe("FSUtil.writeAtomic read-only rollback (#2329)", () => {
+  const renameError = () =>
+    systemError({
+      _tag: "Unknown",
+      module: "FileSystem",
+      method: "rename",
+      syscall: "rename",
+      cause: Object.assign(new Error("rename EIO: injected rename failure"), { code: "EIO" }),
+    })
+
+  async function readonlyTarget() {
+    const directory = await dir()
+    const file = path.join(directory, "target.txt")
+    fs.writeFileSync(file, "before")
+    fs.chmodSync(file, 0o400)
+    return { directory, file }
+  }
+
+  test("rename failure after the temporary chmod restores the original mode", async () => {
+    const { directory, file } = await readonlyTarget()
+    const outcome = await run((service) => service.writeAtomic(file, "after"), {
+      rename: () => Effect.fail(renameError()),
+    }).then(
+      () => "succeeded",
+      () => "failed",
+    )
+    expect(outcome).toBe("failed")
+    expect(fs.readFileSync(file, "utf8")).toBe("before")
+    if (process.platform !== "win32") expect(await mode(file)).toBe(0o400)
+    expect(fs.readdirSync(directory)).toEqual(["target.txt"])
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
+  test("interruption after the temporary chmod restores the original mode", async () => {
+    const { directory, file } = await readonlyTarget()
+    const real = await realFileSystem()
+    const custom = Layer.succeed(FileSystem.FileSystem, { ...real, rename: () => Effect.never })
+    const fiber = Effect.runFork(
+      Effect.gen(function* () {
+        const service = yield* FSUtil.Service
+        return yield* service.writeAtomic(file, "after")
+      }).pipe(Effect.provide(FSUtil.layer), Effect.provide(custom)),
+    )
+    let loosened = false
+    for (let attempt = 0; attempt < 500 && !loosened; attempt++) {
+      if ((fs.statSync(file).mode & 0o200) !== 0) loosened = true
+      else await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(loosened).toBe(true)
+    const exit = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Fiber.interrupt(fiber)
+        return yield* Fiber.await(fiber)
+      }),
+    )
+    expect(exit._tag).toBe("Failure")
+    expect(fs.readFileSync(file, "utf8")).toBe("before")
+    if (process.platform !== "win32") expect(await mode(file)).toBe(0o400)
+    expect(fs.readdirSync(directory)).toEqual(["target.txt"])
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+
+  test("a failed restoration is surfaced with the primary failure, never ignored", async () => {
+    const { directory, file } = await readonlyTarget()
+    const real = await realFileSystem()
+    const exit = await run((service) => Effect.exit(service.writeAtomic(file, "after")), {
+      rename: () => Effect.fail(renameError()),
+      chmod: (target, modeArg) => {
+        // The loosening chmod (0o600) and the temp chmod pass through;
+        // only the restoration chmod back to the read-only mode fails.
+        if (target === file && modeArg === 0o400)
+          return Effect.fail(
+            systemError({
+              _tag: "Unknown",
+              module: "FileSystem",
+              method: "chmod",
+              syscall: "chmod",
+              cause: Object.assign(new Error("chmod EIO: injected restore failure"), { code: "EIO" }),
+            }),
+          )
+        return real.chmod(target, modeArg)
+      },
+    })
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag !== "Failure") throw new Error("unreachable")
+    const outcome = Cause.pretty(exit.cause)
+    expect(outcome).toContain("injected rename failure")
+    expect(outcome).toContain("injected restore failure")
+    // The rollback genuinely did not happen — and that fact is exactly
+    // what the surfaced failure reports: content intact, mode left
+    // loosened rather than silently writable.
+    expect(fs.readFileSync(file, "utf8")).toBe("before")
+    if (process.platform !== "win32") expect(await mode(file)).toBe(0o600)
+    fs.chmodSync(file, 0o400)
     fs.rmSync(directory, { recursive: true, force: true })
   })
 })
