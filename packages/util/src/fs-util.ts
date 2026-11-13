@@ -3,7 +3,7 @@ import { realpathSync } from "fs"
 import { readdir } from "fs/promises"
 import { lookup } from "mime-types"
 import { randomBytes } from "crypto"
-import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
+import { Cause, Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./glob.js"
 import { serviceUse } from "./effect/service-use.js"
@@ -199,6 +199,37 @@ export namespace FSUtil {
           }),
         )
 
+      // #2329: replacing a read-only target — Windows refuses rename
+      // over a read-only destination — temporarily adds the owner-write
+      // bit to the OLD file. That chmod and the rename are one
+      // failure-safe operation: the sequence runs inside
+      // uninterruptibleMask with only the rename interruptible, so on
+      // typed failure AND on interruption the original mode is restored
+      // by code that cannot itself be interrupted away. A failed
+      // restore is never ignored (the defect in PR #2327's
+      // Effect.onError + Effect.ignore version): its cause is combined
+      // with the primary failure, so a target left writable is
+      // surfaced, never silent. On success no restore is needed — the
+      // replacement already carries the final mode. The guard applies
+      // on every platform, not just win32: POSIX rename does not need
+      // the bit, but one sequence everywhere keeps the guarantee (and
+      // its failure-injection tests) identical on every platform.
+      const replaceReadonlyTarget = (
+        temp: string,
+        target: string,
+        readonlyMode: number,
+      ): Effect.Effect<void, PlatformError> =>
+        Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            yield* fs.chmod(target, readonlyMode | 0o200)
+            const exit = yield* Effect.exit(restore(renameWithRetry(temp, target)))
+            if (exit._tag === "Success") return
+            const restoreExit = yield* Effect.exit(fs.chmod(target, readonlyMode))
+            if (restoreExit._tag === "Success") return yield* exit
+            return yield* Effect.failCause(Cause.combine(exit.cause, restoreExit.cause))
+          }),
+        )
+
       const writeAtomic = Effect.fn("FileSystem.writeAtomic")(function* (
         path: string,
         content: string | Uint8Array,
@@ -345,11 +376,20 @@ export namespace FSUtil {
           // clears setuid/setgid bits, so only a last chmod makes the
           // computed mode the file's actual mode.
           yield* fs.chmod(temp, mode)
-          yield* renameWithRetry(temp, target)
+          // An existing target without the owner-write bit is read-only:
+          // route the replacement through the failure-safe guard above
+          // (#2329) instead of a bare rename.
+          const readonlyMode =
+            existingMode !== undefined && (existingMode & 0o200) === 0 ? existingMode : undefined
+          if (readonlyMode === undefined) yield* renameWithRetry(temp, target)
+          else yield* replaceReadonlyTarget(temp, target, readonlyMode)
           created = false
         })
         yield* write.pipe(
-          Effect.onError(() => (created ? fs.remove(temp, { force: true }).pipe(Effect.ignore) : Effect.void)),
+          // onExit, not onError: an interrupted write must not leak its
+          // temp file either (#2329 — the same finalizer gap as the
+          // read-only restore, one level out).
+          Effect.onExit(() => (created ? fs.remove(temp, { force: true }).pipe(Effect.ignore) : Effect.void)),
         )
       })
 
