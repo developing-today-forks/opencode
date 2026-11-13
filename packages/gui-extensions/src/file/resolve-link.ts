@@ -87,7 +87,7 @@ function extractLineSelection(input: string, isFileUrl: boolean) {
     // A link naming a file with an invalid line still names the file, so strip
     // the invalid `:<line>` suffix here; the `[./]` guard keeps a drive-relative
     // `C:12` or a scheme like `tel:5551234` intact. (#2405)
-    const invalid = /^(.*):\d+(?::\d+)?(?:-\d+(?::\d+)?)?:?$/.exec(input)
+    const invalid = /^(.*?):\d+(?::\d+)?(?:-\d+(?::\d+)?)?:?$/.exec(input)
     const stripped = invalid?.[1] && /[./]/.test(invalid[1]) ? invalid[1] : input
 
     return { path: stripped, selection: undefined }
