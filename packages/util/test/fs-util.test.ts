@@ -524,12 +524,20 @@ describe("FSUtil.writeAtomic read-only rollback (#2329)", () => {
   test("a failed restoration is surfaced with the primary failure, never ignored", async () => {
     const { directory, file } = await readonlyTarget()
     const real = await realFileSystem()
+    // The restoration chmod carries the original mode of the file as stat
+    // reports it, which is platform-shaped: 0o400 on POSIX, 0o444 on
+    // Windows (a read-only file there reports every read bit set). Key
+    // the injection on the reported mode, not the POSIX literal, or the
+    // restore succeeds on Windows and the combined-cause assertion below
+    // can never see the restore failure (#2394).
+    const originalMode = await mode(file)
     const exit = await run((service) => Effect.exit(service.writeAtomic(file, "after")), {
       rename: () => Effect.fail(renameError()),
       chmod: (target, modeArg) => {
-        // The loosening chmod (0o600) and the temp chmod pass through;
-        // only the restoration chmod back to the read-only mode fails.
-        if (target === file && modeArg === 0o400)
+        // The loosening chmod (original mode plus owner-write) and the
+        // temp chmod pass through; only the restoration chmod back to
+        // the original mode of the file fails.
+        if (target === file && modeArg === originalMode)
           return Effect.fail(
             systemError({
               _tag: "Unknown",

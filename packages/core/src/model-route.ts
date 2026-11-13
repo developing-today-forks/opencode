@@ -7,6 +7,7 @@ import { Provider } from "@opencode/schema/provider"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { ModelRouteMembership } from "./model-route-membership.js"
+import { ownValue } from "./util/record.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ModelRouteOverrides } from "./model-route-overrides.js"
@@ -805,7 +806,7 @@ const modelWindowReading = (
   readonly complete: boolean
 } | undefined => {
   const candidatesOf = (reading: QuotaCurrent.ProviderReading): QuotaCurrent.Window[] => [
-    ...(reading.models[modelID] ?? []),
+    ...(ownValue(reading.models, modelID) ?? []),
     ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
   ]
   let freshest: number | undefined

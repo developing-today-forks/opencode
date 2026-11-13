@@ -48,6 +48,7 @@ import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
 import { configure as configureOpenAI } from "@opencode/ai/providers/openai"
 import { ModelRouteLog } from "./model-route-log.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
+import { ownValue } from "./util/record.js"
 
 // ------------------------------------------------------------ registry (§3)
 
@@ -189,7 +190,7 @@ const field = (form: TranscriptionForm, name: string): string | undefined => {
 }
 
 const fieldList = (form: TranscriptionForm, name: string): ReadonlyArray<string> => {
-  const value = form.fields[name] ?? form.fields[`${name}[]`]
+  const value = ownValue(form.fields, name) ?? ownValue(form.fields, `${name}[]`)
   if (typeof value === "string") return [value]
   if (Array.isArray(value)) return value
   return []
@@ -230,7 +231,7 @@ export const parseTranscriptionRequest = (
       ),
     )
   const extension = file.filename?.split(".").pop()?.toLowerCase()
-  const mediaType = file.mediaType || (extension ? EXTENSION_MEDIA_TYPES[extension] : undefined) || ""
+  const mediaType = file.mediaType || (extension ? ownValue(EXTENSION_MEDIA_TYPES, extension) : undefined) || ""
   if (!capabilities.mediaTypes.includes(mediaType))
     return fail(
       shape(
@@ -487,7 +488,7 @@ export const layer = Layer.effect(
             ),
             new Error(`${registration.apiKeyEnv} is not set`),
           )
-        const factory = PROVIDER_FACTORIES[registration.providerID]
+        const factory = ownValue(PROVIDER_FACTORIES, registration.providerID)
         if (!factory)
           return yield* fail(
             shape(502, "upstream_failure", `no transcription factory is wired for provider ${registration.providerID}`),
