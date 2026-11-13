@@ -37,7 +37,14 @@ export function localLinkPath(href: string) {
   // `app.tsx:42` is a file and line, not a URL scheme. The `.` or `/` keeps `tel:5551234` external.
   const cited = parsePathLineSuffix(target)
   const line = cited.path !== target && /[./]/.test(cited.path) ? cited : undefined
-  const base = localImagePath(line?.path ?? target)
+  // #2187 leaves an out-of-range suffix (line 0, or past 1,000,000) on the path
+  // instead of stripping it, so `foo.ts:0` no longer reaches the file. A link
+  // into a file with an invalid line still names that file, so strip the invalid
+  // `:<line>` suffix here; the `[./]` guard keeps a scheme like `tel:5551234`
+  // external. (Fixed in #2405 for the session-ui test `recognizes local link foo.ts:0`.)
+  const invalidSuffix = line ? undefined : /^(.*?):\d+(?::\d+)?(?:-\d+(?::\d+)?)?:?$/.exec(target)
+  const stripped = invalidSuffix?.[1] && /[./]/.test(invalidSuffix[1]) ? invalidSuffix[1] : undefined
+  const base = localImagePath(line?.path ?? stripped ?? target)
 
   if (!base) return
 

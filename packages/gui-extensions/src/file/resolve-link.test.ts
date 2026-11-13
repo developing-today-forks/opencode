@@ -45,6 +45,7 @@ describe("parseFileLink", () => {
     ["what?.md", "what?.md", undefined],
     ["a#b.md#L10", "a#b.md", { start: 10, end: 10 }],
     ["foo.ts:0", "foo.ts", undefined],
+    ["foo.ts:0:7", "foo.ts", undefined],
     ["./a/../b.ts", "b.ts", undefined],
     ["..", "..", undefined],
     ["C:12", "C:12", undefined],
