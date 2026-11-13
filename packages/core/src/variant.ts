@@ -632,6 +632,11 @@ const PROTOCOLS: Readonly<Record<string, Protocol>> = {
   "@opencode/ai/providers/alibaba/responses": openaiResponses,
   "@opencode/ai/providers/meta": openaiResponses,
   "@opencode/ai/providers/meta/responses": openaiResponses,
+  // muse-direct speaks Meta's Responses wire (protocols/muse-direct-responses.ts)
+  // and normalizes its config-dialect `reasoning_effort` to `reasoningEffort`, so
+  // it spells reasoning variants exactly as `meta` does (#2405; the bundled-package
+  // variant guard in packages/core/test/variant.test.ts caught the missing entry).
+  "@opencode/ai/providers/muse-direct": openaiResponses,
   "@opencode/ai/providers/minimax/responses": openaiResponses,
   "@opencode/ai/providers/moonshot/responses": openaiResponses,
   "@opencode/ai/providers/zai-coding-plan/responses": openaiResponses,

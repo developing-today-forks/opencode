@@ -81,7 +81,17 @@ function extractLineSelection(input: string, isFileUrl: boolean) {
     return { path, selection: parsed.selection }
   }
 
-  if (!isFileUrl) return { path: input, selection: undefined }
+  if (!isFileUrl) {
+    // #2187 leaves an out-of-range suffix (line 0, or past 1,000,000) on the
+    // path instead of stripping it, so `foo.ts:0` would keep the invalid line.
+    // A link naming a file with an invalid line still names the file, so strip
+    // the invalid `:<line>` suffix here; the `[./]` guard keeps a drive-relative
+    // `C:12` or a scheme like `tel:5551234` intact. (#2405)
+    const invalid = /^(.*):\d+(?::\d+)?(?:-\d+(?::\d+)?)?:?$/.exec(input)
+    const stripped = invalid?.[1] && /[./]/.test(invalid[1]) ? invalid[1] : input
+
+    return { path: stripped, selection: undefined }
+  }
 
   const withoutFragment = input.replace(/(\.[a-z0-9]+)#[^/.]*$/i, "$1")
   const withoutQuery = withoutFragment.split("?", 1)[0] ?? ""
