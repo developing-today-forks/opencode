@@ -45,7 +45,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, UnsupportedOperationError } from "@opencode/ai"
 import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
-import { configure as configureOpenAI } from "@opencode/ai/providers/openai"
+import { configure } from "@opencode/ai/providers/openai"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
@@ -408,7 +408,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Tr
 const PROVIDER_FACTORIES: Readonly<
   Record<string, (modelID: string, apiKey: string) => TranscriptionModel>
 > = {
-  openai: (modelID, apiKey) => configureOpenAI({ apiKey }).transcription(modelID),
+  openai: (modelID, apiKey) => configure({ apiKey }).transcription(modelID),
 }
 
 /** A stalled provider must fail, not hang the door. Transcription of

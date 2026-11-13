@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
+import { join } from "node:path"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
@@ -24,6 +25,8 @@ import {
   type RenewalEvent,
 } from "../../src/providers/claude-code-auth.js"
 import { ClaudeCodeMessages } from "../../src/protocols/claude-code-messages.js"
+
+const CREDENTIALS_PATH = join("/fixture/claude-dir", ".credentials.json")
 
 const blob = (accessToken: string, expiresAt?: number) =>
   JSON.stringify({
@@ -86,7 +89,7 @@ describe("resolveCredential — credentials file first, env second", () => {
       },
     }
     await expect(resolveCredential(sources)).resolves.toMatchObject({ accessToken: "tok-dir" })
-    expect(seenPath).toBe("/fixture/claude-dir/.credentials.json")
+    expect(seenPath).toBe(CREDENTIALS_PATH)
   })
 
   test("nothing anywhere resolves to undefined", async () => {
@@ -276,8 +279,8 @@ describe("writeCredential — the shared atomic write helper (#1852)", () => {
     }
     await writeCredential(sources, { accessToken: "tok-new", refreshToken: "ref-new", expiresAt: 42 })
     expect(writes).toHaveLength(1)
-    expect(writes[0]!.path).toStartWith("/fixture/claude-dir/.credentials.json.tmp-")
-    expect(renames).toEqual([{ from: writes[0]!.path, to: "/fixture/claude-dir/.credentials.json" }])
+    expect(writes[0]!.path).toStartWith(CREDENTIALS_PATH + ".tmp-")
+    expect(renames).toEqual([{ from: writes[0]!.path, to: CREDENTIALS_PATH }])
     const written = JSON.parse(writes[0]!.contents)
     expect(written.otherTool).toEqual({ keep: true })
     expect(written.claudeAiOauth).toEqual({
@@ -289,7 +292,7 @@ describe("writeCredential — the shared atomic write helper (#1852)", () => {
   })
 
   test("removes the temp file when rename fails and leaves the target untouched", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const original = JSON.stringify({ claudeAiOauth: { accessToken: "tok-old" } })
     const files = new Map([[path, original]])
     const sources: CredentialSources = {
@@ -396,7 +399,7 @@ describe("claudeCodeAuth - renewal refuses a malformed success response (code#70
     })
 
   const harness = (response: () => Response) => {
-    const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", expiredBlob()]])
+    const store = new Map<string, string>([[CREDENTIALS_PATH, expiredBlob()]])
     const sources: CredentialSources = {
       env: {},
       configDir: "/fixture/claude-dir",
@@ -420,37 +423,37 @@ describe("claudeCodeAuth - renewal refuses a malformed success response (code#70
 
   test("a 200 with an empty refresh_token is discarded and the file stays byte-identical", async () => {
     const { sources, store } = harness(okJson({ access_token: "tok-new", refresh_token: "", expires_in: 3600 }))
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(Error)
     expect(JSON.stringify(error)).toContain("discarded")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("a 200 with expires_in of 0 is discarded and the file stays byte-identical", async () => {
     const { sources, store } = harness(okJson({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 0 }))
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(Error)
     expect(JSON.stringify(error)).toContain("discarded")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("a 200 with a non-JSON body is discarded and the file stays byte-identical", async () => {
     const { sources, store } = harness(() => new Response("not json", { status: 200 }))
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(Error)
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("a 200 with an empty access_token is discarded and the file stays byte-identical", async () => {
     const { sources, store } = harness(okJson({ access_token: "", refresh_token: "ref-new", expires_in: 3600 }))
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(Error)
     expect(JSON.stringify(error)).toContain("discarded")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 })
 
@@ -511,7 +514,7 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
 
   test("callback exchanges the pasted code, persists atomically, and the credential resolves", async () => {
     const { sources, store, calls } = harness()
-    store.set("/fixture/claude-dir/.credentials.json", JSON.stringify({ otherTool: { keep: true } }))
+    store.set(CREDENTIALS_PATH, JSON.stringify({ otherTool: { keep: true } }))
     const signIn = await beginClaudeCodeSignIn(sources)
     const credential = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`)
     expect(credential).toEqual({ accessToken: "tok-signed-in", expiresAt: 4_600_000, source: "credentials-file" })
@@ -523,7 +526,7 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
     expect(body.get("client_id")).toBe(OAUTH_CLIENT_ID)
     expect(body.get("redirect_uri")).toBe(OAUTH_REDIRECT_URI)
     expect(body.get("code_verifier")!.length).toBeGreaterThan(20)
-    const written = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    const written = JSON.parse(store.get(CREDENTIALS_PATH)!)
     expect(written.otherTool).toEqual({ keep: true })
     expect(written.claudeAiOauth).toEqual({
       accessToken: "tok-signed-in",
@@ -615,13 +618,13 @@ describe("beginClaudeCodeSignIn — in-provider OAuth initiation (#1852)", () =>
         throw new Error("disk full")
       },
     })
-    store.set("/fixture/claude-dir/.credentials.json", JSON.stringify({ claudeAiOauth: { accessToken: "tok-old" } }))
+    store.set(CREDENTIALS_PATH, JSON.stringify({ claudeAiOauth: { accessToken: "tok-old" } }))
     const signIn = await beginClaudeCodeSignIn(sources)
     const error = await signIn.callback(`auth-code-1#${stateFrom(signIn.url)}`).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(ClaudeCodeSignInError)
     expect(String(error)).toContain("discarded")
     expect(String(error)).not.toContain("tok-signed-in")
-    expect(JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)).toEqual({
+    expect(JSON.parse(store.get(CREDENTIALS_PATH)!)).toEqual({
       claudeAiOauth: { accessToken: "tok-old" },
     })
   })
@@ -752,7 +755,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
     overrides: Partial<CredentialSources> = {},
     expiresAt = NOW - 1_000,
   ) => {
-    const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", blobWith(expiresAt)]])
+    const store = new Map<string, string>([[CREDENTIALS_PATH, blobWith(expiresAt)]])
     const calls: Array<{ url: string; body: string }> = []
     const sources: CredentialSources = {
       env: {},
@@ -789,7 +792,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
     expect(headers.authorization).toBe("Bearer tok-new")
     expect(calls).toHaveLength(1)
     expect(sleeps).toEqual([])
-    const persisted = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    const persisted = JSON.parse(store.get(CREDENTIALS_PATH)!)
     expect(persisted.claudeAiOauth).toMatchObject({ accessToken: "tok-new", refreshToken: "ref-new" })
   })
 
@@ -810,7 +813,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
     expect(headers.authorization).toBe("Bearer tok-new")
     expect(calls).toHaveLength(3)
     expect(sleeps).toEqual([7_000, 7_000])
-    const persisted = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    const persisted = JSON.parse(store.get(CREDENTIALS_PATH)!)
     expect(persisted.claudeAiOauth.accessToken).toBe("tok-new")
   })
 
@@ -864,14 +867,14 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
     const { sources, store, calls, sleeps } = harness(
       () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
     )
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(calls).toHaveLength(1)
     expect(sleeps).toEqual([])
     const text = JSON.stringify(error)
     expect(text).toContain("HTTP 400")
     expect(text).not.toContain("no longer renewable")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("concurrent requests share one waiting renewal", async () => {
@@ -920,7 +923,7 @@ describe("claudeCodeAuth — OAuth renewal on an expired file credential (#1818)
   let scenario = 0
   const harness = (response: () => Response | Promise<Response>, overrides: Partial<CredentialSources> = {}) => {
     const refreshToken = `ref-1818-${++scenario}`
-    const store = new Map<string, string>([["/fixture/claude-dir/.credentials.json", expiredBlob(refreshToken)]])
+    const store = new Map<string, string>([[CREDENTIALS_PATH, expiredBlob(refreshToken)]])
     const calls: Array<{ url: string; body: string }> = []
     const sources: CredentialSources = {
       env: {},
@@ -960,7 +963,7 @@ describe("claudeCodeAuth — OAuth renewal on an expired file credential (#1818)
     expect(body.get("grant_type")).toBe("refresh_token")
     expect(body.get("client_id")).toBe(OAUTH_CLIENT_ID)
     expect(body.get("refresh_token")).toBe(refreshToken)
-    const persisted = JSON.parse(store.get("/fixture/claude-dir/.credentials.json")!)
+    const persisted = JSON.parse(store.get(CREDENTIALS_PATH)!)
     expect(persisted.claudeAiOauth).toMatchObject({
       accessToken: "tok-new",
       refreshToken: "ref-new",
@@ -977,21 +980,21 @@ describe("claudeCodeAuth — OAuth renewal on an expired file credential (#1818)
         throw new Error("EACCES")
       },
     })
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(Error)
     expect(JSON.stringify(error)).toContain("tokens were discarded")
     expect(JSON.stringify(error)).not.toContain("tok-new")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("invalid_grant keeps the fail-loud floor with a named re-login error and no write", async () => {
     const { sources, store } = harness(() => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }))
-    const before = store.get("/fixture/claude-dir/.credentials.json")
+    const before = store.get(CREDENTIALS_PATH)
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(JSON.stringify(error)).toContain("HTTP 400")
     expect(JSON.stringify(error)).toContain("in-product sign-in")
-    expect(store.get("/fixture/claude-dir/.credentials.json")).toBe(before)
+    expect(store.get(CREDENTIALS_PATH)).toBe(before)
   })
 
   test("concurrent expired requests share exactly one refresh exchange", async () => {
@@ -1070,7 +1073,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
     })
 
   test("budget exhaustion retires to a standing retry that lands with no intervening request", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-a")]])
     const events: Array<RenewalEvent> = []
     let exchanges = 0
@@ -1153,7 +1156,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("a genuine rejection stops the standing retry and surfaces the real error", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-c")]])
     const events: Array<RenewalEvent> = []
     let exchanges = 0
@@ -1207,7 +1210,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("a load during a standing retry adopts its outcome and runs no exchange of its own", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-join-a")]])
     let exchanges = 0
     let cadenceSleeps = 0
@@ -1295,7 +1298,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("a load during a pending standing retry runs no exchange of its own", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-join-c")]])
     let exchanges = 0
     let cadenceSleeps = 0
@@ -1352,7 +1355,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("a transient exchange failure also retires to the standing retry", async () => {
-    const path = "/fixture/claude-dir/.credentials.json"
+    const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-f")]])
     const events: Array<RenewalEvent> = []
     let exchanges = 0
@@ -1388,7 +1391,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
 
   test("the lifecycle is reconstructible from the default log lines alone", async () => {
     const store = new Map<string, string>([
-      ["/fixture/claude-dir/.credentials.json", blobWith(NOW - 1_000, "ref-standing-h")],
+      [CREDENTIALS_PATH, blobWith(NOW - 1_000, "ref-standing-h")],
     ])
     const logged: Array<string> = []
     const original = { log: console.log, info: console.info, warn: console.warn, error: console.error }
@@ -1442,7 +1445,7 @@ describe("renewal single-flight (#1818)", () => {
   test("concurrent resolutions of the same expired credential issue one exchange", async () => {
     const store = new Map<string, string>([
       [
-        "/fixture/claude-dir/.credentials.json",
+        CREDENTIALS_PATH,
         JSON.stringify({ claudeAiOauth: { accessToken: "tok-old", refreshToken: "ref-sf", expiresAt: 1_000 } }),
       ],
     ])

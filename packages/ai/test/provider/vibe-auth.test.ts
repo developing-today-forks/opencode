@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { join } from "node:path"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import {
@@ -158,8 +159,8 @@ describe("resolveApiKey — the binary's resolution order", () => {
       resolveApiKey({ env: { VIBE_HOME: "/tmp/vibe-home" }, readFile, keyringLookup: async () => "k" }),
     ).resolves.toBe("k")
     await expect(resolveApiKey({ env: {}, readFile, keyringLookup: async () => "k" })).resolves.toBe("k")
-    expect(paths[0]).toBe("/tmp/vibe-home/.env")
-    expect(paths[1]).toMatch(/\/.vibe\/\.env$/)
+    expect(paths[0]).toBe(join("/tmp/vibe-home", ".env"))
+    expect(paths[1]).toMatch(/[/\\]\.vibe[/\\]\.env$/)
   })
 })
 
