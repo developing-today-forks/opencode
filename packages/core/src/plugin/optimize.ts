@@ -109,7 +109,10 @@ function make(
           const system = event.system[0]
           if (!system) return
           const rendered = SessionSystemPrompt.render(template, Object.keys(event.tools))
-          const text = mode === "append" ? `${system.text}\n\n${rendered}` : rendered
+          // Append is idempotent: the base prompt already carries the shared delegation
+          // guidance (system.txt placeholder, 28212ab2a2), so an append-mode plugin whose
+          // rendered text is already present must not duplicate it at the end.
+          const text = mode === "append" ? (system.text.includes(rendered) ? system.text : `${system.text}\n\n${rendered}`) : rendered
           event.system[0] = { ...system, text }
         }).pipe(Effect.catch(() => Effect.void))
       yield* ctx.session.hook("context", hook)
