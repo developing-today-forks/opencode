@@ -20,7 +20,7 @@ for (const endpoint of endpoints) {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url)
     if (url.origin !== endpoint.origin) throw new Error(`Skipping non-target endpoint ${url.origin}`)
 
-    const response = await fetch(input, init)
+    const response = await fetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(30_000) })
     if (url.pathname.endsWith(":fetchAvailableModels") && response.ok) {
       const payload: unknown = await response.clone().json()
       if (typeof payload !== "object" || payload === null || !("models" in payload))
