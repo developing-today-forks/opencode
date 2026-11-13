@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { sql } from "drizzle-orm"
 import { Effect, Exit } from "effect"
+import { TestConsole } from "effect/testing"
 import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
 import { Permission } from "@opencode/core/permission"
@@ -1717,10 +1718,12 @@ describe("ModelRouteLog.failureFields surrogate-pair guard (#1973)", () => {
     expect(fields.error_body?.isWellFormed()).toBe(true)
   })
 })
+
 describe("writer persistence failure (#2331)", () => {
   it.live("a failed batch is retained, retried and persisted exactly once after the database recovers", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
+      const now = Date.now()
       // Sabotage: with the attempt table renamed away, every batch carrying an
       // attempt fails part-way through its inserts.
       yield* db.run(sql`ALTER TABLE route_attempt RENAME TO route_attempt_down`)
@@ -1735,13 +1738,44 @@ describe("writer persistence failure (#2331)", () => {
           reason: "drawn",
         },
       })
-      ModelRouteLog.record({ kind: "attempt", row: attempt({}) })
       ModelRouteLog.record({
         kind: "attempt",
-        row: attempt({ outcome: "failure", output_started: false }),
+        row: attempt({
+          provider_id: "recovery-probe",
+          model_id: "m-recovery",
+          time_started: now - 2_000,
+          time_ended: now - 1_000,
+          tokens_input: 10,
+          tokens_output: 5,
+        }),
       })
-      // Give the writer time to attempt the batch and fail (250ms, then 500ms backoff).
-      yield* Effect.sleep("900 millis")
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({
+          provider_id: "recovery-probe",
+          model_id: "m-recovery",
+          time_started: now - 900,
+          time_ended: now - 100,
+          outcome: "failure",
+          output_started: false,
+          tokens_input: 20,
+          tokens_output: 5,
+        }),
+      })
+      // Wait until a failed persistence attempt is OBSERVED — the writer logs a
+      // warning for every retained batch it retries — instead of sleeping a fixed
+      // interval and hoping the writer ran. The test cannot pass unless the
+      // writer actually attempted the batch and the failure was seen.
+      let failureObserved = false
+      for (let i = 0; i < 100 && !failureObserved; i++) {
+        const lines = yield* TestConsole.logLines
+        failureObserved = lines.some(
+          (line) =>
+            typeof line === "string" && line.includes("failed to persist model route telemetry; batch retained for retry"),
+        )
+        if (!failureObserved) yield* Effect.sleep("50 millis")
+      }
+      expect(failureObserved).toBe(true)
       // Atomicity: the decision from the same batch is not visible either —
       // the failed batch rolled back in full instead of leaving partial rows.
       expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(0)
@@ -1756,10 +1790,24 @@ describe("writer persistence failure (#2331)", () => {
       }
       expect(attempts).toHaveLength(2)
       expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(1)
-      // The recovered rows feed the usage reads the quota gate relies on.
+      // The recovered rows feed the diagnostic stats for the target.
       const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
       expect(stats).toHaveLength(1)
       expect(stats[0]).toMatchObject({ attempts: 2, failures: 1 })
+      // …and the quota usage read: each recovered attempt counted exactly once.
+      const usage = yield* ModelRouteLog.targetUsage(db, 0)
+      const recovered = ModelUsage.sum(usage.filter((row) => row.providerID === "recovery-probe"))
+      expect(recovered.input).toBe(30)
+      expect(recovered.output).toBe(10)
+      // …and the restart restoration read: a restore from the persisted rows
+      // rebuilds the same usage (current timestamps keep the rows inside the
+      // restoration window, which only reaches back one day).
+      ModelRoute.resetHealth()
+      yield* ModelRouteLog.restoreUsageFrom(db)
+      expect(ModelRoute.usageOf(ModelRoute.ref({ providerID: "recovery-probe", model: "m-recovery" })).day).toEqual({
+        requests: 2,
+        tokens: 40,
+      })
     }),
   )
 })
