@@ -3,6 +3,11 @@ import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { CodeModeWeb } from "@opencode/core/codemode/web"
 
+// The header/size suites below exercise response handling against real loopback servers; the
+// outbound-network policy (#2310) denies loopback by default, so those suites opt in through the
+// policy's explicit host-operator escape hatch. The policy suite at the bottom removes it again.
+process.env[CodeModeWeb.ALLOW_PRIVATE_NETWORK_ENV] = "1"
+
 type WebResponse = {
   readonly status: number
   readonly headers: {
@@ -163,5 +168,130 @@ describe("CodeModeWeb fetch response size cap (#923)", () => {
       server.closeAllConnections()
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
+  })
+})
+
+describe("CodeModeWeb fetch outbound-network policy (#2310)", () => {
+  const withoutOptIn = async (run: () => Promise<void>) => {
+    delete process.env[CodeModeWeb.ALLOW_PRIVATE_NETWORK_ENV]
+    try {
+      await run()
+    } finally {
+      process.env[CodeModeWeb.ALLOW_PRIVATE_NETWORK_ENV] = "1"
+    }
+  }
+
+  test("address classification follows the public / special-range boundary", () => {
+    // Oracle: the IANA special-purpose registries — only global unicast is public.
+    for (const address of ["8.8.8.8", "93.184.216.34", "1.1.1.1", "2606:4700:4700::1111", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
+      expect(CodeModeWeb.isPublicIPAddress(address)).toBe(true)
+    }
+    for (const address of [
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.16.0.1",
+      "172.31.255.255",
+      "192.168.0.1",
+      "169.254.169.254",
+      "100.64.0.1",
+      "0.0.0.0",
+      "224.0.0.1",
+      "255.255.255.255",
+      "198.18.0.1",
+      "192.0.2.1",
+      "203.0.113.9",
+      "::1",
+      "::",
+      "fe80::1",
+      "fc00::1",
+      "fd12::1",
+      "ff02::1",
+      "::ffff:127.0.0.1",
+      "2001:db8::1",
+      "2002:7f00:0001::",
+      "not-an-ip",
+    ]) {
+      expect(CodeModeWeb.isPublicIPAddress(address)).toBe(false)
+    }
+  })
+
+  test("a direct loopback request is denied before the server is contacted", async () => {
+    await withoutOptIn(async () => {
+      let hits = 0
+      const server = Bun.serve({
+        port: 0,
+        fetch: () => {
+          hits++
+          return new Response("secret")
+        },
+      })
+      try {
+        await expect(webFetch(`http://127.0.0.1:${server.port}/`)).rejects.toThrow("denied")
+        expect(hits).toBe(0)
+      } finally {
+        server.stop(true)
+      }
+    })
+  })
+
+  test("private, link-local and localhost destinations are denied without any request", async () => {
+    await withoutOptIn(async () => {
+      for (const url of [
+        "http://192.168.1.1/",
+        "http://10.0.0.5/",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/",
+        "http://localhost/",
+        "http://service.localhost/",
+      ]) {
+        await expect(webFetch(url)).rejects.toThrow("denied")
+      }
+    })
+  })
+
+  test("a redirect from a public URL to a private destination is stopped at the hop", async () => {
+    await withoutOptIn(async () => {
+      const requested: Array<string> = []
+      const original = globalThis.fetch
+      globalThis.fetch = (async (input: unknown) => {
+        requested.push(String(input))
+        return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:9/secret" } })
+      }) as typeof fetch
+      try {
+        await expect(webFetch("http://93.184.216.34/start")).rejects.toThrow("denied")
+        // The public start was requested once; the private hop was never requested.
+        expect(requested).toEqual(["http://93.184.216.34/start"])
+      } finally {
+        globalThis.fetch = original
+      }
+    })
+  })
+
+  test("public destinations and public-to-public redirects still work", async () => {
+    await withoutOptIn(async () => {
+      const requested: Array<string> = []
+      const original = globalThis.fetch
+      globalThis.fetch = (async (input: unknown) => {
+        requested.push(String(input))
+        if (String(input).endsWith("/start")) {
+          return new Response(null, { status: 302, headers: { location: "http://93.184.216.34/final" } })
+        }
+        return new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })
+      }) as typeof fetch
+      try {
+        const response = (await webFetch("http://93.184.216.34/start")) as WebResponse & {
+          url: string
+          redirected: boolean
+          text: () => Promise<string>
+        }
+        expect(response.status).toBe(200)
+        expect(response.redirected).toBe(true)
+        expect(response.url).toBe("http://93.184.216.34/final")
+        expect(await response.text()).toBe("hello")
+        expect(requested).toEqual(["http://93.184.216.34/start", "http://93.184.216.34/final"])
+      } finally {
+        globalThis.fetch = original
+      }
+    })
   })
 })
