@@ -52,6 +52,20 @@ export const CompletionsGroup = HttpApiGroup.make("server.completions")
     ),
   )
   .add(
+    HttpApiEndpoint.post("completions.transcriptions", "/v1/audio/transcriptions", {
+      payload: Schema.Record(Schema.String, Schema.Unknown),
+      success: Schema.Unknown,
+      error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "completions.transcriptions",
+        summary: "Create a transcription (OpenAI-compatible)",
+        description:
+          "Transcribe audio with a registered transcription model (design specs/2026-11-08_design_voice-input-stt-facade.md §2). The request is multipart/form-data with OpenAI-compatible fields; the model is a concrete catalog ref (openai/whisper-1, the first registered backend) resolved in-process against the transcription registry, gated by the same provider config as chat. Batch only in phase 1: stream=true fails typed, never fake-streams. Answers in the normalized §2.3 envelope with §2.4 typed errors; every attempt records a route_attempt row with session_id NULL like the other doors. The payload schema here is nominal — the handler reads the multipart form itself.",
+      }),
+    ),
+  )
+  .add(
     HttpApiEndpoint.post("completions.messages", "/v1/messages", {
       payload: Schema.Record(Schema.String, Schema.Unknown),
       success: Schema.Unknown,
