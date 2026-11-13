@@ -12,6 +12,7 @@ describe("ServerInfo.connectionURLs", () => {
           internal: true,
           netmask: "ffff:ffff:ffff:ffff::",
           mac: "00:00:00:00:00:00",
+          cidr: "::1/128",
           scopeid: 0,
         },
       ],
@@ -22,6 +23,7 @@ describe("ServerInfo.connectionURLs", () => {
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
           mac: "00:00:00:00:00:00",
+          cidr: "fe80::1/64",
           scopeid: 2,
         },
         {
@@ -30,6 +32,7 @@ describe("ServerInfo.connectionURLs", () => {
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
           mac: "00:00:00:00:00:00",
+          cidr: "fd00::1/64",
           scopeid: 0,
         },
         {
@@ -38,6 +41,7 @@ describe("ServerInfo.connectionURLs", () => {
           internal: false,
           netmask: "ffff:ffff:ffff:ffff::",
           mac: "00:00:00:00:00:00",
+          cidr: "2001:db8::1/64",
           scopeid: 0,
         },
       ],
@@ -53,7 +57,14 @@ describe("ServerInfo.connectionURLs", () => {
   test("leaves IPv4 wildcard and specific-hostname results unchanged", () => {
     const interfaces: ReturnType<typeof networkInterfaces> = {
       eth0: [
-        { address: "192.0.2.1", family: "IPv4", internal: false, netmask: "255.255.255.0", mac: "00:00:00:00:00:00" },
+        {
+          address: "192.0.2.1",
+          family: "IPv4",
+          internal: false,
+          netmask: "255.255.255.0",
+          mac: "00:00:00:00:00:00",
+          cidr: "192.0.2.1/24",
+        },
       ],
     }
 
