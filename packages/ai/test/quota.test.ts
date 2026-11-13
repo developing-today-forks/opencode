@@ -600,6 +600,11 @@ describe("turso org usage mapping", () => {
     expect(mapped?.windows.storage?.usedPercent).toBe(45)
   })
 
+  test("a plan label naming an inherited member resolves Starter, not a prototype member", () => {
+    expect(resolveTursoLimits("constructor", null)).toEqual(resolveTursoLimits(undefined, null))
+    expect(resolveTursoLimits("__proto__", null).rowsRead).toBe(500_000_000)
+  })
+
   test("a whitespace-only plan label behaves as no label (#2154)", () => {
     expect(resolveTursoLimits("   ", null).rowsRead).toBe(500_000_000)
     const usage = { organization: { usage: { rows_read: 250_000_000 } } }

@@ -81,6 +81,15 @@ describe("TranscriptionFacade parse (§2.2/§2.4/§5)", () => {
     }
   })
 
+  test("a file extension naming an inherited member is no media type (prototype-chain read)", () => {
+    const parsed = parse({ model: "openai/whisper-1" }, { bytes: new Uint8Array([1]), filename: "clip.constructor" })
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) {
+      expect(parsed.error.code).toBe("unsupported_media_type")
+      expect(parsed.error.message).toContain("unknown media type")
+    }
+  })
+
   test("oversize upload is 413 audio_too_large", () => {
     const big = { bytes: new Uint8Array(26 * 1024 * 1024), mediaType: "audio/mpeg", filename: "big.mp3" }
     const parsed = parse({ model: "openai/whisper-1" }, big)

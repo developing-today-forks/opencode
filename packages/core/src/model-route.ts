@@ -13,6 +13,7 @@ import { ModelRouteOverrides } from "./model-route-overrides.js"
 import { ModelRouteSchedule } from "./model-route-schedule.js"
 import { QuotaSnapshot } from "./quota-snapshot.js"
 import { QuotaCurrent } from "./quota-current.js"
+import { ownValue } from "./util/record.js"
 import { optional, PositiveInt } from "@opencode/schema/schema"
 
 export const PROVIDER_ID = Provider.ID.make("opencode-route")
@@ -805,7 +806,7 @@ const modelWindowReading = (
   readonly complete: boolean
 } | undefined => {
   const candidatesOf = (reading: QuotaCurrent.ProviderReading): QuotaCurrent.Window[] => [
-    ...(reading.models[modelID] ?? []),
+    ...(ownValue(reading.models, modelID) ?? []),
     ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
   ]
   let freshest: number | undefined

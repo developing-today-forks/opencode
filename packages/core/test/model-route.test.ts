@@ -2952,6 +2952,23 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
     expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
   })
 
+  test("a model id naming an inherited member reads no per-model window (prototype-chain read)", () => {
+    const now = 825_000_000
+    const leaf = ModelRoute.ref({ providerID: "antigravity-direct", model: "constructor" })
+    ModelRoute.resetHealth()
+    const planted = ModelRoute.plantGatheredQuotaWall(
+      leaf,
+      gathered({
+        providerID: "antigravity-direct",
+        at: now,
+        models: { "gemini-3.8-flash": [{ name: "weekly", usedPercent: 100, resetAt: now + 86_400_000 }] },
+      }),
+      now,
+    )
+    expect(planted).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(false)
+  })
+
   test("a provider-window wall plants from the provider's single entry (the cline-pass shape, code#8086)", () => {
     const now = 830_000_000
     // The cline-pass shape: no per-model readings at all — the provider's own

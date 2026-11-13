@@ -527,9 +527,11 @@ describe("FSUtil.writeAtomic read-only rollback (#2329)", () => {
     const exit = await run((service) => Effect.exit(service.writeAtomic(file, "after")), {
       rename: () => Effect.fail(renameError()),
       chmod: (target, modeArg) => {
-        // The loosening chmod (0o600) and the temp chmod pass through;
-        // only the restoration chmod back to the read-only mode fails.
-        if (target === file && modeArg === 0o400)
+        // The loosening chmod (owner-write set) and the temp chmod pass through;
+        // only the restoration chmod back to the read-only mode fails. Matched
+        // by the owner-write bit, not a literal 0o400: Windows reports a
+        // read-only file as 0o444, so a literal would never hit there.
+        if (target === file && (modeArg & 0o200) === 0)
           return Effect.fail(
             systemError({
               _tag: "Unknown",
