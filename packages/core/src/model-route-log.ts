@@ -285,7 +285,9 @@ export const failureFields = (reason: unknown, options?: { readonly captureBody?
   }
 }
 
-const persist = (db: Database.Interface["db"], events: readonly Event[]) =>
+type PersistDb = Database.Interface["db"] | Parameters<Parameters<Database.Interface["db"]["transaction"]>[0]>[0]
+
+const persist = (db: PersistDb, events: readonly Event[]) =>
   Effect.gen(function* () {
     const decisions = events.flatMap((event) => (event.kind === "decision" ? [event.row] : []))
     const attempts = events.flatMap((event) => (event.kind === "attempt" ? [event] : []))
@@ -302,7 +304,7 @@ const persist = (db: Database.Interface["db"], events: readonly Event[]) =>
  * The root is read back by its assistant message, so the link survives the root having been persisted in an earlier
  * batch and stays correct across a restart. Retries and hedge losers share that message, so the newest standalone row
  * is the attempt that actually answered — the one whose response hit the output token limit. */
-const persistAttempt = (db: Database.Interface["db"], event: Extract<Event, { kind: "attempt" }>) =>
+const persistAttempt = (db: PersistDb, event: Extract<Event, { kind: "attempt" }>) =>
   Effect.gen(function* () {
     const inserted = yield* db
       .insert(RouteAttemptTable)
@@ -562,6 +564,52 @@ export const restoreNotes = (db: Database.Interface["db"]) =>
 let activeDb: Database.Interface["db"] | undefined
 
 /** Runs a read against the routing database, or yields nothing when no database is attached. */
+/**
+ * Batch persistence for the writer (#2331). One batch is one transaction, so
+ * a failure part-way through a batch (the per-attempt inserts especially)
+ * leaves no partial rows behind; the writer keeps the batch and retries it
+ * with bounded backoff instead of dropping it. Because a failed batch rolled
+ * back in full, retrying it cannot duplicate rows. After the attempt cap the
+ * batch is dropped with an error log — the loss is explicit, never silent —
+ * so one unpersistable batch cannot wedge all later telemetry forever.
+ * Persistence stays asynchronous throughout: recording an event only offers
+ * it to the queue, so a failing database never fails a model request.
+ */
+const maxPersistAttempts = 10
+const persistRetryDelayMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 1), 5_000)
+
+const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]) =>
+  Effect.gen(function* () {
+    for (let attempt = 1; ; attempt++) {
+      const cause = yield* db.transaction((tx) => persist(tx, events)).pipe(
+        Effect.matchCause({
+          onSuccess: () => undefined,
+          onFailure: (failure) => failure,
+        }),
+      )
+      if (cause === undefined) return
+      if (attempt >= maxPersistAttempts) {
+        yield* Effect.logError("dropping model route telemetry batch after repeated persistence failures", {
+          events: events.length,
+          attempts: attempt,
+          cause,
+        })
+        return
+      }
+      yield* Effect.logWarning("failed to persist model route telemetry; batch retained for retry", {
+        attempt,
+        cause,
+      })
+      yield* Effect.sleep(persistRetryDelayMs(attempt))
+    }
+  })
+
+const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
+  Queue.takeAll(queue).pipe(
+    Effect.flatMap((events) => (events.length ? persistWithRetry(db, events) : Effect.void)),
+    Effect.forever,
+  )
+
 export const withDb = <A, E>(use: (db: Database.Interface["db"]) => Effect.Effect<A, E>) =>
   activeDb ? Effect.asSome(use(activeDb)) : Effect.succeedNone
 
@@ -577,15 +625,7 @@ const layer = Layer.effectDiscard(
     const queue = yield* Queue.unbounded<Event>()
     setSink((event) => void Queue.offerUnsafe(queue, event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
-    yield* Queue.takeAll(queue).pipe(
-      Effect.flatMap((events) =>
-        persist(db, events).pipe(
-          Effect.catchCause((cause) => Effect.logWarning("failed to persist model route telemetry", { cause })),
-        ),
-      ),
-      Effect.forever,
-      Effect.forkScoped,
-    )
+    yield* writerLoop(db, queue).pipe(Effect.forkScoped)
   }),
 )
 

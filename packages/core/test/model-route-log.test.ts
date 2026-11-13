@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { sql } from "drizzle-orm"
 import { Effect, Exit } from "effect"
 import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -1715,4 +1716,50 @@ describe("ModelRouteLog.failureFields surrogate-pair guard (#1973)", () => {
     expect(fields.error_body).toBe("a".repeat(1_999))
     expect(fields.error_body?.isWellFormed()).toBe(true)
   })
+})
+describe("writer persistence failure (#2331)", () => {
+  it.live("a failed batch is retained, retried and persisted exactly once after the database recovers", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      // Sabotage: with the attempt table renamed away, every batch carrying an
+      // attempt fails part-way through its inserts.
+      yield* db.run(sql`ALTER TABLE route_attempt RENAME TO route_attempt_down`)
+      ModelRouteLog.record({
+        kind: "decision",
+        row: {
+          time: 1,
+          route_id: "luna",
+          selection: "weighted",
+          candidates: ["openai/gpt-6-luna"],
+          chosen: "openai/gpt-6-luna",
+          reason: "drawn",
+        },
+      })
+      ModelRouteLog.record({ kind: "attempt", row: attempt({}) })
+      ModelRouteLog.record({
+        kind: "attempt",
+        row: attempt({ outcome: "failure", output_started: false }),
+      })
+      // Give the writer time to attempt the batch and fail (250ms, then 500ms backoff).
+      yield* Effect.sleep("900 millis")
+      // Atomicity: the decision from the same batch is not visible either —
+      // the failed batch rolled back in full instead of leaving partial rows.
+      expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(0)
+
+      // The database recovers; the retained batch must land exactly once.
+      yield* db.run(sql`ALTER TABLE route_attempt_down RENAME TO route_attempt`)
+      let attempts: (typeof RouteAttemptTable.$inferSelect)[] = []
+      for (let i = 0; i < 50; i++) {
+        attempts = yield* db.select().from(RouteAttemptTable).all()
+        if (attempts.length === 2) break
+        yield* Effect.sleep("200 millis")
+      }
+      expect(attempts).toHaveLength(2)
+      expect(yield* db.select().from(RouteDecisionTable).all()).toHaveLength(1)
+      // The recovered rows feed the usage reads the quota gate relies on.
+      const stats = yield* ModelRouteLog.targetStats(db, 0, "luna")
+      expect(stats).toHaveLength(1)
+      expect(stats[0]).toMatchObject({ attempts: 2, failures: 1 })
+    }),
+  )
 })
