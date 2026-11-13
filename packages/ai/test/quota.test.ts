@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
-import { resolveTursoLimits, tursoWindows } from "../src/quota/providers/turso.js"
+import { resolveTursoLimits, tursoWindows, TURSO_LIMITS } from "../src/quota/providers/turso.js"
 import { parseGroqResetSeconds, provider as groqProvider } from "../src/quota/providers/groq.js"
 import {
   formatResetAfter,
@@ -598,6 +598,17 @@ describe("turso org usage mapping", () => {
     expect(mapped?.planLabel).toBe("scaler")
     expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
     expect(mapped?.windows.storage?.usedPercent).toBe(45)
+  })
+
+  test("a prototype-member plan label falls back to Starter limits (#2392)", () => {
+    // Oracle (#865 guard): the plan label is an external string. A bare
+    // TURSO_PLAN_LIMITS["constructor"] read resolves to the inherited
+    // Object constructor — truthy, so the ?? Starter fallback never
+    // fires and the limits come out silently wrong. The own-key guard
+    // must miss to Starter for every prototype member name.
+    expect(resolveTursoLimits("constructor", null).rowsRead).toBe(TURSO_LIMITS.rowsRead)
+    expect(resolveTursoLimits("__proto__", null).rowsRead).toBe(TURSO_LIMITS.rowsRead)
+    expect(resolveTursoLimits("toString", null).rowsRead).toBe(TURSO_LIMITS.rowsRead)
   })
 
   test("a whitespace-only plan label behaves as no label (#2154)", () => {

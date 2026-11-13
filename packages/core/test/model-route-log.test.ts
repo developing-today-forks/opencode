@@ -998,6 +998,26 @@ describe("quota cooldown restore re-judged against current quota (#1976)", () =>
       expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
     }),
   )
+
+  it.live("a prototype-named model id is no reading, never a crash (#2392)", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      ModelRoute.resetHealth()
+      const now = Date.now()
+      bench("restore-proto", "__proto__", "quota", now + 60_000, now)
+      yield* Effect.sleep("100 millis")
+
+      // Oracle (#865 guard): the reading's models record is a plain
+      // object, so a bare models["__proto__"] read resolves to
+      // Object.prototype — a non-iterable the candidate-window spread
+      // throws on. The own-value lookup treats the leg as unmeasured
+      // instead: the bench restores exactly as persisted.
+      yield* ModelRouteLog.restoreCooldownsFrom(db, [reading("restore-proto", {}, now)])
+      const target = ModelRoute.ref({ providerID: "restore-proto", model: "__proto__" })
+      expect(ModelRoute.coolingDown(target, now)).toBe(true)
+      expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 60_000)
+    }),
+  )
 })
 
 describe("credential cooldown restore (#870)", () => {

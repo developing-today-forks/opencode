@@ -299,3 +299,8 @@ packages/tui/src/util/form.ts :: if (dayFirst) return [Number(dayFirst[3]), MONT
 packages/tui/src/util/presentation.ts :: const right = draw(logo.right[index] ?? "", reset, "\x1b[38;5;238m", "\x1b[48;5;238m") :: safe: numeric index into an array
 packages/ui/src/theme/v2/resolve.ts :: tokens[`v2-${prefix}-${V2_STEPS[i]}`] = scale[i]! :: safe: numeric index into the scale array (the tokens bracket is a computed-key write composed from V2_STEPS[i])
 packages/util/src/cross-spawn-spawner.ts :: const opts = flat.opts[i] ?? {} :: safe: numeric index into an array
+packages/ai/src/protocols/openai-chat.ts :: const statedTool = tool.index == null ? undefined : (tools[tool.index] ?? pendingTools[tool.index]) :: safe: numeric index into arrays, not a string-key dictionary read (#2392)
+packages/ai/src/quota/providers/turso.ts :: (wanted && Object.hasOwn(TURSO_PLAN_LIMITS, wanted) ? TURSO_PLAN_LIMITS[wanted] : undefined) ?? { ...TURSO_LIMITS } :: guarded: Object.hasOwn ternary at the same site; plan label is an external string (#2392)
+packages/ai/src/utils/media-type.ts :: if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand as keyof typeof FTYP_BRANDS] :: guarded: Object.hasOwn at the same site (#2392)
+packages/core/src/mime.ts :: if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand] :: guarded: Object.hasOwn at the same site (#2392)
+packages/core/src/transcription-facade.ts :: const value = form.fields[name] ?? form.fields[`${name}[]`] :: validated: string/array checks at the same site return [] for any other value; callers pass literal field names (#2392)

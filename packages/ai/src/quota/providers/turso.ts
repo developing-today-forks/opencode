@@ -125,7 +125,11 @@ export const resolveTursoLimits = (planLabel?: string, plansDoc?: JsonValue | nu
   // padded /plans name) cannot silently miss its plan and regress to
   // Starter denominators (#2154).
   const wanted = typeof planLabel === "string" ? planLabel.trim().toLowerCase() : ""
-  const fallback: TursoLimits = (wanted ? TURSO_PLAN_LIMITS[wanted] : undefined) ?? { ...TURSO_LIMITS }
+  // Object.hasOwn guard (#865/#2392): the plan label is an external string, so a
+  // prototype member name ("constructor") must miss to Starter, not resolve to an
+  // inherited member the ?? fallback would never replace.
+  const fallback: TursoLimits =
+    (wanted && Object.hasOwn(TURSO_PLAN_LIMITS, wanted) ? TURSO_PLAN_LIMITS[wanted] : undefined) ?? { ...TURSO_LIMITS }
   if (plansDoc == null || wanted === "") return fallback
   const plansRoot = asObject(plansDoc)
   const plans = plansRoot?.plans

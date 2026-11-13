@@ -47,6 +47,7 @@ import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, Ra
 import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
 import { configure as configureOpenAI } from "@opencode/ai/providers/openai"
 import { ModelRouteLog } from "./model-route-log.js"
+import { ownValue } from "./util/record.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
 
 // ------------------------------------------------------------ registry (§3)
@@ -230,7 +231,9 @@ export const parseTranscriptionRequest = (
       ),
     )
   const extension = file.filename?.split(".").pop()?.toLowerCase()
-  const mediaType = file.mediaType || (extension ? EXTENSION_MEDIA_TYPES[extension] : undefined) || ""
+  // ownValue (#865/#2392): the extension comes from an uploaded filename, so a
+  // prototype member name must miss, not resolve to an inherited member.
+  const mediaType = file.mediaType || (extension ? ownValue(EXTENSION_MEDIA_TYPES, extension) : undefined) || ""
   if (!capabilities.mediaTypes.includes(mediaType))
     return fail(
       shape(
@@ -487,7 +490,10 @@ export const layer = Layer.effect(
             ),
             new Error(`${registration.apiKeyEnv} is not set`),
           )
-        const factory = PROVIDER_FACTORIES[registration.providerID]
+        // ownValue (#865/#2392): a prototype-named providerID must miss to the
+        // not-wired failure below, never resolve to an inherited member that
+        // would then be CALLED as the factory.
+        const factory = ownValue(PROVIDER_FACTORIES, registration.providerID)
         if (!factory)
           return yield* fail(
             shape(502, "upstream_failure", `no transcription factory is wired for provider ${registration.providerID}`),
