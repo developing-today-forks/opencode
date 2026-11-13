@@ -19,7 +19,8 @@ export type Resume = {
  * Opt-in automatic reconnect for a shared stream (issue #2321). When a
  * connection attempt fails with an error `shouldRetry` accepts — or ends
  * unexpectedly with no error — the shared stream reopens after
- * `delay(attempt)` (attempt is 1-based and resets once an event is read),
+ * `delay(attempt)` (attempt is 1-based and resets once a non-handshake
+ * event is read),
  * resuming from the last event id the stream read. Subscribers are not
  * completed while a reconnect is pending or in flight; a terminal error
  * completes them exactly as an unretried failure does. When the last
@@ -110,7 +111,9 @@ export function make<A extends { readonly type: string }>(
           if (item.value.type === "server.connected") connection.connected = item.value
           const id = connection.eventID
           if (id !== undefined) connection.lastEventID = id
-          connection.attempt = 0
+          // The server.connected handshake alone is not progress: a stream
+          // that handshakes and then ends must keep growing its backoff.
+          if (item.value.type !== "server.connected") connection.attempt = 0
           connection.subscribers.forEach((subscriber) => subscriber.push(item.value, id))
         }
       } catch (error) {
@@ -131,18 +134,33 @@ export function make<A extends { readonly type: string }>(
       // A clean end is an unexpected end for a long-lived subscription: it
       // reconnects under a policy just like a retryable failure. A terminal
       // failure (or no policy) completes every subscriber as before.
-      const retryable =
-        reconnect !== undefined &&
-        connection.subscribers.size > 0 &&
-        (!failed || reconnect.shouldRetry((completion as { readonly error: unknown }).error))
+      // A throwing policy must not strand subscribers on a rejected run:
+      // the thrown error completes them exactly as a terminal failure does.
+      let retryable = false
+      let delayMs = 0
+      try {
+        if (
+          reconnect !== undefined &&
+          connection.subscribers.size > 0 &&
+          (!failed || reconnect.shouldRetry((completion as { readonly error: unknown }).error))
+        ) {
+          retryable = true
+          connection.attempt += 1
+          delayMs = reconnect.delay(connection.attempt)
+        }
+      } catch (error) {
+        stop(connection)
+        const policyFailure: Completion = { error }
+        connection.subscribers.forEach((subscriber) => subscriber.finish(policyFailure))
+        return
+      }
       if (!retryable) {
         stop(connection)
         connection.subscribers.forEach((subscriber) => subscriber.finish(completion))
         return
       }
-      connection.attempt += 1
       connection.connected = undefined
-      if (!(await waitForRetry(connection, reconnect.delay(connection.attempt)))) return
+      if (!(await waitForRetry(connection, delayMs))) return
       if (connection.stopped) return
       connection.controller = new AbortController()
     }

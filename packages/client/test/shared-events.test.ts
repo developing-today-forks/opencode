@@ -503,3 +503,79 @@ test("leaving during the reconnect backoff cancels the pending reconnect", async
   await Bun.sleep(20)
   expect(calls).toBe(1)
 })
+
+test("a handshake-only stream that keeps ending grows its backoff", async () => {
+  const attempts: number[] = []
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        yield { type: "server.connected" }
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => true,
+        delay: (attempt) => {
+          attempts.push(attempt)
+          return 1
+        },
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  expect(await iterator.next()).toEqual({ done: false, value: { type: "server.connected" } })
+  // The handshake alone never resets the attempt counter, so the delay grows.
+  expect(attempts).toEqual([1, 2])
+  expect(calls).toBe(3)
+  await iterator.return!()
+})
+
+test("a throwing reconnect policy completes subscribers with the thrown error", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        throw new Error("transport down")
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => {
+          throw new Error("policy broke")
+        },
+        delay: () => 1,
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  await expect(iterator.next()).rejects.toThrow("policy broke")
+  expect(calls).toBe(1)
+})
+
+test("a throwing reconnect delay completes subscribers with the thrown error", async () => {
+  let calls = 0
+  const shared = SharedEvents.make(
+    () => {
+      calls += 1
+      return (async function* () {
+        throw new Error("transport down")
+      })()
+    },
+    {
+      reconnect: {
+        shouldRetry: () => true,
+        delay: () => {
+          throw new Error("delay broke")
+        },
+      },
+    },
+  )
+  const iterator = shared.subscribe()[Symbol.asyncIterator]()
+  await expect(iterator.next()).rejects.toThrow("delay broke")
+  expect(calls).toBe(1)
+})

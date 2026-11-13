@@ -40,6 +40,20 @@ test("5xx status errors are retryable, 4xx are terminal", async () => {
   expect(eventErrorRetryable(status(401))).toBeFalse()
 })
 
+test("an undeclared 5xx arrives as a DecodeError carrying the status and is retryable", () => {
+  const decode = (code: number) =>
+    clientFailure(
+      new HttpClientError.HttpClientError({
+        reason: new HttpClientError.DecodeError({
+          request,
+          response: HttpClientResponse.fromWeb(request, new Response("err", { status: code })),
+        }),
+      }),
+    )
+  expect(eventErrorRetryable(decode(503))).toBeTrue()
+  expect(eventErrorRetryable(decode(400))).toBeFalse()
+})
+
 test("decode errors and non-ClientError failures are terminal", () => {
   expect(
     eventErrorRetryable(

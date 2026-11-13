@@ -51,6 +51,11 @@ export function eventErrorRetryable(error: unknown): boolean {
       return true
     case "StatusCodeError":
       return cause.reason.response.status >= 500
+    case "DecodeError":
+      // failStatus reports an undeclared status as a DecodeError carrying
+      // the response: a 5xx there is a transient server failure, while a
+      // DecodeError on a 200 response stays a terminal protocol failure.
+      return cause.reason.response.status >= 500
     default:
       return false
   }
