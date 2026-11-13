@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { createRequire } from "node:module"
 import { copyFile, mkdir, readFile, stat } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,6 +9,8 @@ import { collectFiles } from "./files"
 import { resolveOpencodePty } from "./opencode-pty"
 
 const dir = path.resolve(import.meta.dirname, "..")
+const requireAI = createRequire(path.resolve(dir, "../ai/package.json"))
+const keyringRequire = createRequire(requireAI.resolve("@napi-rs/keyring"))
 
 // Bun's compiler discovers file imports and embeds them in its virtual filesystem. Vite only bundles the JavaScript
 // portion of the Node executable, while SEA embeds only the assets explicitly listed in its build configuration.
@@ -32,6 +35,14 @@ export async function collectNodeAssets(target: NodeTarget) {
       arch: target.arch,
       ...(target.platform === "linux" ? { libc: "glibc" as const } : {}),
     }),
+    ...(target.keyringAsset
+      ? [
+          {
+            key: target.keyringAsset,
+            source: keyringRequire.resolve(`@napi-rs/keyring-linux-${target.arch}-gnu`),
+          },
+        ]
+      : []),
     { key: target.parcelWatcherAsset, source: fileURLToPath(import.meta.resolve(target.parcelWatcherPackage)) },
     { key: target.fffAsset, source: fileURLToPath(import.meta.resolve(target.fffPackage)) },
     { key: target.fffFfiAsset, source: fileURLToPath(import.meta.resolve(target.fffFfiPackage)) },

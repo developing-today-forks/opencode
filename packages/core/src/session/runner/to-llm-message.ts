@@ -14,7 +14,7 @@ import { fileURLToPath } from "url"
 import { SessionMessage } from "../message.js"
 import { SessionProviderContext } from "../provider-context.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
-import { validate as validateToolFile } from "./tool-result-content.js"
+import { validateToolFile } from "./tool-result-content.js"
 
 const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 

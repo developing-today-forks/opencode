@@ -281,7 +281,7 @@ const layer = Layer.effect(
           })
         }
         const prepared = yield* prepareFor(loaded.model)
-        const outcome = yield* steps.attempt({
+        const outcome = yield* Effect.scoped(steps.attempt({
           isLocationClosed: lifecycle.isClosed,
           sessionID,
           assistantMessageID,
@@ -309,7 +309,7 @@ const layer = Layer.effect(
                   .pipe(Effect.map((result) => result.status === "completed"))
               : Effect.succeed(false),
           ),
-        })
+        }))
         const completed = yield* SessionStep.Outcome.$match(outcome, {
           Completed: (outcome) => Effect.succeed<StepResult>({ needsContinuation: outcome.needsContinuation }),
           Retry: (outcome) =>

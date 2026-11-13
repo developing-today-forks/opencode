@@ -24,6 +24,8 @@ import { Bus } from "@opencode/core/bus"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { FileAccess } from "@opencode/core/file-access"
+import { Location } from "@opencode/core/location"
 import { EventTable } from "@opencode/core/event/sql"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -48,9 +50,13 @@ import { testEffect } from "./lib/effect"
 
 const it = testEffect(
   Layer.merge(
-    AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node]), [
-      Bus.node.replace(Bus.configured({ persist: true })),
-    ]),
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node, FileAccess.node]),
+      [
+        Bus.node.replace(Bus.configured({ persist: true })),
+        Location.node.replace(Location.boundNode(Location.Ref.make({ directory: AbsolutePath.make("/project") }))),
+      ],
+    ),
     TestLLM.testLayer(),
   ),
 )

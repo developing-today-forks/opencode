@@ -92,7 +92,7 @@ const dataUri = (file: Extract<Content, { type: "file" }>) => {
   return { ...file, uri: `data:${mime};base64,${bytes.toString("base64")}`, mime }
 }
 
-export const validate = (item: Extract<Content, { type: "file" }>): Content => {
+export const validateToolFile = (item: Extract<Content, { type: "file" }>): Content => {
   if (item.uri.startsWith("data:")) return dataUri(item)
   if (item.uri.startsWith("https://") || item.uri.startsWith("http://")) return item
   if (item.uri.startsWith("file:")) return fallback(item.uri, "local file URI was not materialized by an authorized tool")
@@ -103,14 +103,14 @@ export const validate = (item: Extract<Content, { type: "file" }>): Content => {
 }
 
 /** Snapshots authorized local files before a completed tool result is persisted. */
-export const materialize = (
+export const materializeToolResult = (
   content: ReadonlyArray<Content>,
   context: FileAccess.Invocation,
   authorizeRead: FileAccess.Interface["authorizeRead"],
-) =>
+): Effect.Effect<ReadonlyArray<Content>, never> =>
   Effect.forEach(content, (item) => {
     if (item.type !== "file") return Effect.succeed(item)
-    if (!item.uri.startsWith("file:")) return Effect.succeed(validate(item))
+    if (!item.uri.startsWith("file:")) return Effect.succeed(validateToolFile(item))
     let path: string
     try {
       path = fileURLToPath(item.uri)

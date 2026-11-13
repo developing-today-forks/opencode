@@ -22,6 +22,7 @@ import { Effect, Layer, Logger, Stream } from "effect"
 import { Agent } from "../src/agent"
 import { Bus } from "../src/bus"
 import { Database } from "../src/database/database"
+import { FileAccess } from "../src/file-access"
 import { AppNodeBuilder } from "../src/effect/app-node-builder"
 import { Location } from "../src/location"
 import { Project } from "../src/project"
@@ -108,7 +109,7 @@ const model = SessionRunnerModel.resolved(
 const delayed = (response: ReturnType<typeof TestLLM.stop>) =>
   Stream.unwrap(Effect.sleep(ttft).pipe(Effect.as(Stream.fromIterable(response as Iterable<LLMEvent>))))
 
-const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
+const run = (snapshots: Layer.Layer<Snapshot.Service, never, never>) =>
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
     const llm = yield* TestLLM.Test
@@ -139,7 +140,7 @@ const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
               : TestLLM.tool(call, kind, { path: files[edits % files.length] }),
           ),
         )
-        yield* steps.attempt({
+        yield* Effect.scoped(steps.attempt({
           isLocationClosed: () => false,
           sessionID,
           assistantMessageID: SessionMessage.ID.create(),
@@ -161,16 +162,20 @@ const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
           retry: () => Effect.succeed({ retry: false as const }),
           recoverContinuation: false,
           recoverOverflow: Effect.succeed(false),
-        })
+        }))
       }
     return { ms: performance.now() - start, spawns: spawns - before }
   }).pipe(
     Effect.provide(snapshots),
     Effect.provide(
       Layer.merge(
-        AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node]), [
-          Bus.node.replace(Bus.configured({ persist: true })),
-        ]),
+        AppNodeBuilder.build(
+          LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node, FileAccess.node]),
+          [
+            Bus.node.replace(Bus.configured({ persist: true })),
+            Location.node.replace(Location.boundNode(Location.Ref.make({ directory: AbsolutePath.make(directory) }))),
+          ],
+        ),
         TestLLM.testLayer(),
       ),
     ),
@@ -179,9 +184,9 @@ const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
 
 await $`git -c core.fsmonitor=false reset -q --hard`.cwd(directory).quiet()
 const data = await fs.mkdtemp(path.join(root, "session-data-"))
-const noop = await Effect.runPromise(run(Snapshot.noopLayer))
+const noop = await Effect.runPromise(run(Snapshot.noopLayer).pipe(Effect.orDie))
 await $`git -c core.fsmonitor=false reset -q --hard`.cwd(directory).quiet()
-const real = await Effect.runPromise(run(snapshotLayer(data)))
+const real = await Effect.runPromise(run(snapshotLayer(data)).pipe(Effect.orDie))
 await $`git -c core.fsmonitor=false reset -q --hard`.cwd(directory).quiet()
 await fs.rm(data, { recursive: true, force: true })
 
