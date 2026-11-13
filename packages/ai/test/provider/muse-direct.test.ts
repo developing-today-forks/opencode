@@ -505,7 +505,11 @@ it.effect("v1-dialect effort settings normalize to reasoningEffort on the wire",
     const expected = ["xhigh", "high", "low", "medium"]
     for (const [index, settings] of shapes.entries()) {
       const compiled = yield* compileRequest(
-        LLM.request({ model: MuseDirect.model("muse-spark-1.3-contributor", settings), prompt: "Hi" }),
+        LLM.request({
+          // A fixture apiKey keeps compilation off the real Muse auth file (absent on CI runners).
+          model: MuseDirect.model("muse-spark-1.3-contributor", { ...settings, apiKey: MINTED_KEY }),
+          prompt: "Hi",
+        }),
       )
       expect((compiled.body as { reasoning?: { effort?: string } }).reasoning?.effort).toBe(expected[index])
     }
