@@ -101,9 +101,14 @@ const publishSessionUsage = Effect.fn("SessionProjector.publishUsage")(function*
     .get()
     .pipe(Effect.orDie)
   if (!row) return
-  // Refresh the authoritative (success-only route_attempt) totals alongside the
-  // projector fold (#7): attempts are recorded during the step, so by the time a
-  // step's usage is published the ledger already holds the finished attempt.
+  // Refresh the authoritative (success-only route_attempt) totals alongside
+  // the projector fold (#7). The ledger writer is asynchronous and batched,
+  // so this publish carries the totals of the attempts persisted SO FAR —
+  // a just-finished attempt may not have landed yet (#2408). The guarantee
+  // is completed by the corrective republication registered in the layer
+  // below: ModelRouteLog notifies after every batch persist and the
+  // projector republishes the session's usage then, so the final step's
+  // authoritative total reaches consumers without a reload.
   const authoritative = (yield* ModelRouteLog.authoritativeSessionUsage(db, [sessionID]))[0]
   yield* bus.publish(SessionEvent.UsageUpdated, {
     sessionID,
@@ -824,6 +829,16 @@ const layer = Layer.effectDiscard(
         yield* InstructionState.reset(db, event.data.sessionID)
       }),
     )
+    // Corrective republication (#2408): when a telemetry batch lands, the
+    // sessions whose attempts it carried get a fresh usage publish computed
+    // from the now-readable rows. The listener is a plain callback on the
+    // writer's fiber, so the publish is forked; it only touches the db and
+    // the bus, both already in hand here.
+    const offAttemptsPersisted = ModelRouteLog.onAttemptsPersisted((sessionIDs) => {
+      for (const sessionID of sessionIDs)
+        Effect.runFork(publishSessionUsage(db, bus, sessionID as SessionSchema.ID))
+    })
+    yield* Effect.addFinalizer(() => Effect.sync(offAttemptsPersisted))
     yield* bus.subscribe([SessionEvent.Step.Ended, SessionEvent.Step.Failed, SessionEvent.UsageRecorded]).pipe(
       Stream.runForEach((event) => {
         if (

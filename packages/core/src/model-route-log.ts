@@ -49,6 +49,24 @@ export const setSink = (next: Sink | undefined) => {
   sink = next
 }
 
+/** Notified after the writer persists a batch, with the session ids whose attempt
+ * rows landed in it. Persistence is asynchronous, so a reader that runs at record
+ * time (the session projector's usage publish, #2408) cannot see the just-finished
+ * attempt yet; this notification is what lets such a reader republish once the
+ * rows are actually readable. Listeners are plain callbacks on the writer's
+ * fiber: they must be cheap, must not throw, and must not record telemetry. */
+export type AttemptsPersistedListener = (sessionIDs: readonly string[]) => void
+
+const attemptPersistedListeners = new Set<AttemptsPersistedListener>()
+
+/** Registers a persisted-batch listener and returns the function that removes it. */
+export const onAttemptsPersisted = (listener: AttemptsPersistedListener) => {
+  attemptPersistedListeners.add(listener)
+  return () => {
+    attemptPersistedListeners.delete(listener)
+  }
+}
+
 /** Flattens an `AIError.reason` into the exact tag, code, status, message and body, plus any
  * rate-limit detail the provider reported. */
 /** Observe one request to a target: read what its response says about rate limits as soon as the
@@ -587,14 +605,14 @@ const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]
           onFailure: (failure) => failure,
         }),
       )
-      if (cause === undefined) return
+      if (cause === undefined) return true
       if (attempt >= maxPersistAttempts) {
         yield* Effect.logError("dropping model route telemetry batch after repeated persistence failures", {
           events: events.length,
           attempts: attempt,
           cause,
         })
-        return
+        return false
       }
       yield* Effect.logWarning("failed to persist model route telemetry; batch retained for retry", {
         attempt,
@@ -604,9 +622,31 @@ const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]
     }
   })
 
+const notifyAttemptsPersisted = (events: readonly Event[]) => {
+  const sessionIDs = [
+    ...new Set(
+      events.flatMap((event) => (event.kind === "attempt" && event.row.session_id ? [event.row.session_id] : [])),
+    ),
+  ]
+  if (!sessionIDs.length) return
+  for (const listener of [...attemptPersistedListeners]) {
+    try {
+      listener(sessionIDs)
+    } catch {
+      // A listener must never break the writer.
+    }
+  }
+}
+
 const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
   Queue.takeAll(queue).pipe(
-    Effect.flatMap((events) => (events.length ? persistWithRetry(db, events) : Effect.void)),
+    Effect.flatMap((events) =>
+      events.length
+        ? persistWithRetry(db, events).pipe(
+            Effect.tap((persisted) => (persisted ? Effect.sync(() => notifyAttemptsPersisted(events)) : Effect.void)),
+          )
+        : Effect.void,
+    ),
     Effect.forever,
   )
 

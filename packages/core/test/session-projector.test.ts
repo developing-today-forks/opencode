@@ -21,6 +21,7 @@ import { Money } from "@opencode/schema/money"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { fromRow } from "@opencode/core/session/info"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionStore } from "@opencode/core/session/store"
 import { Shell } from "@opencode/schema/shell"
@@ -36,6 +37,19 @@ import { Snapshot } from "@opencode/core/snapshot"
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([Database.node, Bus.node, SessionProjector.node, SessionInbox.node, SessionStore.node]),
+    [Bus.node.replace(Bus.configured({ persist: true }))],
+  ),
+)
+const itRouteLog = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      Bus.node,
+      SessionProjector.node,
+      SessionInbox.node,
+      SessionStore.node,
+      ModelRouteLog.node,
+    ]),
     [Bus.node.replace(Bus.configured({ persist: true }))],
   ),
 )
@@ -807,5 +821,98 @@ describe("SessionProjector", () => {
       })
       expect(yield* updated()).toEqual({ time_updated: 15 })
     }),
+  )
+})
+
+describe("SessionProjector authoritative usage correction (#2408)", () => {
+  itRouteLog.live(
+    "republishes the final step's authoritative total after the async writer persists a held attempt",
+    () =>
+      Effect.gen(function* () {
+        const db = yield* seedSession()
+        const bus = yield* Bus.Service
+        yield* db
+          .insert(SessionMessageTable)
+          .values([assistantRow(SessionMessage.ID.make("msg_held_attempt"), 0)])
+          .run()
+          .pipe(Effect.orDie)
+
+        const seen: (typeof SessionEvent.UsageUpdated.Type)[] = []
+        yield* bus.subscribe(SessionEvent.UsageUpdated).pipe(
+          Stream.runForEach((event) => Effect.sync(() => void seen.push(event))),
+          Effect.forkScoped({ startImmediately: true }),
+        )
+        yield* Effect.sleep("100 millis")
+        // Observed polling, the house style for writer-adjacent waits: the
+        // assertion is on what arrives, with a bounded number of retries.
+        const waitFor = (count: number) =>
+          Effect.gen(function* () {
+            for (let i = 0; i < 100 && seen.length < count; i++) yield* Effect.sleep("100 millis")
+            return seen[count - 1]
+          })
+
+        // Hold the writer deterministically: renaming route_decision makes
+        // every batch transaction fail and roll back in full (the writer
+        // retains the batch and retries with backoff), while route_attempt
+        // stays readable and empty — recording cannot become visible yet.
+        yield* db.run(sql`ALTER TABLE route_decision RENAME TO route_decision_down`)
+        ModelRouteLog.record({
+          kind: "decision",
+          row: {
+            time: 1,
+            route_id: "luna",
+            selection: "weighted",
+            candidates: ["openai/gpt-6-luna"],
+            chosen: "openai/gpt-6-luna",
+            reason: "drawn",
+          },
+        })
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: {
+            time_started: 1_000,
+            time_ended: 2_000,
+            route_id: "luna",
+            provider_id: "openai",
+            model_id: "gpt-6-luna",
+            outcome: "success",
+            output_started: true,
+            session_id: sessionID,
+            tokens_input: 100,
+            tokens_output: 40,
+            tokens_reasoning: 3,
+            tokens_cache_read: 10,
+            tokens_cache_write: 2,
+            cost_usd: 0.5,
+            cache_savings_usd: 0.07,
+          },
+        })
+
+        yield* bus.publish(SessionEvent.Step.Ended, {
+          sessionID,
+          assistantMessageID: SessionMessage.ID.make("msg_held_attempt"),
+          finish: "stop",
+          cost: Money.USD.make(1.25),
+          tokens: { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 1 } },
+        })
+
+        // The publish at step end raced the held writer and lost: it carries
+        // no authoritative total, because none is persisted yet. That is the
+        // stale live state #2408 reports, pinned here as the before picture.
+        const first = yield* waitFor(1)
+        expect(first?.data.costAuthoritative).toBeUndefined()
+        expect(yield* ModelRouteLog.authoritativeSessionUsage(db, [sessionID])).toEqual([])
+
+        // The database recovers; the writer's retained batch lands, and the
+        // persist notification must produce a corrective publish carrying
+        // the final step's authoritative total — no reload involved.
+        yield* db.run(sql`ALTER TABLE route_decision_down RENAME TO route_decision`)
+        const second = yield* waitFor(2)
+        expect(second?.data.costAuthoritative).toEqual({
+          cost: Money.USD.make(0.5),
+          cacheSavings: Money.USD.make(0.07),
+          tokens: { input: 100, output: 40, reasoning: 3, cache: { read: 10, write: 2 } },
+        })
+      }),
   )
 })
