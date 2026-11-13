@@ -527,9 +527,14 @@ describe("FSUtil.writeAtomic read-only rollback (#2329)", () => {
     const exit = await run((service) => Effect.exit(service.writeAtomic(file, "after")), {
       rename: () => Effect.fail(renameError()),
       chmod: (target, modeArg) => {
-        // The loosening chmod (0o600) and the temp chmod pass through;
-        // only the restoration chmod back to the read-only mode fails.
-        if (target === file && modeArg === 0o400)
+        // The loosening chmod (which adds the owner-write bit) and the
+        // temp chmod pass through; only the restoration chmod — the one
+        // on the target that clears the owner-write bit — fails. Matching
+        // one exact mode value would be POSIX-shaped: Windows stat
+        // synthesizes modes (a read-only file reads back 0o444, not the
+        // 0o400 set above), so the restored value differs per platform
+        // while the write-bit shape does not (#2392).
+        if (target === file && (modeArg & 0o200) === 0)
           return Effect.fail(
             systemError({
               _tag: "Unknown",
