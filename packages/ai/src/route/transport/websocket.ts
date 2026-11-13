@@ -34,6 +34,9 @@ export interface WebSocketConnector {
 }
 
 const MAX_FRAME_BYTES = 16 * 1024 * 1024
+// Preserve synchronous bursts (including >1,000 small Bun frames) while bounding queued payloads and empty-frame overhead.
+const MAX_QUEUED_BYTES = 32 * 1024 * 1024
+const MAX_QUEUED_MESSAGES = 4096
 const transportError = (
   message: string,
   input: {
@@ -232,11 +235,16 @@ export const fromWebSocket = (
     // The socket pushes frames synchronously and cannot be paused, so the hand-off to the consumer
     // fiber must absorb whole read buffers. Bun delivers over a thousand small frames in one tick.
     const messages = yield* Queue.unbounded<string | Uint8Array, AIError | Cause.Done<void>>()
+    let queuedBytes = 0
+    let queuedMessages = 0
+    let failed = false
 
-    const oversized = (message: string | Uint8Array) =>
-      typeof message === "string" ? new Blob([message]).size > MAX_FRAME_BYTES : message.byteLength > MAX_FRAME_BYTES
-    const rejectOversized = (message: string | Uint8Array) => {
-      if (!oversized(message)) return false
+    const frameBytes = (message: string | Uint8Array) =>
+      typeof message === "string" ? new Blob([message]).size : message.byteLength
+
+    const rejectOversized = (message: string | Uint8Array, bytes: number) => {
+      if (bytes <= MAX_FRAME_BYTES) return false
+      failed = true
       Queue.failCauseUnsafe(
         messages,
         Cause.fail(
@@ -253,8 +261,28 @@ export const fromWebSocket = (
       return true
     }
     const offer = (message: string | Uint8Array) => {
-      if (rejectOversized(message)) return
-      Queue.offerUnsafe(messages, message)
+      if (failed) return
+      const bytes = frameBytes(message)
+      if (rejectOversized(message, bytes)) return
+      if (queuedBytes + bytes > MAX_QUEUED_BYTES || queuedMessages >= MAX_QUEUED_MESSAGES) {
+        failed = true
+        Queue.failCauseUnsafe(
+          messages,
+          Cause.fail(
+            transportError("WebSocket inbound buffer exceeded its 32 MiB / 4096 message limit", {
+              url: input.url,
+              operation: "read",
+              code: "buffer-overflow",
+              phase: "receive",
+            }),
+          ),
+        )
+        if (ws.readyState === globalThis.WebSocket.OPEN) ws.close(1009, "Inbound buffer exceeded")
+        return
+      }
+      if (!Queue.offerUnsafe(messages, message)) return
+      queuedBytes += bytes
+      queuedMessages++
     }
 
     const onMessage = (event: Socket.WebSocketEvent) => {
@@ -347,7 +375,14 @@ export const fromWebSocket = (
               }),
           })
         }),
-      messages: Stream.fromQueue(messages),
+      messages: Stream.fromQueue(messages).pipe(
+        Stream.tap((message) =>
+          Effect.sync(() => {
+            queuedBytes -= frameBytes(message)
+            queuedMessages--
+          }),
+        ),
+      ),
       close: cleanup.pipe(
         Effect.andThen(
           Effect.sync(() => {
