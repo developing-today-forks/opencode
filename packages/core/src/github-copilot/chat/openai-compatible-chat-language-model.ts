@@ -519,7 +519,12 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV3 {
               })
             }
 
-            if (delta.tool_calls != null) {
+            // After a stream error, no further tool-call events may be emitted
+            // for this response (#2407): the flush guard from #2311 does not
+            // cover chunks that arrive after the error and complete an
+            // in-flight call or carry a whole new call, and downstream would
+            // execute those calls as if the stream had succeeded.
+            if (delta.tool_calls != null && !hasStreamError) {
               // If reasoning was active and we're starting tool calls, end reasoning first
               // This handles the case where reasoning goes directly to tool calls with no content
               if (isActiveReasoning) {
