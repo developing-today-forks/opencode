@@ -277,6 +277,73 @@ describe("ConfigModelRoutes.Window string fields (#1681)", () => {
   })
 })
 
+describe("ConfigModelRoutes.Window list, day and epoch fields (#2041)", () => {
+  // Oracle: the same runtime parser as the #1681 describe. For these fields the parser
+  // also drops the whole window on an empty list (every list field), on a day entry it
+  // cannot read, and on a non-finite epoch bound — while accepting friendly forms the
+  // schema used to reject: capitalised or padded day names, numeric-string days, padded
+  // excludeWindows names, and epoch bounds of 0 or fractional. Decode now mirrors both
+  // directions; the parser canonicalises the friendly forms downstream.
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Window)
+
+  test("rejects empty lists in every list field, naming the field", () => {
+    expect(() => decode({ daysOfWeek: [] })).toThrow("window daysOfWeek must not be empty")
+    expect(() => decode({ daysOfMonth: [] })).toThrow("window daysOfMonth must not be empty")
+    expect(() => decode({ excludeWindows: [] })).toThrow("window excludeWindows must not be empty")
+    // The #2035 controls still hold.
+    expect(() => decode({ dates: [] })).toThrow("window dates must not be empty")
+    expect(() => decode({ excludeDates: [] })).toThrow("window excludeDates must not be empty")
+  })
+
+  test("accepts the parser's friendly day forms and rejects the ones it drops", () => {
+    expect(decode({ daysOfWeek: ["Mon"] })).toMatchObject({ daysOfWeek: ["Mon"] })
+    expect(decode({ daysOfWeek: [" mon "] })).toMatchObject({ daysOfWeek: [" mon "] })
+    expect(decode({ daysOfWeek: ["sunday"] })).toMatchObject({ daysOfWeek: ["sunday"] })
+    expect(decode({ daysOfWeek: ["3"] })).toMatchObject({ daysOfWeek: ["3"] })
+    expect(decode({ daysOfWeek: ["03"] })).toMatchObject({ daysOfWeek: ["03"] })
+    expect(decode({ daysOfWeek: [0, "sat"] })).toMatchObject({ daysOfWeek: [0, "sat"] })
+    expect(() => decode({ daysOfWeek: ["funday"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["7"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["-1"] })).toThrow("invalid weekday")
+    expect(() => decode({ daysOfWeek: ["constructor"] })).toThrow("invalid weekday")
+
+    expect(decode({ daysOfMonth: ["15"] })).toMatchObject({ daysOfMonth: ["15"] })
+    expect(decode({ daysOfMonth: ["-1"] })).toMatchObject({ daysOfMonth: ["-1"] })
+    expect(decode({ daysOfMonth: [" 15 "] })).toMatchObject({ daysOfMonth: [" 15 "] })
+    expect(decode({ daysOfMonth: [15, -1] })).toMatchObject({ daysOfMonth: [15, -1] })
+    expect(() => decode({ daysOfMonth: ["0"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: ["32"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: ["-2"] })).toThrow("invalid day of month")
+    expect(() => decode({ daysOfMonth: [1.5] })).toThrow()
+    expect(() => decode({ daysOfMonth: [0] })).toThrow()
+  })
+
+  test("accepts padded excludeWindows names, rejects names the parser drops", () => {
+    expect(decode({ excludeWindows: [" peak "] })).toMatchObject({ excludeWindows: [" peak "] })
+    expect(decode({ excludeWindows: ["peak"] })).toMatchObject({ excludeWindows: ["peak"] })
+    expect(() => decode({ excludeWindows: [""] })).toThrow("invalid window name")
+    expect(() => decode({ excludeWindows: ["bad name"] })).toThrow("invalid window name")
+    expect(() => decode({ excludeWindows: ["-leading-dash"] })).toThrow("invalid window name")
+  })
+
+  test("accepts epoch bounds of 0 and fractional values, rejects non-finite ones", () => {
+    expect(decode({ from: 0, until: 1000 })).toMatchObject({ from: 0, until: 1000 })
+    expect(decode({ from: 1.5, until: 1000 })).toMatchObject({ from: 1.5, until: 1000 })
+    expect(decode({ from: 100, until: 1000 })).toMatchObject({ from: 100, until: 1000 })
+    expect(() => decode({ from: Number.NaN })).toThrow()
+    expect(() => decode({ until: Number.POSITIVE_INFINITY })).toThrow()
+    // The ordered-bounds rule is unchanged.
+    expect(() => decode({ from: 1000, until: 1000 })).toThrow("window from must be before until")
+  })
+
+  test("nested windows decode with the same list, day and epoch validation", () => {
+    const decodeWindows = Schema.decodeUnknownSync(ConfigModelRoutes.Windows)
+    expect(decodeWindows({ peak: { daysOfWeek: ["Mon"], from: 0 } })).toBeDefined()
+    expect(() => decodeWindows({ peak: { daysOfWeek: [] } })).toThrow("window daysOfWeek must not be empty")
+    expect(() => decodeWindows({ peak: { excludeWindows: ["bad name"] } })).toThrow("invalid window name")
+  })
+})
+
 describe("field descriptions beyond model-routes (#650)", () => {
   // Same defect as #240, in the remaining schema files: a description annotated outside the package
   // `optional` helper never reaches the encoded JSON schema. These cases pin the fields fixed by #650.
