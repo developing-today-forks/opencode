@@ -1784,6 +1784,8 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
         retryAfterMinMs: 1_000,
         cooldownCapMs: 3_600_000,
         quotaCooldownCapMs: 86_400_000,
+        longBenchMs: 900_000,
+        sustainedRateLimitFailures: 3,
       },
       demotion: { factor: 0.01 },
       quotaGate: {
