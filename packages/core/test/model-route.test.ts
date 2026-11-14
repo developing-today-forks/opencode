@@ -3062,6 +3062,45 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
     ).toBeUndefined()
     expect(ModelRoute.skipped(leaf, now + 60_001)).toBe(true)
   })
+
+  test("a gathered wall does not overwrite an attempt-reported skip (#2332)", () => {
+    const now = 870_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "claude-haiku-5.5" })
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(leaf, undefined, now + 3 * 86_400_000, now)
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(true)
+    // A wall is judged from the gathered snapshot while the attempt record
+    // stands. The plant must leave that record untouched — origin, until
+    // and note — not replace it with a proactive record of its own (#2332):
+    // nothing is planted by this call.
+    expect(
+      ModelRoute.plantGatheredQuotaWall(
+        leaf,
+        gathered({
+          providerID: "opendesign",
+          at: now + 60_000,
+          models: { "claude-haiku-5.5": [{ name: "weekly", usedPercent: 100, resetAt: now + 7 * 86_400_000 }] },
+        }),
+        now + 60_000,
+      ),
+    ).toBeUndefined()
+    // The discriminating consequence: had the wall flipped the record's
+    // origin to "proactive", this headroom reading would lift it on the
+    // snapshot's word. The attempt record stands instead, until the
+    // attempt path or its own stated reset releases it (#1974).
+    expect(
+      ModelRoute.plantGatheredQuotaWall(
+        leaf,
+        gathered({
+          providerID: "opendesign",
+          at: now + 120_000,
+          models: { "claude-haiku-5.5": [{ name: "weekly", usedPercent: 4, resetAt: now + 7 * 86_400_000 }] },
+        }),
+        now + 120_000,
+      ),
+    ).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 120_001)).toBe(true)
+  })
 })
 
 describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (#1974, #1976)", () => {
