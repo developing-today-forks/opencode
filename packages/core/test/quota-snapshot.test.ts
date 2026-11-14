@@ -343,6 +343,48 @@ describe("QuotaSnapshot", () => {
       expect(QuotaSnapshot.isKnownFull(snap({ resetAt: null }), now + 86_400_000)).toBe(true)
     })
   })
+
+  describe("blocksRootStart (#566 root-start gate)", () => {
+    const snap = (overrides: Partial<QuotaSnapshot.Snapshot> = {}): QuotaSnapshot.Snapshot => ({
+      planID: "anthropic-max",
+      window: "5-hour",
+      providerID: "anthropic",
+      percent: 97,
+      remaining: 3,
+      resetAt: now + 3_600_000,
+      observedAt: now,
+      stale: false,
+      ...overrides,
+    })
+
+    test("at or above the default threshold (85) blocks a root start; below admits", () => {
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 85 }), now)).toBe(true)
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 97 }), now)).toBe(true)
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 100, remaining: 0 }), now)).toBe(true)
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 84.9 }), now)).toBe(false)
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 50 }), now)).toBe(false)
+    })
+
+    test("a caller threshold replaces the default", () => {
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 97 }), now, 99)).toBe(false)
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: 97 }), now, 50)).toBe(true)
+      expect(QuotaSnapshot.DEFAULT_ROOT_START_MAX_PCT).toBe(85)
+    })
+
+    test("unknown and stale readings never block a root start", () => {
+      expect(QuotaSnapshot.blocksRootStart(snap({ percent: null, remaining: null }), now)).toBe(false)
+      expect(QuotaSnapshot.blocksRootStart(snap({ stale: true }), now)).toBe(false)
+    })
+
+    test("a reading whose reset has passed no longer blocks", () => {
+      expect(QuotaSnapshot.blocksRootStart(snap(), now + 3_600_000)).toBe(false)
+      expect(QuotaSnapshot.blocksRootStart(snap({ resetAt: null }), now)).toBe(true)
+    })
+
+    test("balance snapshots never block a root start (the dead-balance gate governs them)", () => {
+      expect(QuotaSnapshot.blocksRootStart(snap({ balance: true, percent: 100, remaining: 0 }), now)).toBe(false)
+    })
+  })
 })
 
 describe("QuotaSnapshot balance classification and gating selection (#1014 fix pass)", () => {

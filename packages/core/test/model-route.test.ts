@@ -1785,6 +1785,7 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
         fallbackMs: 30 * 60_000,
         feedTtlMs: 60_000,
         balanceDeadThreshold: 0.1,
+        rootStartMaxPct: 85,
       },
       escalation: { outcomeWindow: 5 },
       network: { windowMs: 30_000, providers: 3, providerModels: 2 },
@@ -1879,6 +1880,13 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
     expect(ModelRoute.credentialQuotaBlocked("settings-cred-a", now)?.until).toBe(now + 30 * 86_400_000)
     ModelRoute.observeQuotaFailure(target, "settings-cred-b", undefined, now)
     expect(ModelRoute.credentialQuotaBlocked("settings-cred-b", now)?.until).toBe(now + 30 * 60_000)
+  })
+
+  test("the root-start threshold is configurable through quota gate settings (#566)", () => {
+    ModelRoute.onSettingsConfig(() => ({ quotaGate: { rootStartMaxPct: 70 } }))
+    expect(ModelRoute.currentConstants().quotaGate.rootStartMaxPct).toBe(70)
+    ModelRoute.onSettingsConfig(() => undefined)
+    expect(ModelRoute.currentConstants().quotaGate.rootStartMaxPct).toBe(85)
   })
 
   test("the quota gate fallback and cap are configurable", () => {
