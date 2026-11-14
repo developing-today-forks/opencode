@@ -41,7 +41,7 @@ export const withRecheckFloor = (decision: Decision, recheckAt: number | undefin
   if (recheckAt === undefined) return decision
   const wait = recheckAt - now
   if (wait <= decision.delay) return decision
-  return { ...decision, delay: Math.min(wait, RETRY_AFTER_MAX) }
+  return { ...decision, delay: Math.max(decision.delay, Math.min(wait, RETRY_AFTER_MAX)) }
 }
 
 const retryAfter = (input: Input) => {

@@ -1033,6 +1033,7 @@ export const layer = Layer.effect(
             ready.length === 0 && allowCooling && eligible.length > 0
               ? definition.targets.reduce<number | undefined>((earliest, target, candidate) => {
                   if (eligible.includes(candidate)) return earliest
+                  if (sitsOut(candidate) || overLimit.has(candidate)) return earliest
                   const reason = unavailable.get(candidate)
                   const stated = reason ? /until:(\d+)$/.exec(reason) : null
                   const benchEnd = ModelRoute.cooldownUntil(target, now, locationDirectory)

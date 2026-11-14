@@ -2469,6 +2469,37 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("a last-resort recheck ignores an over-limit target's earlier bench end (#1806)", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.resetSelection()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const route = routed([a, b, c], {
+      ...ordered,
+      nodes: [{ selection: "ordered", weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+      targetLimits: [{ context: 100_000 }, { context: 200_000 }, { context: 200_000 }],
+    })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withResolver([a, b, c], (resolver) =>
+      Effect.gen(function* () {
+        // pa cannot serve this request at all (ceiling below it) and benches
+        // almost immediately; pb is quota-dead on a long bench; pc merely
+        // cooling. The last resort seats pc, and the seat's recheck is pb's
+        // bench end — pa's early end must not pull the retry back to a
+        // target that can never serve the request.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { retryAfterMs: 1200 })
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        const resolved = yield* resolver.resolveModel(route, undefined, "s-recheck-overlimit", 110_000)
+        expect(targetOf(resolved)).toBe("pc")
+        expect(resolved.routing?.recheckAt).toBe(ModelRoute.cooldownUntil(targetB, Date.now()))
+      }),
+    )
+  })
+
   it.live("after the recheck instant a fresh resolution draws the re-admitted leaf as a ready seat (#1806)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
