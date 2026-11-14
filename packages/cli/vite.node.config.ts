@@ -157,8 +157,10 @@ function nativeStubGraphPlugin(target: NodeTarget): Plugin {
         this.error("Node bundle graph is missing the onnxruntime-node stub")
       if (!ids.some((id) => id.includes("opencode:keyring-runtime")))
         this.error("Node bundle graph is missing the keyring runtime adapter")
-      if (target.platform === "linux" && !target.keyringAsset)
-        this.error("Linux Node bundle target is missing its keyring addon asset")
+      if (!target.keyringAsset)
+        this.error(
+          `Node bundle target ${target.platform}-${target.arch} is missing its keyring addon asset`,
+        )
     },
   }
 }
