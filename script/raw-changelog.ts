@@ -22,7 +22,7 @@ type Diff = {
   message: string
 }
 
-const repo = process.env.GH_REPO ?? "anomalyco/opencode"
+const repo = process.env.GH_REPO ?? "developing-today-forks/opencode"
 const bot = ["actions-user", "github-actions[bot]", "opencode", "opencode-agent[bot]"]
 const team = [
   ...(await Bun.file(new URL("../.github/TEAM_MEMBERS", import.meta.url))
@@ -32,14 +32,46 @@ const team = [
   ...bot,
 ]
 const order = ["Core", "TUI", "Desktop", "SDK", "Extensions"] as const
+// Area -> changelog section for this fork's package layout. Every package
+// under packages/ is assigned a section; unmapped areas fall back to Core.
 const sections = {
   core: "Core",
+  cli: "Core",
+  server: "Core",
+  ai: "Core",
+  util: "Core",
+  protocol: "Core",
+  schema: "Core",
+  client: "Core",
+  codemode: "Core",
+  function: "Core",
+  identity: "Core",
+  containers: "Core",
+  simulation: "Core",
+  "http-recorder": "Core",
+  "effect-drizzle-sqlite": "Core",
+  "httpapi-codegen": "Core",
+  latex: "Core",
+  merman: "Core",
+  posts: "Core",
+  script: "Core",
   tui: "TUI",
+  "session-ui": "TUI",
+  ui: "TUI",
+  theme: "TUI",
+  storybook: "TUI",
   app: "Desktop",
-  tauri: "Desktop",
+  desktop: "Desktop",
+  web: "Desktop",
+  console: "Desktop",
+  stats: "Desktop",
   sdk: "SDK",
   plugin: "SDK",
-  "extensions/vscode": "Extensions",
+  "plugin-browser": "SDK",
+  "plugin-github": "SDK",
+  plugins: "SDK",
+  "gui-extensions": "SDK",
+  vscode: "Extensions",
   github: "Extensions",
 } as const
 
@@ -74,7 +106,46 @@ async function diff(base: string, head: string) {
 }
 
 function section(areas: Set<string>) {
-  const priority = ["core", "tui", "app", "tauri", "sdk", "plugin", "extensions/vscode", "github"]
+  const priority = [
+    "core",
+    "cli",
+    "tui",
+    "session-ui",
+    "ui",
+    "theme",
+    "storybook",
+    "app",
+    "desktop",
+    "web",
+    "console",
+    "stats",
+    "sdk",
+    "plugin",
+    "plugin-browser",
+    "plugin-github",
+    "plugins",
+    "gui-extensions",
+    "vscode",
+    "github",
+    "server",
+    "ai",
+    "client",
+    "codemode",
+    "protocol",
+    "schema",
+    "util",
+    "function",
+    "identity",
+    "containers",
+    "simulation",
+    "http-recorder",
+    "effect-drizzle-sqlite",
+    "httpapi-codegen",
+    "latex",
+    "merman",
+    "posts",
+    "script",
+  ]
   for (const area of priority) {
     if (areas.has(area)) return sections[area as keyof typeof sections]
   }
@@ -126,7 +197,7 @@ async function commits(from: string, to: string) {
   }
 
   const log =
-    await $`git log ${base}..${head} --format=%H -- packages/opencode packages/plugin packages/desktop packages/app sdks/vscode packages/extensions github`.text()
+    await $`git log ${base}..${head} --format=%H -- packages/ai packages/app packages/cli packages/client packages/codemode packages/console packages/containers packages/core packages/desktop packages/effect-drizzle-sqlite packages/function packages/gui-extensions packages/httpapi-codegen packages/http-recorder packages/identity packages/latex packages/merman packages/plugin packages/plugin-browser packages/plugin-github packages/plugins packages/posts packages/protocol packages/schema packages/script packages/sdk packages/server packages/session-ui packages/simulation packages/stats packages/storybook packages/theme packages/tui packages/ui packages/util packages/web sdks/vscode github`.text()
 
   const list: Commit[] = []
   for (const hash of log.split("\n").filter(Boolean)) {
@@ -138,12 +209,10 @@ async function commits(from: string, to: string) {
     const areas = new Set<string>()
 
     for (const file of diff.split("\n").filter(Boolean)) {
-      if (file.startsWith("packages/opencode/src/cli/cmd/")) areas.add("tui")
-      else if (file.startsWith("packages/opencode/")) areas.add("core")
-      else if (file.startsWith("packages/desktop/src-tauri/")) areas.add("tauri")
-      else if (file.startsWith("packages/desktop/") || file.startsWith("packages/app/")) areas.add("app")
-      else if (file.startsWith("packages/plugin/")) areas.add("sdk")
-      else if (file.startsWith("sdks/vscode/") || file.startsWith("github/")) areas.add("extensions/vscode")
+      const pkg = file.match(/^packages\/([^/]+)\//)
+      if (pkg) areas.add(pkg[1]!)
+      else if (file.startsWith("sdks/vscode/")) areas.add("vscode")
+      else if (file.startsWith("github/")) areas.add("github")
     }
 
     if (areas.size === 0) continue
