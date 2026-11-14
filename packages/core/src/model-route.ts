@@ -736,7 +736,10 @@ const bench = (
   logHealth(
     target,
     "cooldown-start",
-    `${reason}${credentialID ? ` credential:${credentialID}` : ""}${variant !== undefined ? ` variant:${variant}` : ""}`,
+    // The effort suffix comes from the state, not the call: a traffic state always
+    // carries its effort (the default effort included), so its row restores onto
+    // the leg after a restart — never widened onto the pool scope.
+    `${reason}${credentialID ? ` credential:${credentialID}` : ""}${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
     state.cooldownUntil,
     credentialID,
   )
@@ -835,16 +838,16 @@ const probeStates = (
   {
     state: credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target)),
   },
-  ...(variant !== undefined
-    ? [
-        {
-          state: credentialID
-            ? trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
-            : trafficHealth.get(trafficKey(target, variant)),
-          variant,
-        },
-      ]
-    : []),
+  // The traffic scope is always part of the address: an unnamed effort names the
+  // default effort, whose key the traffic maps already fold it to — a probe read
+  // for one effort must never find a sibling effort's probe, and a read for the
+  // default effort must find its own.
+  {
+    state: credentialID
+      ? trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+      : trafficHealth.get(trafficKey(target, variant)),
+    variant,
+  },
 ]
 
 /** Whether the bench on this target (or on this credential of it, when one is named) is holding
@@ -1892,7 +1895,7 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now(), varian
     state.probeClaimToken = undefined
     state.probePending = undefined
     state.probePendingReason = undefined
-    logHealth(target, "cooldown-start", `slow${variant !== undefined ? ` variant:${variant}` : ""}`, state.cooldownUntil)
+    logHealth(target, "cooldown-start", `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`, state.cooldownUntil)
   }
 }
 
@@ -3131,7 +3134,7 @@ export const completed = (
     logHealth(
       target,
       "cooldown-start",
-      `slow${variant !== undefined ? ` variant:${variant}` : ""}`,
+      `slow${trafficState.variant !== undefined ? ` variant:${trafficState.variant}` : ""}`,
       trafficState.cooldownUntil,
     )
   }
