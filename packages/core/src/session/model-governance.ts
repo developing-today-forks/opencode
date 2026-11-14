@@ -7,6 +7,7 @@ import { Provider } from "@opencode/schema/provider"
 import type { Agent } from "@opencode/schema/agent"
 import { Config } from "../config.js"
 import { ModelRouteExpansion } from "../model-route-expansion.js"
+import { ModelRouteMatch } from "../model-route-match.js"
 import type { Session } from "../session.js"
 import { SessionSchema } from "./schema.js"
 
@@ -198,9 +199,12 @@ export type Catalog = ReadonlyMap<string, ReadonlyMap<string, CatalogModel>>
  * named after an Object.prototype member (e.g. "constructor") is unremapped
  * unless the target's variants record defines it itself (#831). */
 const ownVariant = (
-  variants: Readonly<Record<string, string>> | undefined,
+  variants: Readonly<Record<string, string | false>> | undefined,
   requested: string,
-): string | undefined => (variants && Object.hasOwn(variants, requested) ? variants[requested] : undefined)
+): string | undefined =>
+  variants && Object.hasOwn(variants, requested) && typeof variants[requested] === "string"
+    ? variants[requested]
+    : undefined
 
 function routeTargets(
   entries: readonly Entry[],
@@ -208,28 +212,34 @@ function routeTargets(
   seen: Set<string>,
   requestedVariant?: Model.VariantID,
   catalog?: Catalog,
+  unjudged: string[] = [],
 ): Model.Ref[] {
-  if (seen.has(routeID)) return []
-  seen.add(routeID)
   const configuredRoutes = Config.latest(entries, "experimental")?.routes
   const routes = configuredRoutes?.models
   const providerRoutes = configuredRoutes?.providers
+  // A route id names a pool, so it matches in any case (branch #233).
+  const id = routes ? (ModelRouteMatch.poolsNamed(Object.keys(routes), routeID)[0] ?? routeID) : routeID
+  if (seen.has(id)) return []
+  seen.add(id)
   // Own-property lookup: a route named after an Object.prototype member
   // (e.g. "constructor") must read as an unknown route, not the inherited
   // member (#831).
-  const route = routes && Object.hasOwn(routes, routeID) ? routes[routeID] : undefined
+  const route = routes && Object.hasOwn(routes, id) ? routes[id] : undefined
   if (route === undefined) return []
+  if ([route.include, route.contains, route.match, route.variantRules].some((value) => value !== undefined))
+    unjudged.push(id)
   const requested = requestedVariant === "default" ? undefined : requestedVariant
-  return route.targets.flatMap((target) => {
+  return (route.targets ?? []).flatMap((target) => {
     const selection = "providerID" in target ? target : target.model
     const object = "providerID" in target ? undefined : target
+    if (requested !== undefined && object?.variants?.[requested] === false) return []
     const selectionVariant =
       selection.variant === undefined || selection.variant === "default"
         ? undefined
         : Model.VariantID.make(selection.variant)
     if (object?.until !== undefined && Date.now() >= object.until) return []
     if (selection.providerID === "opencode-route")
-      return routeTargets(entries, selection.model, seen, selectionVariant ?? requested, catalog)
+      return routeTargets(entries, selection.model, seen, selectionVariant ?? requested, catalog, unjudged)
     const rawVariant =
       selectionVariant ??
       (requested === undefined
@@ -458,10 +468,20 @@ export const assertAllowed = Effect.fn("ModelGovernance.assertAllowed")(function
   const model = checkedModel(entries, input)
   if (model === undefined) return
 
+  const unjudged: string[] = []
   const targets =
     model.providerID === "opencode-route"
-      ? routeTargets(entries, model.id, new Set(), model.variant, catalog)
+      ? routeTargets(entries, model.id, new Set(), model.variant, catalog, unjudged)
       : undefined
+  if (unjudged.length > 0 && (allowed !== undefined || excluded.length > 0))
+    return yield* new DeniedError({
+      message:
+        "Route " +
+        refString(model) +
+        " is not allowed for this subagent: " +
+        unjudged.map((routeID) => "opencode-route/" + routeID).join(", ") +
+        " picks models by include, contains or match, or remaps levels by variantRules, so the models it may run cannot be checked against the model restrictions of this subagent. Name its models as targets to use it here.",
+    })
   const checked = targets !== undefined && targets.length > 0 ? targets : [model]
   for (const target of checked) {
     const deniedBy = excluded.find((item) => Model.Selector.matches(item.selector, target))

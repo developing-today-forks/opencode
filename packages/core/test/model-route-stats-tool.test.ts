@@ -41,6 +41,11 @@ describe("route_stats configuration view", () => {
       RouteStatsTool.collect({ route: "other" }, { routes: new Map([["cheap-fast", pool]]), notes: [] }),
     )
     expect(report.routes).toEqual([])
+    // A pool id matches in any case.
+    const named = await Effect.runPromise(
+      RouteStatsTool.collect({ route: "Cheap-Fast" }, { routes: new Map([["cheap-fast", pool]]), notes: [] }),
+    )
+    expect(named.routes.map((route) => route.id)).toEqual(["cheap-fast"])
   })
 
   test("surfaces declared per-target ceilings in the per-pool view", async () => {

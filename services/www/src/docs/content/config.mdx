@@ -346,17 +346,16 @@ output deadline as the only performance signal. Both are measured to the end of
 the model's response, so tools that a step runs afterwards do not count against
 the model. Cooldowns are shared by every
 session in the OpenCode process and are restored from the health history after a
-restart. A route can reference another route,
-and a requested variant is offered only when every target supports it.
+restart. A route can reference another route. Which variants a route offers is
+covered under "Effort levels in a pool".
 Provider-use policies still apply to the concrete targets; a route only exposes
 models that remain available after those policies run.
 
 A target can also be an object. `defaultVariant` runs that target at a chosen
 variant when the route is selected without one, and `variants` remaps a
 route-level variant per target, so `opencode-route/luna-stack#low` can run one
-provider at `high` and another at `low`. The route advertises the union of each
-target's native variants and remap keys, and only offers what every target can
-produce.
+provider at `high` and another at `low`. A remap to `false` makes the target sit
+that level out.
 
 A route or a target object can declare `cache_format` to say which prompt-cache
 marker syntax that endpoint accepts. It takes the same values as
@@ -368,7 +367,9 @@ failover moves it to another target.
 
 A target's model can contain `*` to match every model of its provider whose id
 fits, such as `"openai/gpt-6-*"`; matches follow the provider's order, and a model
-reached twice is used once, at its first place. `until` is an epoch time in
+reached twice is used once, at its first place. This glob stays inside one
+provider and is case-sensitive. To pick models across providers, use the matching
+keys under "Choosing pool members by pattern". `until` is an epoch time in
 milliseconds after which the target leaves the route, for time-limited pool
 membership. It takes effect when the configuration reloads.
 
@@ -377,13 +378,232 @@ target. `"round-robin"` gives each new session the next target in rotation and
 `"weighted"` draws one by `weights`, roughly `weights[a] : weights[b]` across
 new sessions. The drawn choice is sticky for the session, so prompt caches stay
 warm; only failure, cooldown expiry, or a re-draw when the sticky target is
-cooling moves a session to another target, and failover still walks the
-remaining targets in order.
+cooling moves a session to another target.
 
 Weights order every selection mode: at each decision the targets are ranked by
 their effective weight, and equal weights keep their configured relative order.
 With no other configuration every weight is 1, so `ordered` routes keep their
-order exactly.
+order exactly. Failover is another such decision, among the targets not yet
+tried: an `ordered` route moves to the heaviest of them, and `round-robin` and
+`weighted` routes rotate or draw again by weight.
+
+### Choosing pool members by pattern
+
+A pool can pick its models by pattern instead of listing each one. `include`,
+`contains` and `match` add models; `exclude` and `notContains` remove them.
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "small": { "include": ["*luna*", "*haiku*"], "exclude": ["*-5", "*-6"] },
+      "claude": { "contains": ["haiku", "sonnet", "opus", "mythos"] },
+      "frontier-direct": { "include": ["anthropic/*opus*", "anthropic/*mythos*"] },
+      "claude-agg": { "include": ["claude"], "exclude": ["frontier-direct"] },
+      "small-all": { "include": ["small", "small-old"] },
+    },
+  },
+}
+```
+
+`small` takes every Luna and Haiku model from every connected provider, then drops
+the ids that end in `-5` or `-6`, so `luna-5.5` and `luna-6.1` stay. `claude-agg` is
+the `claude` pool without the models of `frontier-direct`.
+
+| Entry                             | What it matches                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `*luna*`                          | Model ids that contain `luna`, in every provider. `*` stands for any run of characters.           |
+| `anthropic/*opus*`                | A pattern with `/` is tested against `provider/model`, so this is only Anthropic's Opus models.   |
+| `re:luna-(5\|6)$`                 | `re:` starts a regular expression. It matches anywhere in the id unless anchored with `^` or `$`. |
+| `claude`, `opencode-route/claude` | Another pool's id, in any case: that pool's models.                                               |
+
+- Case never matters, in globs, regular expressions or text.
+- A glob covers the whole id: `*-5` matches `luna-5` and not `luna-5.5`.
+- `contains` and `notContains` take plain text, found anywhere in `provider/model`,
+  so a provider id matches too: `"contains": ["copilot"]` takes every GitHub
+  Copilot model. Patterns keep their own rule.
+- Patterns only add models the model picker offers: enabled models of providers
+  that are connected or configured, switched on, and allowed by provider-use
+  policies. Connecting a provider adds its matching models to the pool.
+  `targets` can still name a provider that is not connected, as before.
+
+A pool's members are built in this order:
+
+1. `targets`, in their order.
+2. Models from `include`, `contains` and `match`, in provider order. A model that is
+   already in the pool is not added again.
+3. Whatever `exclude` and `notContains` match is removed, including targets and the
+   members of nested pools.
+
+`targets` can be left out when a pool has `include`, `contains` or `match`.
+
+#### Pools by name
+
+A pool's name brings in that pool's models, without its order, weights or effort
+settings. To nest a whole pool with its own selection, list it in `targets` as
+`opencode-route/<id>`.
+
+```jsonc
+"claude-agg": { "include": ["opencode-route/claude"], "exclude": ["frontier-direct"] }
+```
+
+A pool's name matches in any case wherever a pool is named: in `targets`, matching
+keys, `variantRules`, `weights` keys, schedule `routes`, route overrides and the
+routing tools, so `Claude` and `opencode-route/CLAUDE` both name the pool `claude`.
+An exact spelling wins. When several pools match only ignoring case, the first in
+the config is used, with a warning in the log.
+
+A pool that names itself, directly or through other pools, gets nothing from that
+name and no warning, so `small-all` may name a pool that names `small-all` back. A
+name that starts with `opencode-route/` and is not a pool is logged as a warning;
+any other name that is not a pool is read as a pattern.
+
+#### Expressions
+
+`match` takes one expression of patterns and pool names, joined by `and`, `or` and
+`not`, with parentheses.
+
+```jsonc
+"small": { "match": "(*luna* or *haiku*) and not 're:-(5|6)$' and not *mini*" }
+```
+
+`not` binds tightest and `or` loosest. Quote a term that has spaces or parentheses
+with single or double quotes, as the regular expression above is. There is no
+`xor`: a pool rarely needs it, it is easy to misread, and
+`(a or b) and not (a and b)` says the same thing.
+
+#### Malformed pools
+
+A pool with a malformed pattern, regular expression or expression is skipped
+whole, and the config warning names the key and what is wrong. Skipping only the
+bad entry could make the pool larger than written, for example when an `exclude`
+stops applying. A pool with none of `targets`, `include`, `contains` and `match`
+is skipped the same way.
+
+```jsonc
+"small": { "include": ["*luna*"], "exclude": ["re:luna-(5"] }
+```
+
+This pool is skipped with the warning `skipped pool: Invalid regular expression:
+missing )` at `experimental.model_routes.small.exclude.0`.
+
+#### Pools for a subagent with model restrictions
+
+A subagent whose allowed or excluded models are restricted may run a pool only
+when every target of the pool is allowed, each judged at the variant it would run.
+A pool that picks models by `include`, `contains` or `match`, or remaps levels by
+`variantRules`, can run models its targets do not list, so it is refused there,
+and so is a pool that nests one.
+
+```jsonc
+"small": { "include": ["*luna*"] }
+```
+
+A restricted subagent cannot run `opencode-route/small`; listing its models in
+`targets` makes it usable there.
+
+### Effort levels in a pool
+
+A pool offers effort levels, its variants, as `opencode-route/<id>#<level>`. When a
+pool is selected at a level, each target runs it through the first of these that
+applies:
+
+1. The target's own `variants` remap for that level.
+2. The last `variantRules` entry that matches the model and maps that level.
+3. The model's own variant of the same name.
+
+A remap to `false` makes the target sit that level out. A target that sits out
+the requested level is never used at it, not even as a last resort when every
+other target is cooling down. A nested pool written as a target object, such as
+`{ "model": "opencode-route/<id>", "variants": { "max": false } }`, sits that level
+out as a whole. Only `false` applies to a nested pool: a string remap,
+`defaultVariant` or `until` on it is ignored, with a config warning.
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "big": {
+        "targets": [
+          { "model": "openai/argon", "variants": { "xhigh": "high", "max": false } },
+          "anthropic/claude-opus-5",
+        ],
+      },
+      "smart-fast": {
+        "include": ["*argon*", "*luna*"],
+        "variantRules": [
+          { "match": "*argon*", "map": { "medium": "high", "high": "high", "xhigh": "high", "max": "high" } },
+        ],
+      },
+      "small": { "include": ["*haiku*", "*luna-mini*"], "levels": ["low", "medium", "high"] },
+    },
+  },
+}
+```
+
+In `big`, Argon runs `xhigh` at its `high` and sits out `max`, which goes to
+Opus. In `smart-fast`, Argon runs every level from `medium` up at its `high`.
+`small` offers exactly `low`, `medium` and `high`, and each model runs them at its
+own variants of those names.
+
+Which levels a pool offers:
+
+- Without `levels`, a level is offered when every target can run it or sits it
+  out, and at least one target runs it. A target that cannot run a level and does
+  not sit it out still keeps that level from the whole pool.
+- With `levels`, the pool offers exactly those levels. A target that cannot run
+  one of them sits it out. A declared level that no target can run is left out,
+  with a warning in the log. Nested in another pool, the pool keeps its `levels`:
+  its members sit out every other level, so the outer pool offers a level through
+  them only where the nested pool does.
+- A pool with a target pinned as `provider/model#variant`, or a nested pool pinned
+  as `opencode-route/<id>#<level>`, offers no levels unless it declares `levels`.
+  With `levels`, the pinned target runs each of them at its pin, except a level the
+  pool sits it out of.
+- A nested pool pinned as `opencode-route/<id>#<level>` runs only at that level, and
+  brings each member that has that variant, at that variant. A pool pinned at a
+  level it does not declare adds nothing, with a warning in the log. Reached inside a
+  pinned pool without a pin of its own, its members still count as left out, as they
+  would sit that level out when the pool above is selected at it.
+
+A remap or a rule applies to the levels of the pool that declares it. A pinned pool
+runs only at its pin, so its remaps and rules, and those of the pools nested in it,
+decide only whether a member sits the pin out. Such a member is left out. Otherwise
+the pinned pool is built as it would be when selected at its pin: a later target or
+matching key that repeats a member left out adds nothing, and a target with its own
+`#variant` is a separate member. Every other member runs at the pin at each level of
+the pools above, unless one of them sits it out of that level.
+
+```jsonc
+"inner": {
+  "targets": [
+    { "model": "openai/luna-6", "variants": { "low": false } },
+    { "model": "anthropic/claude-opus-5", "variants": { "max": false } },
+  ],
+},
+"outer": { "targets": ["opencode-route/inner#max", "openai/argon"], "levels": ["low", "high"] },
+```
+
+`inner#max` leaves Opus out, because Opus sits `max` out. Luna runs at `max` at both
+of `outer`'s levels: `inner` never runs at `low`, so its `low: false` does not apply.
+To keep Luna out of `outer` at `low`, put the remap on `outer`'s target:
+`{ "model": "opencode-route/inner#max", "variants": { "low": false } }`.
+
+`variantRules` apply in order, and a later rule overrides an earlier one level by
+level. A target's own `variants` override every rule, and a remap to a variant the
+model does not have is ignored for that model. Rules reach the members of nested
+pools too; the nested pool's own rules come later, so they win. In a pinned pool
+they decide only whether a member sits the pin out, as above.
+
+```jsonc
+"variantRules": [
+  { "match": "*", "map": { "max": "high" } },
+  { "match": "claude and not *haiku*", "map": { "max": false } },
+]
+```
+
+A rule's `match` takes a pattern, a pool name or an expression, as `match` on the
+pool does.
 
 ### Schedules: peak hours and recurring priorities
 
@@ -442,8 +662,8 @@ schedule says; the schedule steers new sessions and the fallback order.
 
 | Field         | Meaning                                                                                                                       |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `daysOfWeek`  | Day names (`mon`, `tuesday`) or 0 (Sunday) to 6 (Saturday). Unset means every day.                                              |
-| `daysOfMonth` | 1 to 31, or -1 for the last day of the month. Unset means every day.                                                            |
+| `daysOfWeek`  | Day names (`mon`, `tuesday`) or 0 (Sunday) to 6 (Saturday). Empty or unset means every day.                                     |
+| `daysOfMonth` | 1 to 31, or -1 for the last day of the month. Empty or unset means every day.                                                   |
 | `start`, `end` | Local `HH:mm` bounds; `end` is exclusive. Unset bounds mean from/to the edge of the day. A start later than the end runs past midnight into the following morning. |
 | `timezone`    | IANA name such as `America/Chicago`. Unset means the host's local timezone.                                                     |
 | `from`, `until` | Optional epoch-millisecond bounds for the whole schedule, e.g. a promotion that ends.                                          |
@@ -453,6 +673,30 @@ When both day fields are set the date has to match both, so `daysOfMonth:
 empty `when` means all the time. The same window shape is understood by
 `route_adjust` (the agent tool), so "weekdays 9 to 5 downweight deepseek" can be
 recorded as one adjustment instead of a config edit.
+
+A schedule OpenCode cannot apply still loads, the router skips it, and a config
+warning names the pool, the schedule and the field. That happens for:
+
+- a `start` or `end` that is not `HH:mm`
+- a `timezone` the runtime does not know
+- a `from` that is not before `until`
+- a schedule with neither `factor` nor `weight`
+
+A key OpenCode does not know, anywhere in a pool, its targets or its schedules,
+is reported the same way and then ignored.
+
+```jsonc
+"schedules": [
+  { "id": "monday", "when": { "dayOfWeek": ["mon"] }, "factor": 0.5 },
+  { "id": "peak", "when": { "start": "9am", "end": "17:00" }, "factor": 0.5 },
+]
+```
+
+In a pool named `coding`, this logs `omitted unknown setting` at
+`experimental.model_routes.coding.schedules.0.when.dayOfWeek`. The key is
+`daysOfWeek`, so until it is fixed `monday` applies every day. It also logs
+`skipped schedule peak: start "9am" is not HH:mm` at
+`experimental.model_routes.coding.schedules.1.when.start`.
 
 Routes nest. Every route is a group with its own `selection` and `weights`: a
 parent picks a nested route as one unit (key it as `"opencode-route/<id>"` in
@@ -467,20 +711,30 @@ includes the ones before it:
 
 | Level        | The route may                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------ |
-| `fixed`      | Use the configured order and fail over on errors. Weights, budgets and holds are ignored.  |
+| `fixed`      | Fail over on errors. Configured weights, selection modes, budgets and holds are ignored.   |
 | `rules`      | Also use selection modes, weights, budgets and provider rate-limit holds.                  |
 | `adaptive`   | Also be reviewed on a schedule: failing or slow targets are skipped or down-weighted.      |
 | `predictive` | Also learn hours of the day when a target is unreliable, and read reset times from errors. |
-| `agent`      | Also expose `route_stats` and `route_adjust`, so the model can inspect and steer routing.  |
+| `agent`      | Also give every session `route_stats` and `route_adjust`, which cover all routes.          |
 
-A route with no `autonomy` keeps every rule on and offers the agent tools, as before
-levels existed. Each route takes only what its own level reaches. The scheduled
+A route with no `autonomy` keeps every rule on, as before levels existed. Each route
+takes only what its own level reaches, except the agent tools: once any route is
+`agent` or has no `autonomy`, every session is offered `route_stats` and
+`route_adjust`. `route_stats` then reports on every route, and an adjustment made
+with `route_adjust` applies to every route that is not `fixed`. The scheduled
 review's skips and down-weights apply to `adaptive` and higher routes, and to `rules`
 routes when `routes.tuning.enabled` is true (flat spelling: `model_route_tuning`). Time-of-day and error-text
 prediction apply to `predictive` and higher routes. A route with no `autonomy` takes
 all of it. The review runs when tuning is enabled or any route is `adaptive` or
 higher. Real failures always cool a target down, at every level, so a `fixed` route
 still fails over.
+
+A `fixed` route starts from its configured order, and these still change it:
+
+- Schedules, the route's own and `model_route_schedules`.
+- The user's prefer and avoid rules in `route-overrides.json`, which OpenChamber
+  writes. An avoided target is used only when nothing else is available.
+- Quota demotion: a target with repeated quota errors drops to the end.
 
 Set `attempts` to the total number of requests made to a target before the route
 moves on. The default is 2, so one transient failure is retried on the same target

@@ -435,6 +435,35 @@ describe("ConfigModelRoutes.Tuning notes", () => {
   })
 })
 
+describe("ConfigModelRoutes.Route matching keys", () => {
+  const decode = Schema.decodeUnknownSync(ConfigModelRoutes.Route)
+
+  test("a route needs no targets, and its matching keys, levels and false remaps round-trip", () => {
+    const input: (typeof ConfigModelRoutes.Route)["Encoded"] = {
+      include: ["*luna*", "small"],
+      exclude: ["*-5"],
+      contains: ["haiku"],
+      notContains: ["old"],
+      match: "*luna* and not *mini*",
+      levels: ["low", "medium", "high"],
+      variantRules: [{ match: "*argon*", map: { xhigh: "high", max: false } }],
+    }
+    const route = decode(input)
+    expect(route.targets).toBeUndefined()
+    expect(route.variantRules?.[0].map).toEqual({ xhigh: "high", max: false })
+    expect(Schema.encodeSync(ConfigModelRoutes.Route)(route)).toEqual(input)
+    const target = decode({ targets: [{ model: "openai/argon", variants: { max: false } }] }).targets?.[0]
+    expect(target !== undefined && "variants" in target ? target.variants : undefined).toEqual({ max: false })
+  })
+
+  test("only false or a variant name is a remap, and a rule needs a match", () => {
+    expect(() => decode({ targets: [{ model: "openai/argon", variants: { max: true } }] })).toThrow()
+    expect(() => decode({ match: "*", variantRules: [{ match: "*", map: { max: true } }] })).toThrow()
+    expect(() => decode({ match: "*", variantRules: [{ map: { max: false } }] })).toThrow()
+    expect(() => decode({ levels: "low" })).toThrow()
+  })
+})
+
 describe("ConfigModel.Selection segment spelling (#456)", () => {
   const decode = Schema.decodeUnknownSync(ConfigModel.Selection)
 

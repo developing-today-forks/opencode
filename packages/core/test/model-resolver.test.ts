@@ -2707,6 +2707,70 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("a target that sits the requested level out is never used at it, not even as a last resort", () => {
+    ModelRoute.resetHealth()
+    const levelled = (providerID: string) =>
+      model(Provider.aisdk("@ai-sdk/openai"), {
+        providerID: Provider.ID.make(providerID),
+        modelID: "luna",
+        settings: { apiKey: "key" },
+        variants: [{ id: VariantID.make("high") }, { id: VariantID.make("max") }],
+      })
+    const a = levelled("pa")
+    const b = levelled("pb")
+    const route = Info.make({
+      ...routed([a, b], { ...ordered, targetVariants: [{ map: { max: false } }, {}] }),
+      variants: [{ id: VariantID.make("high") }, { id: VariantID.make("max") }],
+    })
+    const logged: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => void logged.push(event))
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const max = yield* resolver.resolveModel(route, VariantID.make("max"))
+        expect(targetOf(max)).toBe("pb")
+        expect(max.routing?.target.variant).toBe(VariantID.make("max"))
+        // The decision says why the first target was left out.
+        const decision = logged.find((event) => event.kind === "decision")
+        expect(decision?.kind === "decision" ? decision.row.detail : undefined).toMatchObject({
+          excluded: [{ candidate: `${a.providerID}/${a.id}`, reason: "sits-out-level" }],
+        })
+        // Nothing is left to fall back to at max.
+        expect(yield* max.routing!.fallback()).toBeUndefined()
+        // At another level, and with none, the first target answers as before.
+        expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("high")))).toBe("pa")
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        // With the second target cooling it is still the last resort at max; the first never is.
+        ModelRoute.failed(ModelRoute.ref({ providerID: "pb", model: b.id }), ModelRoute.policy(), Date.now())
+        expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("max")))).toBe("pb")
+        expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("high")))).toBe("pa")
+      }).pipe(Effect.ensuring(Effect.sync(() => ModelRouteLog.setSink(undefined)))),
+    )
+  })
+
+  it.effect("a route whose every target sits the requested level out has no model for it", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("max") }],
+    })
+    const route = Info.make({
+      ...routed([a], {
+        nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+        targetVariants: [{ map: { max: false } }],
+      }),
+      variants: [{ id: VariantID.make("max") }],
+    })
+    return withResolver([a], (resolver) =>
+      Effect.gen(function* () {
+        const failure = yield* resolver.resolveModel(route, VariantID.make("max")).pipe(Effect.flip)
+        expect(failure._tag).toBe("SessionRunnerModel.RouteUnavailableError")
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+      }),
+    )
+  })
+
   it.effect("learned adjustments take effect only on the routes whose level they were made for", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

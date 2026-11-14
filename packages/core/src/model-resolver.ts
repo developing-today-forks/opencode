@@ -908,9 +908,18 @@ export const layer = Layer.effect(
           },
           }
         }
+        // A target whose remap sits the requested level out is never used at it, not even as a last resort.
+        const sitsOut = (index: number) =>
+          requestedVariant !== undefined && definition.targetVariants[index]?.map?.[requestedVariant] === false
         while (triedTargets.size < definition.targets.length) {
-          const indexes = definition.targets.flatMap((_, index) => (triedTargets.has(index) ? [] : [index]))
-          const unavailable = new Map<number, string>()
+          const indexes = definition.targets.flatMap((_, index) =>
+            triedTargets.has(index) || sitsOut(index) ? [] : [index],
+          )
+          const unavailable = new Map<number, string>(
+            definition.targets.flatMap((_, index) =>
+              !triedTargets.has(index) && sitsOut(index) ? [[index, "sits-out-level"] as const] : [],
+            ),
+          )
           const overLimit = new Set<number>()
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
@@ -1064,15 +1073,22 @@ export const layer = Layer.effect(
           }
           const targetVariants = definition.targetVariants[index]
           // A requested route variant runs the target at its remap, else at the same variant when the
-          // target has it natively: the route only offers variants every target can produce one of
-          // those two ways (config/plugin/model-routes.ts routeVariants).
+          // target has it natively. A target that can do neither sits the level out: its remap says
+          // false, so it was never a candidate (config/plugin/model-routes.ts routeVariants and expand).
+          const remapped = requestedVariant === undefined ? undefined : targetVariants?.map?.[requestedVariant]
           const mapped =
             requestedVariant !== undefined
-              ? (ownValue(targetVariants?.map ?? {}, requestedVariant) ??
-                (source.variants.some((item) => item.id === requestedVariant) ? requestedVariant : undefined))
+              ? remapped === false
+                ? undefined
+                : typeof ownValue(targetVariants?.map ?? {}, requestedVariant) === "string"
+                  ? (ownValue(targetVariants?.map ?? {}, requestedVariant) as string)
+                  : source.variants.some((item) => item.id === requestedVariant)
+                    ? requestedVariant
+                    : undefined
+
               : targetVariants?.default
           const resolved = yield* Effect.result(
-            load(source, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
+            load(source, target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)), definition.targetCacheFormats?.[index]?.cacheFormat),
           )
           if (Result.isFailure(resolved)) {
             // The pick's probe claim settles here too (#1486): the target scope benches as
@@ -1166,7 +1182,7 @@ export const layer = Layer.effect(
                       ? { ...source, headers: { ...headers, "chatgpt-account-id": account } }
                       : { ...source, headers }
                   const retried = yield* Effect.result(
-                    load(refreshed, target.variant ?? mapped, definition.targetCacheFormats?.[index]?.cacheFormat),
+                    load(refreshed, target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)), definition.targetCacheFormats?.[index]?.cacheFormat),
                   )
                   if (Result.isFailure(retried)) continue
                   // Attribution follows the credential load() actually served on, which is

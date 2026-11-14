@@ -612,6 +612,105 @@ describe("LocationServiceMap", () => {
     ),
   )
 
+  it.live("builds pools from matching keys and effort levels in a config file, and skips a malformed one", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const variants = (...ids: string[]) => ids.map((id) => ({ id }))
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  pool: {
+                    name: "Pool",
+                    package: "test-provider",
+                    models: {
+                      "luna-5": { variants: variants("low", "high", "max") },
+                      "luna-5.5": { variants: variants("low", "high", "max") },
+                      "haiku-6": { variants: variants("low", "high") },
+                      argon: { variants: variants("low", "high") },
+                      "luna-old": { disabled: true, variants: variants("low") },
+                    },
+                  },
+                },
+                experimental: {
+                  model_routes: {
+                    small: { include: ["*LUNA*", "*haiku*"], exclude: ["*-5"], levels: ["low", "high", "max"] },
+                    big: {
+                      include: ["small", "argon"],
+                      variantRules: [{ match: "argon or *haiku*", map: { max: false } }],
+                    },
+                    broken: { include: ["*luna*"], exclude: ["re:luna-(5"] },
+                    // Its only effort setting is a false remap. These models' variants exist only in this file, so
+                    // the pool offers low and high only when it is built with the configured models, as small is.
+                    remapped: { targets: [{ model: "pool/haiku-6", variants: { high: false } }, "pool/luna-5.5"] },
+                    "remapped-outer": { targets: ["opencode-route/remapped"] },
+                  },
+                },
+              }),
+            ),
+          )
+          const routes = yield* Effect.gen(function* () {
+            const plugins = yield* Plugin.Service
+            yield* plugins.awaitActivation
+            const models = yield* Model.Service
+            const providers = yield* Provider.Service
+            const snapshot = yield* providers.snapshot()
+            return {
+              small: yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("small")),
+              big: yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("big")),
+              broken: yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("broken")),
+              remapped: yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("remapped")),
+              remappedOuter: yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("remapped-outer")),
+              // Matching models of providers that are defined but not connected, which no pool may take.
+              unconnected: Array.from(snapshot.records.values())
+                .filter((record) => !snapshot.available.includes(record))
+                .flatMap((record) => Array.from(record.models.keys()).filter((id) => /luna|haiku/i.test(id))),
+            }
+          }).pipe(
+            Effect.scoped,
+            Effect.provide(
+              LocationServiceMap.Service.get(Location.Ref.make({ directory: AbsolutePath.make(dir.path) })),
+            ),
+          )
+          const summary = (route: Model.Info | undefined) => {
+            const definition = route && ModelRoute.definition(route)
+            return {
+              targets: definition?.targets.map((target) => `${target.providerID}/${target.id}`),
+              targetVariants: definition?.targetVariants,
+              variants: route?.variants.map((variant) => String(variant.id)),
+            }
+          }
+          expect(routes.unconnected.length).toBeGreaterThan(0)
+          expect(summary(routes.small)).toEqual({
+            targets: ["pool/luna-5.5", "pool/haiku-6"],
+            targetVariants: [{}, { map: { max: false } }],
+            variants: ["low", "high", "max"],
+          })
+          expect(summary(routes.big)).toEqual({
+            targets: ["pool/luna-5.5", "pool/haiku-6", "pool/argon"],
+            targetVariants: [{}, { map: { max: false } }, { map: { max: false } }],
+            variants: ["low", "high", "max"],
+          })
+          expect(routes.broken).toBeUndefined()
+          // haiku-6 sits high out and luna-5.5 runs it. haiku-6 cannot run max and does not sit it out, so the
+          // pool does not offer max. The pool that nests it is built the same way.
+          expect(summary(routes.remapped)).toEqual({
+            targets: ["pool/haiku-6", "pool/luna-5.5"],
+            targetVariants: [{ map: { high: false } }, {}],
+            variants: ["low", "high"],
+          })
+          expect(summary(routes.remappedOuter)).toEqual(summary(routes.remapped))
+        }),
+      ),
+    ),
+  )
+
+
   it.live("presents a route's configured context cap as its model limit", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((dir) =>

@@ -6,17 +6,17 @@ import { ConfigModel } from "@opencode/schema/config/model"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import type { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
-import { Effect } from "effect"
+import { Effect, Result } from "effect"
 import { Config } from "../../config.js"
 import { ConfigProvider } from "@opencode/schema/config/provider"
 import { applyModelConfig } from "./provider.js"
 import { Model } from "../../model.js"
 import { ModelRoute } from "../../model-route.js"
+import { ModelRouteMatch } from "../../model-route-match.js"
 import { ModelRouteMembership } from "../../model-route-membership.js"
 import { ModelRouteExpansion } from "../../model-route-expansion.js"
 import { ModelRouteSchedule } from "../../model-route-schedule.js"
 import { Provider } from "../../provider.js"
-import { ownOr } from "../../util/record.js"
 import { ConfigEntryObserver } from "./entry-observer.js"
 import { Permission } from "../../permission.js"
 import { ModelRouteTuning } from "../../model-route-tuning.js"
@@ -32,9 +32,9 @@ type SourceModel = {
   readonly fixedVariant: boolean
   /** Variant used when the route is selected without an explicit one. */
   readonly defaultVariant?: Model.VariantID
-  /** Route-level variant → this target's variant. */
   readonly budget?: ModelRoute.Budget
-  readonly variantMap?: Readonly<Record<string, Model.VariantID>>
+  /** Route-level variant -> this target's variant, or `false` when the target sits that level out. */
+  readonly variantMap?: Readonly<Record<string, Model.VariantID | false>>
   /** Prompt-cache format in force for this leaf: its own declaration, else the route's. */
   readonly cacheFormat?: CacheFormat
   /** Effective per-target context ceiling from config: the smallest `limit.context` on the path that
@@ -42,6 +42,32 @@ type SourceModel = {
    * path declares one; the model's own limit applies on top of what is stored here. */
   readonly contextLimit?: number
 }
+
+/** What the pools a pool is nested in hand down to its members. */
+type Enclosing = {
+  /** The exclusions of every pool on the way in. */
+  readonly excludes: readonly ModelRouteMatch.Predicate[]
+  /** The variantRules of the pools on the way in above any pin, outermost first. They apply to the levels the
+   * expanded pool is selected at, so a member keeps what they say. */
+  readonly rules: readonly ModelRouteMatch.Rule[]
+  /** Each pin on the way in, outermost first. */
+  readonly pins: readonly Pin[]
+}
+
+/** A nested pool entered as `opencode-route/<id>#<level>`, with the pools nested in it that have no pin of their
+ * own. They run only at that level, so their remaps and rules decide only whether a member sits it out, and such
+ * a member is left out. */
+type Pin = {
+  readonly level: Model.VariantID
+  /** The variantRules of the pools at this pin, outermost first. */
+  readonly rules: readonly ModelRouteMatch.Rule[]
+  /** The members left out here, as a later target names one (`provider/model`, with that target's own
+   * `#variant`) and as a model. Nothing later at this pin brings one back, as a member placed here would stop
+   * it; a pool above the pin may still take the model on its own terms. */
+  readonly leftOut: { readonly targets: Set<string>; readonly models: Set<string> }
+}
+
+const POOL_PREFIX = `${ModelRoute.PROVIDER_ID}/`
 
 export const Plugin = define({
   id: "opencode.config.model-routes",
@@ -105,6 +131,17 @@ export const Plugin = define({
       }))
     })
 
+    const runFork = Effect.runForkWith(yield* Effect.context())
+    // Transforms replay on every reload, so each diagnostic is logged once while it lasts.
+    const report = (diagnostics: ReadonlySet<string>, reported: ReadonlySet<string>) => {
+      diagnostics.forEach((message) => {
+        if (!reported.has(message)) runFork(Effect.logWarning("model route diagnostic", { message }))
+      })
+      return diagnostics
+    }
+    let reportedByProviders: ReadonlySet<string> = new Set()
+    let reportedByModels: ReadonlySet<string> = new Set()
+
     yield* ctx.provider.transform((providers) => {
       if (providers.get(ModelRoute.PROVIDER_ID)) return
       const routes = configuredRoutes(loaded.entries)
@@ -116,12 +153,16 @@ export const Plugin = define({
       const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
         providers.list().map((record) => [record.provider.id, record.models] as const),
       )
+      const later = builtWithModels(routes)
+      const diagnostics = new Set<string>()
       const providerRoutes = configuredProviderRoutes(loaded.entries, new Set(definitions.keys()), routes)
       const models = Array.from(routes, ([id, route]) => {
+        if (later.has(id)) return undefined
         const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
         return routeModel(id, route, expanded, nodes, globalSchedules, ctx.location.directory)
       }).filter((model): model is Model.Info => model !== undefined)
+      reportedByProviders = report(diagnostics, reportedByProviders)
 
       // The routes provider is registered even when no route could be built from
       // definitions alone: a route whose targets are all transform-created (#1001)
@@ -266,6 +307,37 @@ export const Plugin = define({
         }
       }
     })
+
+    // Pools that use the matching or effort keys are built once provider connections are known, so a pattern
+    // adds only models that can be used: a model of a provider that is not connected is never offered here.
+    yield* ctx.model.transform((editor) => {
+      const routes = configuredRoutes(loaded.entries)
+      const later = builtWithModels(routes)
+      if (later.size === 0) return
+      const globalSchedules = weightRulesAcross(configuredSchedules(loaded.entries))
+      const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>(
+        editor.provider
+          .list()
+          .filter((record) => record.provider.id !== ModelRoute.PROVIDER_ID)
+          .map((record) => [record.provider.id, record.models] as const),
+      )
+      const diagnostics = new Set<string>()
+      routes.forEach((route, id) => {
+        if (!later.has(id)) return
+        const {
+          leaves,
+          nodes,
+          diagnostics: found,
+        } = expand(id, routes, definitions, (providerID, modelID) => editor.get(providerID, modelID))
+        found.forEach((message) => diagnostics.add(message))
+        if (leaves.length === 0) return editor.remove(ModelRoute.PROVIDER_ID, id)
+        const info = routeModel(id, route, leaves, nodes, globalSchedules)
+        editor.update(ModelRoute.PROVIDER_ID, id, (model) => {
+          Object.assign(model, info)
+        })
+      })
+      reportedByModels = report(diagnostics, reportedByModels)
+    })
   }),
 })
 
@@ -330,7 +402,7 @@ function routeModel(
       input: intersect(expanded.map((target) => target.model.capabilities.input)),
       output: intersect(expanded.map((target) => target.model.capabilities.output)),
     },
-    variants: routeVariants(expanded),
+    variants: routeVariants(expanded, route.levels),
     cost: first.cost,
     status: "active",
     limit: {
@@ -359,6 +431,47 @@ function routeModel(
     },
   })
 }
+
+/** Pools that use a matching or effort key, or nest a pool that does. They are built with the models of
+ * connected providers; every other pool is built from the provider definitions, as it always was. A target
+ * remap to false is an effort key too: whether the pool offers a level it sits out depends on the variants of
+ * its other targets, and variants configured under a provider's models come only with the models. */
+function builtWithModels(routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
+  const uses = (id: string, trail: ReadonlySet<string>): boolean => {
+    const route = routes.get(id)
+    if (!route || trail.has(id)) return false
+    if (
+      [
+        route.include,
+        route.exclude,
+        route.contains,
+        route.notContains,
+        route.match,
+        route.levels,
+        route.variantRules,
+      ].some((value) => value !== undefined) ||
+      (route.targets ?? []).some((target) => Object.values(targetSpec(target).variants ?? {}).includes(false))
+    )
+      return true
+    const next = new Set(trail).add(id)
+    return (route.targets ?? []).some((target) => {
+      const ref = targetRef(targetSpec(target).model)
+      return (
+        ref.providerID === ModelRoute.PROVIDER_ID &&
+        uses(ModelRouteMatch.poolsNamed(routes.keys(), ref.id)[0] ?? ref.id, next)
+      )
+    })
+  }
+  return new Set([...routes.keys()].filter((id) => uses(id, new Set())))
+}
+
+/** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
+ * Expansion only consumes a provider route when a model route seats it, so a session
+ * addressing the route provider directly finds no catalog entry and dies as
+ * provider.no-route. Each model the route's members offer gets a synthetic model under
+ * the route id carrying the same group definition a seat would expand to — selection,
+ * weights, windows, schedules, health, and failover included — so direct sessions
+ * resolve through the identical machinery. */
 
 /** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
  * Expansion only consumes a provider route when a model route seats it, so a session
@@ -729,7 +842,8 @@ const gateFor = (
 }
 
 /** The schedule rules a route declares for its own targets, in a shape the runtime can judge. An
- * entry with an unreadable window, or with nothing to change, is dropped rather than applied. */
+ * entry with an unreadable window, or with nothing to change, is dropped rather than applied; the
+ * config loader has already reported it (scheduleProblems in config/normalize.ts). */
 export function routeWeightRules(
   route: ConfigModelRoutes.Route,
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
@@ -757,7 +871,8 @@ export function routeWeightRules(
 }
 
 /** The global schedule rules in a shape the runtime can judge. The route filter stays in the match,
- * so one list serves every route and nested route. An entry with nothing to change is dropped. */
+ * so one list serves every route and nested route. An entry with nothing to change, or with an
+ * unreadable window, is dropped; the config loader has already reported it. */
 export function weightRulesAcross(
   schedules: readonly ConfigModelRoutes.GlobalSchedule[],
   windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
@@ -793,16 +908,87 @@ export function weightRulesAcross(
   })
 }
 
-export function expand(
+/** One route's targets and selection tree, with what the pool's author should hear about it. Targets come
+ * from `definitions`; `candidate` returns a model as it can be used now, or undefined when its provider is not
+ * connected. Models that matching keys add come only through `candidate`, and a target uses it when it has
+ * the model, so configured variants count. The route's declared `levels` are applied here: a target that
+ * cannot run one of them sits it out. A nested pool's are applied where it is collected, and here its members
+ * sit out every other level. A nested pool pinned as `opencode-route/<id>#<level>` runs only at that level, so
+ * its remaps and rules decide only whether a member sits the pin out; such a member is left out, and the rest
+ * run at the pin at every level of the pools above, which may still sit them out. */
+export type CandidateFn = (providerID: Provider.ID, id: Model.ID) => Model.Info | undefined
+
+type ExpandShared = {
+  readonly candidate: CandidateFn
+  readonly members: Map<string, ReadonlySet<string>>
+  readonly models: () => readonly { readonly providerID: Provider.ID; readonly id: Model.ID }[]
+}
+
+function expandCollected(
   id: string,
   routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
-  windows: ReadonlyMap<string, ModelRouteSchedule.Window> = new Map(),
-  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+  windows: ReadonlyMap<string, ModelRouteSchedule.Window>,
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute>,
+  candidate: CandidateFn,
+  trailArg: ReadonlySet<string>,
+  shared: ExpandShared,
+  enteredAt: readonly Pin[] = [],
 ) {
+  const diagnostics: string[] = []
   const result: SourceModel[] = []
   const nodes: ModelRoute.Node[] = []
   const leafByKey = new Map<string, number>()
+  const seen = new Set<string>()
+  const placed = new Set<string>()
+
+  const allowed = new Map<number, ReadonlySet<string>>()
+  let cut = false
+
+  // A pool named in any case: the one spelled exactly so, else the first that matches ignoring case, with a
+  // warning when several do.
+  const poolNamed = (routeID: string, name: string) => {
+    const named = ModelRouteMatch.poolsNamed(routes.keys(), name)
+    if (named.length > 1)
+      diagnostics.push(
+        `pool ${routeID} names ${name}, which matches ${named.join(", ")} ignoring case; it uses ${named[0]}`,
+      )
+    return named[0]
+  }
+
+  // A term that names a pool, as an id or with the route provider prefix, in any case, stands for that
+  // pool and its models. A pool already on the way in adds nothing for that name.
+  const reference =
+    (routeID: string, within: ReadonlySet<string>) =>
+    (text: string): ModelRouteMatch.Predicate | undefined => {
+      const prefixed = text.toLowerCase().startsWith(POOL_PREFIX)
+      const poolID =
+        ModelRouteMatch.poolsNamed(routes.keys(), text).length > 0
+          ? poolNamed(routeID, text)
+          : prefixed
+            ? poolNamed(routeID, text.slice(POOL_PREFIX.length))
+            : undefined
+      if (poolID === undefined) {
+        if (prefixed) diagnostics.push(`pool ${routeID} names ${text}, which is not a pool`)
+        return undefined
+      }
+      if (within.has(poolID)) {
+        cut = true
+        return () => false
+      }
+      const members = shared.members.get(poolID) ?? membersOf(poolID, within)
+      return (cand) => members.has(`${cand.providerID}/${cand.id}`)
+    }
+  const membersOf = (poolID: string, within: ReadonlySet<string>) => {
+    const named = expandCollected(poolID, routes, definitions, windows, providerRoutes, candidate, within, shared)
+    named.diagnostics.forEach((message) => {
+      if (!diagnostics.includes(message)) diagnostics.push(message)
+    })
+    const members = new Set(named.leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}`))
+    if (named.cut) cut = true
+    else shared.members.set(poolID, members)
+    return members
+  }
 
   // Each route becomes a group node with its own selection mode and weights, so a weighted route
   // nested in another is chosen as one unit and then splits among its own members.
@@ -813,11 +999,40 @@ export function expand(
     inheritedCacheFormat: CacheFormat | undefined,
     inheritedLimit: number | undefined,
     override?: { route: ConfigModelRoutes.Route; providerRoute: string; keepEmpty?: boolean },
+    enclosing: Enclosing = { excludes: [], rules: [], pins: [] },
+    reattach = false,
   ): number | undefined => {
-    if (trail.has(routeID)) return
+    if (trail.has(routeID)) {
+      cut = true
+      return
+    }
     const current = override?.route ?? routes.get(routeID)
     if (!current) return
+    // The pin this pool runs at, when a pool on the way in was entered at one: the last such pin.
+    const pin = enclosing.pins.at(-1)
+    // A pool pinned at a level it does not declare offers its members nowhere there.
+    if (pin !== undefined && current.levels !== undefined && !current.levels.includes(pin.level)) {
+      diagnostics.push(`pool ${routeID} is pinned at level ${pin.level}, which it does not declare, so it adds nothing`)
+      return
+    }
     const nextTrail = new Set(trail).add(routeID)
+    // The config loader skips a pool with a malformed matching key, so this fails only for a pool that
+    // never went through it; such a pool contributes nothing rather than part of what it says.
+    const compiled = ModelRouteMatch.compile(current, reference(routeID, nextTrail))
+    if (Result.isFailure(compiled)) {
+      diagnostics.push(
+        `pool ${routeID} is skipped: ${compiled.failure.map((problem) => `${problem.path.join(".")}: ${problem.message}`).join("; ")}`,
+      )
+      return
+    }
+    const excludes = [...enclosing.excludes, compiled.success.excludes]
+    // A remap or rule applies to the levels of the pool that declares it: above any pin, every level the expanded
+    // pool is selected at; at a pin, that one level.
+    const own = compiled.success.rules
+    const rules = pin === undefined ? [...enclosing.rules, ...own] : enclosing.rules
+    const pins =
+      pin === undefined ? enclosing.pins : [...enclosing.pins.slice(0, -1), { ...pin, rules: [...pin.rules, ...own] }]
+    const excluded = (candidate: ModelRouteMatch.Candidate) => excludes.some((test) => test(candidate))
     const nodeIndex = nodes.length
     const node: {
       routeID: string
@@ -838,9 +1053,53 @@ export function expand(
     const attached = new Set<string>()
     const attach = (child: ModelRoute.Node["children"][number], key: string) => {
       node.children.push(child)
-      node.weights.push(ModelRouteAutonomy.usesRules(current.autonomy) ? ownOr(current.weights ?? {}, key, 1) : 1)
+      // A nested pool's weight key names a pool, so it matches in any case.
+      const weight =
+        current.weights?.[key] ??
+        (child.node === undefined
+          ? undefined
+          : Object.entries(current.weights ?? {}).find(
+              ([name]) =>
+                name.toLowerCase() === key.toLowerCase() ||
+                name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
+            )?.[1])
+      node.weights.push(ModelRouteAutonomy.usesRules(current.autonomy) ? (weight ?? 1) : 1)
     }
-    for (const target of current.targets) {
+    const applying = (list: readonly ModelRouteMatch.Rule[], candidate: ModelRouteMatch.Candidate) =>
+      list.filter((rule) => rule.applies(candidate)).map((rule) => rule.map)
+    // What a member keeps: the rules above any pin, outermost first, then the target's own remap. At a pin the
+    // remap applies only to the pin, which a member pinned here runs at whatever the level: its remaps to a
+    // variant stay, as they always have, its false entries only decide whether it is left out, and the rules
+    // above come last, so a pool above may still sit it out.
+    const levelMap = (
+      candidate: ModelRouteMatch.Candidate,
+      model: Model.Info,
+      variants: Readonly<Record<string, string | false>> = {},
+    ) =>
+      effort(
+        model,
+        pin === undefined
+          ? [...applying(rules, candidate), variants]
+          : [
+              Object.fromEntries(Object.entries(variants).filter(([, to]) => to !== false)),
+              ...applying(rules, candidate),
+            ],
+      )
+    // Whether a member sits out a pin it is under: each pin's rules, and at the last one the target's own remap.
+    const sitsOutPin = (
+      candidate: ModelRouteMatch.Candidate,
+      model: Model.Info,
+      variants: Readonly<Record<string, string | false>> = {},
+    ) =>
+      pins.some(
+        (each, index) =>
+          effort(model, [...applying(each.rules, candidate), ...(index === pins.length - 1 ? [variants] : [])])[
+            each.level
+          ] === false,
+      )
+    const first = result.length
+    const childPairs = new Set<string>()
+    for (const target of current.targets ?? []) {
       const spec = targetSpec(target)
       const ref = targetRef(spec.model)
       if (spec.until !== undefined && Date.now() >= spec.until) continue
@@ -849,16 +1108,65 @@ export function expand(
       const own = "limit" in spec ? spec.limit?.context : undefined
       const ceiling = own === undefined ? inheritedLimit : Math.min(own, inheritedLimit ?? own)
       if (ref.providerID === ModelRoute.PROVIDER_ID) {
+        const poolID = poolNamed(routeID, ref.id) ?? ref.id
+        const off = Object.entries(spec.variants ?? {}).flatMap(([level, to]) => (to === false ? [level] : []))
+        const leaveOut = (at: Pin) => {
+          const brought = expandCollected(
+            poolID, routes, definitions, windows, providerRoutes, candidate, nextTrail, shared,
+            ref.variant === undefined
+              ? []
+              : [{ level: ref.variant, rules: [], leftOut: { targets: new Set(), models: new Set() } }],
+          )
+          brought.diagnostics.forEach((message) => {
+            if (!diagnostics.includes(message)) diagnostics.push(message)
+          })
+          if (brought.cut) cut = true
+          brought.leaves.forEach((leaf) => {
+            at.leftOut.targets.add(
+              `${leaf.ref.providerID}/${leaf.ref.id}${leaf.ref.variant ? `#${leaf.ref.variant}` : ""}`,
+            )
+            at.leftOut.models.add(`${leaf.ref.providerID}/${leaf.ref.id}`)
+          })
+        }
+        if (pin !== undefined && off.includes(pin.level)) {
+          leaveOut(pin)
+          continue
+        }
+        const start = result.length
+        const repeated = childPairs.has(poolID)
+        childPairs.add(poolID)
         const child = visit(
-          ref.id,
+          poolID,
           ref.variant ?? inheritedVariant,
           nextTrail,
           spec.cache_format ?? current.cache_format ?? inheritedCacheFormat,
           ceiling,
+          undefined,
+          {
+            excludes,
+            rules,
+            pins:
+              ref.variant === undefined
+                ? pins
+                : [...pins, { level: ref.variant, rules: [], leftOut: { targets: new Set(), models: new Set() } }],
+          },
+          repeated,
         )
+        const nested = routes.get(poolID)
+        if (
+          pin !== undefined &&
+          ref.variant === undefined &&
+          nested?.levels !== undefined &&
+          !nested.levels.includes(pin.level)
+        )
+          leaveOut(pin)
+        if (pin === undefined && off.length > 0)
+          result.slice(start).forEach((leaf, offset) => {
+            result[start + offset] = sitOut(leaf, off)
+          })
         if (child !== undefined) {
           const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
-          attach({ node: child, ...(gate ? { gate } : {}) }, `${ref.id}`)
+          attach({ node: child, ...(gate ? { gate } : {}) }, `${poolID}`)
         }
         continue
       }
@@ -953,9 +1261,42 @@ export function expand(
             )
           : [[ref.providerID, definitions.get(ref.providerID)]]
       for (const [door, doorModels] of doors) {
-        for (const [id, model] of ModelRouteExpansion.matchingModels(ref.id, doorModels)) {
-        if (!model.enabled) continue
-        const requested = ref.variant ?? inheritedVariant
+        for (const [id, defined] of ModelRouteExpansion.matchingModels(ref.id, doorModels)) {
+        const cand = { providerID: door, id: Model.ID.make(id) }
+        const requested = ref.variant ?? pin?.level ?? inheritedVariant
+        const named = `${door}/${id}${ref.variant ? `#${ref.variant}` : ""}`
+        if (pin?.leftOut.targets.has(named)) continue
+        const seenKey = `${door}/${id}${requested ? `#${requested}` : ""}`
+        if (seen.has(seenKey)) {
+          const prior = leafByKey.get(seenKey)
+          if (prior !== undefined) {
+            if (
+              ceiling !== undefined &&
+              (result[prior].contextLimit === undefined || ceiling < result[prior].contextLimit)
+            )
+              result[prior] = { ...result[prior], contextLimit: ceiling }
+            // The leaf itself is shared, but when the same parent names the pool again
+            // this node still references it, so a pool referenced twice by one parent
+            // keeps both group nodes over the same leaf indexes.
+            if (reattach && !attached.has(seenKey)) {
+              attached.add(seenKey)
+              const gate = gateFor(
+                "window" in spec ? spec.window : undefined,
+                windows,
+                `route ${JSON.stringify(routeID)}`,
+              )
+              attach({ leaf: prior, ...(gate ? { gate } : {}) }, `${door}/${id}`)
+            }
+          }
+          continue
+        }
+        const model = candidate(door, Model.ID.make(id)) ?? defined
+        if (!model.enabled || excluded(cand)) continue
+        if (pin !== undefined && sitsOutPin(cand, model, spec.variants ?? {})) {
+          pin.leftOut.targets.add(named)
+          pin.leftOut.models.add(`${door}/${id}`)
+          continue
+        }
         // A pinned variant is producible natively or through the target's remap table, matching
         // routeVariants and the resolver: a remap the model can produce wins, else the native
         // variant, else the leaf is pruned. A variant the door's catalog exposes as a
@@ -970,7 +1311,7 @@ export function expand(
         const variant =
           requested === undefined
             ? undefined
-            : remapped !== undefined && producible(remapped)
+            : remapped !== undefined && remapped !== false && producible(remapped)
               ? Model.VariantID.make(remapped)
               : producible(requested)
                 ? requested
@@ -1014,11 +1355,10 @@ export function expand(
           spec.defaultVariant && model.variants.some((item) => item.id === spec.defaultVariant)
             ? Model.VariantID.make(spec.defaultVariant)
             : undefined
-        const variantMap = Object.fromEntries(
-          Object.entries(spec.variants ?? {}).flatMap(([from, to]) =>
-            model.variants.some((item) => item.id === to) ? [[from, Model.VariantID.make(to)] as const] : [],
-          ),
-        )
+        const variantMap = levelMap({ providerID: door, id: Model.ID.make(id) }, model, spec.variants ?? {})
+        seen.add(key)
+        seen.add(seenKey)
+        placed.add(leafKey)
         leafByKey.set(key, result.length)
         attach({ leaf: result.length, ...(gate ? { gate } : {}) }, leafKey)
         // A leaf's own cache_format wins, then the route that declared it, then an enclosing
@@ -1045,11 +1385,153 @@ export function expand(
         }
       }
     }
+    if (compiled.success.selects) {
+      for (const entry of shared.models()) {
+        const key = `${entry.providerID}/${entry.id}`
+        if (placed.has(key) || pin?.leftOut.models.has(key) || !compiled.success.selects(entry) || excluded(entry))
+          continue
+        const model = candidate(entry.providerID, entry.id)
+        if (!model?.enabled) continue
+        if (pin !== undefined && sitsOutPin(entry, model)) {
+          pin.leftOut.targets.add(key)
+          pin.leftOut.models.add(key)
+          continue
+        }
+        const levelMapped = levelMap(entry, model)
+        // The pin is resolved through the remaps before the native check: a rule that maps
+        // the pin onto a variant the model has lets it run at that variant (Codex review
+        // 4337111440), instead of the matched model being discarded for lacking the pin.
+        const viaPinRules =
+          pin !== undefined ? effort(model, [...applying(pins.at(-1)?.rules ?? [], entry)])[pin.level] : undefined
+        const mapped = viaPinRules !== undefined ? viaPinRules : pin !== undefined ? levelMapped[pin.level] : undefined
+        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level))
+          continue
+        const variantMap =
+          pin !== undefined && viaPinRules !== undefined && viaPinRules !== false
+            ? { ...levelMapped, [pin.level]: viaPinRules }
+            : levelMapped
+        const budget = plainBudget(
+          [...nextTrail]
+            .filter((rid) => ModelRouteAutonomy.usesRules(routes.get(rid)?.autonomy))
+            .map((rid) => routes.get(rid)?.budgets?.[key])
+            .find((value) => value !== undefined),
+        )
+        const seenKey = `${key}${pin ? `#${pin.level}` : ""}`
+        seen.add(seenKey)
+        placed.add(key)
+        leafByKey.set(seenKey, result.length)
+        attach({ leaf: result.length }, key)
+        const cacheFormat = current.cache_format ?? inheritedCacheFormat
+        result.push({
+          ...(budget ? { budget } : {}),
+          ref: Model.Ref.make({
+            providerID: entry.providerID,
+            id: entry.id,
+            ...(pin ? { variant: pin.level } : {}),
+          }),
+          model,
+          fixedVariant: pin !== undefined,
+          ...(Object.keys(variantMap).length ? { variantMap } : {}),
+          ...(cacheFormat ? { cacheFormat } : {}),
+        })
+      }
+    }
+    const declared = current.levels
+    if (declared !== undefined && routeID !== id && pin === undefined)
+      result.slice(first).forEach((leaf, offset) => {
+        const index = first + offset
+        result[index] = keptTo(leaf, declared)
+        allowed.set(index, new Set(declared.filter((level) => allowed.get(index)?.has(level) ?? true)))
+      })
     return node.children.length > 0 || override?.keepEmpty ? nodeIndex : undefined
   }
 
-  visit(id, undefined, new Set(), undefined, undefined)
-  return { leaves: result, nodes }
+  visit(id, undefined, trailArg, undefined, undefined, undefined, {
+    excludes: [],
+    rules: [],
+    pins: [...enteredAt],
+  })
+  return { leaves: result, nodes, diagnostics, cut, allowed }
+}
+
+/** A target with `false` added for each of `levels` it does not already sit out. */
+function sitOut(target: SourceModel, levels: readonly string[]): SourceModel {
+  const off = levels.filter((level) => target.variantMap?.[level] !== false)
+  if (off.length === 0) return target
+  return {
+    ...target,
+    variantMap: { ...target.variantMap, ...Object.fromEntries(off.map((level) => [level, false] as const)) },
+  }
+}
+
+/** A member of a pool that declares `levels`, sitting out each declared level it cannot run. */
+function keptTo(target: SourceModel, levels: readonly string[]): SourceModel {
+  return sitOut(
+    target,
+    [...new Set(levels)].filter((level) => !runs(target, level)),
+  )
+}
+
+export function expand(
+  id: string,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  definitions: ReadonlyMap<Provider.ID, ReadonlyMap<string, Model.Info>>,
+  windowsOrCandidate: ReadonlyMap<string, ModelRouteSchedule.Window> | CandidateFn = new Map(),
+  providerRoutes: ReadonlyMap<string, ModelRoute.ProviderRoute> = new Map(),
+  candidateArg?: CandidateFn,
+  trailArg: ReadonlySet<string> = new Set(),
+) {
+  const windows: ReadonlyMap<string, ModelRouteSchedule.Window> =
+    typeof windowsOrCandidate === "function" ? new Map() : windowsOrCandidate
+  const rawCandidate: CandidateFn =
+    candidateArg ??
+    (typeof windowsOrCandidate === "function"
+      ? windowsOrCandidate
+      : (providerID, modelID) => definitions.get(providerID)?.get(modelID))
+  const memo = new Map<string, Model.Info | undefined>()
+  let catalog: readonly { readonly providerID: Provider.ID; readonly id: Model.ID }[] | undefined
+  const shared: ExpandShared = {
+    candidate: (providerID, modelID) => {
+      const key = `${providerID}/${modelID}`
+      if (!memo.has(key)) memo.set(key, rawCandidate(providerID, modelID))
+      return memo.get(key)
+    },
+    members: new Map(),
+    models: () =>
+      (catalog ??= [...definitions].flatMap(([providerID, models]) =>
+        [...models.keys()].map((modelID) => ({ providerID, id: Model.ID.make(modelID) })),
+      )),
+  }
+  const collected = expandCollected(id, routes, definitions, windows, providerRoutes, shared.candidate, trailArg, shared)
+  const levels = routes.get(id)?.levels
+  const asked = [
+    ...new Set([
+      ...collected.leaves.flatMap((leaf) => [
+        ...leaf.model.variants.map((variant) => String(variant.id)),
+        ...Object.keys(leaf.variantMap ?? {}),
+      ]),
+      ...(levels ?? []),
+    ]),
+  ]
+  const opened = collected.leaves.map((leaf, index) => {
+    const allowedLevels = collected.allowed.get(index)
+    return allowedLevels === undefined ? leaf : sitOut(leaf, asked.filter((level) => !allowedLevels.has(level)))
+  })
+  if (levels === undefined || opened.length === 0)
+    return { leaves: opened, nodes: collected.nodes, diagnostics: collected.diagnostics }
+  const leaves = opened.map((leaf) => keptTo(leaf, levels))
+  return {
+    leaves,
+    nodes: collected.nodes,
+    diagnostics: [
+      ...collected.diagnostics,
+      ...[...new Set(levels)]
+        .filter((level) => !leaves.some((leaf) => runs(leaf, level)))
+        .map(
+          (level) => `pool ${id} declares level ${level}, but none of its models can run it, so it is not offered`,
+        ),
+    ],
+  }
 }
 
 /** What a retarget produces: the replacement definition, and the variants the route can
@@ -1098,7 +1580,7 @@ function currentDefinitions(
   )
   const targeted = new Set<Provider.ID>()
   for (const route of routes.values()) {
-    for (const target of route.targets) {
+    for (const target of route.targets ?? []) {
       const ref = targetRef(targetSpec(target).model)
       // A door-set target (`*`, #869) names no single provider: every concrete
       // door is targeted, so transform-created models are merged from each
@@ -1265,15 +1747,48 @@ function intersect(values: readonly (readonly string[])[]) {
   return (first ?? []).filter((value) => rest.every((items) => items.includes(value)))
 }
 
-export function routeVariants(targets: readonly SourceModel[]) {
+/** Whether a target runs `level` when its pool is selected at it: a pinned target always does, at its
+ * pin; any other through its remap or its own variant of that name. A remap to `false` sits it out. */
+function runs(target: SourceModel, level: string) {
+  const mapped = target.variantMap?.[level]
+  if (mapped === false) return false
+  return target.fixedVariant || mapped !== undefined || target.model.variants.some((item) => item.id === level)
+}
+
+/** A member of a pool that declares `levels`, sitting out each declared level it cannot run. */
+/** Level remaps for a target: each map in order, a later one overriding an earlier one level by level. A
+ * remap to a variant the model does not have leaves that level alone; false, sitting it out, always
+ * applies. */
+function effort(
+  model: Model.Info,
+  maps: readonly Readonly<Record<string, string | false>>[],
+): Record<string, Model.VariantID | false> {
+  return Object.fromEntries(
+    maps.flatMap((map) =>
+      Object.entries(map).flatMap(([from, to]): (readonly [string, Model.VariantID | false])[] => {
+        if (to === false) return [[from, false]]
+        return model.variants.some((item) => item.id === to) ? [[from, Model.VariantID.make(to)]] : []
+      }),
+    ),
+  )
+}
+
+export function routeVariants(targets: readonly SourceModel[], levels?: readonly string[]) {
+  const offer = (list: readonly string[]) => list.map((id) => ({ id: Model.VariantID.make(id) }))
+  if (levels !== undefined)
+    return offer([...new Set(levels)].filter((level) => targets.some((target) => runs(target, level))))
   if (targets.some((target) => target.fixedVariant)) return []
-  // A route-level variant is offered when every target can produce it, either natively or through
-  // its remap table.
-  return intersect(
-    targets.map((target) => {
-      const native = target.model.variants.map((variant) => variant.id)
-      const remapped = Object.keys(target.variantMap ?? {})
-      return [...new Set([...native, ...remapped])]
-    }),
-  ).map((id) => ({ id: Model.VariantID.make(id) }))
+  const candidates = new Set(
+    targets.flatMap((target) => [
+      ...target.model.variants.map((variant) => variant.id),
+      ...Object.keys(target.variantMap ?? {}),
+    ]),
+  )
+  return offer(
+    [...candidates].filter(
+      (level) =>
+        targets.some((target) => runs(target, level)) &&
+        targets.every((target) => runs(target, level) || target.variantMap?.[level] === false),
+    ),
+  )
 }

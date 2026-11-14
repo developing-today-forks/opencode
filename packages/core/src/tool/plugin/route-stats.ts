@@ -8,6 +8,7 @@ import type { Permission } from "../../permission.js"
 import { ModelRoute } from "../../model-route.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
 import { ModelRouteLog } from "../../model-route-log.js"
+import { ModelRouteMatch } from "../../model-route-match.js"
 import { ModelRouteReview } from "../../model-route-review.js"
 import { ModelRouteTuning } from "../../model-route-tuning.js"
 
@@ -68,14 +69,19 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
   Effect.gen(function* () {
     const now = Date.now()
     const since = now - (input.hours ?? 24) * 3_600_000
+    // A pool id matches in any case; history records the configured spelling.
+    const routeID =
+      input.route === undefined
+        ? undefined
+        : (ModelRouteMatch.poolsNamed(source.routes.keys(), input.route)[0] ?? input.route)
     const read = yield* ModelRouteLog.withDb((db) =>
       Effect.all({
         stats: ModelRouteLog.targetStats(db, since),
         errors: ModelRouteLog.errorBreakdown(db, since),
         hedges: ModelRouteLog.hedgeAccuracy(db, since),
         hourly: ModelRouteLog.hourlyStats(db, since),
-        attempts: ModelRouteLog.attemptRows(db, since, input.route),
-        decisions: ModelRouteLog.decisionRows(db, since, input.route),
+        attempts: ModelRouteLog.attemptRows(db, since, routeID),
+        decisions: ModelRouteLog.decisionRows(db, since, routeID),
       }).pipe(Effect.orDie),
     )
     const { stats, errors, hedges, hourly, attempts, decisions } = Option.getOrElse(read, () => ({
@@ -103,7 +109,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
     const suggestions = ModelRouteTuning.suggest({ stats, errors, now })
     const pools = new Map<string, ModelRouteReview.Configured>()
     for (const [id, route] of source.routes) {
-      if (input.route === undefined || id === input.route) pools.set(id, ModelRouteReview.configured(route))
+      if (routeID === undefined || id === routeID) pools.set(id, ModelRouteReview.configured(route))
     }
     return {
       benches: ModelRoute.activeBenches(now),

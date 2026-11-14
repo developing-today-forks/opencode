@@ -1,5 +1,7 @@
 export * as ModelRouteSchedule from "./model-route-schedule.js"
 
+import { Result } from "effect"
+
 /**
  * Recurring time windows for routing rules: a date and time-of-day filter the operator (or a
  * sentence the interpreter understood) attaches to a weight change. A window never talks to the
@@ -11,8 +13,9 @@ export * as ModelRouteSchedule from "./model-route-schedule.js"
  *   { "daysOfWeek": ["mon", "tue"], "start": "09:00", "end": "17:00", "timezone": "America/Chicago" }
  *
  * `parse` normalizes the friendly forms (day names, "9:30") to this shape and rejects an object it
- * cannot read, so a typo makes a rule disappear rather than apply at the wrong time. `active`
- * evaluates it; a window with no constraints is always active.
+ * cannot read, so a typo makes a rule disappear rather than apply at the wrong time. `read` also says
+ * which fields it could not read, so the config loader can report them. `active` evaluates a window;
+ * a window with no constraints is always active.
  */
 export interface Window {
   /** 0 (Sunday) to 6 (Saturday). Empty or absent means every day. */
@@ -216,9 +219,104 @@ const daysInMonth = (parts: Pick<LocalParts, "year" | "month">) =>
   // Day 0 of the following month is the last day of this one.
   new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate()
 
-/** The local calendar day before `parts`, derived from the date itself. Subtracting the day's
- * elapsed wall-clock minutes from the absolute instant is not equivalent: on the DST fall-back
- * night the repeated hour makes that subtraction land on the same local day (#585). */
+/** A field `read` could not use, and why. */
+export interface Problem {
+  /** The field, such as ["start"]; empty when the value is not a window at all. */
+  readonly path: readonly string[]
+  readonly message: string
+}
+
+/**
+ * Reads a window from user input, or lists every field it cannot use: a day list that is not a list or
+ * holds an entry that is not a day, a date list holding an entry that is not a date or date range, an
+ * excludeWindows list that is not window names, a time that is not "HH:mm", a timezone the runtime does
+ * not know, or a `from` that is not before `until`. An empty day list means every day, as an absent one does, so `{}` and
+ * `{ daysOfWeek: [] }` are both always active. Fields that read as empty lists are dropped so the
+ * canonical value is as small as the config.
+ */
+export const read = (value: unknown): Result.Result<Window, readonly Problem[]> => {
+  if (!value || typeof value !== "object") return Result.fail([{ path: [], message: "the window is not an object" }])
+  const problems: Problem[] = []
+  const refuse = (name: string, reason: string) => {
+    problems.push({ path: [name], message: `${name} ${reason}` })
+    return undefined
+  }
+  const days = (name: "daysOfWeek" | "daysOfMonth", day: (value: unknown) => number | undefined) => {
+    const raw = field(value, name)
+    if (raw === undefined) return undefined
+    if (!Array.isArray(raw)) return refuse(name, "is not a list")
+    const parsed = raw.map(day)
+    const valid = parsed.filter((item): item is number => item !== undefined)
+    // Any entry that is not a day refuses the window: dropping it would narrow the days the rule applies
+    // on without a word.
+    if (valid.length < raw.length) {
+      const unreadable = raw.filter((_, index) => parsed[index] === undefined).map((item) => JSON.stringify(item))
+      return refuse(name, `${unreadable.join(", ")} ${unreadable.length === 1 ? "is not a day" : "are not days"}`)
+    }
+    return valid.length > 0 ? [...new Set(valid)] : undefined
+  }
+  const time = (name: "start" | "end") => {
+    const raw = field(value, name)
+    if (raw === undefined) return undefined
+    return (
+      (typeof raw === "string" ? normalizeTime(raw) : undefined) ?? refuse(name, `${JSON.stringify(raw)} is not HH:mm`)
+    )
+  }
+  const instant = (name: "from" | "until") => {
+    const raw = field(value, name)
+    if (raw === undefined) return undefined
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : refuse(name, "is not a time in epoch milliseconds")
+  }
+  const rawTimezone = field(value, "timezone")
+
+  const daysOfWeek = days("daysOfWeek", dayOfWeek)?.toSorted((left, right) => left - right)
+  const daysOfMonth = days("daysOfMonth", dayOfMonth)
+  const start = time("start")
+  const end = time("end")
+  const timezone =
+    rawTimezone === undefined
+      ? undefined
+      : ((typeof rawTimezone === "string" ? timezoneName(rawTimezone.trim()) : undefined) ??
+        refuse("timezone", `${JSON.stringify(rawTimezone)} is not a known IANA timezone`))
+  const dateList = (name: "dates" | "excludeDates") => {
+    const raw = field(value, name)
+    if (raw === undefined) return undefined
+    if (!Array.isArray(raw)) return refuse(name, "is not a list")
+    const parsed = raw.map(dateEntry)
+    if (parsed.length === 0 || parsed.some((entry) => entry === undefined))
+      return refuse(name, "holds an entry that is not a date or date range")
+    return [...new Set(parsed as string[])].sort()
+  }
+  const dates = dateList("dates")
+  const excludeDates = dateList("excludeDates")
+  const rawExcludeWindows = field(value, "excludeWindows")
+  const excludeWindows =
+    rawExcludeWindows === undefined
+      ? undefined
+      : Array.isArray(rawExcludeWindows) &&
+          rawExcludeWindows.length > 0 &&
+          rawExcludeWindows.every((name) => typeof name === "string" && WINDOW_NAME.test(name.trim()))
+        ? [...new Set(rawExcludeWindows.map((name) => (name as string).trim()))].sort()
+        : refuse("excludeWindows", "is not a list of window names")
+  const from = instant("from")
+  const until = instant("until")
+  if (from !== undefined && until !== undefined && from >= until)
+    refuse("until", "is not after from, so the window never opens")
+  if (problems.length > 0) return Result.fail(problems)
+  return Result.succeed({
+    ...(daysOfWeek ? { daysOfWeek } : {}),
+    ...(daysOfMonth ? { daysOfMonth } : {}),
+    ...(dates ? { dates } : {}),
+    ...(excludeDates ? { excludeDates } : {}),
+    ...(excludeWindows ? { excludeWindows } : {}),
+    ...(start === undefined ? {} : { start }),
+    ...(end === undefined ? {} : { end }),
+    ...(timezone === undefined ? {} : { timezone }),
+    ...(from === undefined ? {} : { from }),
+    ...(until === undefined ? {} : { until }),
+  })
+}
+
 const previousDay = (parts: LocalParts): LocalParts => {
   const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.dayOfMonth) - 86_400_000)
   return {

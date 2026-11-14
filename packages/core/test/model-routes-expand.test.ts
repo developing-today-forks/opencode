@@ -14,6 +14,8 @@ import { ModelRoute } from "@opencode/core/model-route"
 import { ModelRouteSchedule } from "@opencode/core/model-route-schedule"
 import { Provider } from "@opencode/core/provider"
 import { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
+import { catalog as existingCatalog, routes as existingRoutes } from "./fixture/model-routes-existing"
+import existingExpansion from "./fixture/model-routes-existing.expected.json"
 
 const anthropic = Provider.ID.make("anthropic")
 const openai = Provider.ID.make("openai")
@@ -72,6 +74,35 @@ describe("route system prompt (#1413)", () => {
 })
 
 describe("pool targets", () => {
+  // The expected file was captured from this expansion at 1668a0350b, before pools had matching keys,
+  // effort levels or `false` remaps; the pinned-stack entry came later from dc951d46de, whose expansion code
+  // is the same. It is the only check that those additions leave an older configuration exactly as it was;
+  // regenerate it from one of those commits, never from the current code.
+  test("a configuration without the new keys expands exactly as it did before they existed", () => {
+    const expanded = Object.fromEntries(
+      [...existingRoutes.keys()].map((id) => {
+        const result = expand(id, existingRoutes, existingCatalog)
+        return [
+          id,
+          {
+            leaves: result.leaves.map((leaf) => ({
+              ref: `${leaf.ref.providerID}/${leaf.ref.id}${leaf.ref.variant ? `#${leaf.ref.variant}` : ""}`,
+              fixedVariant: leaf.fixedVariant,
+              ...(leaf.defaultVariant ? { defaultVariant: leaf.defaultVariant } : {}),
+              ...(leaf.variantMap ? { variantMap: leaf.variantMap } : {}),
+              ...(leaf.budget ? { budget: leaf.budget } : {}),
+            })),
+            nodes: result.nodes,
+            variants: routeVariants(result.leaves).map((variant) => String(variant.id)),
+          },
+        ]
+      }),
+    )
+    expect(Object.keys(expanded)).toHaveLength(8)
+    // The expected file is JSON, so the expansion is compared in its JSON form.
+    expect(JSON.parse(JSON.stringify(expanded))).toEqual(existingExpansion)
+  })
+
   test("a glob target joins every matching model of its provider, in provider order", () => {
     const { leaves } = expand("r", route(["anthropic/*sonnet*", "anthropic/*opus*"]), definitions)
     expect(leaves.map((leaf) => String(leaf.ref.id))).toEqual(["claude-sonnet-4-5", "claude-opus-4-1"])
@@ -295,6 +326,18 @@ describe("pool weight schedules", () => {
         targets: [],
         schedules: [{ targets: ["*"], when: { start: "25:00" }, factor: 2 }],
       } as unknown as ConfigModelRoutes.Route),
+    ).toEqual([])
+  })
+
+  test("a schedule with an empty day list is dropped, as the parser rejects the window whole", () => {
+    expect(
+      routeWeightRules({
+        targets: [],
+        schedules: [{ id: "daily", targets: ["*"], when: { daysOfWeek: [], start: "09:00" }, factor: 2 }],
+      } as unknown as ConfigModelRoutes.Route),
+    ).toEqual([])
+    expect(
+      weightRulesAcross([{ when: { daysOfMonth: [] }, weight: 3 }] as unknown as ConfigModelRoutes.GlobalSchedule[]),
     ).toEqual([])
   })
 
@@ -953,7 +996,7 @@ describe("provider routes", () => {
 
   test("a provider route target expands to a marked group of the members' leaves for the model, in member order", () => {
     const { leaves, nodes } = expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan"))
-    expect(refs({ leaves, nodes })).toEqual(["openai.alternate/gpt-6.1-terra", "openai/gpt-6.1-terra"])
+    expect(refs({ leaves, nodes, diagnostics: [] })).toEqual(["openai.alternate/gpt-6.1-terra", "openai/gpt-6.1-terra"])
     expect(nodes).toHaveLength(2)
     expect(nodes[0].children).toEqual([{ node: 1 }])
     expect(nodes[1]).toMatchObject({ routeID: "openai-plan", providerRoute: "openai-plan", selection: "ordered" })
@@ -1022,7 +1065,7 @@ describe("provider routes", () => {
       ],
     ])
     const { leaves, nodes } = expand("r", routes, definitionsWithVariants, new Map(), providerRoutes("openai-plan"))
-    expect(refs({ leaves, nodes })).toEqual(["openai.alternate/gpt-6.1-terra"])
+    expect(refs({ leaves, nodes, diagnostics: [] })).toEqual(["openai.alternate/gpt-6.1-terra"])
     expect(leaves[0].ref.variant).toBe(Model.VariantID.make("high"))
     expect(nodes[1].children).toEqual([{ leaf: 0 }])
   })

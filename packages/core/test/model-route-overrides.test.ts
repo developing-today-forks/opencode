@@ -229,6 +229,8 @@ describe("priority, lighter, and the fixed-route facet", () => {
     ModelRouteOverrides.add(draft({ providers: ["openai"], routes: ["other"] }), now)
     expect(ModelRoute.userSkipped(openai, now, { routeID: "r", fixed: true })).toBe(false)
     expect(ModelRoute.userSkipped(openai, now, { routeID: "other", fixed: true })).toBe(true)
+    // A route id names a pool, so it matches in any case.
+    expect(ModelRoute.userSkipped(openai, now, { routeID: "Other", fixed: true })).toBe(true)
   })
 
   test("prefer reorders a fixed route's order and raises a target's weight", () => {

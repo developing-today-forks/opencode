@@ -19,6 +19,10 @@ const LongDurationMs = PositiveInt.check(Schema.isLessThanOrEqualTo(7_776_000_00
  * The match cannot hold a colon, so the first colon is the separator. */
 export const NOTE_LINE = /^[^:\r\n]*[^\s:][^:\r\n]*:[^\r\n]*\S[^\r\n]*$/
 
+/** A level a route is selected at, mapped to the variant a target runs it at, or `false` when the target
+ * sits that level out. */
+const VariantChoice = Schema.Union([Schema.String, Schema.Literal(false)])
+
 /** A reference to a named window in experimental.routes.windows: the name alone, or
  * `{ "name": ..., "invert": true }` for eligibility only while the window is NOT active.
  * Shared by model-route targets and provider-route members so a window gate means the
@@ -48,15 +52,17 @@ const TargetObject = Schema.Struct({
     })
     .pipe(optional),
   defaultVariant: Schema.String.annotate({
-    description: "Variant used when the route is selected without an explicit variant.",
+    description: "Variant used when the route is selected without an explicit variant. A nested route ignores it.",
   }).pipe(optional),
-  variants: Schema.Record(Schema.String, Schema.String).annotate({
-    description:
-      'Remaps a route-level variant to this target\'s variant, e.g. { "low": "high" } runs this target at high when the route is selected at low.',
-  }).pipe(optional),
+  variants: Schema.Record(Schema.String, VariantChoice)
+    .annotate({
+      description:
+        'Remaps a route-level variant to this target\'s variant, e.g. { "low": "high" } runs this target at high when the route is selected at low. false makes the target sit that level out, e.g. { "max": false }: it is never used at that level, not even as a last resort. Overrides the route\'s variantRules level by level. On a nested route only false applies, and the whole route sits that level out; a string remap, defaultVariant and until are ignored there, with a config warning.',
+    })
+    .pipe(optional),
   until: PositiveInt.annotate({
     description:
-      "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads.",
+      "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads. A nested route ignores it.",
   }).pipe(optional),
   limit: Schema.Struct({
     context: PositiveInt.annotate({
@@ -78,6 +84,18 @@ export const Target = Schema.Union([ConfigModel.Selection, TargetObject]).annota
   identifier: "Config.ModelRoute.Target",
 })
 export type Target = typeof Target.Type
+
+/** A level remap for the models a route's `match` selects. */
+export class VariantRule extends Schema.Class<VariantRule>("Config.ModelRoute.VariantRule")({
+  match: Schema.String.annotate({
+    description:
+      'Which models the rule covers: a pattern, a route name in any case, or an expression of them with and, or, not and parentheses, as in the route\'s match, e.g. "*argon*" or "claude and not *haiku*".',
+  }),
+  map: Schema.Record(Schema.String, VariantChoice).annotate({
+    description:
+      'Route-level variant to the variant the model runs it at, or false to sit that level out, e.g. { "xhigh": "high", "max": false }. A later rule overrides an earlier one level by level, and a target\'s own variants override every rule.',
+  }),
+}) {}
 
 /** Request and token allowances for one target. A target that reaches `softLimit` of any allowance is
  * passed over until it recovers, so traffic moves before the provider starts refusing it. */
@@ -422,7 +440,8 @@ class GlobalScheduleClass extends Schema.Class<GlobalScheduleClass>("Config.Mode
     .pipe(optional),
   routes: Schema.Array(Schema.String)
     .annotate({
-      description: "Route IDs the change is limited to, including nested ones. Empty or unset means every route.",
+      description:
+        "Route IDs the change is limited to, including nested ones, matched in any case. Empty or unset means every route.",
     })
     .pipe(optional),
   when: ScheduleWindow,
@@ -455,9 +474,51 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     description:
       "System prompt this route carries, prepended to the caller's own system text on every request the route serves (persona routes, #1413: the design-code door's injected design prompt, carried by the route instead of a proxy). A route nested inside another route does not stack its prompt: only the addressed route's prompt applies.",
   }).pipe(optional),
-  targets: Schema.Array(Target).annotate({
-    description: "Ordered provider/model references. A route may include another route reference.",
-  }),
+  // The descriptions of the keys below sit inside optional(...): annotated outside it, a description never
+  // reaches the generated JSON schema, so editors could not show it.
+  targets: Schema.Array(Target)
+    .annotate({
+      description:
+        "Ordered provider/model references. A route may include another route reference. A * in the model matches within that one provider and is case-sensitive. Optional when include, contains or match supply the models.",
+    })
+    .pipe(optional),
+  include: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'Patterns whose models join the route after its targets, in provider order. Only models of connected providers are matched, so connecting a provider adds its matching models. * matches any run of characters, re: starts a regular expression, and case never matters. A pattern with / is tested against provider/model, one without against the model id in every provider. A route name, or opencode-route/<name>, in any case, stands for that route\'s models. E.g. ["*luna*", "anthropic/*haiku*", "small"].',
+    })
+    .pipe(optional),
+  exclude: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'Patterns, written as in include, whose models are removed from the route, including those its targets and nested routes bring. E.g. ["*-mini", "frontier-direct"].',
+    })
+    .pipe(optional),
+  contains: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'Text whose models join the route: found anywhere in provider/model, so a provider id matches too. Case never matters, and only models of connected providers are matched. E.g. ["haiku", "sonnet", "opus"].',
+    })
+    .pipe(optional),
+  notContains: Schema.Array(Schema.String)
+    .annotate({ description: "Text, written as in contains, whose models are removed from the route." })
+    .pipe(optional),
+  match: Schema.String.annotate({
+    description:
+      "One expression whose models join the route: patterns and route names joined by and, or, not and parentheses, e.g. \"(*luna* or *haiku*) and not *-mini\". Quote a term that has spaces or parentheses, such as 're:gpt-(5|6)$'. There is no xor.",
+  }).pipe(optional),
+  levels: Schema.Array(Schema.String)
+    .annotate({
+      description:
+        'The levels (variants) the route offers, e.g. ["low", "medium", "high"]. Each target runs a level through its remap, else its own variant of that name, else sits the level out. A level no target can run is left out and logged. Nested in another route, the route keeps its levels: its members sit out every other level. Unset, the route offers each level that at least one target runs and every other target runs or sits out, and none when a target is pinned with #variant.',
+    })
+    .pipe(optional),
+  variantRules: Schema.Array(VariantRule)
+    .annotate({
+      description:
+        "Level remaps for the route's models chosen by pattern, applied in order. They reach models of nested routes too, where the nested route's own rules come later. A target's own variants override them. A route nested as opencode-route/<id>#<level> runs only at that level, so its rules decide only whether a member sits that level out.",
+    })
+    .pipe(optional),
   cache_format: CacheFormat.pipe(optional),
   health: Health.pipe(optional),
   budgets: Schema.Record(Schema.String, Budget)
@@ -474,19 +535,24 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     description:
       "Total requests to make against one target before failing over to the next, so 2 allows one retry. Defaults to 2. Retries only happen before any response output, so no tool call ever runs twice.",
   }).pipe(optional),
-  autonomy: Schema.Literals(["fixed", "rules", "adaptive", "predictive", "agent"]).annotate({
-    description:
-      "How much the route may decide for itself; each level includes the ones before it. fixed: configured order with failover only. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing. Unset keeps the behavior from before levels existed.",
-  }).pipe(optional),
-  selection: Schema.Literals(["ordered", "round-robin", "weighted"]).annotate({
-    description:
-      "How a session picks its target: ordered uses the configured order (default), round-robin rotates per new session, weighted draws by weights. Either way the choice is sticky for the session and failover falls through the remaining targets in order.",
-  }).pipe(optional),
+  autonomy: Schema.Literals(["fixed", "rules", "adaptive", "predictive", "agent"])
+    .annotate({
+      description:
+        "How much the route may decide for itself; each level includes the ones before it. fixed: failover only, starting from the configured order; schedules, the user's prefer and avoid rules and quota demotion still apply. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing; once any route is agent or unset, every session gets them, and they cover every route. Unset keeps the behavior from before levels existed.",
+    })
+    .pipe(optional),
+  selection: Schema.Literals(["ordered", "round-robin", "weighted"])
+    .annotate({
+      description:
+        "How a session picks its target: ordered (default) takes the heaviest ready target, in configured order when weights are equal; round-robin rotates per new session in proportion to weight; weighted draws by weight. Either way the choice is sticky for the session, and failover picks again the same way among the targets not yet tried.",
+    })
+    .pipe(optional),
   weights: Schema.Record(Schema.String, Schema.Finite.check(Schema.isGreaterThan(0)))
     .annotate({
       description:
-        'Relative ratios for the weighted selection mode, keyed by target model reference, e.g. { "openai/gpt-6-luna": 3, "github-copilot/gpt-6-luna": 1 } sends about 3/4 of new sessions to the first target. Targets without a weight count as 1. A nested route is keyed as "opencode-route/<id>" and is chosen as one unit by this route; it then picks among its own members using its own selection and weights.',
-    }).pipe(optional),
+        'Relative weights keyed by target model reference. They rank targets in every selection mode, failover included: ordered tries the heaviest first, round-robin rotates in proportion, and weighted draws in proportion, so { "openai/gpt-6-luna": 3, "github-copilot/gpt-6-luna": 1 } sends about 3/4 of new weighted sessions to the first target. Targets without a weight count as 1, and a fixed route ignores weights. A nested route is keyed as "opencode-route/<id>", in any case, and is chosen as one unit by this route; it then picks among its own members using its own selection and weights.',
+    })
+    .pipe(optional),
   schedules: Schema.Array(Schedule).annotate({
     description:
       "Time-bound weight changes for this route's targets, e.g. peak hours that make a provider lighter. Weights order every selection mode: inside an active window the targets are ranked by effective weight, and equal weights keep their configured order.",

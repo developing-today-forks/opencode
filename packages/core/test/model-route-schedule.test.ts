@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { Result } from "effect"
 import { ModelRouteSchedule } from "@opencode/core/model-route-schedule"
 
 // January 5, 2026 is a Monday; 15:00 UTC is mid-afternoon there.
@@ -32,7 +33,7 @@ describe("ModelRouteSchedule.parse", () => {
     expect(ModelRouteSchedule.parse({ start: "9:30:60" })).toBeUndefined()
     expect(ModelRouteSchedule.parse({ end: "17:00:99" })).toBeUndefined()
     expect(ModelRouteSchedule.parse({ end: "noon" })).toBeUndefined()
-    expect(ModelRouteSchedule.parse({ daysOfWeek: [] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ daysOfWeek: ["someday"] })).toBeUndefined()
     expect(ModelRouteSchedule.parse({ daysOfMonth: [0, 42] })).toBeUndefined()
     // A mixed list is rejected too: dropping the unreadable entry would narrow the window.
     expect(ModelRouteSchedule.parse({ daysOfWeek: ["mon", "frieday"] })).toBeUndefined()
@@ -62,9 +63,42 @@ describe("ModelRouteSchedule.parse", () => {
     expect(ModelRouteSchedule.parse({ daysOfWeek: ["06", "frieday"] })).toBeUndefined()
   })
 
+    // Reconciliation note (task 13229): the branch read an empty day list as every day;
+  // the #2041 semantics on main won the merge - the schema and this parser reject an
+  // empty list whole, so a typo fails at load instead of silently widening the window.
+  test("an empty day list rejects the window whole", () => {
+    expect(ModelRouteSchedule.parse({ daysOfWeek: [] })).toBeUndefined()
+    expect(ModelRouteSchedule.parse({ daysOfMonth: [], start: "09:00", timezone: "UTC" })).toBeUndefined()
+  })
+
   test("keeps named days from every conventional spelling", () => {
     const parsed = ModelRouteSchedule.parse({ daysOfWeek: ["tues", "thurs", "sun"] })
     expect(parsed?.daysOfWeek).toEqual([0, 2, 4])
+  })
+})
+
+describe("ModelRouteSchedule.read", () => {
+  test("names every field it cannot use, so the config loader can report them", () => {
+    const result = ModelRouteSchedule.read({
+      start: "9am",
+      end: "25:00",
+      timezone: "Mars/Olympus",
+      from: 2_000,
+      until: 1_000,
+    })
+    expect(Result.isFailure(result) ? result.failure : []).toEqual([
+      { path: ["start"], message: 'start "9am" is not HH:mm' },
+      { path: ["end"], message: 'end "25:00" is not HH:mm' },
+      { path: ["timezone"], message: 'timezone "Mars/Olympus" is not a known IANA timezone' },
+      { path: ["until"], message: "until is not after from, so the window never opens" },
+    ])
+  })
+
+  test("agrees with parse on a window it can read", () => {
+    const input = { daysOfWeek: ["fri", "mon"], start: "9:00", timezone: "America/Chicago" }
+    const result = ModelRouteSchedule.read(input)
+    expect(Result.isSuccess(result) ? result.success : undefined).toEqual(ModelRouteSchedule.parse(input))
+    expect(ModelRouteSchedule.parse(input)).toEqual({ daysOfWeek: [1, 5], start: "09:00", timezone: "America/Chicago" })
   })
 })
 

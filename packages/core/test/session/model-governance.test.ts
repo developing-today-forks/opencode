@@ -581,6 +581,79 @@ describe("ModelGovernance.assertAllowed", () => {
     await run({ all: [excluding], parent: excluding, configInput, model: ref("opencode-route/main#high") })
   })
 
+  test("a route target whose remap sits the requested variant out is not judged, as it never runs there", async () => {
+    const configInput = {
+      experimental: {
+        model_routes: {
+          main: { targets: [{ model: "test/a", variants: { low: false } }, "test/b", "opencode-route/inner"] },
+          // A nested route written as a target object sits the variant out as a whole.
+          wrapped: { targets: [{ model: "opencode-route/inner", variants: { low: false } }, "test/b"] },
+          inner: { targets: ["test/c"] },
+        },
+      },
+    }
+    const allowing = info("ses_allowing", { subagentPolicy: { models: ["test/b", "test/c"] } })
+    await run({ all: [allowing], parent: allowing, configInput, model: ref("opencode-route/main#low") })
+    // At another variant test/a runs, so it is judged and denied.
+    const message = await runDenied({
+      all: [allowing],
+      parent: allowing,
+      configInput,
+      model: ref("opencode-route/main#high"),
+    })
+    expect(message).toContain("test/a#high")
+    const onlyB = info("ses_only_b", { subagentPolicy: { models: ["test/b"] } })
+    await run({ all: [onlyB], parent: onlyB, configInput, model: ref("opencode-route/wrapped#low") })
+    expect(
+      await runDenied({ all: [onlyB], parent: onlyB, configInput, model: ref("opencode-route/wrapped#high") }),
+    ).toContain("test/c#high")
+  })
+
+  // Governance lists a route's models from its configuration; a route that picks them by pattern or remaps them
+  // by rule can run models that list does not hold, so a restricted launch refuses it rather than guessing.
+  test("under a restriction, a route that picks models by pattern or remaps them by rule is refused", async () => {
+    const configInput = {
+      experimental: {
+        model_routes: {
+          patterned: { include: ["test/*"] },
+          ruled: { targets: ["test/a"], variantRules: [{ match: "*", map: { low: "high" } }] },
+          outer: { targets: ["test/a", "opencode-route/patterned"] },
+        },
+      },
+    }
+    const excluding = info("ses_excluding", { subagentPolicy: { excludedModels: ["test/x"] } })
+    for (const route of ["patterned", "ruled", "outer"]) {
+      const message = await runDenied({
+        all: [excluding],
+        parent: excluding,
+        configInput,
+        model: ref(`opencode-route/${route}`),
+      })
+      expect(message).toContain("include, contains or match, or remaps levels by variantRules")
+    }
+    expect(
+      await runDenied({ all: [excluding], parent: excluding, configInput, model: ref("opencode-route/outer") }),
+    ).toContain("opencode-route/patterned")
+    // Without a restriction nothing is judged, as before.
+    const open = info("ses_open")
+    await run({ all: [open], parent: open, configInput, model: ref("opencode-route/patterned") })
+  })
+
+  test("a route named in another case is followed to its targets", async () => {
+    const configInput = {
+      experimental: { model_routes: { outer: { targets: ["opencode-route/INNER"] }, inner: { targets: ["test/b"] } } },
+    }
+    const restricted = info("ses_restricted", { subagentPolicy: { models: ["test/a"] } })
+    const message = await runDenied({
+      all: [restricted],
+      parent: restricted,
+      configInput,
+      model: ref("opencode-route/outer"),
+    })
+    expect(message).toContain("test/b")
+    expect(message).toContain("target of route")
+  })
+
   test("a wildcard route target expanding to an excluded model denies (#530a)", async () => {
     const parent = info("ses_parent", { subagentPolicy: { excludedModels: ["test/b"] } })
     const configInput = { experimental: { model_routes: { main: { targets: [{ model: "test/*" }] } } } }

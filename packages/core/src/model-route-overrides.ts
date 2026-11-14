@@ -149,7 +149,9 @@ export const applies = (
   (item.schedule === undefined || ModelRouteSchedule.active(item.schedule, now)) &&
   (item.providers.length === 0 || item.providers.some((id) => id.toLowerCase() === target.providerID.toLowerCase())) &&
   (item.models.length === 0 || item.models.some((pattern) => glob(pattern).test(target.id))) &&
-  (item.routes.length === 0 || scope.routeID === undefined || item.routes.includes(scope.routeID)) &&
+  (item.routes.length === 0 ||
+    scope.routeID === undefined ||
+    item.routes.some((id) => id.toLowerCase() === scope.routeID?.toLowerCase())) &&
   (item.fixed || scope.fixed !== true)
 
 let location: string | undefined

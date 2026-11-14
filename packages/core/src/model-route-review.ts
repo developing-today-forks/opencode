@@ -80,7 +80,8 @@ export interface Member {
   readonly expectedShare: number | null
   /** The share of those draws it won. Compare with `expectedShare`. */
   readonly takeRate: number | null
-  /** Selections in which it was left out, by reason: cooldown, provider-limit, user-skip, soft-budget, over-limit, already-tried. */
+  /** Selections in which it was left out, by reason: cooldown, provider-limit, user-skip, soft-budget,
+   * over-limit, already-tried, or sits-out-level when its remap sits the requested level out. */
   readonly excluded: Readonly<Record<string, number>>
   /** The per-target context ceiling the pool declares for this target, or null when it declares none. */
   readonly configuredLimit: number | null
@@ -127,12 +128,13 @@ const referenceOf = (reference: { readonly providerID: string; readonly model: s
 /** `provider/model` without the `#variant` a configured reference may carry. */
 const bare = (reference: string) => reference.replace(/#.*$/, "")
 
-/** The pool as its configuration states it, in the terms the history uses. */
+/** The pool as its configuration states it, in the terms the history uses. Models a pool gains through
+ * include, contains or match are not listed here; they appear once the history has offered them. */
 export const configured = (route: ConfigModelRoutes.Route): Configured => ({
   selection: route.selection ?? "ordered",
   ...(route.autonomy !== undefined ? { autonomy: route.autonomy } : {}),
   ...(route.hedgeAfterMs !== undefined ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
-  targets: route.targets.map((target) => {
+  targets: (route.targets ?? []).map((target) => {
     if (typeof target === "string") return bare(target)
     return bare("providerID" in target ? referenceOf(target) : referenceOf(target.model))
   }),
@@ -140,7 +142,7 @@ export const configured = (route: ConfigModelRoutes.Route): Configured => ({
     Object.entries(route.weights ?? {}).map(([reference, weight]) => [bare(reference), weight]),
   ),
   limits: Object.fromEntries(
-    route.targets.flatMap((target): [string, number][] => {
+    (route.targets ?? []).flatMap((target): [string, number][] => {
       if (typeof target === "string" || "providerID" in target) return []
       const ceiling = target.limit?.context
       return ceiling === undefined ? [] : [[bare(referenceOf(target.model)), ceiling]]

@@ -37,9 +37,11 @@ exact config keys.
 
 ### Pools
 
-A pool is `experimental.model_routes.<id>`: an ordered list of targets, shown as the
-model `opencode-route/<id>`. A category's model can be a pool, and a pool can list
-another pool as a target.
+A pool is `experimental.model_routes.<id>`: an ordered list of targets plus the
+models its matching keys (`include`, `contains`, `match`) add, shown as the model
+`opencode-route/<id>`. A category's model can be a pool, and a pool can list
+another pool as a target or name it in a matching key. `route_stats` lists only the
+configured `targets` as members until the history has offered the matched ones.
 
 - `selection`: `ordered` (default; the first ready target takes the traffic, and the
   rest are failover, ranked by effective weight), `round-robin` (weights are priority
@@ -54,8 +56,9 @@ another pool as a target.
   (60000), `quotaCooldownMs` (900000). A target that fails goes on cooldown.
 - `budgets`: per target, `requestsPerMinute`, `requestsPerDay`, `tokensPerMinute`,
   `tokensPerDay`, `softLimit` (default 0.9). A target at its soft limit is passed over.
-- `attempts`: tries per target before failover (default 1); retries only before any
-  output.
+- `attempts`: requests per target before failover (default 2, so one retry).
+  Retries happen only before any output, and a rate limit or quota error moves on
+  at once.
 - `hedgeAfterMs`: after this many milliseconds without output, the next target gets
   the same request, and the first answer wins. It costs a duplicate request.
 - `autonomy`: `fixed`, `rules`, `adaptive`, `predictive` or `agent`, each including
@@ -63,8 +66,8 @@ another pool as a target.
 
 A target is left out of a selection for one reason, which `route_stats` reports as
 `excluded`: `cooldown`, `provider-limit`, `user-skip`, `soft-budget`,
-`over-limit` (the request does not fit the target's ceiling), or
-`already-tried` (it already failed in this request).
+`over-limit` (the request does not fit the target's ceiling), `already-tried` (it already failed in this request), or `sits-out-level` (its
+remap sits out the requested level, which is configuration, not a fault).
 
 ### How effective weight is formed
 

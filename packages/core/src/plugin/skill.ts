@@ -34,7 +34,7 @@ export const RoutingUsageDescription =
 export const PlanTrackingDescription =
   "Use when the user talks about their subscriptions, quotas, credits or plan limits: recording or updating a plan, how to find its current details, notes about running out or having quota left over, or what they expect from a plan or model. Reads and records plan records with plan_info."
 export const RoutingConfigDescription =
-  "Use when the user wants to change OpenCode configuration for models: hide or show a model, turn a provider on or off, add a custom model, or change pools, weights, schedules, budgets, autonomy or tuning. Gives the exact keys and a safe way to apply the change."
+  "Use when the user wants to change OpenCode configuration for models: hide or show a model, turn a provider on or off, add a custom model, or change pools, the patterns that pick their models, their effort levels, weights, schedules, budgets, autonomy or tuning. Gives the exact keys and a safe way to apply the change."
 
 export const Plugin = define({
   id: "opencode.skill",

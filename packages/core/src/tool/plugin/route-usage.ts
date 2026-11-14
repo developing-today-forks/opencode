@@ -4,6 +4,7 @@ import type { ToolEditor } from "@opencode/plugin/effect/tool"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { Effect, Option, Schema } from "effect"
 import { ModelPlan } from "../../model-plan.js"
+import { ModelRouteMatch } from "../../model-route-match.js"
 import { ModelRouteLog } from "../../model-route-log.js"
 import { ModelRouteReview } from "../../model-route-review.js"
 import { ModelUsage } from "../../model-usage.js"
@@ -54,9 +55,14 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
     const now = options.now?.() ?? Date.now()
     const hours = input.hours ?? 168
     const since = now - hours * 3_600_000
+    // A pool id matches in any case; history records the configured spelling.
+    const routeID =
+      input.route === undefined
+        ? undefined
+        : (ModelRouteMatch.poolsNamed(source.routes.keys(), input.route)[0] ?? input.route)
     const pools = new Map<string, readonly string[]>()
     for (const [id, route] of source.routes) {
-      if (input.route === undefined || id === input.route) pools.set(id, ModelRouteReview.configured(route).targets)
+      if (routeID === undefined || id === routeID) pools.set(id, ModelRouteReview.configured(route).targets)
     }
     const matches = (target: { readonly providerID: string; readonly modelID: string }) =>
       (input.provider === undefined || target.providerID === input.provider) &&
@@ -122,7 +128,7 @@ export const collect = (input: Input, source: Source = NO_SOURCE, options: Optio
           input.session === undefined ? [] : yield* ModelRouteLog.sessionAttempts(db, input.session, 50)
         const days = yield* ModelRouteLog.dailyUsage(db, since)
         const turns = yield* ModelRouteLog.turnAttempts(db, since, input.session)
-        const offers = (yield* ModelRouteLog.offerUsage(db, since, input.route)) as ModelUsage.OfferRow[]
+        const offers = (yield* ModelRouteLog.offerUsage(db, since, routeID)) as ModelUsage.OfferRow[]
         const windowTotals: { plan: string; window: string; totals: ModelUsage.Totals }[] = []
         for (const { plan, window } of windows) {
           if (window.windowHours === undefined) continue

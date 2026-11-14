@@ -91,6 +91,55 @@
       }
     },
     "/auth/connect/{code}": {
+      "post": {
+        "tags": ["server"],
+        "operationId": "server.redeem",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "PairingSession",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Redeem a pairing code with an explicit state-changing request. Browsers land on GET first (which never consumes the code) and confirm here; requests that accept JSON receive a session token to use as the password.",
+        "summary": "Confirm pairing code redemption"
+      },
       "get": {
         "tags": ["server"],
         "operationId": "server.connect",
@@ -16256,6 +16305,12 @@
                             "minimum": 1,
                             "description": "Each consecutive failure multiplies the bench by this. 1 keeps every bench at its base. Defaults to 2."
                           },
+                          "failureCapMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 86400000,
+                            "description": "The longest bench an ordinary failure (transport, provider-internal, unclassified) can impose, however far its consecutive-failure ladder escalates: the leg gets this short grace and the route moves on. Quota and authentication benches are not bounded by it. Defaults to 120000."
+                          },
                           "retryAfterMinMs": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
@@ -16379,6 +16434,18 @@
                         },
                         "additionalProperties": false
                       },
+                      "membership": {
+                        "type": "object",
+                        "properties": {
+                          "waitMs": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 86400000,
+                            "description": "The longest a request waits for a membership slot to free before failing over to the next leg. The wait is bounded so it can never hold a session on a capped leg; when the bound expires the request moves on. Defaults to 5000."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
                       "continuity": {
                         "type": "object",
                         "properties": {
@@ -16478,6 +16545,12 @@
                         "type": "number",
                         "minimum": 1,
                         "description": "Each consecutive failure multiplies the bench by this. 1 keeps every bench at its base. Defaults to 2."
+                      },
+                      "failureCapMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 86400000,
+                        "description": "The longest bench an ordinary failure (transport, provider-internal, unclassified) can impose, however far its consecutive-failure ladder escalates: the leg gets this short grace and the route moves on. Quota and authentication benches are not bounded by it. Defaults to 120000."
                       },
                       "retryAfterMinMs": {
                         "type": "integer",
@@ -16598,6 +16671,18 @@
                         "type": "integer",
                         "exclusiveMinimum": 0,
                         "description": "Models of one provider cooling at once that demote the provider itself to last resort. Defaults to 2."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "membership": {
+                    "type": "object",
+                    "properties": {
+                      "waitMs": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 86400000,
+                        "description": "The longest a request waits for a membership slot to free before failing over to the next leg. The wait is bounded so it can never hold a session on a capped leg; when the bound expires the request moves on. Defaults to 5000."
                       }
                     },
                     "additionalProperties": false
@@ -17036,7 +17121,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Route IDs the change is limited to, including nested ones. Empty or unset means every route."
+            "description": "Route IDs the change is limited to, including nested ones, matched in any case. Empty or unset means every route."
           },
           "when": {
             "anyOf": [
@@ -17159,7 +17244,53 @@
             "items": {
               "$ref": "#/components/schemas/Config.ModelRoute.Target"
             },
-            "description": "Ordered provider/model references. A route may include another route reference."
+            "description": "Ordered provider/model references. A route may include another route reference. A * in the model matches within that one provider and is case-sensitive. Optional when include, contains or match supply the models."
+          },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Patterns whose models join the route after its targets, in provider order. Only models of connected providers are matched, so connecting a provider adds its matching models. * matches any run of characters, re: starts a regular expression, and case never matters. A pattern with / is tested against provider/model, one without against the model id in every provider. A route name, or opencode-route/<name>, in any case, stands for that route's models. E.g. [\"*luna*\", \"anthropic/*haiku*\", \"small\"]."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Patterns, written as in include, whose models are removed from the route, including those its targets and nested routes bring. E.g. [\"*-mini\", \"frontier-direct\"]."
+          },
+          "contains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Text whose models join the route: found anywhere in provider/model, so a provider id matches too. Case never matters, and only models of connected providers are matched. E.g. [\"haiku\", \"sonnet\", \"opus\"]."
+          },
+          "notContains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Text, written as in contains, whose models are removed from the route."
+          },
+          "match": {
+            "type": "string",
+            "description": "One expression whose models join the route: patterns and route names joined by and, or, not and parentheses, e.g. \"(*luna* or *haiku*) and not *-mini\". Quote a term that has spaces or parentheses, such as 're:gpt-(5|6)$'. There is no xor."
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The levels (variants) the route offers, e.g. [\"low\", \"medium\", \"high\"]. Each target runs a level through its remap, else its own variant of that name, else sits the level out. A level no target can run is left out and logged. Nested in another route, the route keeps its levels: its members sit out every other level. Unset, the route offers each level that at least one target runs and every other target runs or sits out, and none when a target is pinned with #variant."
+          },
+          "variantRules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Config.ModelRoute.VariantRuleEncoded"
+            },
+            "description": "Level remaps for the route's models chosen by pattern, applied in order. They reach models of nested routes too, where the nested route's own rules come later. A target's own variants override them. A route nested as opencode-route/<id>#<level> runs only at that level, so its rules decide only whether a member sits that level out."
           },
           "cache_format": {
             "$ref": "#/components/schemas/Model.CacheFormat"
@@ -17241,12 +17372,12 @@
           "autonomy": {
             "type": "string",
             "enum": ["fixed", "rules", "adaptive", "predictive", "agent"],
-            "description": "How much the route may decide for itself; each level includes the ones before it. fixed: configured order with failover only. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing. Unset keeps the behavior from before levels existed."
+            "description": "How much the route may decide for itself; each level includes the ones before it. fixed: failover only, starting from the configured order; schedules, the user's prefer and avoid rules and quota demotion still apply. rules: adds selection modes, weights, budgets and provider rate-limit holds. adaptive: adds the scheduled review that skips or down-weights targets from recent history. predictive: adds time-of-day and error-text prediction. agent: adds route_stats and route_adjust so the model can inspect and steer routing; once any route is agent or unset, every session gets them, and they cover every route. Unset keeps the behavior from before levels existed."
           },
           "selection": {
             "type": "string",
             "enum": ["ordered", "round-robin", "weighted"],
-            "description": "How a session picks its target: ordered uses the configured order (default), round-robin rotates per new session, weighted draws by weights. Either way the choice is sticky for the session and failover falls through the remaining targets in order."
+            "description": "How a session picks its target: ordered (default) takes the heaviest ready target, in configured order when weights are equal; round-robin rotates per new session in proportion to weight; weighted draws by weight. Either way the choice is sticky for the session, and failover picks again the same way among the targets not yet tried."
           },
           "weights": {
             "type": "object",
@@ -17254,7 +17385,7 @@
               "type": "number",
               "exclusiveMinimum": 0
             },
-            "description": "Relative ratios for the weighted selection mode, keyed by target model reference, e.g. { \"openai/gpt-6-luna\": 3, \"github-copilot/gpt-6-luna\": 1 } sends about 3/4 of new sessions to the first target. Targets without a weight count as 1. A nested route is keyed as \"opencode-route/<id>\" and is chosen as one unit by this route; it then picks among its own members using its own selection and weights."
+            "description": "Relative weights keyed by target model reference. They rank targets in every selection mode, failover included: ordered tries the heaviest first, round-robin rotates in proportion, and weighted draws in proportion, so { \"openai/gpt-6-luna\": 3, \"github-copilot/gpt-6-luna\": 1 } sends about 3/4 of new weighted sessions to the first target. Targets without a weight count as 1, and a fixed route ignores weights. A nested route is keyed as \"opencode-route/<id>\", in any case, and is chosen as one unit by this route; it then picks among its own members using its own selection and weights."
           },
           "schedules": {
             "type": "array",
@@ -17277,7 +17408,6 @@
             "description": "Limits the route presents as its own, regardless of its targets' limits."
           }
         },
-        "required": ["targets"],
         "additionalProperties": false
       },
       "Config.ModelRoute.ScheduleEncoded": {
@@ -17343,19 +17473,27 @@
               },
               "defaultVariant": {
                 "type": "string",
-                "description": "Variant used when the route is selected without an explicit variant."
+                "description": "Variant used when the route is selected without an explicit variant. A nested route ignores it."
               },
               "variants": {
                 "type": "object",
                 "additionalProperties": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "boolean",
+                      "enum": [false]
+                    }
+                  ]
                 },
-                "description": "Remaps a route-level variant to this target's variant, e.g. { \"low\": \"high\" } runs this target at high when the route is selected at low."
+                "description": "Remaps a route-level variant to this target's variant, e.g. { \"low\": \"high\" } runs this target at high when the route is selected at low. false makes the target sit that level out, e.g. { \"max\": false }: it is never used at that level, not even as a last resort. Overrides the route's variantRules level by level. On a nested route only false applies, and the whole route sits that level out; a string remap, defaultVariant and until are ignored there, with a config warning."
               },
               "until": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "description": "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads."
+                "description": "Epoch milliseconds after which this target leaves the route. Used for time-limited pool membership; takes effect when the configuration reloads. A nested route ignores it."
               },
               "limit": {
                 "type": "object",
@@ -17400,6 +17538,32 @@
           }
         ]
       },
+      "Config.ModelRoute.VariantRuleEncoded": {
+        "type": "object",
+        "properties": {
+          "match": {
+            "type": "string",
+            "description": "Which models the rule covers: a pattern, a route name in any case, or an expression of them with and, or, not and parentheses, as in the route's match, e.g. \"*argon*\" or \"claude and not *haiku*\"."
+          },
+          "map": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean",
+                  "enum": [false]
+                }
+              ]
+            },
+            "description": "Route-level variant to the variant the model runs it at, or false to sit that level out, e.g. { \"xhigh\": \"high\", \"max\": false }. A later rule overrides an earlier one level by level, and a target's own variants override every rule."
+          }
+        },
+        "required": ["match", "map"],
+        "additionalProperties": false
+      },
       "Config.ModelRoute.WindowEncoded": {
         "type": "object",
         "properties": {
@@ -17433,11 +17597,14 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 6
+                },
+                {
+                  "type": "string"
                 }
               ],
-              "description": "A weekday as a name or 0 (Sunday) to 6 (Saturday)."
+              "description": "A weekday as a name (any case, padding ignored) or a number 0 (Sunday) to 6 (Saturday); numeric strings are accepted."
             },
-            "description": "Weekdays the window is active on. Empty or unset means every day."
+            "description": "Weekdays the window is active on. Unset means every day; an empty list is invalid."
           },
           "daysOfMonth": {
             "type": "array",
@@ -17451,11 +17618,14 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 31
+                },
+                {
+                  "type": "string"
                 }
               ],
-              "description": "A day of the month, 1 to 31, or -1 for the last day of the month."
+              "description": "A day of the month, 1 to 31, or -1 for the last day of the month; numeric strings are accepted."
             },
-            "description": "Days of the month the window is active on. Empty or unset means every day."
+            "description": "Days of the month the window is active on. Unset means every day; an empty list is invalid."
           },
           "dates": {
             "type": "array",
@@ -17476,7 +17646,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion."
+            "description": "Names of windows defined in experimental.routes.windows; while any named window is active, this window is not. A named window that is only a list of dates is a reusable holiday calendar shared by many windows. An unknown name or a reference cycle drops this window rather than applying it without its exclusion. An empty list is invalid."
           },
           "start": {
             "type": "string",
@@ -17491,13 +17661,11 @@
             "description": "IANA timezone such as \"America/Chicago\". Unset means the host's local timezone."
           },
           "from": {
-            "type": "integer",
-            "exclusiveMinimum": 0,
+            "type": "number",
             "description": "Epoch milliseconds before which the window never applies."
           },
           "until": {
-            "type": "integer",
-            "exclusiveMinimum": 0,
+            "type": "number",
             "description": "Epoch milliseconds after which the window never applies."
           }
         },
@@ -23058,6 +23226,22 @@
         },
         "additionalProperties": false
       },
+      "Session.AuthoritativeCost": {
+        "type": "object",
+        "properties": {
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "cacheSavings": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage.Info"
+          }
+        },
+        "required": ["cost", "cacheSavings", "tokens"],
+        "additionalProperties": false
+      },
       "Session.ForkBoundary": {
         "anyOf": [
           {
@@ -23347,6 +23531,9 @@
           },
           "cost": {
             "$ref": "#/components/schemas/Money.USD"
+          },
+          "costAuthoritative": {
+            "$ref": "#/components/schemas/Session.AuthoritativeCost"
           },
           "tokens": {
             "$ref": "#/components/schemas/TokenUsage.Info"
@@ -24122,6 +24309,10 @@
             "required": ["created"],
             "additionalProperties": false
           },
+          "delivery": {
+            "type": "string",
+            "enum": ["steer", "queue"]
+          },
           "text": {
             "type": "string"
           },
@@ -24280,6 +24471,10 @@
             "required": ["created"],
             "additionalProperties": false
           },
+          "delivery": {
+            "type": "string",
+            "enum": ["steer", "queue"]
+          },
           "text": {
             "type": "string"
           },
@@ -24387,6 +24582,12 @@
             "type": "integer",
             "minimum": 100,
             "maximum": 599
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
           },
           "response": {
             "type": "object",

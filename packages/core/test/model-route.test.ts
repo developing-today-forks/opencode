@@ -1269,6 +1269,15 @@ describe("ModelRoute scheduled weights", () => {
         false,
       ),
     ).toEqual([1, 0])
+    // A route id names a pool, so it matches in any case.
+    expect(
+      ModelRoute.orderTargets(
+        { ...base, id: "OTHER", schedules: [scoped] } as unknown as ModelRoute.Definition,
+        ready(2),
+        undefined,
+        false,
+      ),
+    ).toEqual([1, 0])
   })
 
   test("a schedule on a nested route applies inside it", () => {

@@ -1,0 +1,319 @@
+{
+  "cheap-fast": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna",
+        "fixedVariant": false,
+        "budget": {
+          "requestsPerDay": 500,
+          "softLimit": 0.8
+        }
+      },
+      {
+        "ref": "github-copilot/gpt-6-luna",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "cheap-fast",
+        "selection": "weighted",
+        "weights": [3, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          }
+        ]
+      }
+    ],
+    "variants": ["medium", "high"]
+  },
+  "luna-stack": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna",
+        "fixedVariant": false,
+        "defaultVariant": "max",
+        "variantMap": {
+          "low": "high",
+          "medium": "high"
+        }
+      },
+      {
+        "ref": "github-copilot/gpt-6-luna",
+        "fixedVariant": false,
+        "defaultVariant": "medium"
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "luna-stack",
+        "selection": "ordered",
+        "weights": [1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          }
+        ]
+      }
+    ],
+    "variants": ["medium", "high"]
+  },
+  "family": {
+    "leaves": [
+      {
+        "ref": "anthropic/claude-sonnet-4-5",
+        "fixedVariant": false
+      },
+      {
+        "ref": "anthropic/claude-opus-4-1",
+        "fixedVariant": false
+      },
+      {
+        "ref": "openrouter/anthropic/claude-sonnet-4-5",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "family",
+        "selection": "ordered",
+        "weights": [1, 1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          },
+          {
+            "leaf": 2
+          }
+        ]
+      }
+    ],
+    "variants": ["high"]
+  },
+  "pinned": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna#high",
+        "fixedVariant": true
+      },
+      {
+        "ref": "openai/gpt-6-astra",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "pinned",
+        "selection": "ordered",
+        "weights": [1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          }
+        ]
+      }
+    ],
+    "variants": []
+  },
+  "nested": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna#high",
+        "fixedVariant": true,
+        "budget": {
+          "requestsPerDay": 500,
+          "softLimit": 0.8
+        }
+      },
+      {
+        "ref": "github-copilot/gpt-6-luna#high",
+        "fixedVariant": true,
+        "budget": {
+          "tokensPerDay": 1000000
+        }
+      },
+      {
+        "ref": "anthropic/claude-sonnet-4-5",
+        "fixedVariant": false
+      },
+      {
+        "ref": "anthropic/claude-opus-4-1",
+        "fixedVariant": false
+      },
+      {
+        "ref": "openrouter/anthropic/claude-sonnet-4-5",
+        "fixedVariant": false
+      },
+      {
+        "ref": "openai/gpt-6-astra",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "nested",
+        "selection": "round-robin",
+        "weights": [1, 2, 1],
+        "schedules": [
+          {
+            "match": {
+              "targets": ["openai/*"]
+            },
+            "window": {
+              "daysOfWeek": [0, 6]
+            },
+            "factor": 0.5
+          }
+        ],
+        "children": [
+          {
+            "node": 1
+          },
+          {
+            "node": 2
+          },
+          {
+            "leaf": 5
+          }
+        ]
+      },
+      {
+        "routeID": "cheap-fast",
+        "selection": "weighted",
+        "weights": [3, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          }
+        ]
+      },
+      {
+        "routeID": "family",
+        "selection": "ordered",
+        "weights": [1, 1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 2
+          },
+          {
+            "leaf": 3
+          },
+          {
+            "leaf": 4
+          }
+        ]
+      }
+    ],
+    "variants": []
+  },
+  "self": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna-mini",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "self",
+        "selection": "ordered",
+        "weights": [1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          }
+        ]
+      }
+    ],
+    "variants": ["low", "high"]
+  },
+  "nothing": {
+    "leaves": [],
+    "nodes": [
+      {
+        "routeID": "nothing",
+        "selection": "ordered",
+        "weights": [],
+        "schedules": [],
+        "children": []
+      }
+    ],
+    "variants": []
+  },
+  "pinned-stack": {
+    "leaves": [
+      {
+        "ref": "openai/gpt-6-luna#high",
+        "fixedVariant": true,
+        "defaultVariant": "max",
+        "variantMap": {
+          "low": "high",
+          "medium": "high"
+        }
+      },
+      {
+        "ref": "github-copilot/gpt-6-luna#high",
+        "fixedVariant": true,
+        "defaultVariant": "medium"
+      },
+      {
+        "ref": "anthropic/claude-sonnet-4-5",
+        "fixedVariant": false
+      }
+    ],
+    "nodes": [
+      {
+        "routeID": "pinned-stack",
+        "selection": "ordered",
+        "weights": [1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "node": 1
+          },
+          {
+            "leaf": 2
+          }
+        ]
+      },
+      {
+        "routeID": "luna-stack",
+        "selection": "ordered",
+        "weights": [1, 1],
+        "schedules": [],
+        "children": [
+          {
+            "leaf": 0
+          },
+          {
+            "leaf": 1
+          }
+        ]
+      }
+    ],
+    "variants": []
+  }
+}

@@ -27,9 +27,10 @@ approves the specific change.
   picker, and pool targets that use it cannot be reached.
 - Allow-list: `"enabled_providers": ["<providerID>", ...]` turns off every provider
   it does not name. Use it only when the user asks for an allow-list.
-- The same thing as policies, in `experimental.policies`:
+- The same thing as policies, in the top-level `policies` list:
   `{ "action": "provider.use", "resource": "<providerID>", "effect": "deny" }`, or
-  `"allow"` to switch a denied provider back on.
+  `"allow"` to switch a denied provider back on. `experimental.policies` is the
+  deprecated name for that list: it still loads, but write new rules in `policies`.
 - In OpenChamber, Settings → Providers has an on/off control. `/connect` in OpenCode
   connects a provider. Never edit credential files by hand.
 
@@ -84,26 +85,92 @@ model `opencode-route/<id>`.
 - `targets`: `"provider/model"`, `"provider/model#variant"`, or
   `{ "model": "provider/model", "defaultVariant", "variants", "until" }`. `until` is
   an epoch-millisecond time after which the target leaves the pool. A target can be
-  another pool, written `"opencode-route/<id>"`.
+  another pool, written `"opencode-route/<id>"`. A `*` in a target stays inside that
+  provider and is case-sensitive. `targets` is optional when a matching key below
+  adds models.
+- Matching keys pick models across every connected provider, ignoring case. A
+  provider that is not connected contributes nothing until it is:
+  - `include`: patterns that add models, e.g. `["*luna*", "anthropic/*haiku*"]`.
+    `*` is any run of characters; a pattern with `/` is tested against
+    `provider/model`, one without against the model id; `re:` starts a regular
+    expression, unanchored unless it uses `^` or `$`.
+  - `exclude`: patterns that remove models, including targets and the members of
+    nested pools. `["*-5"]` drops `luna-5` and keeps `luna-5.5`.
+  - `contains`, `notContains`: plain text found anywhere in `provider/model`, so a
+    provider id matches too. `["haiku", "copilot"]`.
+  - `match`: one expression with `and`, `or`, `not` and parentheses, e.g.
+    `"(*luna* or *haiku*) and not *mini*"`. Quote a term with spaces or parentheses:
+    `"'re:gpt-(5|6)$' or *luna*"`. There is no `xor`.
+  - An entry or term that is another pool's id, or `opencode-route/<id>`, stands
+    for that pool's models, without its weights or effort settings. A pool naming
+    itself gets nothing from that name.
+  - Order: targets first, then matched models in provider order, each model once;
+    then the removals.
+- Effort levels (variants):
+  - `variants` on a target object remaps a level, `{ "xhigh": "high" }`; `false`
+    makes the target sit that level out, `{ "max": false }`. A target that sits out
+    a level is never used at it, not even as a last resort. On a nested pool's
+    target object only `false` applies, and the whole nested pool sits that level
+    out; a string remap, `defaultVariant` or `until` there is ignored and logged.
+  - `variantRules`: `[{ "match": "*argon*", "map": { "xhigh": "high", "max": false } }]`.
+    `match` takes a pattern, pool name or expression. Later rules override earlier
+    ones per level; a target's own `variants` override every rule.
+  - `levels`: `["low", "medium", "high"]` makes the pool offer exactly those. A
+    target that cannot run one sits it out; a level no target can run is dropped
+    and logged. Without `levels`, a level is offered when every target runs it or
+    sits it out and at least one target runs it. Nested in another pool, a pool
+    keeps its `levels`: its members sit out every other level.
+  - A nested pool pinned as `opencode-route/<id>#<level>` runs only at that level
+    and brings each member that has that variant, at that variant. A remap or rule
+    applies to the levels of the pool that declares it, so those of the pinned pool
+    and the pools nested in it decide only whether a member sits the pin out. Such a
+    member is left out, and a later target or matching key that repeats it adds
+    nothing; a target with its own `#variant` is a separate member, as it is when the
+    pool is selected at that level. The others run at the pin at every level of the
+    pools above, unless one of those sits them out of a level. A pool pinned at a
+    level it does not declare adds nothing; reached inside a pinned pool without a
+    pin of its own, its members still count as left out.
+- A pool's name matches in any case wherever a pool is named: targets, matching
+  keys, `variantRules`, `weights` keys, schedule `routes`, route overrides and the
+  `route` input of `route_stats` and `route_usage`. An exact spelling wins; when
+  several pools match only ignoring case, the first in the config is used, with a
+  warning.
+- A subagent with allowed or excluded models runs a pool only when every target is
+  allowed. A pool that uses `include`, `contains`, `match` or `variantRules`, or
+  nests one, is refused there, since its models cannot be listed from config.
 - `selection`: `ordered` (the default), `round-robin`, or `weighted`.
 - `weights`: keyed by target; a target not listed weighs 1. In a `weighted` pool a
   weight is a relative ratio. In a `round-robin` pool it is a priority tier instead:
   equal weights rotate evenly, and a lower tier is tried only once every target above
-  it has failed. In an `ordered` pool weights rank the failover order.
+  it has failed. In an `ordered` pool weights rank the failover order. Models from matching keys are keyed by `provider/model` too.
 - `autonomy`: `fixed`, `rules`, `adaptive`, `predictive`, or `agent`. Each level
-  includes the ones before it. `agent` also exposes `route_stats`, `route_usage` and
-  `route_adjust` to the model.
+  includes the ones before it. Every session gets `route_usage` whenever any pool
+  exists, and gets `route_stats` and `route_adjust` once any pool is `agent` or has
+  no `autonomy`, whatever model the session runs. `route_stats` reports on every
+  pool, and a `route_adjust` adjustment applies to every pool that is not `fixed`.
 - `health`, `budgets`, `attempts`, `hedgeAfterMs`: see routing-review, section 1.
+
+A malformed pattern, regular expression or expression skips the whole pool, and a
+pool with none of `targets`, `include`, `contains` and `match` is skipped too. A
+schedule whose `when` cannot be read, or that has neither `factor` nor `weight`, is
+skipped on its own, and an unknown key anywhere in a pool is ignored, as is a string
+remap, `defaultVariant` or `until` on a nested pool's target object. Each gets a
+config warning that names the key. Check the log after editing a pool.
 
 Common changes:
 
 - Change a member's share or tier: edit its `weights` entry — a share in a `weighted`
   pool, a priority tier in a `round-robin` pool. Ordered pools rank failover by
   weight too, so a weight change there also changes the order.
-- Add a member: append it to `targets`, and give it a `weights` entry if it should
-  not weigh 1.
-- Remove a member for good: delete it from `targets` and `weights`. For a temporary
-  removal, give it an `until` instead, or use `route_adjust` skip.
+- Add a member: append it to `targets`, or widen `include`, and give it a `weights`
+  entry if it should not weigh 1.
+- Remove a member for good: delete it from `targets` and `weights`, or add it to
+  `exclude`. For a temporary removal, use `route_adjust` skip with `hours`, which
+  ends on its own. A target's `until` does not fit: the target leaves only when the
+  pools are next rebuilt after that time, such as on a config reload or a restart,
+  and it stays out until the config changes.
+- Keep a member out of one level: map that level to `false` in its `variants`, or in
+  a `variantRules` entry that matches it.
 - A new pool: add a new key under `model_routes`. Then point a category at
   `opencode-route/<id>` in OpenChamber (Settings → Routing).
 
@@ -165,8 +232,10 @@ Common changes:
 - `when` fields: `daysOfWeek` (`mon`..`sun`, or 0 to 6), `daysOfMonth` (1 to 31, or
   -1 for the last day), `start` and `end` as `HH:mm` (`end` exclusive; a start after
   the end runs past midnight), `timezone` (IANA), and `from` and `until` (epoch ms).
+  A day list that is empty or unset means every day.
 - A temporary fact ("credits expire Friday") belongs in `route_adjust`, not in config.
-  It needs approval and it expires on its own.
+  It needs approval. It expires on its own only when it has `hours`: one made with a
+  recurring window and no `hours` stays in force until `route_adjust` removes it.
 
 ## Tuning and notes
 
