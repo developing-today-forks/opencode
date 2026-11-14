@@ -968,12 +968,20 @@ export const layer = Layer.effect(
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
             // the target, below — so a probe is never consumed by a target the route passed over.
-            const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
+            // probeDue is self-gating (a quota bench must be standing past its reset; a
+            // probe-pending auth bench, code#9950, is due precisely because its cooldown
+            // has lapsed). While a probe is outstanding the scope admits nothing else.
+            const targetProbe = ModelRoute.probeDue(target, undefined, now)
             const credentialProbe =
-              credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+              credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            const targetProbeHeld = ModelRoute.probeInFlight(target, undefined, now)
+            const credentialProbeHeld =
+              credentialID !== undefined && ModelRoute.probeInFlight(target, credentialID, now)
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
+            else if (targetProbeHeld) unavailable.set(index, "bench-probe-in-flight")
+            else if (credentialProbeHeld) unavailable.set(index, "credential-bench-probe-in-flight")
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
             else if (providerBlock)
               unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
@@ -985,6 +993,8 @@ export const layer = Layer.effect(
             return (
               (until <= now || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
+              !targetProbeHeld &&
+              !credentialProbeHeld &&
               quotaBlock === undefined &&
               providerBlock === undefined &&
               membershipHeld <= now &&
