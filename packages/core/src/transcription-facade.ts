@@ -13,10 +13,11 @@ export * as TranscriptionFacade from "./transcription-facade.js"
  * registration.
  *
  * Phase 1 is batch only (§7): the façade never fake-streams, so a
- * `stream=true` request fails typed (§2.4). One provider is registered
- * end-to-end — OpenAI whisper-1, whose protocol defines the capability
- * shape the registry mirrors (§3). Further registrations are their own
- * tickets (§8.2); route names (`opencode-route/<route-id>`) resolve
+ * `stream=true` request fails typed (§2.4). Five providers are
+ * registered (§8.1 + §8.2) — OpenAI whisper-1, whose protocol defines the capability
+ * shape the registry mirrors (§3), plus Deepgram, Google, AssemblyAI and
+ * ElevenLabs, each verified against its recorded fixtures in packages/ai
+ * before enablement. Route names (`opencode-route/<route-id>`) resolve
  * once media routes are wired into the resolver — until then a label
  * that matches no concrete registration answers `model_not_found`,
  * which is the §2.4 answer for a model that matches no concrete ref
@@ -46,6 +47,10 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, UnsupportedOperationError } from "@opencode/ai"
 import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
 import { configure } from "@opencode/ai/providers/openai"
+import { configure as configureAssemblyAI } from "@opencode/ai/providers/assemblyai"
+import { configure as configureDeepgram } from "@opencode/ai/providers/deepgram"
+import { configure as configureElevenLabs } from "@opencode/ai/providers/elevenlabs"
+import { configure as configureGoogle } from "@opencode/ai/providers/google"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
@@ -104,6 +109,95 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
     audioLeavesMachine: true,
     retention:
       "Audio is processed by the OpenAI API and retained only under that API's data controls; the façade itself retains no audio.",
+    maxUploadBytes: 25 * MIB,
+  },
+  {
+    ref: "deepgram/nova-3",
+    providerID: "deepgram",
+    modelID: "nova-3",
+    // The Deepgram protocol's shape for nova-3 (protocols/deepgram-transcription.ts):
+    // an inline (batch) route; utterances give segment timestamps and the
+    // word timings give word timestamps; diarization is a model choice
+    // (diarize_model), not a separate model.
+    capabilities: {
+      stream: false,
+      timestamps: ["segment", "word"],
+      diarize: true,
+      maxDurationSeconds: 600,
+      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+    },
+    backend: { kind: "http" },
+    apiKeyEnv: "DEEPGRAM_API_KEY",
+    audioLeavesMachine: true,
+    retention:
+      "Audio is processed by the Deepgram API and retained only under that API's data controls; the façade itself retains no audio.",
+    maxUploadBytes: 25 * MIB,
+  },
+  {
+    ref: "google/gemini-3.5-transcribe",
+    providerID: "google",
+    modelID: "gemini-3.5-transcribe",
+    // The Google protocol's shape (protocols/google-transcription.ts): a
+    // streaming route natively (the façade's phase-1 route stays batch
+    // only, §7); the finish event carries segment and word timings, and
+    // diarization is a generation-config option. Only `transcribe`
+    // models are accepted by the protocol.
+    capabilities: {
+      stream: true,
+      timestamps: ["segment", "word"],
+      diarize: true,
+      maxDurationSeconds: 600,
+      mediaTypes: ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/wave", "audio/aiff", "audio/x-aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/x-flac"],
+    },
+    backend: { kind: "http" },
+    apiKeyEnv: "GOOGLE_GENERATIVE_AI_API_KEY",
+    audioLeavesMachine: true,
+    retention:
+      "Audio is processed by the Google Gemini API and retained only under that API's data controls; the façade itself retains no audio.",
+    maxUploadBytes: 25 * MIB,
+  },
+  {
+    ref: "assemblyai/universal-3-5-pro",
+    providerID: "assemblyai",
+    modelID: "universal-3-5-pro",
+    // The AssemblyAI protocol's shape (protocols/assemblyai-transcription.ts):
+    // a queued submit-and-poll route, still one façade call (§3);
+    // utterances give segment timestamps with speakers, words give word
+    // timestamps, and speaker labels are the diarization path.
+    capabilities: {
+      stream: false,
+      timestamps: ["segment", "word"],
+      diarize: true,
+      maxDurationSeconds: 600,
+      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+    },
+    backend: { kind: "http" },
+    apiKeyEnv: "ASSEMBLYAI_API_KEY",
+    audioLeavesMachine: true,
+    retention:
+      "Audio is processed by the AssemblyAI API and retained only under that API's data controls; the façade itself retains no audio.",
+    maxUploadBytes: 25 * MIB,
+  },
+  {
+    ref: "elevenlabs/scribe_v2",
+    providerID: "elevenlabs",
+    modelID: "scribe_v2",
+    // The ElevenLabs protocol's shape (protocols/elevenlabs-transcription.ts):
+    // an inline (batch) route; timed words give word timestamps, and
+    // speaker turns derived from diarized words give segment timestamps;
+    // diarization is a request option on the same model.
+    capabilities: {
+      stream: false,
+      timestamps: ["segment", "word"],
+      diarize: true,
+      maxDurationSeconds: 600,
+      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+    },
+    backend: { kind: "http" },
+    apiKeyEnv: "ELEVENLABS_API_KEY",
+    audioLeavesMachine: true,
+    retention:
+      "Audio is processed by the ElevenLabs API and retained only under that API's data controls; the façade itself retains no audio.",
     maxUploadBytes: 25 * MIB,
   },
 ]
@@ -409,6 +503,10 @@ const PROVIDER_FACTORIES: Readonly<
   Record<string, (modelID: string, apiKey: string) => TranscriptionModel>
 > = {
   openai: (modelID, apiKey) => configure({ apiKey }).transcription(modelID),
+  deepgram: (modelID, apiKey) => configureDeepgram({ apiKey }).transcription(modelID),
+  google: (modelID, apiKey) => configureGoogle({ apiKey }).transcription(modelID),
+  assemblyai: (modelID, apiKey) => configureAssemblyAI({ apiKey }).transcription(modelID),
+  elevenlabs: (modelID, apiKey) => configureElevenLabs({ apiKey }).transcription(modelID),
 }
 
 /** A stalled provider must fail, not hang the door. Transcription of
