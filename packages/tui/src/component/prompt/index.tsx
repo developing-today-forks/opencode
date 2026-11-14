@@ -478,11 +478,23 @@ export function Prompt(props: PromptProps) {
         // preview takes whatever columns remain — so a long name or
         // ref can never crowd the preview off the single line.
         const width = dimensions().width
-        const name = Locale.truncateMiddle(snapshot.audio?.name ?? "audio", Math.max(8, Math.floor(width / 4)))
-        const ref = Locale.truncateMiddle(registration.ref, Math.max(8, Math.floor(width / 4)))
         const phrase = width >= 80 ? " — live preview, not in your draft yet: " : " — preview: "
+        // Reserve preview space BEFORE sizing the prefix: the audio
+        // name and model ref may be long, but they must never crowd
+        // the live preview off the single status line. Compute the
+        // label budget from the width left after the fixed text and a
+        // minimum preview reservation, so the composed line always
+        // fits the available width and the preview keeps at least
+        // `minPreview` columns.
+        const minPreview = 16
+        const fixed = "Transcribing ".length + " with ".length + phrase.length
+        const labelsBudget = Math.max(0, width - fixed - minPreview)
+        const maxLabel = Math.max(4, Math.floor(width / 4))
+        const labelCap = Math.min(maxLabel, Math.max(4, Math.floor(labelsBudget / 2)))
+        const name = Locale.truncateMiddle(snapshot.audio?.name ?? "audio", labelCap)
+        const ref = Locale.truncateMiddle(registration.ref, labelCap)
         const prefix = `Transcribing ${name} with ${ref}${phrase}`
-        const budget = Math.max(16, width - prefix.length)
+        const budget = Math.max(minPreview, width - prefix.length)
         const preview = bounded.length > budget ? `…${bounded.slice(-(budget - 1))}` : bounded
         return `${prefix}${preview}`
       case "error":
