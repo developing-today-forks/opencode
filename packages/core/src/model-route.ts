@@ -268,6 +268,30 @@ interface HealthState {
    * Cleared by every settle: a success (endBench), a fresh failure (bench), or the
    * network-forgiveness sweep. */
   probePending?: boolean
+  /** The bench class that converted to probe-pending, kept after benchReason is
+   * cleared by the conversion so diagnostics can still name the stop's class
+   * ("auth" or "retry-after"). */
+  probePendingReason?: string
+  /** The bench this state carries was planted at window length (at or beyond the long
+   * ladder's base, bench.longBenchMs) rather than at grace length. Only meaningful for
+   * traffic benches: a long retry-after bench converts to a half-open probe at expiry
+   * like an auth bench does, and counts as dead — not merely cooling — to last-resort
+   * selection while it stands (Drew, 2026-11-14). Set by bench() from the planted
+   * cooldown, and by seedCooldowns from the persisted row's span. */
+  benchLong?: boolean
+  /** Consecutive rate-limit failures (the RateLimit class, stated retry-after or not)
+   * with no success between them. The count is what separates a scattered transient
+   * 429 — ordinary short grace, as before — from a sustained throttle: at
+   * bench.sustainedRateLimitFailures the bench classifies up to the long ladder.
+   * Reset by a success, like consecutiveFailures; other failure classes leave it
+   * standing, since a transport error between two 429s is no evidence the throttle
+   * lifted. */
+  consecutiveRateLimits?: number
+  /** The effort this state is the traffic scope for, stamped by the traffic entry
+   * factories; undefined at pool scope. Health log rows carry it as a reason
+   * suffix so restart replay restores the bench onto the same leg it was planted
+   * on (the credential suffix's precedent, #870). */
+  variant?: string
 }
 
 /** Monotonic identity stamped on every probe claim (#1486). Process-local like health. */
@@ -296,12 +320,103 @@ const credentialEntry = (target: Model.Ref, credentialID: string) => {
   return current
 }
 
+/** Traffic health, keyed by the leg that actually errored: door × model × effort
+ * (Drew, 2026-11-14, amending the #9950 bench design). Failure modes differ by
+ * effort — Luna #xhigh on openai.main racked up thousands of Authentication
+ * failures in a week while Luna #high on the same door served 99.9% — so a bench
+ * planted by one effort's failures must not hold the model's other efforts out.
+ * Quota state deliberately does NOT live here: quota is drawn per pool, so quota
+ * benches and quota classification stay at door × pool-family scope in `health` /
+ * `credentialHealth` above. Two signals, two scopes: traffic = the leg that
+ * errored; quota = the pool that drained. The variant segment is the served
+ * variant of the attempt, "default" when the attempt ran at the model's own
+ * default. A credential's traffic health appends the segment to its credential
+ * key, so the #6 rule survives the split: a failure benches the credential that
+ * served, at the effort it served, never its siblings. */
+const trafficHealth = new Map<string, HealthState>()
+const trafficCredentialHealth = new Map<string, HealthState>()
+
+const trafficKey = (target: Model.Ref, variant?: string) => `${target.providerID}/${target.id}@${variant ?? "default"}`
+
+const trafficCredentialKey = (target: Model.Ref, credentialID: string, variant?: string) =>
+  `${credentialKey(target, credentialID)}@${variant ?? "default"}`
+
+const trafficEntry = (target: Model.Ref, variant?: string) => {
+  const id = trafficKey(target, variant)
+  const current = trafficHealth.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0, consecutiveFailures: 0 }
+  current.variant = variant ?? "default"
+  trafficHealth.delete(id)
+  trafficHealth.set(id, current)
+  while (trafficHealth.size > HEALTH_LIMIT) trafficHealth.delete(trafficHealth.keys().next().value!)
+  return current
+}
+
+const trafficCredentialEntry = (target: Model.Ref, credentialID: string, variant?: string) => {
+  const id = trafficCredentialKey(target, credentialID, variant)
+  const current = trafficCredentialHealth.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0, consecutiveFailures: 0 }
+  current.variant = variant ?? "default"
+  trafficCredentialHealth.delete(id)
+  trafficCredentialHealth.set(id, current)
+  while (trafficCredentialHealth.size > HEALTH_LIMIT)
+    trafficCredentialHealth.delete(trafficCredentialHealth.keys().next().value!)
+  return current
+}
+
+/** A health state by its exact key, whichever scope's map holds it: the
+ * network-forgiveness sweep records the key a failure benched under, and the
+ * probe settle paths name a scope by the pick's token, so both look states up
+ * without knowing which of the four scopes planted them. */
+const stateByKey = (id: string) =>
+  health.get(id) ?? credentialHealth.get(id) ?? trafficHealth.get(id) ?? trafficCredentialHealth.get(id)
+
+/** Every health state one target owns across the four scopes, with the scope
+ * each lives at: the probe settle paths (benchProbeScope, endProbeScope,
+ * releaseBenchProbe) act on whichever scope the pick's token names, and a
+ * token match is the whole test — a scope the pick did not claim never matches. */
+const scopeStates = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  variant?: string,
+): Array<{ state: HealthState; credentialID?: string; variant?: string }> => {
+  const out: Array<{ state: HealthState; credentialID?: string; variant?: string }> = []
+  const own = health.get(key(target))
+  if (own) out.push({ state: own })
+  if (variant !== undefined) {
+    const traffic = trafficHealth.get(trafficKey(target, variant))
+    if (traffic) out.push({ state: traffic, variant })
+  } else {
+    // No variant named: the caller holds only the pick's token (a release from a
+    // consumer that never attempted the model), and the token names the scope by
+    // itself — enumerate the leg's traffic scopes across efforts.
+    const prefix = `${key(target)}@`
+    for (const [id, state] of trafficHealth) if (id.startsWith(prefix)) out.push({ state, variant: id.slice(prefix.length) })
+  }
+  if (credentialID) {
+    const credential = credentialHealth.get(credentialKey(target, credentialID))
+    if (credential) out.push({ state: credential, credentialID })
+    if (variant !== undefined) {
+      const credentialTraffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+      if (credentialTraffic) out.push({ state: credentialTraffic, credentialID, variant })
+    } else {
+      const prefix = `${credentialKey(target, credentialID)}@`
+      for (const [id, state] of trafficCredentialHealth)
+        if (id.startsWith(prefix)) out.push({ state, credentialID, variant: id.slice(prefix.length) })
+    }
+  }
+  return out
+}
+
 /** Until when one credential of a target is benched; 0 when it is not. Reading an expired bench
- * clears it, exactly like `cooldownUntil` for targets. */
-export const credentialCooldownUntil = (target: Model.Ref, credentialID: string, now = Date.now()) => {
+ * clears it, exactly like `cooldownUntil` for targets. A named effort's traffic bench
+ * on the credential counts too: the credential is held out at that effort while it stands. */
+export const credentialCooldownUntil = (target: Model.Ref, credentialID: string, now = Date.now(), variant?: string) => {
   const state = credentialHealth.get(credentialKey(target, credentialID))
   if (state) recover(target, state, now, credentialID)
-  return state?.cooldownUntil ?? 0
+  // An unnamed effort reads as the default effort: attempts that served without
+  // a named variant planted their traffic bench there.
+  const traffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+  if (traffic) recover(target, traffic, now, credentialID)
+  return Math.max(state?.cooldownUntil ?? 0, traffic?.cooldownUntil ?? 0)
 }
 
 export const credentialCoolingDown = (target: Model.Ref, credentialID: string, now = Date.now()) =>
@@ -414,19 +529,39 @@ const recover = (
   // (code#9950): the refusal cannot heal by itself, so before the door is a candidate
   // again it owes the one probe attempt a quota bench owes at its reset — otherwise the
   // expiry instant returns a possibly-still-dead door to full candidacy and a wave piles
-  // onto it. The failure count is what separates conversion from a settle: completed()
-  // zeroes it before endBench() lands here, so a probe success never re-converts.
-  const authProbe = state.benchReason === "auth" && state.consecutiveFailures > 0
+  // onto it. A long retry-after bench (benchLong) converts the same way: the provider
+  // stated a window-length wait, so its expiry is a window moment, not a grace lapse —
+  // without the conversion, every session in flight at the expiry instant re-deals the
+  // leg at once (the Go beam-free doors' midnight pile-up, 2026-11-14). A short
+  // retry-after bench keeps the ordinary lapse: its grace was the whole point. The
+  // failure count is what separates conversion from a settle: completed() zeroes it
+  // before endBench() lands here, so a probe success never re-converts.
+  const authProbe =
+    (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+    state.consecutiveFailures > 0
+  const converting = authProbe ? state.benchReason : undefined
   state.cooldownUntil = 0
   state.samples = []
   state.benchReason = undefined
+  state.benchLong = undefined
   state.benchQuotaResetAt = undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
-  if (authProbe) state.probePending = true
+  state.probePendingReason = undefined
+  if (authProbe) {
+    state.probePending = true
+    state.probePendingReason = converting
+  }
   // Credential expirations are tagged so restart replay ends that credential's restored
-  // cooldown, never the target's (#870).
-  logHealth(target, "cooldown-end", credentialID ? `expired credential:${credentialID}` : "expired", undefined, credentialID)
+  // cooldown, never the target's (#870). Traffic expirations carry their effort the
+  // same way, so replay ends the leg's restored cooldown, never a sibling effort's.
+  logHealth(
+    target,
+    "cooldown-end",
+    `${credentialID ? `expired credential:${credentialID}` : "expired"}${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
+    undefined,
+    credentialID,
+  )
 }
 
 // A provider-wide fault looks different from a model-specific one. When several models of the same
@@ -460,24 +595,40 @@ export const networkSuspect = (now = Date.now(), location?: string) =>
 
 const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
   const prefix = `${providerID}/`
-  let count = 0
+  // The corroboration count is per MODEL: a model cooling at several efforts is
+  // still one model. Traffic benches live on the leg's own map now, so both maps
+  // count — two sibling models erroring in the same window is exactly the
+  // evidence this demotion has always required, at whichever scope it landed.
+  const models = new Set<string>()
   let until = 0
   for (const [id, state] of health) {
     if (!id.startsWith(prefix) || state.cooldownUntil <= now) continue
-    count++
+    models.add(id)
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= currentConstants(location).network.providerModels ? until : 0
+  for (const [id, state] of trafficHealth) {
+    if (!id.startsWith(prefix) || state.cooldownUntil <= now) continue
+    models.add(id.slice(0, id.lastIndexOf("@")))
+    until = Math.max(until, state.cooldownUntil)
+  }
+  return models.size >= currentConstants(location).network.providerModels ? until : 0
 }
 
-export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string) =>
-  cooldownUntil(target, now, location) > now
+export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) =>
+  cooldownUntil(target, now, location, variant) > now
 
-export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: string) => {
+export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) => {
   const state = health.get(key(target))
   if (state) recover(target, state, now)
+  // The leg's traffic bench at the named effort holds it out on the same terms as
+  // its pool-scope bench: a candidacy read that named the effort must see both.
+  // An unnamed effort reads as the default effort, where attempts that served
+  // without a named variant planted their bench.
+  const traffic = trafficHealth.get(trafficKey(target, variant))
+  if (traffic) recover(target, traffic, now)
   return Math.max(
     state?.cooldownUntil ?? 0,
+    traffic?.cooldownUntil ?? 0,
     providerCooldownUntil(target.providerID, now, location),
     infraHoldUntil(key(target), now),
   )
@@ -505,6 +656,11 @@ export interface FailureHint {
   readonly tierLimit?: boolean
   /** A local transport failure with no provider HTTP response. */
   readonly network?: boolean
+  /** The provider answered a rate limit (the RateLimit class), whether or not it
+   * stated a retry-after. A stated retry-after is believed as-is (see bench());
+   * an unstated one is an ordinary failure until the failures prove sustained —
+   * the count on the health state is what classifies it up. */
+  readonly rateLimit?: boolean
   /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
    * so its first bench is the long quota-length one. */
   readonly auth?: boolean
@@ -527,10 +683,12 @@ const bench = (
   credentialID?: string,
   quotaResetAt?: number,
   location?: string,
+  variant?: string,
 ) => {
   state.samples = []
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
+  if (hint?.rateLimit) state.consecutiveRateLimits = (state.consecutiveRateLimits ?? 0) + 1
   const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
   const ladder = currentConstants(location).bench
   const escalated = base * ladder.multiplier ** (state.consecutiveFailures - 1)
@@ -543,8 +701,27 @@ const bench = (
   // auth keep the long ladder: the provider stated the window, or the refusal cannot heal
   // by itself. A stated retry-after is believed as-is, as before.
   const graced = hint?.quota || hint?.auth ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
-  const cooldown =
-    hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
+  // A rate limit with no stated retry-after starts on the ordinary ladder above — one
+  // scattered 429 is a transient, and its grace stays short. But a provider that keeps
+  // answering 429 has stated a throttle in the only language it used: at
+  // sustainedRateLimitFailures consecutive rate-limit failures (no success between
+  // them) the bench classifies up to the long ladder, off the quota base, past
+  // failureCapMs — the same treatment a stated window-length retry-after earns —
+  // because re-dealing the leg every two minutes into a standing throttle is the
+  // failure #9950 was built to end (Drew, 2026-11-14).
+  const sustained =
+    hint?.rateLimit === true &&
+    !hint.quota &&
+    !(hint.retryAfterMs !== undefined && hint.retryAfterMs > 0) &&
+    (state.consecutiveRateLimits ?? 0) >= ladder.sustainedRateLimitFailures
+  const sustainedCooldown = Math.min(
+    policy.quotaCooldownMs *
+      ladder.multiplier ** ((state.consecutiveRateLimits ?? 0) - ladder.sustainedRateLimitFailures),
+    ladder.maxCooldownMs,
+  )
+  const cooldown = sustained
+    ? sustainedCooldown
+    : hint?.retryAfterMs !== undefined && hint.retryAfterMs > 0
       ? Math.min(Math.max(hint.retryAfterMs, ladder.retryAfterMinMs), ladder.maxCooldownMs)
       : Math.min(graced, ladder.maxCooldownMs)
   const until = now + cooldown
@@ -553,20 +730,25 @@ const bench = (
     ? hint.retryAfterMs
       ? "quota retry-after"
       : "quota"
-    : hint?.retryAfterMs
+    : hint?.retryAfterMs || hint?.rateLimit
       ? "retry-after"
       : hint?.auth
         ? "auth"
         : "failure"
   state.benchReason = reason
+  state.benchLong = cooldown >= ladder.longBenchMs
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
   state.probePending = undefined
+  state.probePendingReason = undefined
   logHealth(
     target,
     "cooldown-start",
-    `${reason}${credentialID ? ` credential:${credentialID}` : ""}`,
+    // The effort suffix comes from the state, not the call: a traffic state always
+    // carries its effort (the default effort included), so its row restores onto
+    // the leg after a restart — never widened onto the pool scope.
+    `${reason}${credentialID ? ` credential:${credentialID}` : ""}${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
     state.cooldownUntil,
     credentialID,
   )
@@ -644,19 +826,45 @@ const probeDueState = (state: HealthState | undefined, now: number) =>
     // An auth bench past its cooldown holds as probe-pending (code#9950): its probe is
     // due immediately and stays due until a claim settles it. The raw form — bench
     // still standing in the map, cooldown lapsed, no candidacy read has converted it
-    // yet — is due on the same terms recover() converts it by.
+    // yet — is due on the same terms recover() converts it by. A long retry-after
+    // bench (benchLong) is due on the same terms, for the same reason.
     state.probePending === true ||
-    (state.benchReason === "auth" &&
+    ((state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
       state.cooldownUntil > 0 &&
       state.cooldownUntil <= now &&
       state.consecutiveFailures > 0))
+
+/** The health states a probe read at one scope consults: the scope's own state (the
+ * target's, or the named credential's) plus — when a variant is named — the traffic
+ * scope's state for that effort. Quota probes live at pool scope and traffic probes
+ * at the leg's own effort scope; a pick judging the leg must find whichever is due,
+ * and must never find a sibling effort's: the variant is part of the address. */
+const probeStates = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  variant?: string,
+): Array<{ state: HealthState | undefined; variant?: string }> => [
+  {
+    state: credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target)),
+  },
+  // The traffic scope is always part of the address: an unnamed effort names the
+  // default effort, whose key the traffic maps already fold it to — a probe read
+  // for one effort must never find a sibling effort's probe, and a read for the
+  // default effort must find its own.
+  {
+    state: credentialID
+      ? trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+      : trafficHealth.get(trafficKey(target, variant)),
+    variant,
+  },
+]
 
 /** Whether the bench on this target (or on this credential of it, when one is named) is holding
  * past a known quota window reset, so a half-open probe is due: the window has rolled over, the
  * bench has not, and no probe is outstanding yet. The independent quota gate still applies on
  * top of this — a probe never bypasses a gate whose own reset is still ahead. */
-export const probeDue = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) =>
-  probeDueState(credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target)), now)
+export const probeDue = (target: Model.Ref, credentialID: string | undefined, now = Date.now(), variant?: string) =>
+  probeStates(target, credentialID, variant).some(({ state }) => probeDueState(state, now))
 
 /** Claims the one half-open probe a due bench admits. Exactly one claim succeeds: while it is
  * outstanding the bench keeps excluding ordinary candidacy, a probe success ends the bench
@@ -671,30 +879,41 @@ export const claimBenchProbe = (
   credentialID: string | undefined,
   now = Date.now(),
   token = nextProbeClaimToken(),
+  variant?: string,
 ) => {
-  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  if (!state || !probeDueState(state, now)) return false
-  if (state.probePending !== true && state.benchReason === "auth") {
-    // Claiming the raw expired form: materialize the conversion recover() performs on
-    // candidacy reads (code#9950), so the claimed state is the canonical probe-pending
-    // one whichever read arrived first.
-    state.cooldownUntil = 0
-    state.benchReason = undefined
-    state.benchQuotaResetAt = undefined
-    state.probePending = true
+  let claimed = false
+  for (const scope of probeStates(target, credentialID, variant)) {
+    const state = scope.state
+    if (!state || !probeDueState(state, now)) continue
+    const was = state.benchReason
+    if (
+      state.probePending !== true &&
+      (was === "auth" || (was === "retry-after" && state.benchLong === true))
+    ) {
+      // Claiming the raw expired form: materialize the conversion recover() performs on
+      // candidacy reads (code#9950), so the claimed state is the canonical probe-pending
+      // one whichever read arrived first.
+      state.cooldownUntil = 0
+      state.benchReason = undefined
+      state.benchLong = undefined
+      state.benchQuotaResetAt = undefined
+      state.probePending = true
+      state.probePendingReason = was
+    }
+    state.probeClaimedAt = now
+    state.probeClaimToken = token
+    logHealth(
+      target,
+      "bench-probe",
+      state.probePending
+        ? `probe after ${was === "retry-after" ? "rate-limit" : "auth"} bench${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`
+        : `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`,
+      state.benchQuotaResetAt,
+      credentialID,
+    )
+    claimed = true
   }
-  state.probeClaimedAt = now
-  state.probeClaimToken = token
-  logHealth(
-    target,
-    "bench-probe",
-    state.probePending
-      ? `probe after auth bench${credentialID ? ` credential:${credentialID}` : ""}`
-      : `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}`,
-    state.benchQuotaResetAt,
-    credentialID,
-  )
-  return true
+  return claimed
 }
 
 /** Whether a half-open probe is already outstanding on this scope (a target, or one
@@ -703,41 +922,48 @@ export const claimBenchProbe = (
  * covered by their still-standing cooldown; this read exists for probe-pending auth
  * benches (code#9950), whose cooldown has already lapsed, so candidacy must consult
  * the claim itself. */
-export const probeInFlight = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) => {
-  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  return (
-    state !== undefined &&
-    state.probeClaimedAt !== undefined &&
-    (state.probePending === true || state.cooldownUntil > now)
+export const probeInFlight = (target: Model.Ref, credentialID: string | undefined, now = Date.now(), variant?: string) =>
+  probeStates(target, credentialID, variant).some(
+    ({ state }) =>
+      state !== undefined &&
+      state.probeClaimedAt !== undefined &&
+      (state.probePending === true || state.cooldownUntil > now),
   )
-}
 
 /** Releases a probe claim whose owner resolved the target but never attempted a request on it
  * (#1478): the bench stays in force and the probe is due again for the next real request.
  * The release only lands when `claimedAt` still names the outstanding claim — and, when the
  * owner passes the pick's `token` (#1486), when the token matches too — so a claim that
  * has since settled, or one a different resolution took afterwards (including within the
- * same millisecond), is never cleared by a stale owner. Releasing is not an outcome:
+ * same millisecond), is never cleared by a stale owner. Every scope the pick claimed
+ * releases together: the token names the pick's whole spend, so the release consults
+ * each of the target's scopes (pool and traffic, the named credential's included) and
+ * clears the ones still holding this pick's claim. Releasing is not an outcome:
  * no bench ends, no failure is recorded. */
 export const releaseBenchProbe = (
   target: Model.Ref,
   credentialID: string | undefined,
   claimedAt: number,
   token?: number,
+  variant?: string,
 ) => {
-  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  if (!state || state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) return false
-  if (token !== undefined && state.probeClaimToken !== token) return false
-  state.probeClaimedAt = undefined
-  state.probeClaimToken = undefined
-  logHealth(
-    target,
-    "bench-probe-release",
-    `probe claim released without an outcome${credentialID ? ` credential:${credentialID}` : ""}`,
-    state.benchQuotaResetAt,
-    credentialID,
-  )
-  return true
+  let released = false
+  for (const scope of scopeStates(target, credentialID, variant)) {
+    const state = scope.state
+    if (state.probeClaimedAt === undefined || state.probeClaimedAt !== claimedAt) continue
+    if (token !== undefined && state.probeClaimToken !== token) continue
+    state.probeClaimedAt = undefined
+    state.probeClaimToken = undefined
+    logHealth(
+      target,
+      "bench-probe-release",
+      `probe claim released without an outcome${scope.credentialID ? ` credential:${scope.credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`,
+      state.benchQuotaResetAt,
+      scope.credentialID,
+    )
+    released = true
+  }
+  return released
 }
 
 /** Whether a health state is a quota-class bench still in force whose half-open probe is
@@ -801,6 +1027,74 @@ export const credentialQuotaCoolingDown = (target: Model.Ref, credentialID: stri
   if (state) recover(target, state, now, credentialID)
   return quotaBenched(state, now)
 }
+
+/** Whether a health state is a long traffic bench still in force: a retry-after bench
+ * whose remaining wait is beyond bench.longBenchMs. The provider stated a recovery
+ * horizon in traffic — a stated retry-after measured in hours IS a window, whatever
+ * the failure's class — so while it stands the leg is not "cooling down", it is out,
+ * and selection treats it the way it treats a quota bench: skipped at every place
+ * the leg is seated, never dealt as a last resort (Drew, 2026-11-14). A short
+ * retry-after bench is ordinary cooling and keeps the old last-resort grace. The
+ * judgement is scoped to the state it is given — a target's, one credential's, or
+ * one effort's traffic state — and never widened: a sibling model's or sibling
+ * effort's bench says nothing about this leg. */
+const longBenched = (state: HealthState | undefined, now: number, location?: string) =>
+  state !== undefined &&
+  state.benchReason === "retry-after" &&
+  // Long is a property of the bench as planted (benchLong), not of the time left
+  // on it: a nine-hour bench is still a window bench in its last hour, and it
+  // stays classified dead until it expires into its probe.
+  state.benchLong === true &&
+  state.cooldownUntil > now &&
+  !probeDueState(state, now)
+
+/** Whether this leg — the target at the named effort, and its named credential at
+ * the same effort — is out under a long traffic bench right now: its own traffic
+ * scope, its credential's traffic scope, or (for benches planted before traffic
+ * scopes existed, which live at target/credential scope) those scopes themselves.
+ * Judged at the leg's own keys only. */
+export const longTrafficBenched = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+  variant?: string,
+) => {
+  const own = health.get(key(target))
+  if (own) recover(target, own, now)
+  if (longBenched(own, now, location)) return true
+  const traffic = trafficHealth.get(trafficKey(target, variant))
+  if (traffic) recover(target, traffic, now)
+  if (longBenched(traffic, now, location)) return true
+  if (!credentialID) return false
+  const credential = credentialHealth.get(credentialKey(target, credentialID))
+  if (credential) recover(target, credential, now, credentialID)
+  if (longBenched(credential, now, location)) return true
+  const credentialTraffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+  if (credentialTraffic) recover(target, credentialTraffic, now, credentialID)
+  return longBenched(credentialTraffic, now, location)
+}
+
+/** Whether last-resort selection must treat this leg as dead rather than merely
+ * cooling: quota-dead at pool scope (quotaCoolingDown /
+ * credentialQuotaCoolingDown — the pool that drained) or out under a long traffic
+ * bench at the leg's own effort scope (longTrafficBenched — the leg that errored).
+ * The two scopes stay distinct: this read only ORs the verdicts, it never lets a
+ * traffic bench speak for a pool or a pool verdict bench a leg. The 2026-11-07
+ * no-hard-exclusion doctrine (code#8086) governs quota READS — a pool is never
+ * idled on a reading — and is untouched: what changed is that a traffic bench is
+ * not a read, it is the provider's own stated wait, and Drew's 2026-11-14
+ * directive is to follow it and skip the leg. */
+export const lastResortDead = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+  variant?: string,
+) =>
+  quotaCoolingDown(target, now, location) ||
+  (credentialID !== undefined && credentialQuotaCoolingDown(target, credentialID, now)) ||
+  longTrafficBenched(target, credentialID, now, location, variant)
 
 /** The durable record id for one model target's reactive quota skip (#1976): keyed to the
  * answering target, so one model family's exhaustion record names only that family. */
@@ -1144,6 +1438,9 @@ export interface ActiveBench {
   readonly providerID: string
   readonly modelID: string
   readonly credentialID?: string
+  /** The effort the bench holds out, for traffic-scope benches (door × model ×
+   * effort). Absent on pool-scope benches: quota holds the pool, not an effort. */
+  readonly variant?: string
   readonly until: number
   /** The bench class that planted it: quota, quota retry-after, retry-after, auth, failure, slow. */
   readonly reason: string
@@ -1154,19 +1451,22 @@ export interface ActiveBench {
   readonly probeClaimed: boolean
 }
 
-/** Every bench in force at `now` — target-level and per-credential — soonest expiry first.
- * Reading it changes nothing: expired benches are simply absent, so a target benched with no
- * attempts in the stats window is still visible here. */
+/** Every bench in force at `now` — pool scope, per-credential, and per-effort
+ * traffic scope — soonest expiry first. Reading it changes nothing: expired benches
+ * are simply absent, so a target benched with no attempts in the stats window is
+ * still visible here. */
 export const activeBenches = (now = Date.now()): ActiveBench[] => {
   const benches: ActiveBench[] = []
-  const collect = (id: string, state: HealthState, credentialID?: string) => {
+  const collect = (id: string, state: HealthState, credentialID?: string, variant?: string) => {
     if (state.cooldownUntil <= now) return
-    const base = credentialID ? id.slice(0, id.lastIndexOf("#")) : id
+    const noVariant = variant !== undefined ? id.slice(0, id.lastIndexOf("@")) : id
+    const base = credentialID ? noVariant.slice(0, noVariant.lastIndexOf("#")) : noVariant
     const slash = base.indexOf("/")
     benches.push({
       providerID: base.slice(0, slash),
       modelID: base.slice(slash + 1),
       ...(credentialID ? { credentialID } : {}),
+      ...(variant !== undefined ? { variant } : {}),
       until: state.cooldownUntil,
       reason: state.benchReason ?? "unknown",
       consecutiveFailures: state.consecutiveFailures,
@@ -1177,6 +1477,11 @@ export const activeBenches = (now = Date.now()): ActiveBench[] => {
   }
   for (const [id, state] of health) collect(id, state)
   for (const [id, state] of credentialHealth) collect(id, state, id.slice(id.lastIndexOf("#") + 1))
+  for (const [id, state] of trafficHealth) collect(id, state, undefined, id.slice(id.lastIndexOf("@") + 1))
+  for (const [id, state] of trafficCredentialHealth) {
+    const base = id.slice(0, id.lastIndexOf("@"))
+    collect(id, state, base.slice(base.lastIndexOf("#") + 1), id.slice(id.lastIndexOf("@") + 1))
+  }
   return benches.toSorted((left, right) => left.until - right.until)
 }
 
@@ -1191,6 +1496,8 @@ export interface AvailabilityEntry {
   readonly providerID: string
   readonly modelID?: string
   readonly credentialID?: string
+  /** The effort a traffic-scope stop holds out; absent on pool-scope stops. */
+  readonly variant?: string
   readonly class: AvailabilityClass
   readonly reason: string
   readonly until?: number
@@ -1207,7 +1514,7 @@ export interface AvailabilityEntry {
 export const availability = (now = Date.now()): AvailabilityEntry[] => {
   const entries = new Map<string, AvailabilityEntry>()
   const put = (entry: AvailabilityEntry) => {
-    const id = `${entry.providerID}/${entry.modelID ?? ""}#${entry.credentialID ?? ""}:${entry.class}`
+    const id = `${entry.providerID}/${entry.modelID ?? ""}#${entry.credentialID ?? ""}@${entry.variant ?? ""}:${entry.class}`
     const prior = entries.get(id)
     if (prior && (prior.until ?? Number.POSITIVE_INFINITY) >= (entry.until ?? Number.POSITIVE_INFINITY)) return
     entries.set(id, entry)
@@ -1228,6 +1535,7 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
       providerID: bench.providerID,
       modelID: bench.modelID,
       ...(bench.credentialID ? { credentialID: bench.credentialID } : {}),
+      ...(bench.variant !== undefined ? { variant: bench.variant } : {}),
       class: mapped.class,
       reason: bench.reason,
       until: bench.until,
@@ -1284,57 +1592,46 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   }
   for (const [credentialID, state] of credentialQuota) gate(state, credentialID)
   for (const state of providerQuota.values()) gate(state)
-  // Probe-pending auth benches (code#9950): the timed bench has lapsed, so no bench
-  // entry above names the scope, but it is still held out of ordinary candidacy until
-  // its half-open probe settles. No `until`: the probe, not a clock, ends the stop.
-  for (const [id, state] of health) {
+  // Probe-pending benches (code#9950, extended to long rate-limit benches): the timed
+  // bench has lapsed, so no bench entry above names the scope, but it is still held
+  // out of ordinary candidacy until its half-open probe settles. No `until`: the
+  // probe, not a clock, ends the stop.
+  const probePendingEntry = (id: string, state: HealthState, credentialID?: string, variant?: string) => {
     if (
       state.probePending !== true &&
       !(
-        state.benchReason === "auth" &&
+        (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
         state.cooldownUntil > 0 &&
         state.cooldownUntil <= now &&
         state.consecutiveFailures > 0
       )
     )
-      continue
-    const slash = id.indexOf("/")
-    put({
-      providerID: id.slice(0, slash),
-      modelID: id.slice(slash + 1),
-      class: "auth",
-      reason:
-        state.probeClaimedAt !== undefined
-          ? "auth bench expired; half-open probe in flight"
-          : "auth bench expired; half-open probe pending",
-      resume: "probe",
-    })
-  }
-  for (const [id, state] of credentialHealth) {
-    if (
-      state.probePending !== true &&
-      !(
-        state.benchReason === "auth" &&
-        state.cooldownUntil > 0 &&
-        state.cooldownUntil <= now &&
-        state.consecutiveFailures > 0
-      )
-    )
-      continue
-    const hash = id.lastIndexOf("#")
-    const base = id.slice(0, hash)
+      return
+    const noVariant = variant !== undefined ? id.slice(0, id.lastIndexOf("@")) : id
+    const base = credentialID ? noVariant.slice(0, noVariant.lastIndexOf("#")) : noVariant
     const slash = base.indexOf("/")
+    // A converted bench cleared its reason; the class it converted from is stamped
+    // on probePendingReason. An unconverted one still carries it as benchReason.
+    const label = (state.probePendingReason ?? state.benchReason) === "retry-after" ? "rate-limit" : "auth"
     put({
       providerID: base.slice(0, slash),
       modelID: base.slice(slash + 1),
-      credentialID: id.slice(hash + 1),
-      class: "auth",
+      ...(credentialID ? { credentialID } : {}),
+      ...(variant !== undefined ? { variant } : {}),
+      class: label,
       reason:
         state.probeClaimedAt !== undefined
-          ? "auth bench expired; half-open probe in flight"
-          : "auth bench expired; half-open probe pending",
+          ? `${label} bench expired; half-open probe in flight`
+          : `${label} bench expired; half-open probe pending`,
       resume: "probe",
     })
+  }
+  for (const [id, state] of health) probePendingEntry(id, state)
+  for (const [id, state] of credentialHealth) probePendingEntry(id, state, id.slice(id.lastIndexOf("#") + 1))
+  for (const [id, state] of trafficHealth) probePendingEntry(id, state, undefined, id.slice(id.lastIndexOf("@") + 1))
+  for (const [id, state] of trafficCredentialHealth) {
+    const base = id.slice(0, id.lastIndexOf("@"))
+    probePendingEntry(id, state, base.slice(base.lastIndexOf("#") + 1), id.slice(id.lastIndexOf("@") + 1))
   }
   for (const [id, hold] of infraHolds) {
     if (hold.until <= now) continue
@@ -1399,7 +1696,9 @@ const probeClaimMatches = (state: HealthState | undefined, claim: ProbeClaim) =>
 
 /** Re-benches a probe scope the pick claimed when its attempt failed (#1486): the bench the
  * probe was admitted by renews on the escalated ladder, bounded by the next known reset.
- * Scopes the pick did not claim (or that have since settled) are left alone. */
+ * Scopes the pick did not claim (or that have since settled) are left alone. The claim's
+ * token is the address: every scope the pick spent it on — pool scope, the named
+ * credential's, and the leg's traffic scope at its effort — renews, and no other does. */
 const benchProbeScope = (
   target: Model.Ref,
   policy: Policy,
@@ -1408,30 +1707,41 @@ const benchProbeScope = (
   credentialID: string | undefined,
   claim: ProbeClaim,
   location?: string,
+  variant?: string,
 ) => {
-  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  if (!probeClaimMatches(state, claim) || !state) return
-  bench(
-    target,
-    state,
-    policy,
-    now,
-    hint,
-    credentialID,
-    statedQuotaResetAt(target, credentialID, now, location, hint),
-    location,
-  )
+  for (const scope of scopeStates(target, credentialID, variant)) {
+    if (!probeClaimMatches(scope.state, claim)) continue
+    bench(
+      target,
+      scope.state,
+      policy,
+      now,
+      hint,
+      scope.credentialID,
+      statedQuotaResetAt(target, scope.credentialID, now, location, hint),
+      location,
+      scope.variant,
+    )
+  }
 }
 
 /** Ends a probe scope's bench when the pick's attempt succeeded (#1486): the probe was
  * admitted to learn whether the scope serves again, and it does. Like the release, this
  * only lands while the scope's outstanding claim is still the pick's. */
-const endProbeScope = (target: Model.Ref, now: number, credentialID: string | undefined, claim: ProbeClaim) => {
-  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
-  if (!probeClaimMatches(state, claim) || !state) return
-  state.outcomes = pushOutcome(state.outcomes, true)
-  state.consecutiveFailures = 0
-  endBench(target, state, now, credentialID)
+const endProbeScope = (
+  target: Model.Ref,
+  now: number,
+  credentialID: string | undefined,
+  claim: ProbeClaim,
+  variant?: string,
+) => {
+  for (const scope of scopeStates(target, credentialID, variant)) {
+    if (!probeClaimMatches(scope.state, claim)) continue
+    scope.state.outcomes = pushOutcome(scope.state.outcomes, true)
+    scope.state.consecutiveFailures = 0
+    scope.state.consecutiveRateLimits = 0
+    endBench(target, scope.state, now, scope.credentialID)
+  }
 }
 
 export const failed = (
@@ -1442,13 +1752,26 @@ export const failed = (
   credentialID?: string,
   location?: string,
   probeClaim?: ProbeClaim,
+  variant?: string,
 ) => {
   // Quota, rate-limit and provider HTTP errors are not evidence of an internet outage.
   if (hint?.quota) recordQuota(target, now, credentialID)
+  // The scope this failure benches: quota at pool scope, everything else at the
+  // leg's traffic scope (door × model × effort). The network ledger records the
+  // bench's own key so the forgiveness sweep below clears the state that was
+  // actually planted, in whichever scope's map holds it.
+  const quotaScope = hint?.quota === true
+  const benchKey = quotaScope
+    ? credentialID
+      ? credentialKey(target, credentialID)
+      : key(target)
+    : credentialID
+      ? trafficCredentialKey(target, credentialID, variant)
+      : trafficKey(target, variant)
   if (hint?.network)
     recentFailures.push({
       provider: target.providerID,
-      target: credentialID ? credentialKey(target, credentialID) : key(target),
+      target: benchKey,
       time: now,
     })
   while (
@@ -1466,18 +1789,21 @@ export const failed = (
       // than its network window are retained for other Locations' evaluations, but
       // they are not part of this outage and keep their benches (#1423).
       if (now - failure.time > currentConstants(location).network.windowMs) continue
-      const prior = health.get(failure.target) ?? credentialHealth.get(failure.target)
+      const prior = stateByKey(failure.target)
       if (prior) {
         if (prior.cooldownUntil > now) {
           prior.cooldownUntil = 0
           prior.samples = []
           prior.benchReason = undefined
+          prior.benchLong = undefined
           prior.benchQuotaResetAt = undefined
           prior.probeClaimedAt = undefined
           prior.probeClaimToken = undefined
           prior.probePending = undefined
+          prior.probePendingReason = undefined
         }
         prior.consecutiveFailures = 0
+        prior.consecutiveRateLimits = 0
       }
     }
     // The forgiveness above clears the states it can name; a probe scope of this pick it
@@ -1507,45 +1833,67 @@ export const failed = (
   }
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
+  // The scope within that rule follows the signal: a quota failure benches the pool scope
+  // (the credential's own state, as before); a traffic failure benches the leg's traffic
+  // scope — this credential, at the effort that errored — so a sibling effort or a sibling
+  // credential keeps dealing (Drew, 2026-11-14).
   if (credentialID) {
     bench(
       target,
-      credentialEntry(target, credentialID),
+      quotaScope ? credentialEntry(target, credentialID) : trafficCredentialEntry(target, credentialID, variant),
       policy,
       now,
       hint,
       credentialID,
       statedQuotaResetAt(target, credentialID, now, location, hint),
       location,
+      quotaScope ? undefined : variant,
     )
+    // The outcome itself stays on the pool-scope ledger too: giveUps() judges a
+    // target's recent answers there, and a traffic bench must not make the leg
+    // look steady to the retry logic that reads it. Only the outcome is mirrored
+    // — no counter, no bench: the pool scope records that the leg failed, the
+    // traffic scope decides what that failure costs.
+    if (!quotaScope) {
+      const pool = credentialEntry(target, credentialID)
+      pool.outcomes = pushOutcome(pool.outcomes, false)
+    }
     // The pick may also have claimed the target scope and a different probe credential (#1486):
     // each renews on the same ladder while its outstanding claim is still this pick's.
     // Serving-credential accounting above is unchanged.
     if (probeClaim) {
-      benchProbeScope(target, policy, now, hint, undefined, probeClaim, location)
+      benchProbeScope(target, policy, now, hint, undefined, probeClaim, location, variant)
       if (probeClaim.credentialID && probeClaim.credentialID !== credentialID)
-        benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location)
+        benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location, variant)
     }
     return
   }
   bench(
     target,
-    entry(target),
+    quotaScope ? entry(target) : trafficEntry(target, variant),
     policy,
     now,
     hint,
     undefined,
     statedQuotaResetAt(target, undefined, now, location, hint),
     location,
+    quotaScope ? undefined : variant,
   )
+  if (!quotaScope) {
+    const pool = entry(target)
+    pool.outcomes = pushOutcome(pool.outcomes, false)
+  }
   // A credential-scope claim from the same pick settles here too (#1486).
-  if (probeClaim?.credentialID) benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location)
+  if (probeClaim?.credentialID)
+    benchProbeScope(target, policy, now, hint, probeClaim.credentialID, probeClaim, location, variant)
 }
 
 /** Counts a request that was given up on for being slow, so a target that keeps losing hedges
- * eventually cools down like any other slow one. */
-export const slow = (target: Model.Ref, policy: Policy, now = Date.now()) => {
-  const state = entry(target)
+ * eventually cools down like any other slow one. Slowness is a traffic signal: the
+ * samples and the bench live at the leg's traffic scope (door × model × effort), so
+ * one effort's slow responses never cool the model's other efforts. */
+export const slow = (target: Model.Ref, policy: Policy, now = Date.now(), variant?: string) => {
+  const state = trafficEntry(target, variant)
   recover(target, state, now)
   if (state.cooldownUntil > now) return
   state.samples.push(true)
@@ -1554,11 +1902,13 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now()) => {
     state.samples = []
     state.cooldownUntil = now + policy.cooldownMs
     state.benchReason = "slow"
+    state.benchLong = state.cooldownUntil - now >= currentConstants().bench.longBenchMs
     state.benchQuotaResetAt = undefined
     state.probeClaimedAt = undefined
     state.probeClaimToken = undefined
     state.probePending = undefined
-    logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
+    state.probePendingReason = undefined
+    logHealth(target, "cooldown-start", `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`, state.cooldownUntil)
   }
 }
 
@@ -1609,6 +1959,8 @@ export interface SettingsConfig {
     readonly retryAfterMinMs?: number
     readonly cooldownCapMs?: number
     readonly quotaCooldownCapMs?: number
+    readonly longBenchMs?: number
+    readonly sustainedRateLimitFailures?: number
   }
   readonly demotion?: {
     readonly after?: number
@@ -2685,13 +3037,14 @@ const endBench = (target: Model.Ref, state: HealthState, now: number, credential
   // count, so nothing here can re-convert.)
   if (state.probePending) {
     state.probePending = undefined
+    state.probePendingReason = undefined
     state.probeClaimedAt = undefined
     state.probeClaimToken = undefined
     state.samples = []
     logHealth(
       target,
       "cooldown-end",
-      credentialID ? `probe succeeded credential:${credentialID}` : "probe succeeded",
+      `${credentialID ? `probe succeeded credential:${credentialID}` : "probe succeeded"}${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
       undefined,
       credentialID,
     )
@@ -2704,13 +3057,14 @@ const endBench = (target: Model.Ref, state: HealthState, now: number, credential
   state.cooldownUntil = 0
   state.samples = []
   state.benchReason = undefined
+  state.benchLong = undefined
   state.benchQuotaResetAt = undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
   logHealth(
     target,
     "cooldown-end",
-    credentialID ? `probe succeeded credential:${credentialID}` : "probe succeeded",
+    `${credentialID ? `probe succeeded credential:${credentialID}` : "probe succeeded"}${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
     undefined,
     credentialID,
   )
@@ -2724,6 +3078,7 @@ export const completed = (
   credentialID?: string,
   location?: string,
   probeClaim?: ProbeClaim,
+  variant?: string,
 ) => {
   // A success clears the serving credential's failure count and bench (#6); the target-level
   // accounting below is unchanged, since the target did serve the request.
@@ -2731,12 +3086,36 @@ export const completed = (
     const credentialState = credentialEntry(target, credentialID)
     credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
+    credentialState.consecutiveRateLimits = 0
     if (!probeClaim || credentialState.probeClaimedAt === undefined || credentialState.probeClaimToken === probeClaim.token)
       endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
+  state.consecutiveRateLimits = 0
+  // The leg's traffic scope settles on the same success: its failure and rate-limit
+  // runs end, and a probe claim this pick spent there ends its bench — a success at
+  // one effort says nothing about a sibling effort's bench, so only the serving
+  // leg's scopes settle.
+  const trafficState = trafficEntry(target, variant)
+  trafficState.outcomes = pushOutcome(trafficState.outcomes, true)
+  trafficState.consecutiveFailures = 0
+  trafficState.consecutiveRateLimits = 0
+  if (!probeClaim || trafficState.probeClaimedAt === undefined || trafficState.probeClaimToken === probeClaim.token)
+    endBench(target, trafficState, now)
+  if (credentialID) {
+    const credentialTrafficState = trafficCredentialEntry(target, credentialID, variant)
+    credentialTrafficState.outcomes = pushOutcome(credentialTrafficState.outcomes, true)
+    credentialTrafficState.consecutiveFailures = 0
+    credentialTrafficState.consecutiveRateLimits = 0
+    if (
+      !probeClaim ||
+      credentialTrafficState.probeClaimedAt === undefined ||
+      credentialTrafficState.probeClaimToken === probeClaim.token
+    )
+      endBench(target, credentialTrafficState, now, credentialID)
+  }
   // A success on the target is the path-health signal: any infra hold on it clears.
   if (infraHolds.delete(key(target)))
     logHealth(target, "infra-cleared", "a success on the target cleared the infra hold")
@@ -2747,22 +3126,30 @@ export const completed = (
   // The pick may have claimed a different probe credential than the serving one (#1486):
   // its bench ends here too, while serving-credential accounting above is unchanged.
   if (probeClaim?.credentialID && probeClaim.credentialID !== credentialID)
-    endProbeScope(target, now, probeClaim.credentialID, probeClaim)
-  if (state.cooldownUntil > now) return
+    endProbeScope(target, now, probeClaim.credentialID, probeClaim, variant)
+  if (trafficState.cooldownUntil > now) return
   const slow =
     (typeof policy.firstTokenTimeoutMs === "number" && sample.firstTokenMs > policy.firstTokenTimeoutMs) ||
     (policy.maxResponseTimeMs !== undefined && sample.responseMs > policy.maxResponseTimeMs) ||
     (policy.minOutputTokensPerSecond !== undefined && sample.tokensPerSecond < policy.minOutputTokensPerSecond)
-  state.samples.push(slow)
-  if (state.samples.length > policy.sampleWindow) state.samples.shift()
-  if (state.samples.filter(Boolean).length >= policy.slowThreshold) {
-    state.samples = []
-    state.cooldownUntil = now + policy.cooldownMs
-    state.benchReason = "slow"
-    state.benchQuotaResetAt = undefined
-    state.probeClaimedAt = undefined
-    state.probeClaimToken = undefined
-    logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
+  trafficState.samples.push(slow)
+  if (trafficState.samples.length > policy.sampleWindow) trafficState.samples.shift()
+  if (trafficState.samples.filter(Boolean).length >= policy.slowThreshold) {
+    trafficState.samples = []
+    trafficState.cooldownUntil = now + policy.cooldownMs
+    trafficState.benchReason = "slow"
+    trafficState.benchLong = trafficState.cooldownUntil - now >= currentConstants(location).bench.longBenchMs
+    trafficState.benchQuotaResetAt = undefined
+    trafficState.probeClaimedAt = undefined
+    trafficState.probeClaimToken = undefined
+    trafficState.probePending = undefined
+    trafficState.probePendingReason = undefined
+    logHealth(
+      target,
+      "cooldown-start",
+      `slow${trafficState.variant !== undefined ? ` variant:${trafficState.variant}` : ""}`,
+      trafficState.cooldownUntil,
+    )
   }
 }
 
@@ -2774,6 +3161,8 @@ export const resetHealth = () => {
   adjustments = []
   health.clear()
   credentialHealth.clear()
+  trafficHealth.clear()
+  trafficCredentialHealth.clear()
   infraHolds.clear()
   credentialQuota.clear()
   providerQuota.clear()
@@ -3222,13 +3611,24 @@ export const removeAdjustment = (id: string) => {
  * synthesized, and no attempt is spent probing. Non-quota benches (transport,
  * rate-limit, auth, slow) restore exactly as persisted, readings or not. */
 export const seedCooldowns = (
-  rows: ReadonlyArray<{ providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }>,
+  rows: ReadonlyArray<{
+    providerID: string
+    modelID: string
+    until: number
+    credentialID?: string
+    reason?: string
+    /** The effort a traffic-scope row was planted at, named by its reason suffix. */
+    variant?: string
+    /** When the bench was planted (the health row's time), so its span — and with
+     * it benchLong — survives the restart. */
+    plantedAt?: number
+  }>,
   readings: readonly QuotaCurrent.ProviderReading[] = [],
   now = Date.now(),
 ) => {
   for (const row of rows) {
     const target = ref({ providerID: row.providerID, model: row.modelID })
-    const benchClass = row.reason?.split(" credential:")[0]
+    const benchClass = row.reason?.split(" credential:")[0]?.split(" variant:")[0]
     let until = row.until
     let quotaResetAt: number | undefined
     if ((benchClass === "quota" || benchClass === "quota retry-after") && readings.length > 0) {
@@ -3254,13 +3654,32 @@ export const seedCooldowns = (
       }
     }
     // A credential-scoped cooldown restores onto that credential only (#870): the healthy
-    // credentials behind the same target stay routable after a restart.
-    const state = row.credentialID ? credentialEntry(target, row.credentialID) : entry(target)
+    // credentials behind the same target stay routable after a restart. A traffic-scope
+    // row (one carrying a variant) restores onto the leg it was planted on — door ×
+    // model × effort, plus the credential when it has one — never onto the pool scope
+    // or a sibling effort.
+    const state =
+      row.variant !== undefined
+        ? row.credentialID
+          ? trafficCredentialEntry(target, row.credentialID, row.variant)
+          : trafficEntry(target, row.variant)
+        : row.credentialID
+          ? credentialEntry(target, row.credentialID)
+          : entry(target)
     state.cooldownUntil = until
     // The bench keeps its class across the restart, so a quota reset learned afterwards can
     // still arm its half-open probe (#1123). The stored reason names the credential on
     // credential rows; the class is the part before that suffix.
     if (benchClass) state.benchReason = benchClass
+    // The row is a failure's record: restore the count with the bench, or an
+    // auth / long retry-after bench would lapse open at expiry instead of
+    // converting to its half-open probe (recover() tells conversion from a
+    // settle by the count, and a restart used to zero it).
+    if (benchClass) state.consecutiveFailures = Math.max(state.consecutiveFailures, 1)
+    // A window-length bench stays window-length across the restart: its span is
+    // what made it long, and the span is in the row (planted → until).
+    if (row.plantedAt !== undefined && until - row.plantedAt >= currentConstants().bench.longBenchMs)
+      state.benchLong = true
     if (quotaResetAt !== undefined) state.benchQuotaResetAt = quotaResetAt
   }
 }
@@ -3950,6 +4369,15 @@ export interface Constants {
     readonly retryAfterMinMs: number
     readonly cooldownCapMs: number
     readonly quotaCooldownCapMs: number
+    /** A bench at or beyond this length is a window statement, not a grace: it
+     * classifies its leg as dead to last-resort selection while it stands, and
+     * converts to a half-open probe at expiry instead of lapsing. Pinned to the
+     * long ladder's base (DEFAULT_POLICY.quotaCooldownMs) — a stated wait that
+     * long is the provider naming its window, whatever class planted it. */
+    readonly longBenchMs: number
+    /** Consecutive rate-limit failures (no success between them) at which an
+     * unstated throttle classifies up from the ordinary ladder to the long one. */
+    readonly sustainedRateLimitFailures: number
   }
   readonly demotion: { readonly factor: number }
   readonly quotaGate: {
@@ -3981,6 +4409,12 @@ export const DEFAULT_CONSTANTS: Constants = {
     // The caps policy() applies to a route health block's bench bases.
     cooldownCapMs: 3_600_000,
     quotaCooldownCapMs: 86_400_000,
+    // The long ladder's base (DEFAULT_POLICY.quotaCooldownMs): a bench this long
+    // is a window statement.
+    longBenchMs: 900_000,
+    // Three unstated 429s in a row with no success between them is a standing
+    // throttle, not three transients.
+    sustainedRateLimitFailures: 3,
   },
   demotion: { factor: DEMOTED_FACTOR },
   quotaGate: {

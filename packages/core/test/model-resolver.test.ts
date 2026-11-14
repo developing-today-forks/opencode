@@ -3659,4 +3659,75 @@ describe("ModelResolver routes", () => {
       integration,
     )
   })
+
+  // Drew, 2026-11-14: a leg benched by a window-length stated retry-after is
+  // dead for last-resort purposes, like a quota bench — the 2026-11-07
+  // no-hard-exclusion doctrine (#8086) governs quota READS, not traffic
+  // benches. When every candidate is benched long, the resolver refuses
+  // rather than dealing a fresh session into a door that named a nine-hour
+  // wait (the Go beam-free incident: ~50 attempts/15min/door, 0 successes).
+  it.effect("the last resort refuses a target benched by a window-length retry-after", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(route)
+        expect(targetOf(first)).toBe("pa")
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { rateLimit: true, retryAfterMs: 32_347_000 })
+        expect(yield* first.routing!.fallback()).toBeUndefined()
+      }),
+    )
+  })
+
+  it.effect("the last resort still deals a target benched by a short retry-after", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(route)
+        expect(targetOf(first)).toBe("pa")
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { rateLimit: true, retryAfterMs: 30_000 })
+        const second = yield* first.routing!.fallback()
+        expect(second).toBeDefined()
+        expect(targetOf(second!)).toBe("pb")
+      }),
+    )
+  })
+
+  // The effort-granularity regression (Luna on openai.main: #xhigh drowned in
+  // auth failures while #high served 99.9%): a bench at one effort must not
+  // cool the model at another. pa is ordered first — at #high it must win
+  // outright as a ready pick, which a model-wide bench would have prevented.
+  it.effect("a bench at one effort leaves the same model dealing at a sibling effort", () => {
+    ModelRoute.resetHealth()
+    const levelled = (providerID: string) =>
+      model(Provider.aisdk("@ai-sdk/openai"), {
+        providerID: Provider.ID.make(providerID),
+        modelID: "luna",
+        settings: { apiKey: "key" },
+        variants: [{ id: VariantID.make("high") }, { id: VariantID.make("xhigh") }],
+      })
+    const a = levelled("pa")
+    const b = levelled("pb")
+    const route = Info.make({
+      ...routed([a, b], { ...ordered }),
+      variants: [{ id: VariantID.make("high") }, { id: VariantID.make("xhigh") }],
+    })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { auth: true }, undefined, undefined, undefined, "xhigh")
+        // At the benched effort the healthy sibling serves.
+        expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("xhigh")))).toBe("pb")
+        // At the sibling effort the first target is a ready pick again.
+        expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("high")))).toBe("pa")
+      }),
+    )
+  })
 })

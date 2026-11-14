@@ -712,6 +712,24 @@ export const layer = Layer.effect(
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
+        // The effort a target would serve this request at: its own fixed variant,
+        // else the requested variant as the target's remap translates it, else the
+        // target's default. Bench reads are addressed at this leg (door × model ×
+        // effort): a sibling effort's traffic bench must neither hold this leg out
+        // nor be invisible to it. The pick below re-derives the same value with
+        // the catalog source in hand (a target that lacks the requested variant
+        // natively serves its default); the candidacy read here cannot consult
+        // the catalog, so it judges by the remap alone.
+        const servedVariantFor = (index: number): string | undefined => {
+          const target = definition.targets[index]
+          if (target.variant) return target.variant
+          const targetVariants = definition.targetVariants[index]
+          if (requestedVariant === undefined) return targetVariants?.default
+          const remapped = targetVariants?.map?.[requestedVariant]
+          if (remapped === false) return undefined
+          if (typeof remapped === "string") return remapped
+          return requestedVariant
+        }
         let lastError: Error | undefined
         // The active stored credential per target provider (#6): the ready filter gates on the
         // credential that would actually serve the target, not only on the target itself.
@@ -931,7 +949,7 @@ export const layer = Layer.effect(
           const overLimit = new Set<number>()
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
-            const until = ModelRoute.cooldownUntil(target, now, locationDirectory)
+            const until = ModelRoute.cooldownUntil(target, now, locationDirectory, servedVariantFor(index))
             // A fixed route only fails over: provider holds, skips and budgets are rules and above.
             const rules = ModelRouteAutonomy.usesRules(definition.autonomy)
             const scope = ModelRoute.scopeOf(definition, [], locationDirectory)
@@ -961,7 +979,9 @@ export const layer = Layer.effect(
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
               limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
-            const credentialUntil = credentialID ? ModelRoute.credentialCooldownUntil(target, credentialID, now) : 0
+            const credentialUntil = credentialID
+              ? ModelRoute.credentialCooldownUntil(target, credentialID, now, servedVariantFor(index))
+              : 0
             const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
             const providerBlock = ModelRoute.providerQuotaBlocked(target, now, locationDirectory)
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
@@ -971,12 +991,12 @@ export const layer = Layer.effect(
             // probeDue is self-gating (a quota bench must be standing past its reset; a
             // probe-pending auth bench, code#9950, is due precisely because its cooldown
             // has lapsed). While a probe is outstanding the scope admits nothing else.
-            const targetProbe = ModelRoute.probeDue(target, undefined, now)
+            const targetProbe = ModelRoute.probeDue(target, undefined, now, servedVariantFor(index))
             const credentialProbe =
-              credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
-            const targetProbeHeld = ModelRoute.probeInFlight(target, undefined, now)
+              credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now, servedVariantFor(index))
+            const targetProbeHeld = ModelRoute.probeInFlight(target, undefined, now, servedVariantFor(index))
             const credentialProbeHeld =
-              credentialID !== undefined && ModelRoute.probeInFlight(target, credentialID, now)
+              credentialID !== undefined && ModelRoute.probeInFlight(target, credentialID, now, servedVariantFor(index))
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
@@ -1016,23 +1036,49 @@ export const layer = Layer.effect(
           const nonFull = usable.filter((index) => {
             const target = definition.targets[index]
             const credentialID = effectiveCredential(target, now)?.id
-            // Quota-dead in any scope counts as full for this preference (code#8086):
+            // Dead in any scope counts as full for this preference (code#8086):
             // a credential-less leaf’s exhaustion lives only in its target bench, and
             // a provider gate or a quota bench on the serving credential is the same
             // answer in another scope. Consulting the credential gate alone let the
             // last resort seat legs whose quota was exhausted for weeks over legs
-            // that were merely benched and about to serve again.
-            if (ModelRoute.quotaCoolingDown(target, now, locationDirectory)) return false
+            // that were merely benched and about to serve again. lastResortDead
+            // folds those quota reads together with the leg's own long traffic
+            // bench (door × model × effort): a window-length retry-after the
+            // provider stated in traffic is a window, and the leg is out — not
+            // merely cooling — while it stands (Drew, 2026-11-14).
+            if (ModelRoute.lastResortDead(target, credentialID, now, locationDirectory, servedVariantFor(index)))
+              return false
             if (ModelRoute.providerQuotaBlocked(target, now, locationDirectory) !== undefined) return false
             if (credentialID === undefined) return true
-            if (ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) !== undefined) return false
-            return !ModelRoute.credentialQuotaCoolingDown(target, credentialID, now)
+            return ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) === undefined
           })
           // No pool-level hard exclusion (Drew, 2026-11-07): a pool cannot run out —
           // only a leaf’s own model, credential, or provider can — so the last resort
           // is the usable set itself, preferring targets that are not quota-dead in
-          // any scope while any such target remains.
-          const lastResort = allowQuotaDeadLastResort ? (nonFull.length > 0 ? nonFull : usable) : nonFull
+          // any scope while any such target remains. One carve-out, Drew 2026-11-14:
+          // a leg out under a long traffic bench is never dealt, even as a last
+          // resort — the provider stated its wait in traffic, and dealing anyway is
+          // what burned fresh sessions into the Go doors' throttle (one 429 each,
+          // bench re-planted, hundreds of attempts an hour). The doctrine above
+          // governs quota reads, and they keep their grace here: a quota-gated or
+          // short-benched leg may still be dealt when nothing undead remains. A
+          // long-benched leg may not; when every usable leg is one, the last
+          // resort is empty and the turn is refused rather than dealt into the wall.
+          const longBenched = (index: number) => {
+            const target = definition.targets[index]
+            return ModelRoute.longTrafficBenched(
+              target,
+              effectiveCredential(target, now)?.id,
+              now,
+              locationDirectory,
+              servedVariantFor(index),
+            )
+          }
+          const lastResort = allowQuotaDeadLastResort
+            ? nonFull.length > 0
+              ? nonFull
+              : usable.filter((index) => !longBenched(index))
+            : nonFull
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
           // A last-resort seat (nothing ready) carries the earliest moment an
           // excluded candidate re-admits (#1806): the untried candidates'
@@ -1078,10 +1124,10 @@ export const layer = Layer.effect(
           // the runner) is what ends or renews the bench. Claims on scopes that are not due
           // — an ordinary eligible target — are refused and change nothing. One token
           // names the pick's spend on every scope it claims (#1486).
-          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now, probeToken)
+          const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, now, probeToken, servedVariantFor(index))
           const probeCredential = effectiveCredential(target, now)?.id
           const credentialClaimed = probeCredential
-            ? ModelRoute.claimBenchProbe(target, probeCredential, now, probeToken)
+            ? ModelRoute.claimBenchProbe(target, probeCredential, now, probeToken, servedVariantFor(index))
             : false
           // The claim this pick walked away with (#1478): stamped on the Resolved below so a
           // consumer that never attempts the model can release it, and one that does attempt
@@ -1134,7 +1180,7 @@ export const layer = Layer.effect(
           if (Result.isFailure(resolved)) {
             // The pick's probe claim settles here too (#1486): the target scope benches as
             // before, and a credential-scope claim from the same pick renews with it.
-            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory, probeClaim)
+            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory, probeClaim, target.variant ?? mapped)
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.
@@ -1192,7 +1238,7 @@ export const layer = Layer.effect(
                     connection.type === "credential" &&
                     connection.id !== servingID &&
                     !tried.has(connection.id) &&
-                    ModelRoute.credentialCooldownUntil(target, connection.id, at) <= at &&
+                    ModelRoute.credentialCooldownUntil(target, connection.id, at, target.variant ?? mapped) <= at &&
                     ModelRoute.credentialQuotaBlocked(connection.id, at, locationDirectory) === undefined &&
                     !ModelRoute.demoted(target, at, connection.id, locationDirectory),
                 )

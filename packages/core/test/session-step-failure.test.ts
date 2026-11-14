@@ -18,6 +18,7 @@ describe("SessionStep.failureHint", () => {
     expect(SessionStep.failureHint(error(new RateLimitError({ message: "slow down", retryAfterMs: 7_000 })))).toEqual({
       retryAfterMs: 7_000,
       quota: false,
+      rateLimit: true,
       auth: false,
       network: false,
     })
@@ -53,6 +54,7 @@ describe("SessionStep.failureHint", () => {
     expect(hint).toEqual({
       retryAfterMs: undefined,
       quota: true,
+      rateLimit: false,
       auth: false,
       network: false,
     })
@@ -143,10 +145,10 @@ describe("SessionStep.failureHint", () => {
   test("an ordinary provider failure may carry a retry-after and is never a quota", () => {
     expect(
       SessionStep.failureHint(error(new ProviderInternalError({ message: "overloaded", retryAfterMs: 3_000 }))),
-    ).toEqual({ retryAfterMs: 3_000, quota: false, auth: false, network: false })
+    ).toEqual({ retryAfterMs: 3_000, quota: false, rateLimit: false, auth: false, network: false })
     expect(
       SessionStep.failureHint(error(new TransportError({ message: "reset", transport: "http", operation: "read" }))),
-    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: true })
+    ).toEqual({ retryAfterMs: undefined, quota: false, rateLimit: false, auth: false, network: true })
     expect(
       SessionStep.failureHint(
         error(
@@ -158,7 +160,7 @@ describe("SessionStep.failureHint", () => {
           }),
         ),
       ),
-    ).toEqual({ retryAfterMs: undefined, quota: false, auth: false, network: false })
+    ).toEqual({ retryAfterMs: undefined, quota: false, rateLimit: false, auth: false, network: false })
   })
 
   test("a provider-stated wait on a transport timeout still yields a retry-after (#1551)", () => {

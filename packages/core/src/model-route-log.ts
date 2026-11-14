@@ -354,7 +354,17 @@ export const onRestoreUsage = (next: typeof restoreUsage) => {
   restoreUsage = next
 }
 
-type CooldownRow = { providerID: string; modelID: string; until: number; credentialID?: string; reason?: string }
+type CooldownRow = {
+  providerID: string
+  modelID: string
+  until: number
+  credentialID?: string
+  reason?: string
+  /** The effort a traffic-scope row names in its reason suffix (` variant:<id>`). */
+  variant?: string
+  /** The health row's own time: when the bench was planted. */
+  plantedAt?: number
+}
 let restoreCooldowns:
   | ((rows: readonly CooldownRow[], readings?: readonly QuotaCurrent.ProviderReading[]) => void)
   | undefined
@@ -408,13 +418,20 @@ export const restoreCooldownsFrom = (
       // to the reason regex. A `provider:<id>` reason is a different dimension (provider quota)
       // and never a credential.
       const credentialID = row.credential_id ?? /credential:(\S+)/.exec(row.reason ?? "")?.[1]
-      const id = credentialID ? `${row.provider_id}/${row.model_id}#${credentialID}` : `${row.provider_id}/${row.model_id}`
+      // A traffic-scope row names its effort in the reason the same way (` variant:<id>`):
+      // it restores onto that leg (door × model × effort, plus credential), so its map
+      // identity carries the segment too — a cooldown-end for one effort must never
+      // delete a sibling effort's restored bench.
+      const variant = /variant:(\S+)/.exec(row.reason ?? "")?.[1]
+      const id = `${row.provider_id}/${row.model_id}${credentialID ? `#${credentialID}` : ""}${variant ? `@${variant}` : ""}`
       const entry = {
         providerID: row.provider_id,
         modelID: row.model_id,
         until: row.until ?? 0,
         ...(row.reason ? { reason: row.reason } : {}),
         ...(credentialID ? { credentialID } : {}),
+        ...(variant ? { variant } : {}),
+        plantedAt: row.time,
       }
       if (row.kind === "rate-limit-window") windows.set(id, entry)
       else if (row.kind === "cooldown-end") latest.delete(id)

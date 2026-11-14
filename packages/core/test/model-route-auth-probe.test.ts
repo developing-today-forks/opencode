@@ -35,10 +35,13 @@ describe("ModelRoute auth bench probe (code#9950)", () => {
     // door is not an ordinary candidate — a probe is due and availability says so.
     expect(ModelRoute.cooldownUntil(target, now + 900_000)).toBe(0)
     expect(ModelRoute.probeDue(target, undefined, now + 900_000)).toBe(true)
+    // The bench lives at traffic (effort) scope now: availability names the
+    // effort it holds, "default" for an attempt that served without one.
     expect(entriesFor(now + 900_000)).toEqual([
       {
         providerID: "auth-probe-provider",
         modelID: "door",
+        variant: "default",
         class: "auth",
         reason: "auth bench expired; half-open probe pending",
         resume: "probe",
@@ -76,6 +79,7 @@ describe("ModelRoute auth bench probe (code#9950)", () => {
         providerID: "auth-probe-provider",
         modelID: "door",
         credentialID: "cred-auth",
+        variant: "default",
         class: "auth",
         reason: "auth bench expired; half-open probe in flight",
         resume: "probe",
