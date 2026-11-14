@@ -193,6 +193,7 @@ export const layer = Layer.effect(
             routing.credentialID,
             locationDirectory,
             routing.probeClaim,
+            input.model.ref.variant,
           )
         else if (!interrupted && usage && firstTextAt !== undefined)
           ModelRoute.completed(
@@ -208,6 +209,7 @@ export const layer = Layer.effect(
             routing.credentialID,
             locationDirectory,
             routing.probeClaim,
+            input.model.ref.variant,
           )
         else releaseProbeClaim(input.model)
       }

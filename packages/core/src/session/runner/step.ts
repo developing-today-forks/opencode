@@ -221,6 +221,9 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
         ? undefined
         : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
+    // The rate-limit class itself, stated wait or not: bench() counts these, and
+    // a run of them with no success between classifies the bench up (model-route).
+    rateLimit: reason._tag === "RateLimit",
     // Optional hint fields are omitted when unset, never present-but-undefined — the
     // same convention the route policy follows.
     ...(quotaResetAtMs !== undefined ? { quotaResetAtMs } : {}),
@@ -402,6 +405,7 @@ export const make = Effect.gen(function* () {
                 undefined,
                 locationDirectory,
                 input.model.routing.probeClaim,
+                input.model.ref.variant,
               )
           }
           const receivedAt = performance.now()
@@ -790,6 +794,7 @@ export const make = Effect.gen(function* () {
             input.model.routing.credentialID,
             locationDirectory,
             input.model.routing.probeClaim,
+            input.model.ref.variant,
           )
         // The failover return itself is deferred until after the attempt row is written,
         // so the row can name the destination.
@@ -857,6 +862,7 @@ export const make = Effect.gen(function* () {
             input.model.routing.credentialID,
             locationDirectory,
             input.model.routing.probeClaim,
+            input.model.ref.variant,
           )
           const fallback = yield* Effect.result(input.model.routing.fallback())
           if (Result.isSuccess(fallback) && fallback.success) {
@@ -946,6 +952,7 @@ export const make = Effect.gen(function* () {
             input.model.routing.credentialID,
             locationDirectory,
             input.model.routing.probeClaim,
+            input.model.ref.variant,
           )
           if (input.sessionID)
             ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
@@ -1104,7 +1111,7 @@ export const make = Effect.gen(function* () {
       // The target that lost: the primary when the hedge answered first, otherwise the hedge.
       const loser = raced.winner === "hedge" ? input.model : raced.hedgeValue?.model
       if (loser) {
-        ModelRoute.slow(loser.ref, routing.policy)
+        ModelRoute.slow(loser.ref, routing.policy, Date.now(), loser.ref.variant)
         ModelRoute.recordUsage(loser.ref, input.estimatedInputTokens ?? 0)
       }
       ModelRouteLog.record({
