@@ -192,6 +192,11 @@ export interface Resolved {
       readonly token: number
       readonly credentialID?: Credential.ID
     }
+    /** Epoch ms of the earliest re-admission among this route's excluded candidates,
+     * present only when this resolution seated a last-resort target with nothing ready
+     * (#1806): a failed attempt with no failover candidate retries at this instant
+     * instead of re-resolving into the same wall on the short retry schedule. */
+    readonly recheckAt?: number
     /**
      * Activates the next eligible stored credential on the target's own integration and
      * re-resolves the same target on it (#6 credential failover). Eligibility is the Phase A
@@ -778,6 +783,8 @@ export const layer = Layer.effect(
           // resolution that walked away with the pick carries it — credential-fallback
           // re-resolutions of the same target spend no new claim and pass none.
           probeClaim?: { readonly claimedAt: number; readonly token: number; readonly credentialID?: Credential.ID },
+          // The last-resort seat's recheck instant (#1806), when this pick seated one.
+          recheckAt?: number,
         ): Resolved => {
           const branch = {
             tried: new Set(triedTargets),
@@ -819,6 +826,7 @@ export const layer = Layer.effect(
             autonomy: definition.autonomy,
             ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
             ...(probeClaim ? { probeClaim } : {}),
+            ...(recheckAt !== undefined ? { recheckAt } : {}),
             fallback: () => {
               // Branch-local cascade state (#1014 Codex P2): a fallback call is a
               // speculative branch as often as it is the primary's next step — a
@@ -1004,7 +1012,7 @@ export const layer = Layer.effect(
             // answer in another scope. Consulting the credential gate alone let the
             // last resort seat legs whose quota was exhausted for weeks over legs
             // that were merely benched and about to serve again.
-            if (ModelRoute.quotaCoolingDown(target, now)) return false
+            if (ModelRoute.quotaCoolingDown(target, now, locationDirectory)) return false
             if (ModelRoute.providerQuotaBlocked(target, now, locationDirectory) !== undefined) return false
             if (credentialID === undefined) return true
             if (ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) !== undefined) return false
@@ -1016,6 +1024,29 @@ export const layer = Layer.effect(
           // any scope while any such target remains.
           const lastResort = allowQuotaDeadLastResort ? (nonFull.length > 0 ? nonFull : usable) : nonFull
           const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
+          // A last-resort seat (nothing ready) carries the earliest moment an
+          // excluded candidate re-admits (#1806): the untried candidates'
+          // recorded exclusion instants and every non-eligible target's bench
+          // end (tried targets included — the candidate a cascade already
+          // spent is exactly the one a retry should wait for).
+          const lastResortRecheckAt =
+            ready.length === 0 && allowCooling && eligible.length > 0
+              ? definition.targets.reduce<number | undefined>((earliest, target, candidate) => {
+                  if (eligible.includes(candidate)) return earliest
+                  if (sitsOut(candidate) || overLimit.has(candidate)) return earliest
+                  const reason = unavailable.get(candidate)
+                  const stated = reason ? /until:(\d+)$/.exec(reason) : null
+                  const benchEnd = ModelRoute.cooldownUntil(target, now, locationDirectory)
+                  const skipEnd = ModelRoute.quotaSkipUntil(target, now, locationDirectory)
+                  const instant = Math.min(
+                    stated ? Number(stated[1]) : Number.POSITIVE_INFINITY,
+                    benchEnd > now ? benchEnd : Number.POSITIVE_INFINITY,
+                    skipEnd !== undefined && skipEnd > now ? skipEnd : Number.POSITIVE_INFINITY,
+                  )
+                  if (!Number.isFinite(instant) || instant <= now) return earliest
+                  return earliest === undefined || instant < earliest ? instant : earliest
+                }, undefined)
+              : undefined
           const index = ModelRoute.nextTarget(
             definition,
             new Set(eligible),
@@ -1219,7 +1250,14 @@ export const layer = Layer.effect(
                     cascade,
                   )
               : undefined
-          return makeResolved(current, origin, credentialFallback(servingCredentialID), servingCredentialID, probeClaim)
+          return makeResolved(
+            current,
+            origin,
+            credentialFallback(servingCredentialID),
+            servingCredentialID,
+            probeClaim,
+            lastResortRecheckAt,
+          )
         }
         if (lastError) return yield* Effect.fail(lastError)
         return undefined

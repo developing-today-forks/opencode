@@ -878,7 +878,14 @@ export const make = Effect.gen(function* () {
         if (llmFailure && llmError && retry?.retry && !recorded.outputStarted) {
           // Retry state projects onto the existing assistant, even before it has produced output.
           yield* publisher.startAssistant()
-          return Outcome.Retry({ error: llmError, decision: retry })
+          // No failover candidate served (the Failover outcome above did not
+          // fire): a last-resort seat's retry waits for its recheck instant —
+          // the earliest excluded candidate's re-admission — rather than
+          // re-resolving into the same wall on the short schedule (#1806).
+          return Outcome.Retry({
+            error: llmError,
+            decision: SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt),
+          })
         }
         if (llmError && !recorded.providerFailed) yield* publisher.failAssistant(llmError)
 
