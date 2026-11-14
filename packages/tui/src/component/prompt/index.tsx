@@ -57,6 +57,7 @@ import {
   formatVoiceClock,
   startRecorder,
   submitVoiceTranscription,
+  submitVoiceTranscriptionStream,
   voiceMediaType,
   voicePrivacyNotice,
   voiceRegistration,
@@ -401,12 +402,24 @@ export function Prompt(props: PromptProps) {
       )
       return
     }
-    const result = await submitVoiceTranscription({
-      url,
-      headers: client.headers,
-      registration: voiceMachine.registration,
-      audio: snapshot.audio,
-    }).catch((error) => {
+    // §6.4: a stream-capable registration streams partials that
+    // render provisionally (muted status line) and are never
+    // committed; the batch path remains for batch-only routes.
+    const submit = voiceMachine.registration.capabilities.stream
+      ? submitVoiceTranscriptionStream({
+          url,
+          headers: client.headers,
+          registration: voiceMachine.registration,
+          audio: snapshot.audio,
+          onPartial: (text) => setVoice(voiceMachine.partial(text)),
+        })
+      : submitVoiceTranscription({
+          url,
+          headers: client.headers,
+          registration: voiceMachine.registration,
+          audio: snapshot.audio,
+        })
+    const result = await submit.catch((error) => {
       setVoice(voiceMachine.fail(errorMessage(error)))
       return undefined
     })
@@ -445,7 +458,9 @@ export function Prompt(props: PromptProps) {
       case "reviewing":
         return `Voice ready: ${snapshot.audio?.name ?? "audio"}. ${voicePrivacyNotice(registration)} /voice-send transcribes it once into your draft (never auto-sent); /voice-discard throws it away.`
       case "submitting":
-        return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+        return snapshot.partialText
+          ? `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref} — live preview, not in your draft yet: ${snapshot.partialText}`
+          : `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
       case "error":
         return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
       default:

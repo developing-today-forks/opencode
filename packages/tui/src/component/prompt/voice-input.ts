@@ -13,6 +13,14 @@
 // No STT provider key ever reaches this client (§3): the façade owns
 // provider keys; this module authenticates with the server session
 // headers the TUI already holds and sends only the multipart form.
+//
+// Streaming (§6.4, phase 2): when the resolved registration is
+// stream-capable, submission uses the façade's SSE contract —
+// partial text renders provisionally in the composer (dimmed, via
+// the muted status line) and is never committed to the draft; only
+// the finish frame's transcript is inserted, per §6.3. A stream
+// that errors mid-way leaves the pre-recording draft untouched and
+// returns to the §6.2 error state with the audio still held.
 
 import {
   TRANSCRIPTION_MODELS,
@@ -56,6 +64,10 @@ export interface VoiceSnapshot {
   readonly elapsedSeconds: number
   readonly error?: string
   readonly lastProvenance?: VoiceProvenance
+  /** §6.4 provisional streamed text: rendering-only, present only
+   * while submitting; it is never the draft and is dropped by both
+   * complete() and fail(). */
+  readonly partialText?: string
 }
 
 const EXTENSION_MEDIA_TYPES: Readonly<Record<string, string>> = {
@@ -197,6 +209,15 @@ export class VoiceInputMachine {
     return this.#snapshot
   }
 
+  /** §6.4: a streamed partial replaces the provisional text. Only
+   * valid while submitting; the provisional text is dropped by
+   * complete() and fail() — it is never committed to the draft. */
+  partial(text: string): VoiceSnapshot {
+    if (this.#snapshot.state !== "submitting") return this.#snapshot
+    this.#snapshot = { ...this.#snapshot, partialText: text }
+    return this.#snapshot
+  }
+
   /** A façade failure (§2.4) renders as an actionable composer state
    * with the audio retained locally for retry/discard (§6.2). */
   fail(message: string): VoiceSnapshot {
@@ -253,6 +274,41 @@ export interface VoiceTranscriptionResult {
   readonly provenance: VoiceProvenance
 }
 
+interface TranscriptionEnvelope {
+  text?: string
+  language?: string
+  duration?: number
+  provider_metadata?: { provider?: string; model?: string }
+}
+
+function envelopeResult(envelope: TranscriptionEnvelope, registration: TranscriptionModelRegistration): VoiceTranscriptionResult {
+  if (typeof envelope?.text !== "string")
+    throw new VoiceTranscriptionError("The façade answered without a transcript. Retry, or discard the audio and re-record.")
+  return {
+    text: envelope.text,
+    provenance: {
+      provider: envelope.provider_metadata?.provider ?? registration.providerID,
+      model: envelope.provider_metadata?.model ?? registration.modelID,
+      ...(envelope.duration !== undefined ? { durationSeconds: envelope.duration } : {}),
+      ...(envelope.language !== undefined ? { language: envelope.language } : {}),
+    },
+  }
+}
+
+function voiceForm(input: {
+  readonly registration: TranscriptionModelRegistration
+  readonly audio: VoiceAudio
+  readonly language?: string
+  readonly stream?: boolean
+}): FormData {
+  const form = new FormData()
+  form.set("file", new Blob([input.audio.bytes as BlobPart], { type: input.audio.mediaType }), input.audio.name)
+  form.set("model", input.registration.ref)
+  if (input.language) form.set("language", input.language)
+  if (input.stream) form.set("stream", "true")
+  return form
+}
+
 /** One batch call to the façade (§6.2: submitting calls the façade
  * once). Parses the §2.3 normalized envelope and maps §2.4 typed
  * errors to actionable composer messages. */
@@ -265,10 +321,7 @@ export async function submitVoiceTranscription(input: {
   readonly language?: string
 }): Promise<VoiceTranscriptionResult> {
   const doFetch = input.fetch ?? fetch
-  const form = new FormData()
-  form.set("file", new Blob([input.audio.bytes as BlobPart], { type: input.audio.mediaType }), input.audio.name)
-  form.set("model", input.registration.ref)
-  if (input.language) form.set("language", input.language)
+  const form = voiceForm(input)
   const endpoint = `${input.url.replace(/\/$/, "")}/v1/audio/transcriptions`
   let response: Response
   try {
@@ -283,23 +336,141 @@ export async function submitVoiceTranscription(input: {
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
     throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
   }
-  const envelope = body as {
-    text?: string
-    language?: string
-    duration?: number
-    provider_metadata?: { provider?: string; model?: string }
+  return envelopeResult(body as TranscriptionEnvelope, input.registration)
+}
+
+// ------------------------------------------------------------ streaming (§6.4)
+
+/**
+ * Assembles the façade's §7 SSE frames into the provisional text
+ * and the final result. Delta payloads append; segment payloads
+ * append as the next turn (space-joined for display); the done
+ * frame's envelope is the result, exactly as a batch caller
+ * receives it. An error frame throws — the caller (§6.2) keeps the
+ * audio and the draft untouched.
+ */
+export class TranscriptionStreamAssembler {
+  readonly #registration: TranscriptionModelRegistration
+  #provisional = ""
+  #result: VoiceTranscriptionResult | undefined
+
+  constructor(registration: TranscriptionModelRegistration) {
+    this.#registration = registration
   }
-  if (typeof envelope?.text !== "string")
-    throw new VoiceTranscriptionError("The façade answered without a transcript. Retry, or discard the audio and re-record.")
-  return {
-    text: envelope.text,
-    provenance: {
-      provider: envelope.provider_metadata?.provider ?? input.registration.providerID,
-      model: envelope.provider_metadata?.model ?? input.registration.modelID,
-      ...(envelope.duration !== undefined ? { durationSeconds: envelope.duration } : {}),
-      ...(envelope.language !== undefined ? { language: envelope.language } : {}),
-    },
+
+  get provisional(): string {
+    return this.#provisional
   }
+
+  get result(): VoiceTranscriptionResult | undefined {
+    return this.#result
+  }
+
+  /** Feed one SSE `data:` payload (prefix already stripped).
+   * Returns true for the `[DONE]` terminator. */
+  push(payload: string): boolean {
+    if (payload === "[DONE]") return true
+    let frame: {
+      type?: string
+      delta?: string
+      segment?: { text?: string }
+      error?: { message?: string; code?: string }
+    } & TranscriptionEnvelope
+    try {
+      frame = JSON.parse(payload)
+    } catch {
+      return false
+    }
+    if (frame.error)
+      throw new VoiceTranscriptionError(frame.error.message ?? "The transcription stream failed.", {
+        code: frame.error.code,
+      })
+    switch (frame.type) {
+      case "transcript.text.delta":
+        if (typeof frame.delta === "string") this.#provisional += frame.delta
+        return false
+      case "transcript.text.segment": {
+        const text = frame.segment?.text
+        if (typeof text === "string" && text !== "")
+          this.#provisional = this.#provisional === "" ? text : `${this.#provisional} ${text}`
+        return false
+      }
+      case "transcript.text.done":
+        this.#result = envelopeResult(frame, this.#registration)
+        return false
+      default:
+        return false
+    }
+  }
+}
+
+/** One streaming call to the façade (§6.4): POSTs with stream=true
+ * and reports the provisional text through onPartial as frames
+ * arrive; resolves with the finish frame's result. Pre-stream
+ * failures keep the §2.4 JSON error mapping of the batch path; a
+ * stream that ends without a finish frame fails typed, with the
+ * audio-retry guidance. */
+export async function submitVoiceTranscriptionStream(input: {
+  readonly url: string
+  readonly headers?: Readonly<Record<string, string>>
+  readonly fetch?: typeof fetch
+  readonly registration: TranscriptionModelRegistration
+  readonly audio: VoiceAudio
+  readonly language?: string
+  readonly onPartial?: (text: string) => void
+}): Promise<VoiceTranscriptionResult> {
+  const doFetch = input.fetch ?? fetch
+  const form = voiceForm({ ...input, stream: true })
+  const endpoint = `${input.url.replace(/\/$/, "")}/v1/audio/transcriptions`
+  let response: Response
+  try {
+    response = await doFetch(endpoint, { method: "POST", headers: { ...input.headers }, body: form })
+  } catch {
+    throw new VoiceTranscriptionError(
+      `Could not reach the transcription façade at ${endpoint}. Check that the server is running, then retry — your audio is still held locally.`,
+    )
+  }
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => undefined)
+    const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
+    throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
+  }
+  if (!response.body)
+    throw new VoiceTranscriptionError("The façade answered without a stream. Retry, or discard the audio and re-record.")
+  const assembler = new TranscriptionStreamAssembler(input.registration)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let terminated = false
+  const handlePayload = (payload: string) => {
+    if (assembler.push(payload)) {
+      terminated = true
+      return
+    }
+    if (assembler.result === undefined) input.onPartial?.(assembler.provisional)
+  }
+  while (!terminated) {
+    const { done: eof, value } = await reader.read()
+    if (value) buffer += decoder.decode(value, { stream: true })
+    let split = buffer.indexOf("\n\n")
+    while (split >= 0) {
+      const block = buffer.slice(0, split)
+      buffer = buffer.slice(split + 2)
+      for (const line of block.split("\n")) {
+        const trimmed = line.trim()
+        if (trimmed.startsWith("data:")) handlePayload(trimmed.slice(5).trim())
+      }
+      if (terminated) break
+      split = buffer.indexOf("\n\n")
+    }
+    if (eof) break
+  }
+  const result = assembler.result
+  if (!result)
+    throw new VoiceTranscriptionError(
+      "The transcription stream ended before the final transcript arrived. Retry — your audio is still held locally.",
+    )
+  return result
 }
 
 // ------------------------------------------------------------ capture (§6.1)

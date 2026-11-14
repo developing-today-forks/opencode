@@ -12,8 +12,11 @@ export * as TranscriptionFacade from "./transcription-facade.js"
  * capability shape, key source and retention posture live only in its
  * registration.
  *
- * Phase 1 is batch only (§7): the façade never fake-streams, so a
- * `stream=true` request fails typed (§2.4). Five providers are
+ * Phase 1 shipped batch only (§7); phase 2 (§8.5) adds opt-in
+ * streaming for stream-capable registrations: `stream=true` on a
+ * registration whose capabilities declare `stream: false` still
+ * fails typed (§2.4) — the façade never fake-streams a batch
+ * result as deltas. Five providers are
  * registered (§8.1 + §8.2) — OpenAI whisper-1, whose protocol defines the capability
  * shape the registry mirrors (§3), plus Deepgram, Google, AssemblyAI and
  * ElevenLabs, each verified against its recorded fixtures in packages/ai
@@ -42,10 +45,10 @@ export * as TranscriptionFacade from "./transcription-facade.js"
  * live only in the request-scoped input; nothing is written to the
  * session store, the ledger, or logs.
  */
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, UnsupportedOperationError } from "@opencode/ai"
-import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
+import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, TranscriptionResponse, UnsupportedOperationError } from "@opencode/ai"
+import type { TranscriptionEvent, TranscriptionModel } from "@opencode/ai"
 import { configure } from "@opencode/ai/providers/openai"
 import { configure as configureAssemblyAI } from "@opencode/ai/providers/assemblyai"
 import { configure as configureDeepgram } from "@opencode/ai/providers/deepgram"
@@ -266,6 +269,7 @@ export interface ParsedTranscriptionRequest {
   readonly language?: string
   readonly prompt?: string
   readonly responseFormat: "json" | "verbose_json"
+  readonly stream?: boolean
   readonly timestamps?: "segment" | "word"
   readonly diarize?: boolean
   readonly speakers?: number
@@ -347,15 +351,17 @@ export const parseTranscriptionRequest = (
       ),
     )
 
-  // Batch only in phase 1 (§7): stream=true on this non-stream route
-  // fails typed, never fake-streams (§2.4).
-  const stream = field(form, "stream")
-  if (stream === "true" || stream === "1")
+  // Streaming is phase 2 (§7/§8.5): stream=true is honored only on
+  // a registration that declares the stream capability; on any other
+  // route it fails typed, never fake-streams (§2.4).
+  const streamField = field(form, "stream")
+  const stream = streamField === "true" || streamField === "1"
+  if (stream && !capabilities.stream)
     return fail(
       shape(
         400,
         "stream_not_supported",
-        "streaming transcription is not available on this route in phase 1; omit stream for a batch transcription",
+        `${registration.ref} does not stream; streaming requires a stream-capable registration — omit stream for a batch transcription`,
       ),
     )
 
@@ -418,6 +424,7 @@ export const parseTranscriptionRequest = (
       ...(language !== undefined && language !== "" ? { language } : {}),
       ...(prompt !== undefined && prompt !== "" ? { prompt } : {}),
       responseFormat,
+      ...(stream ? { stream: true } : {}),
       ...(timestamps !== undefined ? { timestamps } : {}),
       ...(diarize !== undefined ? { diarize } : {}),
       ...(speakers !== undefined ? { speakers } : {}),
@@ -479,6 +486,46 @@ export const transcriptionBody = (
   }
 }
 
+/**
+ * The §7 phase-2 SSE frame payload for one streamed event: the
+ * TranscriptionEvent grammar serialized with the OpenAI protocol's
+ * frame names (`transcript.text.delta` / `transcript.text.segment` /
+ * `transcript.text.done`). The finish frame carries the full §2.3
+ * envelope, so a streaming caller ends with exactly what a batch
+ * caller receives. Queued/progress events are route-internal (a
+ * queued route is never stream-capable, §3) and have no §7 frame:
+ * they serialize to undefined and the handler skips them.
+ */
+export const transcriptionStreamFrame = (
+  event: TranscriptionEvent,
+  registration: TranscriptionModelRegistration,
+  responseFormat: "json" | "verbose_json",
+): string | undefined => {
+  switch (event.type) {
+    case "text-delta":
+      return JSON.stringify({ type: "transcript.text.delta", delta: event.delta })
+    case "segment":
+      return JSON.stringify({
+        type: "transcript.text.segment",
+        segment: {
+          text: event.segment.text,
+          start: event.segment.startSeconds,
+          end: event.segment.endSeconds,
+          ...(event.segment.speaker !== undefined ? { speaker: event.segment.speaker } : {}),
+        },
+      })
+    case "finish": {
+      const { type: _type, ...transcript } = event
+      return JSON.stringify({
+        type: "transcript.text.done",
+        ...transcriptionBody(new TranscriptionResponse(transcript), registration, responseFormat),
+      })
+    }
+    default:
+      return undefined
+  }
+}
+
 /** The transcription entries GET /v1/models can advertise alongside
  * the other doors' models (§3). */
 export const transcriptionModelEntries = (enabledProviders?: ReadonlySet<string>) =>
@@ -492,6 +539,17 @@ export type Error = FacadeError
 
 export interface Interface {
   readonly transcribe: (input: ParsedTranscriptionRequest) => Effect.Effect<TranscriptionResponse, Error>
+  /**
+   * Phase-2 streaming (§7/§8.5): the outer effect performs the
+   * setup failures a batch call reports before any byte (missing
+   * provider key, unwired factory) so the handler can still answer
+   * with a §2.4 JSON error; the returned stream carries the
+   * provider's events and fails typed mid-stream. §4 parity is
+   * recorded exactly once per call, from inside the stream.
+   */
+  readonly transcribeStream: (
+    input: ParsedTranscriptionRequest,
+  ) => Effect.Effect<Stream.Stream<TranscriptionEvent, Error>, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/TranscriptionFacade") {}
@@ -640,7 +698,96 @@ export const layer = Layer.effect(
         })
         return result.success
       })
-    return Service.of({ transcribe })
+    const transcribeStream: Interface["transcribeStream"] = (input) =>
+      Effect.gen(function* () {
+        const { registration } = input
+        const startedAt = Date.now()
+        const observed = ModelRouteLog.observer({
+          routeID: "",
+          providerID: registration.providerID,
+          modelID: registration.modelID,
+          startedAt,
+        })
+        const apiKey = process.env[registration.apiKeyEnv]
+        if (apiKey === undefined || apiKey === "") {
+          observed.done("failure", {
+            failure: new Error(`${registration.apiKeyEnv} is not set`),
+            outputStarted: false,
+          })
+          return yield* new FacadeError(
+            shape(
+              502,
+              "upstream_failure",
+              `transcription provider ${registration.providerID} is not configured: ${registration.apiKeyEnv} is not set`,
+            ),
+          )
+        }
+        const factory = ownValue(PROVIDER_FACTORIES, registration.providerID)
+        if (!factory) {
+          observed.done("failure", {
+            failure: new Error(`no transcription factory for ${registration.providerID}`),
+            outputStarted: false,
+          })
+          return yield* new FacadeError(
+            shape(502, "upstream_failure", `no transcription factory is wired for provider ${registration.providerID}`),
+          )
+        }
+        // §4 parity for streamed calls: the attempt row is written
+        // exactly once — success on the finish event (usage from the
+        // finish event, as the batch path), failure on a stream
+        // error, or failure when the stream ends without a finish.
+        let outputStarted = false
+        let firstOutputAt: number | undefined
+        let settled = false
+        const events = client.stream(
+          Transcription.request({
+            model: factory(registration.modelID, apiKey),
+            audio: Media.bytes(input.audio.bytes, input.audio.mediaType),
+            ...(input.language !== undefined ? { language: input.language } : {}),
+            ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+            ...(input.timestamps !== undefined ? { timestamps: input.timestamps } : {}),
+            ...(input.diarize !== undefined ? { diarize: input.diarize } : {}),
+            ...(input.speakers !== undefined ? { speakers: input.speakers } : {}),
+            ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
+          }),
+        )
+        return events.pipe(
+          Stream.tap((event) =>
+            Effect.sync(() => {
+              if (!outputStarted) {
+                outputStarted = true
+                firstOutputAt = Date.now()
+              }
+              if (event.type === "finish" && !settled) {
+                settled = true
+                const tokens = usageTokens(event.usage)
+                observed.done("success", {
+                  outputStarted: true,
+                  firstOutputAt: firstOutputAt ?? Date.now(),
+                  ...(tokens !== undefined ? { tokens } : {}),
+                })
+              }
+            }),
+          ),
+          Stream.mapError((failure) => {
+            if (!settled) {
+              settled = true
+              observed.done("failure", { failure, outputStarted })
+            }
+            return new FacadeError(classifyFailure(failure))
+          }),
+          Stream.concat(
+            Stream.suspend(() => {
+              if (settled) return Stream.empty
+              settled = true
+              const message = "the transcription stream ended without a finish event"
+              observed.done("failure", { failure: new Error(message), outputStarted })
+              return Stream.fail(new FacadeError(shape(502, "upstream_failure", message)))
+            }),
+          ),
+        )
+      })
+    return Service.of({ transcribe, transcribeStream })
   }),
 ).pipe(Layer.provide(TranscriptionClient.layer))
 
