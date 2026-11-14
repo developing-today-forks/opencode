@@ -238,7 +238,14 @@ const layer = Layer.effect(
       // continues a previous step's truncated response starts from that link.
       let continuationOf: SessionMessage.ID | undefined = continuation?.of
       let continuationIndex = continuation?.index ?? 0
-      const retry = yield* SessionRunnerRetry.make(bus, sessionID)
+      // The step's retry bound is the route's own per-target attempt budget when
+      // the model resolved through a route (code#9549): the route's `attempts`
+      // counts the first attempt, the retry policy counts retries after it, and
+      // the policy's own constants cap whatever a route states.
+      const retry = yield* SessionRunnerRetry.make(bus, sessionID, {
+        maxRetries:
+          first.model.routing?.attempts === undefined ? undefined : Math.max(0, first.model.routing.attempts - 1),
+      })
       let initial: SessionContext.Loaded | undefined = first
       let recoverOverflow = true
       let recoverContinuation = true

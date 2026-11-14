@@ -737,10 +737,17 @@ export const make = Effect.gen(function* () {
         // A target gets `attempts` requests before the route moves on. The failure only counts against
         // the target's health once it is given up on.
         const retryKey = `${input.assistantMessageID}|${input.model.ref.providerID}/${input.model.ref.id}`
+        // A dead or walled leg (code#9549: an auth refusal, an exhausted quota, an
+        // account-disabled refusal) is never re-issued on the same target, whatever
+        // the retry hook decided: the failure falls through to the health accounting
+        // below, which benches the target through ModelRoute.failed, and to the
+        // failover walk, which moves this turn to the next candidate.
+        const deadLeg = llmFailure !== undefined && SessionRunnerRetry.neverRetry(llmFailure)
         const sameTargetRetry =
           input.model.routing !== undefined &&
           llmFailure !== undefined &&
           routeFailure &&
+          !deadLeg &&
           !recorded.outputStarted &&
           retry?.retry === true &&
           // A transient failure on a target with a good record gets another try; a rate limit or a
