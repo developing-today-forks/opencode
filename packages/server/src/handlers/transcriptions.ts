@@ -1,4 +1,4 @@
-import { Effect, Option, Result } from "effect"
+import { Cause, Effect, Option, Result, Stream } from "effect"
 import { Headers, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { Completions } from "@opencode/core/completions"
 import { Model } from "@opencode/core/model"
@@ -72,10 +72,59 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
     const parsed = TranscriptionFacade.parseTranscriptionRequest({ fields, file }, enabledProviders)
     if (!parsed.ok) return errorResponse(parsed.error.status, parsed.error.message, parsed.error.code)
     const facade = yield* TranscriptionFacade.Service
-    const result = yield* Effect.result(facade.transcribe(parsed.value))
-    if (Result.isFailure(result))
-      return errorResponse(result.failure.status, result.failure.message, result.failure.code)
-    return HttpServerResponse.jsonUnsafe(
-      TranscriptionFacade.transcriptionBody(result.success, parsed.value.registration, parsed.value.responseFormat),
+    if (!parsed.value.stream) {
+      const result = yield* Effect.result(facade.transcribe(parsed.value))
+      if (Result.isFailure(result))
+        return errorResponse(result.failure.status, result.failure.message, result.failure.code)
+      return HttpServerResponse.jsonUnsafe(
+        TranscriptionFacade.transcriptionBody(result.success, parsed.value.registration, parsed.value.responseFormat),
+      )
+    }
+    // Phase-2 streaming (§7/§8.5): SSE frames of transcript.text.delta /
+    // transcript.text.segment / transcript.text.done, terminated by
+    // `data: [DONE]`. Setup failures (missing provider key, unwired
+    // factory) still answer with the §2.4 JSON error — the stream has
+    // not started; failures after the first frame ride the stream as
+    // one error frame and no [DONE] follows, mirroring the chat
+    // façades' streaming translation.
+    const streamResult = yield* Effect.result(facade.transcribeStream(parsed.value))
+    if (Result.isFailure(streamResult))
+      return errorResponse(streamResult.failure.status, streamResult.failure.message, streamResult.failure.code)
+    let finished = false
+    let failed = false
+    const frames = streamResult.success.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type === "finish") finished = true
+        }),
+      ),
+      Stream.flatMap((event) => {
+        const frame = TranscriptionFacade.transcriptionStreamFrame(
+          event,
+          parsed.value.registration,
+          parsed.value.responseFormat,
+        )
+        return frame === undefined ? Stream.empty : Stream.make(`data: ${frame}\n\n`)
+      }),
+      Stream.catchCause((cause) => {
+        const failure: unknown = Cause.squash(cause)
+        failed = true
+        const shape =
+          failure instanceof TranscriptionFacade.FacadeError
+            ? failure
+            : { status: 502, code: "upstream_failure", message: "transcription stream failed" }
+        return Stream.make(
+          `data: ${JSON.stringify(Completions.errorBody(shape.message, errorType(shape.status), shape.code))}\n\n`,
+        )
+      }),
+      Stream.concat(Stream.suspend(() => (finished && !failed ? Stream.make("data: [DONE]\n\n") : Stream.empty))),
     )
+    return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {
+      contentType: "text/event-stream",
+      headers: {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Content-Type-Options": "nosniff",
+      },
+    })
   })

@@ -57,6 +57,7 @@ import {
   formatVoiceClock,
   startRecorder,
   submitVoiceTranscription,
+  submitVoiceTranscriptionStream,
   voiceMediaType,
   voicePrivacyNotice,
   voiceRegistration,
@@ -401,12 +402,24 @@ export function Prompt(props: PromptProps) {
       )
       return
     }
-    const result = await submitVoiceTranscription({
-      url,
-      headers: client.headers,
-      registration: voiceMachine.registration,
-      audio: snapshot.audio,
-    }).catch((error) => {
+    // §6.4: a stream-capable registration streams partials that
+    // render provisionally (muted status line) and are never
+    // committed; the batch path remains for batch-only routes.
+    const submit = voiceMachine.registration.capabilities.stream
+      ? submitVoiceTranscriptionStream({
+          url,
+          headers: client.headers,
+          registration: voiceMachine.registration,
+          audio: snapshot.audio,
+          onPartial: (text) => setVoice(voiceMachine.partial(text)),
+        })
+      : submitVoiceTranscription({
+          url,
+          headers: client.headers,
+          registration: voiceMachine.registration,
+          audio: snapshot.audio,
+        })
+    const result = await submit.catch((error) => {
       setVoice(voiceMachine.fail(errorMessage(error)))
       return undefined
     })
@@ -445,7 +458,45 @@ export function Prompt(props: PromptProps) {
       case "reviewing":
         return `Voice ready: ${snapshot.audio?.name ?? "audio"}. ${voicePrivacyNotice(registration)} /voice-send transcribes it once into your draft (never auto-sent); /voice-discard throws it away.`
       case "submitting":
-        return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+        if (!snapshot.partialText)
+          return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+        // The live preview is a status line, not the transcript:
+        // flatten it to a single line (line breaks in the streamed
+        // text collapse to spaces) and show only a bounded trailing
+        // excerpt, and the status element below renders this state
+        // with wrapMode="none" + truncate — so however narrow or
+        // short the terminal is, the preview occupies exactly one
+        // row and can never push the composer out of view. The full
+        // text still lands in the draft via the finish frame.
+        const flat = snapshot.partialText.replace(/\s+/g, " ").trim()
+        const bounded = flat.length > 240 ? `…${flat.slice(-240)}` : flat
+        // Reserve visible columns for the preview itself: the audio
+        // name and the model ref are truncated independently (each
+        // to at most a quarter of the terminal width, the same
+        // truncateMiddle idiom the file path above uses), the
+        // explanatory phrase shortens on narrow terminals, and the
+        // preview takes whatever columns remain — so a long name or
+        // ref can never crowd the preview off the single line.
+        const width = dimensions().width
+        const phrase = width >= 80 ? " — live preview, not in your draft yet: " : " — preview: "
+        // Reserve preview space BEFORE sizing the prefix: the audio
+        // name and model ref may be long, but they must never crowd
+        // the live preview off the single status line. Compute the
+        // label budget from the width left after the fixed text and a
+        // minimum preview reservation, so the composed line always
+        // fits the available width and the preview keeps at least
+        // `minPreview` columns.
+        const minPreview = 16
+        const fixed = "Transcribing ".length + " with ".length + phrase.length
+        const labelsBudget = Math.max(0, width - fixed - minPreview)
+        const maxLabel = Math.max(4, Math.floor(width / 4))
+        const labelCap = Math.min(maxLabel, Math.max(4, Math.floor(labelsBudget / 2)))
+        const name = Locale.truncateMiddle(snapshot.audio?.name ?? "audio", labelCap)
+        const ref = Locale.truncateMiddle(registration.ref, labelCap)
+        const prefix = `Transcribing ${name} with ${ref}${phrase}`
+        const budget = Math.max(minPreview, width - prefix.length)
+        const preview = bounded.length > budget ? `…${bounded.slice(-(budget - 1))}` : bounded
+        return `${prefix}${preview}`
       case "error":
         return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
       default:
@@ -1984,7 +2035,11 @@ export function Prompt(props: PromptProps) {
             </Show>
             <Show when={voice().state !== "idle"}>
               <box width="100%" flexShrink={0} paddingBottom={1}>
-                <text fg={theme.text.muted} wrapMode="word">
+                <text
+                  fg={theme.text.muted}
+                  wrapMode={voice().state === "submitting" && voice().partialText ? "none" : "word"}
+                  truncate={voice().state === "submitting" && !!voice().partialText}
+                >
                   {voiceStatusText()}
                 </text>
               </box>

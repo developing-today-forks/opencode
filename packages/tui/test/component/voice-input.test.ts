@@ -5,7 +5,9 @@ import {
   detectRecorder,
   formatVoiceClock,
   recorderCandidates,
+  TranscriptionStreamAssembler,
   submitVoiceTranscription,
+  submitVoiceTranscriptionStream,
   validateVoiceAudio,
   voiceMediaType,
   voicePrivacyNotice,
@@ -219,4 +221,150 @@ test("formatVoiceClock renders m:ss", () => {
   expect(formatVoiceClock(0)).toBe("0:00")
   expect(formatVoiceClock(65)).toBe("1:05")
   expect(formatVoiceClock(600)).toBe("10:00")
+})
+
+describe("streaming partials (§6.4)", () => {
+  const streamRegistration = voiceRegistration("google/gemini-3.5-transcribe")!
+
+  test("partials are provisional: only while submitting, dropped by fail and by complete", () => {
+    const machine = new VoiceInputMachine(streamRegistration)
+    machine.attach(audio())
+    expect(machine.partial("too early").partialText).toBeUndefined()
+    machine.beginSubmit()
+    expect(machine.partial("hel").partialText).toBe("hel")
+    expect(machine.partial("hello").partialText).toBe("hello")
+    const failed = machine.fail("stream died")
+    expect(failed.state).toBe("error")
+    expect(failed.partialText).toBeUndefined()
+    expect(failed.audio?.name).toBe("clip.wav")
+    machine.beginSubmit()
+    machine.partial("again")
+    const done = machine.complete({ provider: "google", model: "gemini-3.5-transcribe" })
+    expect(done.partialText).toBeUndefined()
+  })
+
+  test("the assembler accumulates deltas, joins segments, and lands the done envelope", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    expect(assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "Did it " }))).toBe(false)
+    expect(assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "release ship?" }))).toBe(false)
+    expect(assembler.provisional).toBe("Did it release ship?")
+    expect(
+      assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "Yes, it shipped.", start: 1, end: 2 } })),
+    ).toBe(false)
+    expect(assembler.provisional).toBe("Did it release ship? Yes, it shipped.")
+    expect(assembler.result).toBeUndefined()
+    assembler.push(
+      JSON.stringify({
+        type: "transcript.text.done",
+        text: "Did it release ship? Yes, it shipped.",
+        language: "en",
+        duration: 2,
+        provider_metadata: { provider: "google", model: "gemini-3.5-transcribe" },
+      }),
+    )
+    expect(assembler.result?.text).toBe("Did it release ship? Yes, it shipped.")
+    expect(assembler.result?.provenance).toEqual({
+      provider: "google",
+      model: "gemini-3.5-transcribe",
+      durationSeconds: 2,
+      language: "en",
+    })
+    expect(assembler.push("[DONE]")).toBe(true)
+  })
+
+  test("a segment that repeats delta text does not duplicate the preview", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "hello" }))
+    assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello", start: 0, end: 1 } }))
+    expect(assembler.provisional).toBe("hello")
+  })
+
+  test("a segment extends delta fragments instead of re-joining them", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "hel" }))
+    assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello", start: 0, end: 1 } }))
+    expect(assembler.provisional).toBe("hello")
+    const second = new TranscriptionStreamAssembler(streamRegistration)
+    second.push(JSON.stringify({ type: "transcript.text.delta", delta: "hello" }))
+    second.push(
+      JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello world", start: 0, end: 1 } }),
+    )
+    expect(second.provisional).toBe("hello world")
+  })
+
+  test("an error frame throws typed, carrying the façade code", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    expect(() =>
+      assembler.push(JSON.stringify({ error: { message: "quota exhausted", type: "rate_limit_error", code: "quota_exceeded" } })),
+    ).toThrow(expect.objectContaining({ code: "quota_exceeded" }))
+  })
+
+  const sseFetch = (body: string, seen?: { init?: RequestInit }) =>
+    (async (_url: string, init?: RequestInit) => {
+      if (seen) seen.init = init
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
+    }) as unknown as typeof fetch
+
+  test("a streamed submission posts stream=true, reports partials, and resolves with the finish frame", async () => {
+    const seen: { init?: RequestInit } = {}
+    const partials: string[] = []
+    const body =
+      'data: {"type":"transcript.text.delta","delta":"Did it "}\n\n' +
+      'data: {"type":"transcript.text.delta","delta":"release ship?"}\n\n' +
+      'data: {"type":"transcript.text.done","text":"Did it release ship?","provider_metadata":{"provider":"google","model":"gemini-3.5-transcribe"}}\n\n' +
+      "data: [DONE]\n\n"
+    const result = await submitVoiceTranscriptionStream({
+      url: "http://localhost:4096",
+      fetch: sseFetch(body, seen),
+      registration: streamRegistration,
+      audio: audio(),
+      onPartial: (text) => partials.push(text),
+    })
+    expect((seen.init?.body as FormData).get("stream")).toBe("true")
+    expect((seen.init?.body as FormData).get("model")).toBe("google/gemini-3.5-transcribe")
+    expect(partials).toEqual(["Did it ", "Did it release ship?"])
+    expect(result.text).toBe("Did it release ship?")
+    expect(result.provenance.provider).toBe("google")
+  })
+
+  test("a stream that ends without a finish frame fails with the audio-retry guidance", async () => {
+    const error = await submitVoiceTranscriptionStream({
+      url: "http://localhost:4096",
+      fetch: sseFetch('data: {"type":"transcript.text.delta","delta":"partial"}\n\n'),
+      registration: streamRegistration,
+      audio: audio(),
+    }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("still held locally")
+  })
+
+  test("an unterminated oversized frame fails instead of buffering without limit", async () => {
+    const error = await submitVoiceTranscriptionStream({
+      url: "http://localhost:4096",
+      fetch: sseFetch(`data: ${"x".repeat(1024 * 1024 + 1)}`),
+      registration: streamRegistration,
+      audio: audio(),
+    }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("oversized frame")
+    expect((error as Error).message).toContain("still held locally")
+  })
+
+  test("a pre-stream typed error keeps the §2.4 mapping (stream_not_supported is actionable as-is)", async () => {
+    const failing = (async () =>
+      new Response(
+        JSON.stringify({
+          error: { message: "openai/whisper-1 does not stream", type: "invalid_request_error", code: "stream_not_supported" },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch
+    await expect(
+      submitVoiceTranscriptionStream({
+        url: "http://localhost:4096",
+        fetch: failing,
+        registration: streamRegistration,
+        audio: audio(),
+      }),
+    ).rejects.toMatchObject({ code: "stream_not_supported", status: 400 })
+  })
 })

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { TranscriptionFacade } from "@opencode/core/transcription-facade"
 import { TranscriptionResponse } from "@opencode/ai"
@@ -23,6 +23,7 @@ const fakeFacade = makeLocationNode({
     TranscriptionFacade.Service,
     TranscriptionFacade.Service.of({
       transcribe: () => Effect.succeed(new TranscriptionResponse({ text: "probe transcript", language: "en" })),
+      transcribeStream: () => Effect.succeed(Stream.empty),
     }),
   ),
   deps: [],
@@ -88,5 +89,20 @@ it.live("a non-multipart body is a typed 400 invalid_audio, never a 500", () =>
     expect(response.status).toBe(400)
     const body = yield* Effect.promise(() => response.json())
     expect(body.error.code).toBe("invalid_audio")
+  }),
+)
+
+it.live("stream=true keeps the same §3 gating: a vanished provider's ref is 404, never an SSE 200", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const form = new FormData()
+    form.set("model", "google/gemini-3.5-transcribe")
+    form.set("stream", "true")
+    form.set("file", new File([new Uint8Array([1, 2, 3])], "note.mp3", { type: "audio/mpeg" }))
+    const response = yield* postForm(handler, form)
+    expect(response.status).toBe(404)
+    expect(response.headers.get("content-type")).not.toContain("text/event-stream")
+    const body = yield* Effect.promise(() => response.json())
+    expect(body.error.code).toBe("model_not_found")
   }),
 )

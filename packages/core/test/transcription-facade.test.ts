@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { RequestExecutor } from "@opencode/ai/route"
 import { TranscriptionFacade } from "@opencode/core/transcription-facade"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
-import { TranscriptionResponse } from "@opencode/ai"
+import { TranscriptionResponse, type TranscriptionEvent } from "@opencode/ai"
 
 const mp3 = { bytes: new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3]), mediaType: "audio/mpeg", filename: "note.mp3" }
 
@@ -117,6 +117,15 @@ describe("TranscriptionFacade parse (§2.2/§2.4/§5)", () => {
     }
   })
 
+  test("stream=true is honored on a stream-capable registration (§8.5)", () => {
+    const parsed = parse({ model: "google/gemini-3.5-transcribe", stream: "true" })
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect(parsed.value.stream).toBe(true)
+    const batch = parse({ model: "google/gemini-3.5-transcribe" })
+    expect(batch.ok).toBe(true)
+    if (batch.ok) expect(batch.value.stream).toBeUndefined()
+  })
+
   test("unknown model is 404 model_not_found; missing file is 400 invalid_audio", () => {
     const noModel = parse({ model: "acme/nope" })
     expect(noModel.ok).toBe(false)
@@ -194,6 +203,45 @@ describe("TranscriptionFacade envelope (§2.3)", () => {
       notices: [],
       provider_metadata: { provider: "openai", model: "whisper-1" },
     })
+  })
+})
+
+describe("TranscriptionFacade stream frames (§7 phase 2)", () => {
+  const google = TranscriptionFacade.resolveTranscriptionModel("google/gemini-3.5-transcribe")
+  if (typeof google === "string") throw new Error(google)
+
+  test("delta and segment events serialize to the OpenAI frame names", () => {
+    expect(
+      JSON.parse(TranscriptionFacade.transcriptionStreamFrame({ type: "text-delta", delta: "hel" }, google, "json")!),
+    ).toEqual({ type: "transcript.text.delta", delta: "hel" })
+    expect(
+      JSON.parse(
+        TranscriptionFacade.transcriptionStreamFrame(
+          { type: "segment", segment: { text: "hi", startSeconds: 0, endSeconds: 1.5, speaker: "spk:0" } },
+          google,
+          "json",
+        )!,
+      ),
+    ).toEqual({ type: "transcript.text.segment", segment: { text: "hi", start: 0, end: 1.5, speaker: "spk:0" } })
+  })
+
+  test("the finish frame carries the full §2.3 envelope as transcript.text.done", () => {
+    const frame = JSON.parse(
+      TranscriptionFacade.transcriptionStreamFrame(
+        { type: "finish", text: "hello", language: "en", durationSeconds: 2, usage: { type: "seconds", seconds: 2 } },
+        google,
+        "json",
+      )!,
+    )
+    expect(frame.type).toBe("transcript.text.done")
+    expect(frame.text).toBe("hello")
+    expect(frame.duration).toBe(2)
+    expect(frame.provider_metadata).toEqual({ provider: "google", model: "gemini-3.5-transcribe" })
+  })
+
+  test("route-internal events have no §7 frame", () => {
+    const progress = { type: "generation-progress" } as unknown as TranscriptionEvent
+    expect(TranscriptionFacade.transcriptionStreamFrame(progress, google, "json")).toBeUndefined()
   })
 })
 
@@ -328,6 +376,99 @@ describe("TranscriptionFacade parity (§4)", () => {
         expect(failure.failure.message).toContain("OPENAI_API_KEY")
       }
       expect(events.filter((event) => event.kind === "attempt")).toHaveLength(1)
+    } finally {
+      ModelRouteLog.setSink(undefined)
+    }
+  })
+})
+
+const googleFixtureBody = () =>
+  Bun.file(
+    new URL("../../ai/test/fixtures/recordings/google-transcription/streams-speaker-turns.json", import.meta.url)
+      .pathname,
+  )
+    .json()
+    .then((recording) => recording.interactions[0].response.body as string)
+
+describe("TranscriptionFacade streaming (§7/§8.5, §4 parity)", () => {
+  test("stream=true against the recorded Google fixture streams segment + finish frames and records exactly one route_attempt", async () => {
+    const body = await googleFixtureBody()
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = "fixture"
+    try {
+      const parsed = parse({ model: "google/gemini-3.5-transcribe", stream: "true", diarize: "true" })
+      if (!parsed.ok) throw new Error(parsed.error.message)
+      const frames = await Effect.runPromise(
+        Effect.gen(function* () {
+          const facade = yield* TranscriptionFacade.Service
+          const stream = yield* facade.transcribeStream(parsed.value)
+          const collected = yield* Stream.runCollect(stream)
+          return Array.from(collected).map((event) =>
+            TranscriptionFacade.transcriptionStreamFrame(event, parsed.value.registration, "json"),
+          )
+        }).pipe(
+          Effect.provide(
+            facadeWithStub((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      )
+      const payloads = frames.filter((frame) => frame !== undefined).map((frame) => JSON.parse(frame))
+      const segments = payloads.filter((frame) => frame.type === "transcript.text.segment")
+      expect(segments).toHaveLength(2)
+      const done = payloads.at(-1)
+      expect(done?.type).toBe("transcript.text.done")
+      expect(done?.text).toMatch(/release ship\? Yes, it shipped this morning\.$/)
+      expect(done?.provider_metadata.provider).toBe("google")
+      expect(done?.provider_metadata.model).toBe("gemini-3.5-transcribe")
+
+      const attempts = events.filter((event) => event.kind === "attempt")
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]?.row).toMatchObject({
+        route_id: "",
+        provider_id: "google",
+        model_id: "gemini-3.5-transcribe",
+        outcome: "success",
+      })
+      expect(attempts[0]?.row.session_id ?? null).toBeNull()
+    } finally {
+      ModelRouteLog.setSink(undefined)
+      delete process.env.GOOGLE_GENERATIVE_AI_API_KEY
+    }
+  })
+
+  test("a missing provider key fails the stream setup typed and still records the attempt", async () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY
+    try {
+      const parsed = parse({ model: "google/gemini-3.5-transcribe", stream: "true" })
+      if (!parsed.ok) throw new Error(parsed.error.message)
+      const failure = await Effect.runPromise(
+        Effect.gen(function* () {
+          const facade = yield* TranscriptionFacade.Service
+          return yield* Effect.result(facade.transcribeStream(parsed.value))
+        }).pipe(
+          Effect.provide(
+            facadeWithStub(() => Effect.die(new Error("HTTP must not be called without a key"))),
+          ),
+        ),
+      )
+      expect(failure._tag).toBe("Failure")
+      if (failure._tag === "Failure") {
+        expect(failure.failure.status).toBe(502)
+        expect(failure.failure.message).toContain("GOOGLE_GENERATIVE_AI_API_KEY")
+      }
+      const attempts = events.filter((event) => event.kind === "attempt")
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]?.row).toMatchObject({ provider_id: "google", outcome: "failure" })
     } finally {
       ModelRouteLog.setSink(undefined)
     }
