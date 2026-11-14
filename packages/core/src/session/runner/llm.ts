@@ -29,6 +29,7 @@ import { llmClient } from "../../effect/app-node-platform.js"
 import { StepFailedError } from "../error.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { SessionStep } from "./step.js"
+import { SessionRunnerRenderWiring } from "./render-wiring.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
@@ -247,6 +248,28 @@ const layer = Layer.effect(
           first.model.routing?.attempts === undefined ? undefined : Math.max(0, first.model.routing.attempts - 1),
       })
       let initial: SessionContext.Loaded | undefined = first
+      // Tier chooser (#2384 slice 2): a step that resolved without a route
+      // under a hosted session asks the user before provider spend. The
+      // directive goes in as a synthetic message and the context reloads
+      // below, so this step's own request already carries it. The wiring
+      // latches per session and stays inert without the render tool, a
+      // bare route, or tiered models in the plan store; a store that
+      // cannot be read must not break the step either.
+      const chooserDirective = (() => {
+        try {
+          return SessionRunnerRenderWiring.chooserDirective({
+            sessionID,
+            toolNames: first.tools.definitions.map((tool) => tool.name),
+            routeBare: first.model.routing === undefined,
+          })
+        } catch {
+          return undefined
+        }
+      })()
+      if (chooserDirective !== undefined) {
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: chooserDirective })
+        initial = undefined
+      }
       let recoverOverflow = true
       let recoverContinuation = true
       while (true) {
@@ -295,6 +318,7 @@ const layer = Layer.effect(
           ...(continuationOf === undefined ? {} : { continuation: { of: continuationOf, index: continuationIndex } }),
           agent: loaded.agent.id,
           model: loaded.model,
+          toolNames: loaded.tools.definitions.map((tool) => tool.name),
           ...(loaded.model.membership ? { membership: loaded.model.membership } : {}),
           prepared,
           estimatedInputTokens: SessionCompaction.estimateContext(loaded),
@@ -328,6 +352,23 @@ const layer = Layer.effect(
           Failover: Effect.fnUntraced(function* (outcome) {
             yield* modelTransport.close(sessionID)
             initial = { ...loaded, model: outcome.model }
+          }),
+          QuotaWall: Effect.fnUntraced(function* (outcome) {
+            // Quota fallback (#2384 slice 3): direct the next step to
+            // render the quota fallback card, and continue the turn into
+            // it. When the plan store cannot supply the card's actions,
+            // the step keeps its original bare-error ending.
+            const directive = (() => {
+              try {
+                return SessionRunnerRenderWiring.wallDirective(outcome.wall)
+              } catch {
+                return undefined
+              }
+            })()
+            if (directive === undefined) return yield* new StepFailedError({ error: outcome.error })
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: directive })
+            const continued: StepResult = { needsContinuation: true }
+            return continued
           }),
           Continue: Effect.fnUntraced(function* (outcome) {
             yield* retry.wait({
