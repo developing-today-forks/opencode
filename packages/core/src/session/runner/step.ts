@@ -108,6 +108,33 @@ export const failedAttemptCount = (key?: string) =>
 
 export const clearFailedAttempt = (key: string) => failedAttempts.delete(key)
 
+/** Consecutive no-message completions per session and target (#1903): a provider that keeps
+ * answering with a few tokens and no message at all would otherwise loop a session forever,
+ * every attempt recorded as a success. The bound is small on purpose: each empty attempt is a
+ * full-context request, and a single empty completion followed by a productive one never trips
+ * it — the streak resets on any completion that produced something. */
+export const EMPTY_COMPLETION_LIMIT = 3
+
+/** The output-token ceiling of a no-message completion (#1903): the incident's stall burned 4
+ * output tokens per attempt. A content-free finish reporting more than this is a different
+ * anomaly, and one reporting no usage at all (zero output tokens) reads as the clean stop this
+ * codebase's own test vocabulary models — neither counts toward the streak. */
+export const EMPTY_COMPLETION_MAX_OUTPUT_TOKENS = 16
+const emptyCompletions = new Map<string, number>()
+
+/** Notes one more no-message completion for the key and returns the streak length. */
+export const countEmptyCompletion = (key: string) => {
+  const count = (emptyCompletions.get(key) ?? 0) + 1
+  emptyCompletions.set(key, count)
+  while (emptyCompletions.size > FAILED_ATTEMPT_LIMIT) emptyCompletions.delete(emptyCompletions.keys().next().value!)
+  return count
+}
+
+export const emptyCompletionCount = (key?: string) =>
+  key === undefined ? emptyCompletions.size : (emptyCompletions.get(key) ?? 0)
+
+export const clearEmptyCompletions = (key: string) => emptyCompletions.delete(key)
+
 /** Assistant messages that already ran a hedge race, so a retry of the winner does not race again. */
 const hedgedMessages = new Set<string>()
 export const HEDGED_MESSAGE_LIMIT = 1_000
@@ -610,6 +637,32 @@ export const make = Effect.gen(function* () {
         // than an error: the attempt is recorded as a policy rejection (below), never as a
         // success or a general failure (#1084).
         const policyFinish = !failed && recorded.finish?.finish === "content-filter"
+        // #1903: a completion that finished having produced nothing — no text, no reasoning,
+        // no tool call — counts toward the session's empty-completion streak for this target.
+        // At the limit the attempt is treated as a failure below: its row is recorded as one,
+        // the target is benched, and the turn fails over or ends with a visible error instead
+        // of another silent "success".
+        const emptyKey = `${input.sessionID ?? input.assistantMessageID}|${input.model.ref.providerID}/${input.model.ref.id}`
+        const emptyOutput = recorded.finish ? recorded.finish.tokens.output + recorded.finish.tokens.reasoning : 0
+        const emptyCompletion =
+          !failed &&
+          !policyFinish &&
+          recorded.finish !== undefined &&
+          !recorded.outputStarted &&
+          !recorded.needsContinuation &&
+          emptyOutput > 0 &&
+          emptyOutput <= EMPTY_COMPLETION_MAX_OUTPUT_TOKENS
+        const emptyStreak = emptyCompletion ? countEmptyCompletion(emptyKey) : 0
+        if (!emptyCompletion && !failed && recorded.finish !== undefined) clearEmptyCompletions(emptyKey)
+        const emptyTripped = emptyStreak >= EMPTY_COMPLETION_LIMIT
+        const emptyError: SessionError.Error | undefined = emptyTripped
+          ? {
+              type: "provider.empty-completion",
+              message: `The provider completed ${emptyStreak} consecutive requests with no message (no text, reasoning, or tool call), so the streak is treated as a failed attempt.`,
+              provider: String(input.model.ref.providerID),
+              model: String(input.model.ref.id),
+            }
+          : undefined
         // The failover decision: where this attempt moves to, if anywhere. It is computed
         // after the retry hook below, and the attempt row names its destination.
         let failover: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
@@ -638,11 +691,11 @@ export const make = Effect.gen(function* () {
                 ? "interrupted"
                 : timedOut
                   ? "timeout"
-                  : failed || policyFinish
+                  : failed || policyFinish || emptyTripped
                     ? "failure"
                     : "success",
               ...failureLog,
-              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : undefined),
+              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : emptyTripped ? "EmptyCompletion" : undefined),
               // A failed request's own details win; a successful one keeps what its response said.
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
@@ -785,6 +838,29 @@ export const make = Effect.gen(function* () {
           }
         }
 
+        // #1903: an empty-completion streak at the limit benches the target like any other
+        // given-up attempt and fails over when the route has a next candidate. (No routing, or
+        // no candidate left, falls through to the visible-error return at the end of the step.)
+        if (emptyTripped && input.model.routing && !failover) {
+          ModelRoute.failed(
+            input.model.routing.target,
+            input.model.routing.policy,
+            Date.now(),
+            undefined,
+            input.model.routing.credentialID,
+            locationDirectory,
+            input.model.routing.probeClaim,
+          )
+          const fallback = yield* Effect.result(input.model.routing.fallback())
+          if (Result.isSuccess(fallback) && fallback.success) {
+            failover = {
+              model: fallback.success,
+              overTo: `${fallback.success.ref.providerID}/${fallback.success.ref.id}`,
+            }
+            if (input.sessionID)
+              ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+          }
+        }
         recordAttempt()
         if (
           input.recoverContinuation &&
@@ -794,6 +870,7 @@ export const make = Effect.gen(function* () {
         )
           return Outcome.RecoverFull()
         if (failover && failureError) return Outcome.Failover({ model: failover.model, error: failureError })
+        if (failover && emptyError) return Outcome.Failover({ model: failover.model, error: emptyError })
         if (providerFailure) {
           yield* publisher.publish(providerFailure)
           recorded = publisher.record()
@@ -904,6 +981,10 @@ export const make = Effect.gen(function* () {
         }
         if (tools.interrupted && tools.failure) return yield* Effect.failCause(tools.failure)
         if (tools.interrupted && Exit.isFailure(joined)) return yield* Effect.failCause(joined.cause)
+        if (emptyTripped && emptyError) {
+          yield* publisher.failAssistant(emptyError)
+          return yield* new StepFailedError({ error: emptyError })
+        }
         if (record.failure) return yield* new StepFailedError({ error: record.failure })
         const needsContinuation = input.prepared.request.toolChoice?.type !== "none" && record.needsContinuation
         if (record.finish?.finish === "length") return Outcome.OutputLimit({ needsContinuation })
