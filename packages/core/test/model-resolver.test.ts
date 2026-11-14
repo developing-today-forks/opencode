@@ -1775,6 +1775,52 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  // #2382: the direct attachment's fallback was missing the last-resort pass
+  // the routed fallback ends with (#7073), so a direct launch whose route's
+  // remaining targets were all cooling died on its first startup error.
+  it.effect("direct fallback seats a last-resort candidate when every remaining route target is cooling (#2382)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const route = routed([a, b, c], { ...ordered })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withResolver([a, b, c, route], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(a)
+        expect(first.routing?.routeID).toBe(ID.make("pool"))
+        // Both remaining targets wall off with failure benches: no ready
+        // candidate remains in the route or any parent.
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now())
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now())
+        const next = yield* first.routing!.fallback()
+        expect(next).toBeDefined()
+        expect(["pb", "pc"]).toContain(targetOf(next!))
+      }),
+    )
+  })
+
+  it.effect("direct fallback still refuses when only quota-dead targets remain (#2382)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const c = leaf("pc")
+    const route = routed([a, b, c], { ...ordered })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    const targetC = ModelRoute.ref({ providerID: "pc", model: c.id })
+    return withResolver([a, b, c, route], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(a)
+        expect(first.routing?.routeID).toBe(ID.make("pool"))
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetC, ModelRoute.policy(), Date.now(), { quota: true })
+        const next = yield* first.routing!.fallback()
+        expect(next).toBeUndefined()
+      }),
+    )
+  })
+
   it.effect("names the provider-route id when a direct provider-route model has no targets (#1720)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

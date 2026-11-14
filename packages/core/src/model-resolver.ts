@@ -1424,6 +1424,34 @@ export const layer = Layer.effect(
                     ? Effect.succeed(next)
                     : cascadeToParent(route, branchTried, requestedVariant, sessionID, requestTokens, branchState),
                 ),
+                // Last resort, last (#2382): the routed fallback ends with
+                // this pass (#7073) but the direct attachment was left
+                // without it, so a direct launch whose route's remaining
+                // targets are all cooling still died on its first startup
+                // error. Mirror it exactly: after the parents' ready
+                // candidates, seat a cooling non-quota-dead target of the
+                // containing route; quota-dead targets stay unseated
+                // (#1806).
+                Effect.flatMap((resolved) =>
+                  resolved
+                    ? Effect.succeed(resolved)
+                    : resolveRouteWithin(
+                        candidate,
+                        route,
+                        requestedVariant,
+                        new Set(branchTried),
+                        true,
+                        sessionID,
+                        requestTokens,
+                        branchState,
+                        false,
+                      ).pipe(
+                        Effect.catch((error) => {
+                          branchState.loadErrors.push(error)
+                          return Effect.succeed(undefined)
+                        }),
+                      ),
+                ),
                 Effect.flatMap((resolved) =>
                   resolved
                     ? Effect.succeed(resolved)
