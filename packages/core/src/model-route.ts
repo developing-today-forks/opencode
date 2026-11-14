@@ -412,8 +412,9 @@ const scopeStates = (
 export const credentialCooldownUntil = (target: Model.Ref, credentialID: string, now = Date.now(), variant?: string) => {
   const state = credentialHealth.get(credentialKey(target, credentialID))
   if (state) recover(target, state, now, credentialID)
-  const traffic =
-    variant !== undefined ? trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant)) : undefined
+  // An unnamed effort reads as the default effort: attempts that served without
+  // a named variant planted their traffic bench there.
+  const traffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
   if (traffic) recover(target, traffic, now, credentialID)
   return Math.max(state?.cooldownUntil ?? 0, traffic?.cooldownUntil ?? 0)
 }
@@ -612,7 +613,9 @@ export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: st
   if (state) recover(target, state, now)
   // The leg's traffic bench at the named effort holds it out on the same terms as
   // its pool-scope bench: a candidacy read that named the effort must see both.
-  const traffic = variant !== undefined ? trafficHealth.get(trafficKey(target, variant)) : undefined
+  // An unnamed effort reads as the default effort, where attempts that served
+  // without a named variant planted their bench.
+  const traffic = trafficHealth.get(trafficKey(target, variant))
   if (traffic) recover(target, traffic, now)
   return Math.max(
     state?.cooldownUntil ?? 0,
