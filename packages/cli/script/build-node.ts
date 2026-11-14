@@ -128,6 +128,27 @@ for (const target of targets) {
       const source = `const binding = require(${JSON.stringify(addon)}); if (typeof binding.AsyncEntry !== "function") throw new Error("Node keyring addon is missing AsyncEntry")`
       run(builder, [...nodeExecArgv, "-e", source])
     }
+  } else if (target.keyringAsset) {
+    // Cross target: the artifact cannot execute on this host, so the
+    // AsyncEntry smoke check runs in its equivalent form — the staged
+    // addon must be a native object for the target platform and must
+    // carry the AsyncEntry export the runtime adapter constructs.
+    const addon = path.join(dir, "dist-node", "assets", target.keyringAsset)
+    const bytes = await readFile(addon)
+    const magic = bytes.subarray(0, 4)
+    const isElf = magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+    const isMachO = [
+      Buffer.from([0xfe, 0xed, 0xfa, 0xcf]),
+      Buffer.from([0xcf, 0xfa, 0xed, 0xfe]),
+      Buffer.from([0xca, 0xfe, 0xba, 0xbe]),
+    ].some((candidate) => magic.equals(candidate))
+    const isPe = magic[0] === 0x4d && magic[1] === 0x5a
+    const native =
+      target.platform === "linux" ? isElf : target.platform === "darwin" ? isMachO : isPe
+    if (!native)
+      throw new Error(`Node keyring addon for ${target.platform}-${target.arch} is not a native ${target.platform} object: ${addon}`)
+    if (!bytes.includes(Buffer.from("AsyncEntry")))
+      throw new Error(`Node keyring addon for ${target.platform}-${target.arch} is missing AsyncEntry: ${addon}`)
   }
   if (bundleOnly) continue
 

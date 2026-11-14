@@ -39,7 +39,7 @@ export async function collectNodeAssets(target: NodeTarget) {
       ? [
           {
             key: target.keyringAsset,
-            source: keyringRequire.resolve(`@napi-rs/keyring-linux-${target.arch}-gnu`),
+            source: keyringRequire.resolve(target.keyringPackage),
           },
         ]
       : []),
