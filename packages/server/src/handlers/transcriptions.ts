@@ -91,6 +91,7 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
     if (Result.isFailure(streamResult))
       return errorResponse(streamResult.failure.status, streamResult.failure.message, streamResult.failure.code)
     let finished = false
+    let failed = false
     const frames = streamResult.success.pipe(
       Stream.tap((event) =>
         Effect.sync(() => {
@@ -107,6 +108,7 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
       }),
       Stream.catchCause((cause) => {
         const failure: unknown = Cause.squash(cause)
+        failed = true
         const shape =
           failure instanceof TranscriptionFacade.FacadeError
             ? failure
@@ -115,7 +117,7 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
           `data: ${JSON.stringify(Completions.errorBody(shape.message, errorType(shape.status), shape.code))}\n\n`,
         )
       }),
-      Stream.concat(Stream.suspend(() => (finished ? Stream.make("data: [DONE]\n\n") : Stream.empty))),
+      Stream.concat(Stream.suspend(() => (finished && !failed ? Stream.make("data: [DONE]\n\n") : Stream.empty))),
     )
     return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {
       contentType: "text/event-stream",

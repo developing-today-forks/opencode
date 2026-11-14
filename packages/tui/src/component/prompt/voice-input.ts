@@ -353,6 +353,7 @@ export class TranscriptionStreamAssembler {
   readonly #registration: TranscriptionModelRegistration
   #provisional = ""
   #result: VoiceTranscriptionResult | undefined
+  #deltaText = ""
 
   constructor(registration: TranscriptionModelRegistration) {
     this.#registration = registration
@@ -387,12 +388,39 @@ export class TranscriptionStreamAssembler {
       })
     switch (frame.type) {
       case "transcript.text.delta":
-        if (typeof frame.delta === "string") this.#provisional += frame.delta
+        if (typeof frame.delta === "string") {
+          this.#provisional += frame.delta
+          this.#deltaText += frame.delta
+        }
         return false
       case "transcript.text.segment": {
         const text = frame.segment?.text
-        if (typeof text === "string" && text !== "")
-          this.#provisional = this.#provisional === "" ? text : `${this.#provisional} ${text}`
+        if (typeof text === "string" && text !== "") {
+          // A segment can repeat text the deltas already streamed
+          // (a Google turn emits deltas, then a segment carrying the
+          // same turn text): append only the part the deltas did not
+          // cover, so the preview never shows the turn twice. The
+          // finish frame stays the only committed result.
+          let rest = text
+          const covered = this.#deltaText.trim()
+          if (covered !== "") {
+            if (text.trim() === covered) {
+              rest = ""
+            } else if (text.startsWith(covered)) {
+              const raw = text.slice(covered.length)
+              rest = raw.trim()
+              if (rest !== "") {
+                // The deltas are a prefix of the segment: continue
+                // the provisional directly (a space only where the
+                // segment itself has one), never re-join from scratch.
+                this.#provisional += /^\s/.test(raw) ? ` ${rest}` : rest
+                rest = ""
+              }
+            }
+          }
+          this.#deltaText = ""
+          if (rest !== "") this.#provisional = this.#provisional === "" ? rest : `${this.#provisional} ${rest}`
+        }
         return false
       }
       case "transcript.text.done":
@@ -403,6 +431,11 @@ export class TranscriptionStreamAssembler {
     }
   }
 }
+
+/** Cap on one unterminated SSE frame held in the pending buffer:
+ * a peer that never sends the frame delimiter must not grow the
+ * TUI's memory without limit. */
+const MAX_PENDING_FRAME_LENGTH = 1024 * 1024
 
 /** One streaming call to the façade (§6.4): POSTs with stream=true
  * and reports the provisional text through onPartial as frames
@@ -462,6 +495,12 @@ export async function submitVoiceTranscriptionStream(input: {
       }
       if (terminated) break
       split = buffer.indexOf("\n\n")
+    }
+    if (!terminated && buffer.length > MAX_PENDING_FRAME_LENGTH) {
+      await reader.cancel()
+      throw new VoiceTranscriptionError(
+        "The transcription stream sent an oversized frame. Retry — your audio is still held locally.",
+      )
     }
     if (eof) break
   }

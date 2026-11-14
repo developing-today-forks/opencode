@@ -458,9 +458,15 @@ export function Prompt(props: PromptProps) {
       case "reviewing":
         return `Voice ready: ${snapshot.audio?.name ?? "audio"}. ${voicePrivacyNotice(registration)} /voice-send transcribes it once into your draft (never auto-sent); /voice-discard throws it away.`
       case "submitting":
-        return snapshot.partialText
-          ? `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref} — live preview, not in your draft yet: ${snapshot.partialText}`
-          : `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+        if (!snapshot.partialText)
+          return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+        // The live preview is a status line, not the transcript:
+        // show only a bounded trailing excerpt so a long stream
+        // cannot push the composer out of view. The full text
+        // still lands in the draft via the finish frame.
+        const preview =
+          snapshot.partialText.length > 240 ? `…${snapshot.partialText.slice(-240)}` : snapshot.partialText
+        return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref} — live preview, not in your draft yet: ${preview}`
       case "error":
         return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
       default:

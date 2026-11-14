@@ -571,6 +571,13 @@ const PROVIDER_FACTORIES: Readonly<
  * a 600-second clip legitimately takes longer than an embedding. */
 const REQUEST_TIMEOUT = "120 seconds"
 
+/** Streaming idle bound: a provider that stops emitting events
+ * without closing the stream must fail typed, not hang the door
+ * (and the TUI's submitting state) forever. The bound is per-event
+ * — Stream.timeoutOrElse checks each pull — so a long stream that
+ * keeps emitting is never cut off, unlike the batch total above. */
+const STREAM_IDLE_TIMEOUT = "120 seconds"
+
 const usageTokens = (
   usage: TranscriptionResponse["usage"],
 ): { input: number; output: number; reasoning: number; cache: { read: number; write: number } } | undefined => {
@@ -769,6 +776,13 @@ export const layer = Layer.effect(
               }
             }),
           ),
+          Stream.timeoutOrElse({
+            duration: STREAM_IDLE_TIMEOUT,
+            orElse: () =>
+              Stream.fail(
+                new Error(`the transcription provider sent no stream events for ${STREAM_IDLE_TIMEOUT}`),
+              ),
+          }),
           Stream.mapError((failure) => {
             if (!settled) {
               settled = true

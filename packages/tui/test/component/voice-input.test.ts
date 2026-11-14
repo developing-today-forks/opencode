@@ -272,6 +272,26 @@ describe("streaming partials (§6.4)", () => {
     expect(assembler.push("[DONE]")).toBe(true)
   })
 
+  test("a segment that repeats delta text does not duplicate the preview", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "hello" }))
+    assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello", start: 0, end: 1 } }))
+    expect(assembler.provisional).toBe("hello")
+  })
+
+  test("a segment extends delta fragments instead of re-joining them", () => {
+    const assembler = new TranscriptionStreamAssembler(streamRegistration)
+    assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "hel" }))
+    assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello", start: 0, end: 1 } }))
+    expect(assembler.provisional).toBe("hello")
+    const second = new TranscriptionStreamAssembler(streamRegistration)
+    second.push(JSON.stringify({ type: "transcript.text.delta", delta: "hello" }))
+    second.push(
+      JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello world", start: 0, end: 1 } }),
+    )
+    expect(second.provisional).toBe("hello world")
+  })
+
   test("an error frame throws typed, carrying the façade code", () => {
     const assembler = new TranscriptionStreamAssembler(streamRegistration)
     expect(() =>
@@ -315,6 +335,18 @@ describe("streaming partials (§6.4)", () => {
       audio: audio(),
     }).catch((caught) => caught)
     expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("still held locally")
+  })
+
+  test("an unterminated oversized frame fails instead of buffering without limit", async () => {
+    const error = await submitVoiceTranscriptionStream({
+      url: "http://localhost:4096",
+      fetch: sseFetch(`data: ${"x".repeat(1024 * 1024 + 1)}`),
+      registration: streamRegistration,
+      audio: audio(),
+    }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("oversized frame")
     expect((error as Error).message).toContain("still held locally")
   })
 
