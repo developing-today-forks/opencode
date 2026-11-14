@@ -1032,7 +1032,11 @@ export const credentialQuotaCoolingDown = (target: Model.Ref, credentialID: stri
 const longBenched = (state: HealthState | undefined, now: number, location?: string) =>
   state !== undefined &&
   state.benchReason === "retry-after" &&
-  state.cooldownUntil - now > currentConstants(location).bench.longBenchMs &&
+  // Long is a property of the bench as planted (benchLong), not of the time left
+  // on it: a nine-hour bench is still a window bench in its last hour, and it
+  // stays classified dead until it expires into its probe.
+  state.benchLong === true &&
+  state.cooldownUntil > now &&
   !probeDueState(state, now)
 
 /** Whether this leg — the target at the named effort, and its named credential at
@@ -3658,6 +3662,11 @@ export const seedCooldowns = (
     // still arm its half-open probe (#1123). The stored reason names the credential on
     // credential rows; the class is the part before that suffix.
     if (benchClass) state.benchReason = benchClass
+    // The row is a failure's record: restore the count with the bench, or an
+    // auth / long retry-after bench would lapse open at expiry instead of
+    // converting to its half-open probe (recover() tells conversion from a
+    // settle by the count, and a restart used to zero it).
+    if (benchClass) state.consecutiveFailures = Math.max(state.consecutiveFailures, 1)
     // A window-length bench stays window-length across the restart: its span is
     // what made it long, and the span is in the row (planted → until).
     if (row.plantedAt !== undefined && until - row.plantedAt >= currentConstants().bench.longBenchMs)
