@@ -46,11 +46,6 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, UnsupportedOperationError } from "@opencode/ai"
 import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
-import { configure } from "@opencode/ai/providers/openai"
-import { configure as configureAssemblyAI } from "@opencode/ai/providers/assemblyai"
-import { configure as configureDeepgram } from "@opencode/ai/providers/deepgram"
-import { configure as configureElevenLabs } from "@opencode/ai/providers/elevenlabs"
-import { configure as configureGoogle } from "@opencode/ai/providers/google"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
@@ -496,17 +491,23 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/TranscriptionFacade") {}
 
-/** Provider factories by providerID: the registry holds no protocol
- * code (§3); a registration resolves to the packages/ai provider
- * factory named here. */
-const PROVIDER_FACTORIES: Readonly<
-  Record<string, (modelID: string, apiKey: string) => TranscriptionModel>
-> = {
-  openai: (modelID, apiKey) => configure({ apiKey }).transcription(modelID),
-  deepgram: (modelID, apiKey) => configureDeepgram({ apiKey }).transcription(modelID),
-  google: (modelID, apiKey) => configureGoogle({ apiKey }).transcription(modelID),
-  assemblyai: (modelID, apiKey) => configureAssemblyAI({ apiKey }).transcription(modelID),
-  elevenlabs: (modelID, apiKey) => configureElevenLabs({ apiKey }).transcription(modelID),
+/** Provider module loaders by providerID: the registry holds no protocol
+ * code (§3); a registration resolves to the packages/ai provider module
+ * named here. The module is imported on first use rather than at module
+ * load, so the façade does not pull every provider into the core startup
+ * graph for the sake of five transcription backends. */
+type TranscriptionProviderModule = {
+  readonly configure: (input: { readonly apiKey: string }) => {
+    readonly transcription: (modelID: string) => TranscriptionModel
+  }
+}
+
+const PROVIDER_MODULES: Readonly<Record<string, () => Promise<TranscriptionProviderModule>>> = {
+  openai: () => import("@opencode/ai/providers/openai"),
+  deepgram: () => import("@opencode/ai/providers/deepgram"),
+  google: () => import("@opencode/ai/providers/google"),
+  assemblyai: () => import("@opencode/ai/providers/assemblyai"),
+  elevenlabs: () => import("@opencode/ai/providers/elevenlabs"),
 }
 
 /** A stalled provider must fail, not hang the door. Transcription of
@@ -590,18 +591,19 @@ export const layer = Layer.effect(
           )
         // ownValue (#865/#2392): a prototype-named providerID must miss to the
         // not-wired failure below, never resolve to an inherited member that
-        // would then be CALLED as the factory.
-        const factory = ownValue(PROVIDER_FACTORIES, registration.providerID)
-        if (!factory)
+        // would then be CALLED as the loader.
+        const loadProvider = ownValue(PROVIDER_MODULES, registration.providerID)
+        if (!loadProvider)
           return yield* fail(
             shape(502, "upstream_failure", `no transcription factory is wired for provider ${registration.providerID}`),
             new Error(`no transcription factory for ${registration.providerID}`),
           )
+        const { configure } = yield* Effect.promise(loadProvider)
         const result = yield* Effect.result(
           client
             .generate(
               Transcription.request({
-                model: factory(registration.modelID, apiKey),
+                model: configure({ apiKey }).transcription(registration.modelID),
                 audio: Media.bytes(input.audio.bytes, input.audio.mediaType),
                 ...(input.language !== undefined ? { language: input.language } : {}),
                 ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
