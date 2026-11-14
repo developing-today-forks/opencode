@@ -51,6 +51,21 @@ import { DialogSkill } from "../dialog-skill"
 import { useConfig } from "../../config"
 import { usePromptMove } from "./move"
 import { resolvePastedAttachments } from "./local-attachment"
+import {
+  VoiceInputMachine,
+  detectRecorder,
+  formatVoiceClock,
+  startRecorder,
+  submitVoiceTranscription,
+  voiceMediaType,
+  voicePrivacyNotice,
+  voiceRegistration,
+  type RecorderHandle,
+  type VoiceSnapshot,
+} from "./voice-input"
+import { spawn, spawnSync } from "child_process"
+import { readFile, unlink } from "fs/promises"
+import { tmpdir } from "os"
 import { locationKey, useData } from "../../context/data"
 import { useLocation } from "../../context/location"
 import { useArgs } from "../../context/args"
@@ -259,6 +274,188 @@ export function Prompt(props: PromptProps) {
     sessionID: () => props.sessionID,
   })
   const [pendingDirectory, setPendingDirectory] = createSignal<string>()
+  // Voice input (#2387, design §6): file attach + mic capture against
+  // the STT façade. The machine in ./voice-input owns the state flows;
+  // here we only own the recorder process, the clock, and insertion.
+  const voiceRegistrationValue = voiceRegistration(process.env.OPENCODE_TRANSCRIPTION_MODEL)
+  const voiceMachine = voiceRegistrationValue ? new VoiceInputMachine(voiceRegistrationValue) : undefined
+  const [voice, setVoice] = createSignal<VoiceSnapshot>({ state: "idle", elapsedSeconds: 0 })
+  const voiceWhich = (command: string) => spawnSync("which", [command]).status === 0
+  const voiceRecorderAvailable = voiceMachine !== undefined && detectRecorder(voiceWhich) !== undefined
+  let voiceRecorder: RecorderHandle | undefined
+  let voiceRecordingPath: string | undefined
+  let voiceTimer: ReturnType<typeof setInterval> | undefined
+  function voiceStopTimer() {
+    if (voiceTimer) clearInterval(voiceTimer)
+    voiceTimer = undefined
+  }
+  async function voiceFinishRecording() {
+    voiceStopTimer()
+    const handle = voiceRecorder
+    voiceRecorder = undefined
+    handle?.stop()
+    const file = voiceRecordingPath
+    voiceRecordingPath = undefined
+    if (!voiceMachine || !file) return
+    const elapsed = voice().elapsedSeconds
+    // The recorder finalizes the WAV on SIGINT; poll briefly for a
+    // non-header-sized file before reading it back.
+    let bytes: Buffer | undefined
+    for (let attempt = 0; attempt < 10; attempt++) {
+      bytes = await readFile(file).catch(() => undefined)
+      if (bytes && bytes.length > 44) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    void unlink(file).catch(() => {})
+    if (!bytes || bytes.length === 0) {
+      setVoice(
+        voiceMachine.fail(
+          "The recorder produced no audio. Check microphone access and try again, or attach an audio file with /voice-file.",
+        ),
+      )
+      return
+    }
+    setVoice(
+      voiceMachine.finishRecording({
+        name: "microphone recording (wav)",
+        mediaType: "audio/wav",
+        bytes: new Uint8Array(bytes),
+        source: "recording",
+        durationSeconds: elapsed,
+      }),
+    )
+  }
+  function voiceToggleRecord() {
+    if (!voiceMachine) return
+    if (voice().state === "recording") {
+      void voiceFinishRecording()
+      return
+    }
+    if (voice().state !== "idle" && voice().state !== "error") return
+    const candidate = detectRecorder(voiceWhich)
+    if (!candidate) {
+      toast.show({
+        message:
+          "No microphone capture path found (ffmpeg, arecord, or sox rec). Attach an audio file with /voice-file instead.",
+        variant: "error",
+      })
+      return
+    }
+    voiceRecordingPath = path.join(tmpdir(), `opencode-voice-${Date.now()}.wav`)
+    try {
+      voiceRecorder = startRecorder(candidate, voiceRecordingPath, (command, args) => {
+        const child = spawn(command, [...args], { stdio: "ignore" })
+        return {
+          stop: () => child.kill("SIGINT"),
+          kill: () => child.kill("SIGKILL"),
+        }
+      })
+    } catch {
+      voiceRecordingPath = undefined
+      setVoice(voiceMachine.fail("The recorder failed to start. Check microphone access and try again."))
+      return
+    }
+    setVoice(voiceMachine.startRecording())
+    voiceTimer = setInterval(() => {
+      // §6.1: hitting the duration cap stops capture into reviewing —
+      // it never auto-submits.
+      if (voiceMachine.tick(0.5)) void voiceFinishRecording()
+      else setVoice(voiceMachine.snapshot)
+    }, 500)
+  }
+  async function voiceAttach(raw: string | undefined) {
+    if (!voiceMachine) return
+    const value = raw?.trim()
+    if (!value) {
+      toast.show({ message: "Usage: /voice-file <path to an audio file>", variant: "error" })
+      return
+    }
+    const expanded =
+      value === "~" ? paths.home : value.startsWith("~/") ? path.join(paths.home, value.slice(2)) : value
+    const file = path.resolve(currentLocation.current?.directory ?? data.location.default().directory, expanded)
+    const bytes = await readFile(file).catch(() => undefined)
+    if (!bytes) {
+      setVoice(voiceMachine.fail(`Could not read ${file}. Check the path and try again.`))
+      return
+    }
+    setVoice(
+      voiceMachine.attach({
+        name: path.basename(file),
+        mediaType: voiceMediaType(path.basename(file)),
+        bytes: new Uint8Array(bytes),
+        source: "file",
+      }),
+    )
+  }
+  async function voiceSubmit() {
+    if (!voiceMachine) return
+    const snapshot = voiceMachine.beginSubmit()
+    setVoice(snapshot)
+    if (snapshot.state !== "submitting" || !snapshot.audio) return
+    const url = client.url
+    if (!url) {
+      setVoice(
+        voiceMachine.fail(
+          "No server connection is available for transcription. Reconnect and retry — your audio is still held locally.",
+        ),
+      )
+      return
+    }
+    const result = await submitVoiceTranscription({
+      url,
+      headers: client.headers,
+      registration: voiceMachine.registration,
+      audio: snapshot.audio,
+    }).catch((error) => {
+      setVoice(voiceMachine.fail(errorMessage(error)))
+      return undefined
+    })
+    if (!result) return
+    if (!input || input.isDestroyed) {
+      setVoice(voiceMachine.fail("The composer closed before the transcript could be inserted."))
+      return
+    }
+    // §6.3: inserted at the cursor as editable draft text — voice is
+    // an input method, never an auto-send.
+    input.insertText(result.text)
+    setVoice(voiceMachine.complete(result.provenance))
+    toast.show({
+      message: `Transcript inserted as draft (${result.provenance.provider}/${result.provenance.model}) — edit before sending.`,
+      variant: "success",
+    })
+  }
+  function voiceDiscard() {
+    if (!voiceMachine) return
+    if (voice().state === "recording") {
+      voiceStopTimer()
+      voiceRecorder?.kill()
+      voiceRecorder = undefined
+      if (voiceRecordingPath) void unlink(voiceRecordingPath).catch(() => {})
+      voiceRecordingPath = undefined
+    }
+    setVoice(voiceMachine.cancel())
+  }
+  function voiceStatusText(): string {
+    if (!voiceMachine) return ""
+    const snapshot = voice()
+    const registration = voiceMachine.registration
+    switch (snapshot.state) {
+      case "recording":
+        return `● Voice recording ${formatVoiceClock(snapshot.elapsedSeconds)} / ${formatVoiceClock(registration.capabilities.maxDurationSeconds)} — /voice stops into review, /voice-discard cancels and deletes the audio.`
+      case "reviewing":
+        return `Voice ready: ${snapshot.audio?.name ?? "audio"}. ${voicePrivacyNotice(registration)} /voice-send transcribes it once into your draft (never auto-sent); /voice-discard throws it away.`
+      case "submitting":
+        return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
+      case "error":
+        return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
+      default:
+        return ""
+    }
+  }
+  onCleanup(() => {
+    voiceStopTimer()
+    voiceRecorder?.kill()
+  })
   Keymap.createLayer(() => ({
     mode: "global",
     enabled: !disabled(),
@@ -614,6 +811,48 @@ export function Prompt(props: PromptProps) {
               }}
             />
           ))
+        },
+      },
+      {
+        title: "Voice: record or stop recording",
+        name: "prompt.voice.record",
+        category: "Prompt",
+        slash: { name: "voice" },
+        enabled: voiceRecorderAvailable,
+        run: () => {
+          voiceToggleRecord()
+          dialog.clear()
+        },
+      },
+      {
+        title: "Voice: attach an audio file",
+        name: "prompt.voice.attach",
+        category: "Prompt",
+        slash: { name: "voice-file", arguments: true as const },
+        enabled: !!voiceMachine,
+        run: async (input: string | undefined) => {
+          await voiceAttach(input)
+          dialog.clear()
+        },
+      },
+      {
+        title: "Voice: transcribe reviewed audio",
+        name: "prompt.voice.submit",
+        category: "Prompt",
+        slash: { name: "voice-send" },
+        run: async () => {
+          await voiceSubmit()
+          dialog.clear()
+        },
+      },
+      {
+        title: "Voice: discard held audio",
+        name: "prompt.voice.discard",
+        category: "Prompt",
+        slash: { name: "voice-discard" },
+        run: () => {
+          voiceDiscard()
+          dialog.clear()
         },
       },
       {
@@ -1741,6 +1980,13 @@ export function Prompt(props: PromptProps) {
                     </text>
                   </box>
                 </Show>
+              </box>
+            </Show>
+            <Show when={voice().state !== "idle"}>
+              <box width="100%" flexShrink={0} paddingBottom={1}>
+                <text fg={theme.text.muted} wrapMode="word">
+                  {voiceStatusText()}
+                </text>
               </box>
             </Show>
             <textarea
