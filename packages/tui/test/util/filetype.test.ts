@@ -19,8 +19,8 @@ describe("util.filetype", () => {
   test("documents why HTML embedded-language injections are not configured", () => {
     const html = parsers.parsers.find((parser) => parser.filetype === "html")
 
-    expect(html?.queries.injections).toBeUndefined()
-    expect(html?.injectionMapping).toBeUndefined()
+    expect(Object.hasOwn(html?.queries ?? {}, "injections")).toBe(false)
+    expect(Object.hasOwn(html ?? {}, "injectionMapping")).toBe(false)
   })
 
   test("uses none for missing filenames", () => {
