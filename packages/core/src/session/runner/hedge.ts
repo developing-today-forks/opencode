@@ -1,6 +1,6 @@
 export * as SessionHedge from "./hedge.js"
 
-import { type AIError, LLMEvent } from "@opencode/ai"
+import { AIError, LLMEvent, ProviderInternalError } from "@opencode/ai"
 import { type Cause, Deferred, Effect, Exit, Fiber, Option, Queue, type Scope, Stream } from "effect"
 
 /** Events that mean the model has started answering. Nothing is published, and no tool runs, before
@@ -18,6 +18,25 @@ const OUTPUT = new Set<LLMEvent["type"]>([
 
 export const isOutput = (event: LLMEvent) => OUTPUT.has(event.type)
 
+/**
+ * How many events one leg may hold buffered — offered but not yet taken by the consumer — before
+ * the leg fails with {@link bufferOverflow} (#2376). Both legs run unseen until a winner is known,
+ * so their queues are the only place events can accumulate: a leg streaming lifecycle events that
+ * never count as output, or simply outpacing a slow consumer, would otherwise grow memory without
+ * limit. The bound counts buffered events, not total events: a consumer draining at the producer's
+ * pace never trips it, however long the response runs. Overflow fails the leg explicitly — the
+ * buffered events are never silently dropped into a truncated "complete" stream.
+ */
+export const MAX_LEG_BUFFER_EVENTS = 4096
+
+/** The explicit failure a leg ends with when its buffered events exceed the bound. */
+export const bufferOverflow = (bound: number) =>
+  new AIError({
+    reason: new ProviderInternalError({
+      message: `session hedge leg buffered more than ${bound} events before they could be consumed; failing the leg instead of buffering without limit`,
+    }),
+  })
+
 type Settled = { readonly status: "output" | "failed"; readonly at: number }
 
 interface Leg {
@@ -28,23 +47,48 @@ interface Leg {
   readonly fiber: Fiber.Fiber<void>
 }
 
-const startLeg = (source: Stream.Stream<LLMEvent, AIError>): Effect.Effect<Leg, never, Scope.Scope> =>
+const startLeg = (
+  source: Stream.Stream<LLMEvent, AIError>,
+  maxBufferedEvents: number = MAX_LEG_BUFFER_EVENTS,
+): Effect.Effect<Leg, never, Scope.Scope> =>
   Effect.gen(function* () {
     const queue = yield* Queue.unbounded<LLMEvent, AIError | Cause.Done>()
     const settled = yield* Deferred.make<Settled>()
     let output = false
+    let overflowed = false
     const fiber = yield* source.pipe(
       Stream.runForEach((event) =>
         Effect.suspend(() => {
-          Queue.offerUnsafe(queue, event)
-          if (output) return Effect.void
-          if (isOutput(event)) {
-            output = true
-            return Deferred.succeed(settled, { status: "output" as const, at: performance.now() }).pipe(Effect.asVoid)
-          }
-          if (LLMEvent.is.providerError(event))
-            return Deferred.succeed(settled, { status: "failed" as const, at: performance.now() }).pipe(Effect.asVoid)
-          return Effect.void
+          if (overflowed) return Effect.void
+          // The bound is on buffered events: what the queue still holds when this event arrives.
+          // Tripping it fails the leg (settled as failed, queue failed with the overflow error, and
+          // the producer run ends with the same error) — the event is not offered and the events
+          // already buffered are never replayed as if the response were complete.
+          return Queue.size(queue).pipe(
+            Effect.flatMap((buffered) => {
+              if (buffered >= maxBufferedEvents) {
+                overflowed = true
+                const error = bufferOverflow(maxBufferedEvents)
+                return Deferred.succeed(settled, { status: "failed" as const, at: performance.now() }).pipe(
+                  Effect.andThen(Queue.fail(queue, error)),
+                  Effect.andThen(Effect.fail(error)),
+                )
+              }
+              Queue.offerUnsafe(queue, event)
+              if (output) return Effect.void
+              if (isOutput(event)) {
+                output = true
+                return Deferred.succeed(settled, { status: "output" as const, at: performance.now() }).pipe(
+                  Effect.asVoid,
+                )
+              }
+              if (LLMEvent.is.providerError(event))
+                return Deferred.succeed(settled, { status: "failed" as const, at: performance.now() }).pipe(
+                  Effect.asVoid,
+                )
+              return Effect.void
+            }),
+          )
         }),
       ),
       Effect.exit,
@@ -99,10 +143,12 @@ export const race = <T>(input: {
   readonly afterMs: number
   readonly deadlineMs: number
   readonly start: Effect.Effect<Option.Option<Started<T>>>
+  /** Per-leg buffered-event bound (see MAX_LEG_BUFFER_EVENTS); overridable for tests and tuning. */
+  readonly maxBufferedEventsPerLeg?: number
 }): Effect.Effect<Result<T>, never, Scope.Scope> =>
   Effect.gen(function* () {
     const began = performance.now()
-    const a = yield* startLeg(input.primary)
+    const a = yield* startLeg(input.primary, input.maxBufferedEventsPerLeg)
     const beforeHedge = Math.min(input.afterMs, input.deadlineMs)
     const early = yield* Effect.raceFirst(
       Deferred.await(a.settled).pipe(Effect.map((settled) => ({ kind: "settled" as const, settled }))),
@@ -124,7 +170,7 @@ export const race = <T>(input: {
     const hedge = yield* input.start
     if (Option.isNone(hedge)) return alone()
     const hedgeBegan = performance.now()
-    const b = yield* startLeg(hedge.value.stream)
+    const b = yield* startLeg(hedge.value.stream, input.maxBufferedEventsPerLeg)
     const remaining = () => Math.max(0, input.deadlineMs - (performance.now() - began))
 
     const decide = (winner: "a" | "b", settled?: Settled): Effect.Effect<Result<T>> => {
