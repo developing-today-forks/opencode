@@ -110,6 +110,88 @@ describe("SessionHedge.race", () => {
     ),
   )
 
+  it.live("fails a leg whose non-output flood overflows the buffer bound instead of buffering without limit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const flood = Array.from({ length: 64 }, () => LLMEvent.stepStart({ index: 0 }))
+        const result = yield* SessionHedge.race({
+          primary: Stream.fromIterable(flood),
+          afterMs: 200,
+          deadlineMs: 2_000,
+          start: hedge(after(20, answer("hedge"))),
+          maxBufferedEventsPerLeg: 8,
+        })
+        expect(result.winner).toBe("primary")
+        const error = yield* result.stream.pipe(Stream.runCollect, Effect.flip)
+        expect(error.reason).toBeInstanceOf(ProviderInternalError)
+        expect(error.reason.message).toContain("buffered more than 8 events")
+      }),
+    ),
+  )
+
+  it.live("hands the win to the hedge when the primary overflows after the hedge started", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const flood = Array.from({ length: 64 }, () => LLMEvent.stepStart({ index: 0 }))
+        const result = yield* SessionHedge.race({
+          primary: after(50, flood),
+          afterMs: 30,
+          deadlineMs: 2_000,
+          start: hedge(after(20, answer("hedge"))),
+          maxBufferedEventsPerLeg: 8,
+        })
+        expect(result.winner).toBe("hedge")
+        expect(yield* texts(result.stream)).toEqual(["hedge"])
+      }),
+    ),
+  )
+
+  it.live("fails the winning leg explicitly when a slow consumer lets it overflow, never truncating silently", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const burst = [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.textStart({ id: "winner" }),
+          ...Array.from({ length: 500 }, (_, i) => LLMEvent.textDelta({ id: "winner", text: `t${i}` })),
+        ]
+        const result = yield* SessionHedge.race({
+          primary: Stream.fromIterable(burst),
+          afterMs: 200,
+          deadlineMs: 2_000,
+          start: Effect.succeed(Option.none()),
+          maxBufferedEventsPerLeg: 8,
+        })
+        expect(result.winner).toBe("primary")
+        // The consumer arrives late: the producer has long since tripped the bound.
+        yield* Effect.sleep(100)
+        const error = yield* result.stream.pipe(Stream.runCollect, Effect.flip)
+        expect(error.reason).toBeInstanceOf(ProviderInternalError)
+        expect(error.reason.message).toContain("buffered more than 8 events")
+      }),
+    ),
+  )
+
+  it.live("replays a long in-bound stream completely and in order", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const deltas = Array.from({ length: 200 }, (_, i) => `d${i}`)
+        const events = [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.textStart({ id: "long" }),
+          ...deltas.map((text) => LLMEvent.textDelta({ id: "long", text })),
+        ]
+        const result = yield* SessionHedge.race({
+          primary: after(10, events),
+          afterMs: 200,
+          deadlineMs: 2_000,
+          start: Effect.succeed(Option.none()),
+        })
+        expect(result.winner).toBe("primary")
+        expect(yield* texts(result.stream)).toEqual(deltas)
+      }),
+    ),
+  )
+
   it.live("falls back to the primary at the deadline when nothing answers", () =>
     Effect.scoped(
       Effect.gen(function* () {
