@@ -228,7 +228,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         reconnect: async (signal: AbortSignal) => {
           const endpoint = await managed.reconnect(signal)
           const next = { baseUrl: endpoint.url, headers: Service.headers(endpoint) }
-          return { api: OpenCode.make(next), url: endpoint.url }
+          return { api: OpenCode.make(next), url: endpoint.url, headers: next.headers }
         },
         restart: managed.restart,
       }
@@ -376,7 +376,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                 : undefined
                                             }
                                           >
-                                            <ClientProvider api={api} url={input.server.endpoint.url} service={service}>
+                                            <ClientProvider api={api} url={input.server.endpoint.url} headers={Service.headers(input.server.endpoint)} service={service}>
                                               <PermissionProvider>
                                                 <DataProvider directory={directory}>
                                                   <LocationProvider>
