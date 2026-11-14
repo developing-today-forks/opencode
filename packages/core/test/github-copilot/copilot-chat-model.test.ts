@@ -659,6 +659,86 @@ describe("doStream", () => {
     expect(finish?.finishReason.unified).toBe("error")
   })
 
+  test("should not complete an in-flight tool call from a chunk arriving after a malformed chunk", async () => {
+    const completingDeltaChunk = `data: ${JSON.stringify({
+      id: "chatcmpl-err",
+      object: "chat.completion.chunk",
+      created: 1677652290,
+      model: "test-model",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                type: "function",
+                function: { arguments: ',"content":"hi"}' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    })}`
+    const mockFetch = createMockFetch([partialToolCallChunk, `data: {not-json`, completingDeltaChunk, `data: [DONE]`])
+    const model = createModel(mockFetch)
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: false,
+    })
+    const parts = await convertReadableStreamToArray(stream)
+
+    expect(parts.some((p) => p.type === "error")).toBe(true)
+    expect(parts.filter((p) => p.type === "tool-call")).toEqual([])
+    expect(parts.filter((p) => p.type === "tool-input-end")).toEqual([])
+    const finish = parts.find((p) => p.type === "finish") as { finishReason: { unified: string } } | undefined
+    expect(finish?.finishReason.unified).toBe("error")
+  })
+
+  test("should not emit a new tool call completed by a chunk arriving after a provider error chunk", async () => {
+    const errorChunk = `data: ${JSON.stringify({ error: { message: "provider blew up" } })}`
+    const completeToolCallChunk = `data: ${JSON.stringify({
+      id: "chatcmpl-err",
+      object: "chat.completion.chunk",
+      created: 1677652291,
+      model: "test-model",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "call_new",
+                index: 0,
+                type: "function",
+                function: { name: "write", arguments: '{"filePath":"/tmp/y"}' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    })}`
+    const mockFetch = createMockFetch([errorChunk, completeToolCallChunk, `data: [DONE]`])
+    const model = createModel(mockFetch)
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: false,
+    })
+    const parts = await convertReadableStreamToArray(stream)
+
+    expect(parts.some((p) => p.type === "error")).toBe(true)
+    expect(parts.filter((p) => p.type === "tool-call")).toEqual([])
+    expect(parts.filter((p) => p.type === "tool-input-start")).toEqual([])
+    const finish = parts.find((p) => p.type === "finish") as { finishReason: { unified: string } } | undefined
+    expect(finish?.finishReason.unified).toBe("error")
+  })
+
   test("should keep the error state when a terminal chunk follows a malformed chunk", async () => {
     const terminalChunk = `data: ${JSON.stringify({
       id: "chatcmpl-err",
