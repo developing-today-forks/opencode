@@ -14,7 +14,12 @@ import { readEnableState } from "./enable-state"
  * `.ocdx` extensions: an installed archive runs its main entry only, the renderer loads built-ins until that format
  * ships renderer bundles, and packaged builds refuse the manager until installs have a trust model.
  */
-export function createManager(db: Database, reserved: (id: string) => boolean, definitions: readonly Definition[]) {
+export function createManager(
+  db: Database,
+  reserved: (id: string) => boolean,
+  definitions: readonly Definition[],
+  downloadOptions: ExtensionDownloadOptions = {},
+) {
   return {
     /** Every installed archive. A manifest that no longer decodes is reported, not dropped. */
     installed() {
@@ -53,7 +58,7 @@ export function createManager(db: Database, reserved: (id: string) => boolean, d
     },
     async install(source: Uint8Array | string) {
       const { readArchive } = await import("./archive")
-      const archive = await readArchive(Predicate.isString(source) ? await download(source) : source)
+      const archive = await readArchive(Predicate.isString(source) ? await download(source, downloadOptions) : source)
       const id = archive.manifest.id
 
       if (reserved(id)) throw new ExtensionError("reserved")
@@ -81,45 +86,109 @@ export function createManager(db: Database, reserved: (id: string) => boolean, d
   }
 }
 
-async function download(url: string) {
+/**
+ * The fetch an archive download runs through: Electron's `net.fetch` in the app, a test double in
+ * tests (the desktop unit suite runs under Bun, where `electron` has no `net`). The `signal` is the
+ * download deadline's — a fetch that honors it is cancelled when the deadline fires.
+ */
+export type ExtensionFetch = (url: string, init: { signal: AbortSignal }) => Promise<Response>
+
+export interface ExtensionDownloadOptions {
+  readonly fetch?: ExtensionFetch
+  readonly deadlineMs?: number
+}
+
+/**
+ * The overall deadline for one archive download (#1091): it covers the fetch and the chunk pump
+ * together, so a response that never arrives, a body that stalls, and a body that slow-drips all
+ * settle as the same download failure instead of hanging the install. Sized for the 100 MiB archive
+ * cap on a slow-but-honest connection: 100 MiB at ~350 KiB/s (~2.8 Mbps) takes about 300 s.
+ */
+export const EXTENSION_DOWNLOAD_DEADLINE_MS = 300_000
+
+const electronFetch: ExtensionFetch = async (url, init) => {
+  const { net } = await import("electron")
+
+  return net.fetch(url, init)
+}
+
+export async function downloadArchive(
+  url: string,
+  options: ExtensionDownloadOptions = {},
+): Promise<Buffer> {
   const { archiveLimit } = await import("./archive")
 
   if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol)) throw new ExtensionError("url")
 
-  const { net } = await import("electron")
+  const deadlineMs = options.deadlineMs ?? EXTENSION_DOWNLOAD_DEADLINE_MS
+  const controller = new AbortController()
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let timedOut = false
 
-  const response = await net.fetch(url).catch((error) => {
-    throw new ExtensionError("download", { cause: error })
+  // The deadline is a race, not only the abort signal: a fetch (or a body) that ignores the signal
+  // still loses the race and the install fails instead of hanging. The abort and the reader cancel
+  // are the cleanup for implementations that do honor them.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+      reader?.cancel().catch(() => {})
+      reject(new Error(`extension download deadline of ${deadlineMs} ms elapsed`))
+    }, deadlineMs)
   })
 
-  if (!response.ok || !response.body) throw new ExtensionError("download", { message: String(response.status) })
+  const work = (async () => {
+    const response = await (options.fetch ?? electronFetch)(url, { signal: controller.signal }).catch((error) => {
+      throw new ExtensionError("download", { cause: error })
+    })
 
-  if (Number(response.headers.get("content-length")) > archiveLimit) {
-    await response.body.cancel()
+    if (!response.ok || !response.body) throw new ExtensionError("download", { message: String(response.status) })
 
-    throw new ExtensionError("tooLarge")
-  }
-
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-
-  const pump = async (size: number): Promise<number> => {
-    const next = await reader.read()
-
-    if (next.done) return size
-
-    if (size + next.value.byteLength > archiveLimit) {
-      await reader.cancel()
+    if (Number(response.headers.get("content-length")) > archiveLimit) {
+      await response.body.cancel()
 
       throw new ExtensionError("tooLarge")
     }
 
-    chunks.push(next.value)
+    reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
 
-    return pump(size + next.value.byteLength)
+    const pump = async (size: number): Promise<number> => {
+      const next = await reader!.read()
+
+      if (next.done) return size
+
+      if (size + next.value.byteLength > archiveLimit) {
+        await reader!.cancel()
+
+        throw new ExtensionError("tooLarge")
+      }
+
+      chunks.push(next.value)
+
+      return pump(size + next.value.byteLength)
+    }
+
+    await pump(0)
+
+    return Buffer.concat(chunks)
+  })()
+
+  try {
+    return await Promise.race([work, deadline])
+  } catch (error) {
+    if (timedOut)
+      throw new ExtensionError("download", {
+        message: `download timed out after ${deadlineMs} ms`,
+        cause: error,
+      })
+    throw error
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
+}
 
-  await pump(0)
-
-  return Buffer.concat(chunks)
+async function download(url: string, options: ExtensionDownloadOptions = {}) {
+  return downloadArchive(url, options)
 }
