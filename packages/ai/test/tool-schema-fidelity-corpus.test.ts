@@ -8,8 +8,9 @@
 // projected shape the table states. If a translator's projection for a row changes, this corpus fails
 // until the table row is updated in the same change — that flip is the intended review signal.
 //
-// Known-lossy rows assert the CURRENT (lossy) projection and are marked with their issue: antigravity
-// `const` -> #1557. When its fix lands, exactly that row flips to its conforming disposition. (The Moonshot
+// Known-lossy rows assert the CURRENT (lossy) projection and are marked with their issue. (The
+// antigravity `const` row was known-lossy under #1557 until its fix landed — const lowers to a
+// one-element enum — when the row flipped to preserved. The Moonshot
 // `prefixItems` with `items` present row was reclassified to approximated/widening under #1933: its issue
 // #1574 closed via PR #1647, which adopted the fold as the intended projection, so the stale known-lossy
 // link was removed — the meta-test below guards against a known-lossy row linking a closed issue.)
@@ -131,11 +132,10 @@ export const antigravityTable: ReadonlyArray<Row> = [
   },
   {
     shape: "const",
-    disposition: "known-lossy",
-    issue: "#1557",
-    note: "const is absent from the SCHEMA_FIELDS allowlist and is dropped entirely; the fixed-value parameter goes upstream unconstrained.",
+    disposition: "preserved",
+    note: "const lowers to a one-element enum (#1557): the proto Schema has no const field, and the one-element enum is its faithful equivalent on both targets. Scalar consts ride stringified (the proto enum is string-valued); non-scalar consts cannot be represented and are dropped, as documented in convertSchemaNode.",
     input: P({ const: "fixed" }),
-    expected: { properties: { v: {} }, type: "OBJECT", required: ["v"] },
+    expected: { properties: { v: { enum: ["fixed"], type: "STRING" } }, type: "OBJECT", required: ["v"] },
   },
   {
     shape: "enum (typed)",
@@ -937,8 +937,15 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     }
   })
 
-  test("the remaining known-lossy row is present and marked", () => {
-    expect(antigravityTable.find((row) => row.shape === "const")?.issue).toBe("#1557")
+  test("the const row flipped to preserved when #1557 landed", () => {
+    // #1557 was the last known-lossy row: its fix (const lowers to a
+    // one-element enum) flipped the row to preserved with no live
+    // issue link. This assertion is the flip's record — if const ever
+    // regresses to a silent drop, the row must flip back to
+    // known-lossy with a live issue in the same change.
+    const row = antigravityTable.find((row) => row.shape === "const")
+    expect(row?.disposition).toBe("preserved")
+    expect(row?.issue).toBeUndefined()
   })
 
   test("known-lossy rows cannot link a closed issue", () => {
@@ -947,9 +954,10 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     // to approximated/widening under #1933. When a known-lossy row's issue
     // closes, reclassify the row (or re-link it to a live tracking issue) in
     // the same change and add the closed number here, so a stale link cannot
-    // return unnoticed. The antigravity `const` row above (#1557, open) is
-    // the live positive control.
-    const closedIssues = new Set(["#1574"])
+    // return unnoticed. (The antigravity `const` row was the live positive
+    // control until #1557 landed and the row flipped to preserved; no
+    // known-lossy rows remain, so the guard currently passes vacuously.)
+    const closedIssues = new Set(["#1574", "#1557"])
     for (const { table } of translators) {
       for (const row of table) {
         if (row.disposition !== "known-lossy") continue

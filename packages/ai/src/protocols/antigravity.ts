@@ -295,6 +295,35 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
     const required = node.required.filter((name): name is string => typeof name === "string" && declared.has(name))
     if (required.length) out.required = required
   }
+  // const lowering (#1557): the proto Schema has no const field, but a
+  // one-element enum is its faithful equivalent on both targets — the
+  // Gemini proto and the Anthropic input_schema the door re-serializes
+  // both accept enum, and enum already rides the allowlist verbatim.
+  // Scalar consts (string/number/boolean) map to enum: [String(value)]:
+  // the proto enum is string-valued, so non-string scalars ride
+  // stringified. A const that is a member of a declared enum narrows
+  // the enum to the pin; a const outside the declared enum leaves the
+  // enum untouched (the declared enum is the stronger constraint).
+  // Non-scalar consts (object/array/null) cannot be represented in a
+  // string enum and are dropped — that is the deliberate disposition,
+  // stated here rather than left silent. When the node declares no
+  // type of its own (and no composition branches carry it), the type
+  // is derived from the const value so the pin stays typed.
+  if (node.const !== undefined) {
+    const pinned = node.const
+    if (typeof pinned === "string" || typeof pinned === "number" || typeof pinned === "boolean") {
+      const value = String(pinned)
+      if (Array.isArray(out.enum)) {
+        if (out.enum.includes(value)) out.enum = [value]
+      } else {
+        out.enum = [value]
+      }
+      if (out.type === undefined && out.anyOf === undefined && out.oneOf === undefined && out.allOf === undefined) {
+        out.type =
+          typeof pinned === "string" ? "STRING" : typeof pinned === "boolean" ? "BOOLEAN" : Number.isInteger(pinned) ? "INTEGER" : "NUMBER"
+      }
+    }
+  }
   return out
 }
 

@@ -229,6 +229,31 @@ it.effect("convertSchema ports the door's proto-schema rules", () =>
   }),
 )
 
+it.effect("convertSchema lowers const to a one-element enum (#1557)", () =>
+  Effect.sync(() => {
+    // A string const property: the pin survives as enum: ["fixed"] with
+    // the declared type preserved — identically for both targets.
+    const schema = { type: "object", properties: { kind: { type: "string", const: "fixed" } } }
+    const expected = { type: "OBJECT", properties: { kind: { type: "STRING", enum: ["fixed"] } } }
+    expect(convertSchema(schema)).toEqual(expected)
+    expect(convertSchema(schema, true)).toEqual(expected)
+    // A const with no declared type derives the type from the value.
+    expect(convertSchema({ const: "fixed" })).toEqual({ type: "STRING", enum: ["fixed"] })
+    // Non-string scalar consts ride stringified (the proto enum is
+    // string-valued); the derived type still names the scalar family.
+    expect(convertSchema({ const: 5 })).toEqual({ type: "INTEGER", enum: ["5"] })
+    expect(convertSchema({ const: true })).toEqual({ type: "BOOLEAN", enum: ["true"] })
+    // A const that is a member of a declared enum narrows it to the pin.
+    expect(convertSchema({ type: "string", enum: ["a", "b"], const: "b" })).toEqual({
+      type: "STRING",
+      enum: ["b"],
+    })
+    // Non-scalar consts cannot ride a string enum and are dropped — the
+    // deliberate disposition documented in convertSchemaNode (#1557).
+    expect(convertSchema({ type: "object", const: { a: 1 } })).toEqual({ type: "OBJECT" })
+  }),
+)
+
 it.effect("convertSchema synthesizes items for bare array schemas (#1548)", () =>
   Effect.sync(() => {
     // The live failure: a tool property declared {type: "array"} with no
