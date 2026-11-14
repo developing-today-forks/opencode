@@ -22,6 +22,50 @@ describe("TranscriptionFacade registry", () => {
     expect(typeof missing).toBe("string")
   })
 
+  test("resolves the §8.2 registrations by ref and by bare model id, with their key sources", () => {
+    expect(TranscriptionFacade.resolveTranscriptionModel("deepgram/nova-3")).toMatchObject({
+      ref: "deepgram/nova-3",
+      providerID: "deepgram",
+      apiKeyEnv: "DEEPGRAM_API_KEY",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("nova-3")).toMatchObject({ ref: "deepgram/nova-3" })
+    expect(TranscriptionFacade.resolveTranscriptionModel("google/gemini-3.5-transcribe")).toMatchObject({
+      ref: "google/gemini-3.5-transcribe",
+      providerID: "google",
+      apiKeyEnv: "GOOGLE_GENERATIVE_AI_API_KEY",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("gemini-3.5-transcribe")).toMatchObject({
+      ref: "google/gemini-3.5-transcribe",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("assemblyai/universal-3-5-pro")).toMatchObject({
+      ref: "assemblyai/universal-3-5-pro",
+      providerID: "assemblyai",
+      apiKeyEnv: "ASSEMBLYAI_API_KEY",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("universal-3-5-pro")).toMatchObject({
+      ref: "assemblyai/universal-3-5-pro",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("elevenlabs/scribe_v2")).toMatchObject({
+      ref: "elevenlabs/scribe_v2",
+      providerID: "elevenlabs",
+      apiKeyEnv: "ELEVENLABS_API_KEY",
+    })
+    expect(TranscriptionFacade.resolveTranscriptionModel("scribe_v2")).toMatchObject({ ref: "elevenlabs/scribe_v2" })
+  })
+
+  test("the §8.2 registrations declare diarization and segment+word timestamps", () => {
+    for (const ref of ["deepgram/nova-3", "google/gemini-3.5-transcribe", "assemblyai/universal-3-5-pro", "elevenlabs/scribe_v2"]) {
+      const registration = TranscriptionFacade.resolveTranscriptionModel(ref)
+      expect(typeof registration).not.toBe("string")
+      if (typeof registration === "string") continue
+      expect(registration.capabilities.diarize).toBe(true)
+      expect(registration.capabilities.timestamps).toEqual(["segment", "word"])
+      expect(registration.capabilities.maxDurationSeconds).toBe(600)
+      expect(registration.audioLeavesMachine).toBe(true)
+      expect(registration.backend.kind).toBe("http")
+    }
+  })
+
   test("a disabled provider's refs vanish from resolution", () => {
     const enabled = new Set<string>(["deepgram"])
     expect(typeof TranscriptionFacade.resolveTranscriptionModel("openai/whisper-1", enabled)).toBe("string")
@@ -32,6 +76,22 @@ describe("TranscriptionFacade registry", () => {
 })
 
 describe("TranscriptionFacade parse (§2.2/§2.4/§5)", () => {
+  test("a §8.2 registration accepts diarize and word timestamps, and rejects a media type it does not declare", () => {
+    const parsed = parse({ model: "deepgram/nova-3", diarize: "true", timestamp_granularities: ["word"] })
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) {
+      expect(parsed.value.registration.ref).toBe("deepgram/nova-3")
+      expect(parsed.value.diarize).toBe(true)
+      expect(parsed.value.timestamps).toBe("word")
+    }
+    const aiff = { bytes: new Uint8Array([0x46, 0x4f, 0x52, 0x4d]), mediaType: "audio/aiff", filename: "note.aiff" }
+    const rejected = parse({ model: "deepgram/nova-3" }, aiff)
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.error.code).toBe("unsupported_media_type")
+    const accepted = parse({ model: "google/gemini-3.5-transcribe" }, aiff)
+    expect(accepted.ok).toBe(true)
+  })
+
   test("happy path maps fields, with word granularity winning over segment", () => {
     const parsed = parse({
       model: "openai/whisper-1",
