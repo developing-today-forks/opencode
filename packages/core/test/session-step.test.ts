@@ -35,6 +35,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionStep } from "@opencode/core/session/runner/step"
+import { StepFailedError } from "@opencode/core/session/error"
 import { Model } from "@opencode/core/model"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { Snapshot } from "@opencode/core/snapshot"
@@ -45,7 +46,7 @@ import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
-import { Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -2972,6 +2973,240 @@ describe("SessionStep failover classes (#1806)", () => {
       expect(fallbackCalls).toBe(1)
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) expect(JSON.stringify(result.cause)).toContain("model not found")
+    }),
+  )
+})
+
+// #1903: a provider that keeps completing with a few tokens and no message
+// (no text, no reasoning, no tool call) recorded every attempt as a success
+// and looped the session forever. Three in a row now count as a failed
+// attempt: the row says so, the target is benched, and the turn fails over
+// or ends with a visible error. A productive completion resets the streak.
+describe("empty-completion streak (#1903)", () => {
+  const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+  const cost = [
+    {
+      input: Money.USDPerMillionTokens.make(1),
+      output: Money.USDPerMillionTokens.make(2),
+      cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+    },
+  ]
+  const limit = { context: 100_000, output: 1_000 }
+  const empty = {
+    reason: { normalized: "stop" },
+    usage: {
+      inputTokens: 110_000,
+      outputTokens: 4,
+      nonCachedInputTokens: 110_000,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      reasoningTokens: 0,
+    },
+  } as const
+
+  const setup = (db: any, sessionID: Session.ID, slug: string) =>
+    Effect.gen(function* () {
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({ id: sessionID, project_id: Project.ID.global, slug, directory: "/project", version: "test" })
+        .run()
+    })
+
+  const runAttempt = (steps: any, llm: any, sessionID: Session.ID, model: any, scripted: any) =>
+    Effect.gen(function* () {
+      yield* llm.push(scripted)
+      return yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID: SessionMessage.ID.create(),
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Continue the work" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: (_cause: unknown, _error: unknown, retry: boolean) =>
+            Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+    })
+
+  it.effect("fails over on the third consecutive no-message completion and records it as a failure", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      ModelRoute.resetHealth()
+      const logged: ModelRouteLog.Event[] = []
+      ModelRouteLog.setSink((event) => void logged.push(event))
+      yield* Effect.addFinalizer(() => Effect.sync(() => ModelRouteLog.setSink(undefined)))
+      const sessionID = Session.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* setup(db, sessionID, "empty-streak")
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const fallback = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      let fallbackCalls = 0
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("smart-slow"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => {
+            fallbackCalls++
+            return Effect.succeed(fallback)
+          },
+        },
+      })
+
+      const first = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      const second = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      expect(Exit.isSuccess(first)).toBe(true)
+      expect(Exit.isSuccess(second)).toBe(true)
+      if (Exit.isSuccess(first)) expect(first.value).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
+      expect(fallbackCalls).toBe(0)
+
+      const third = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      expect(Exit.isSuccess(third)).toBe(true)
+      if (Exit.isSuccess(third))
+        expect(third.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+      expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
+
+      const attempts = logged.flatMap((event) => (event.kind === "attempt" ? [event.row] : []))
+      expect(attempts.map((row) => row.outcome)).toEqual(["success", "success", "failure"])
+      expect(attempts[2]).toMatchObject({ error_tag: "EmptyCompletion", failed_over_to: "anthropic/backup" })
+      expect(yield* llm.requests()).toHaveLength(3)
+    }),
+  )
+
+  it.effect("ends the turn with a visible error on the third empty completion when there is no route", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const sessionID = Session.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* setup(db, sessionID, "empty-streak-unrouted")
+      const model = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "solo", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+
+      yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      const third = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      expect(Exit.isFailure(third)).toBe(true)
+      if (Exit.isFailure(third)) {
+        const error = Cause.squash(third.cause)
+        expect(error).toBeInstanceOf(StepFailedError)
+        if (error instanceof StepFailedError) expect(error.error.type).toBe("provider.empty-completion")
+      }
+    }),
+  )
+
+  it.effect("a bare stop with no reported usage does not count toward the streak", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const sessionID = Session.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* setup(db, sessionID, "empty-streak-bare-stop")
+      const model = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "solo", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+
+      // TestLLM.stop() is the harness's clean turn ending: a finish with no
+      // content and no usage reported. Three in a row across prompts are
+      // normal operation, not the #1903 stall (which reported ~4 tokens).
+      for (let index = 0; index < 3; index++) {
+        const result = yield* runAttempt(steps, llm, sessionID, model, TestLLM.stop())
+        expect(Exit.isSuccess(result)).toBe(true)
+      }
+      expect(SessionStep.emptyCompletionCount(sessionID + "|openai/solo")).toBe(0)
+    }),
+  )
+
+  it.effect("a productive completion resets the streak", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const sessionID = Session.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* setup(db, sessionID, "empty-streak-reset")
+      const model = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "solo", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const productive = TestLLM.complete(
+        {
+          reason: { normalized: "stop" },
+          usage: {
+            inputTokens: 100,
+            outputTokens: 12,
+            nonCachedInputTokens: 100,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningTokens: 0,
+          },
+        },
+        LLMEvent.textStart({ id: "t1" }),
+        LLMEvent.textDelta({ id: "t1", text: "working on it" }),
+      )
+
+      for (const scripted of [TestLLM.complete(empty), productive, TestLLM.complete(empty), TestLLM.complete(empty)]) {
+        const result = yield* runAttempt(steps, llm, sessionID, model, scripted)
+        expect(Exit.isSuccess(result)).toBe(true)
+      }
+      // The reset means the two post-productive empties are only a streak of
+      // two; one more trips the limit, proving the count restarted.
+      const fifth = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
+      expect(Exit.isFailure(fifth)).toBe(true)
     }),
   )
 })
