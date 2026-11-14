@@ -10,8 +10,9 @@ export function nodeTarget(platform: string, arch: string) {
   const targetPlatform = platform as (typeof platforms)[number]
   const targetArch = arch as "arm64" | "x64"
   const nodePtyPackage = `@lydell/node-pty-${targetPlatform}-${targetArch}`
-  const keyringAsset =
-    targetPlatform === "linux" ? `keyring/keyring.linux-${targetArch}-gnu.node` : undefined
+  const keyringSuffix = targetPlatform === "linux" ? "-gnu" : targetPlatform === "win32" ? "-msvc" : ""
+  const keyringPackage = `@napi-rs/keyring-${targetPlatform}-${targetArch}${keyringSuffix}`
+  const keyringAsset = `keyring/keyring.${targetPlatform}-${targetArch}${keyringSuffix}.node`
   const parcelWatcherPackage = `@parcel/watcher-${targetPlatform}-${targetArch}${targetPlatform === "linux" ? "-glibc" : ""}`
   const fffPackage = `@ff-labs/fff-bin-${targetPlatform}-${targetArch}${targetPlatform === "linux" ? "-gnu" : ""}`
   const fffFfiPackage = `@yuuang/ffi-rs-${targetPlatform}-${targetArch}${targetPlatform === "linux" ? "-gnu" : targetPlatform === "win32" ? "-msvc" : ""}`
@@ -21,6 +22,7 @@ export function nodeTarget(platform: string, arch: string) {
     platform: targetPlatform,
     arch: targetArch,
     nodePtyPackage,
+    keyringPackage,
     keyringAsset,
     nodePtyEntryAsset: `${nodePtyPackage}/lib/index.js`,
     parcelWatcherPackage,
