@@ -47,10 +47,6 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, UnsupportedOperationError } from "@opencode/ai"
 import type { TranscriptionModel, TranscriptionResponse } from "@opencode/ai"
 import { configure } from "@opencode/ai/providers/openai"
-import { configure as configureAssemblyAI } from "@opencode/ai/providers/assemblyai"
-import { configure as configureDeepgram } from "@opencode/ai/providers/deepgram"
-import { configure as configureElevenLabs } from "@opencode/ai/providers/elevenlabs"
-import { configure as configureGoogle } from "@opencode/ai/providers/google"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
 import { requestExecutor } from "./effect/app-node-platform.js"
@@ -499,6 +495,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Tr
 /** Provider factories by providerID: the registry holds no protocol
  * code (§3); a registration resolves to the packages/ai provider
  * factory named here. */
+const { configure: configureAssemblyAI } = await import("@opencode/ai/providers/assemblyai")
+const { configure: configureDeepgram } = await import("@opencode/ai/providers/deepgram")
+const { configure: configureElevenLabs } = await import("@opencode/ai/providers/elevenlabs")
+const { configure: configureGoogle } = await import("@opencode/ai/providers/google")
+
 const PROVIDER_FACTORIES: Readonly<
   Record<string, (modelID: string, apiKey: string) => TranscriptionModel>
 > = {
