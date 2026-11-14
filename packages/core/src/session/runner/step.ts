@@ -912,38 +912,13 @@ export const make = Effect.gen(function* () {
     )
   }, Effect.scoped)
 
-  /** One request, or two when the route hedges: see SessionHedge.race. */
-  const attempt: Attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
+  /** The part of an attempt after the membership gate: one request, or two
+   * when the route hedges (see SessionHedge.race). Split out of `attempt` so a
+   * gate-acquired primary composes with hedging (#2383): `attempt` holds the
+   * gate slot across this whole body and releases it only when it settles. */
+  const attemptAfterGate: Attempt = Effect.fn("SessionStep.attemptAfterGate")(function* (input: Input) {
     const routing = input.model.routing
     const prepareFor = input.prepareFor
-    // Membership gate (#2253): a provider that declares caps meters every start
-    // against its one shared account before any request goes out. When the
-    // account is full past the bounded wait, the attempt moves to the route's
-    // next leg without spending a request — the session never sees the
-    // provider's tier-limit refusal. With no next leg the capped target is the
-    // last resort and proceeds unmetered rather than failing the session.
-    const membership = input.model.membership
-    if (membership) {
-      const gated = yield* SessionMembershipGate.gate({
-        membership,
-        routeID: routing?.routeID ?? "",
-        sessionID: input.sessionID,
-        location: locationDirectory,
-        lastResort: routing === undefined,
-      })
-      if (gated === undefined) {
-        const fallback = yield* Effect.result(routing!.fallback())
-        const next = Result.isSuccess(fallback) ? fallback.success : undefined
-        if (next) {
-          if (input.sessionID) ModelRoute.moved(routing!.routeID, input.sessionID, routing!.target)
-          return yield* attempt({ ...input, model: next, ...(prepareFor ? { prepared: yield* prepareFor(next) } : {}) })
-        }
-        return yield* run(input)
-      }
-      return yield* run(input).pipe(
-        Effect.ensuring(Effect.sync(() => SessionMembershipGate.release(membership, gated))),
-      )
-    }
     // A target that keeps giving up is raced at once rather than after the hedge delay, on routes whose
     // autonomy allows it; `fixed` and `rules` routes only fail over.
     const escalate =
@@ -955,10 +930,13 @@ export const make = Effect.gen(function* () {
       return yield* run(input)
     const primaryLimit = captureRateLimit(input.model.ref, routing?.credentialID)
     markHedged(input.assistantMessageID)
-    // Hedge legs against a capped provider take their own slot against its
-    // account here, once, and release when this attempt's outcome settles
-    // (#2253): the primary's slot was taken by the gate above; a hedge leg on
-    // the same account is a second concurrent request and meters separately.
+    // Slot ownership in the composed gate + hedge path (#2253, #2383): the
+    // primary's slot, when it carries a membership, is the gate slot `attempt`
+    // took before this body and holds until the whole attempt settles — there
+    // is no second primary slot to take here. Hedge legs against a capped
+    // provider take their own slot against its account here, once, and release
+    // when this attempt's outcome settles: a hedge leg on the same account as
+    // the primary is a second concurrent request and meters separately.
     const hedgeSlots: Array<{ membership: SessionMembershipGate.MembershipRef; result: SessionMembershipGate.GateResult }> = []
     const holdHedgeSlot = (model: SessionRunnerModel.Resolved) =>
       Effect.gen(function* () {
@@ -972,7 +950,6 @@ export const make = Effect.gen(function* () {
         })
         if (gated) hedgeSlots.push({ membership: model.membership, result: gated })
       })
-    yield* holdHedgeSlot(input.model)
     const raced = yield* SessionHedge.race({
       primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
       afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
@@ -1070,6 +1047,45 @@ export const make = Effect.gen(function* () {
         }),
       ),
     )
+  })
+
+  /** One request, or two when the route hedges: see SessionHedge.race. */
+  const attempt: Attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
+    const routing = input.model.routing
+    const prepareFor = input.prepareFor
+    // Membership gate (#2253): a provider that declares caps meters every start
+    // against its one shared account before any request goes out. When the
+    // account is full past the bounded wait, the attempt moves to the route's
+    // next leg without spending a request — the session never sees the
+    // provider's tier-limit refusal. With no next leg the capped target is the
+    // last resort and proceeds unmetered rather than failing the session.
+    const membership = input.model.membership
+    if (membership) {
+      const gated = yield* SessionMembershipGate.gate({
+        membership,
+        routeID: routing?.routeID ?? "",
+        sessionID: input.sessionID,
+        location: locationDirectory,
+        lastResort: routing === undefined,
+      })
+      if (gated === undefined) {
+        const fallback = yield* Effect.result(routing!.fallback())
+        const next = Result.isSuccess(fallback) ? fallback.success : undefined
+        if (next) {
+          if (input.sessionID) ModelRoute.moved(routing!.routeID, input.sessionID, routing!.target)
+          return yield* attempt({ ...input, model: next, ...(prepareFor ? { prepared: yield* prepareFor(next) } : {}) })
+        }
+        return yield* run(input)
+      }
+      // Composition (#2383): holding the gate slot, the attempt continues
+      // into the hedge path instead of returning through run() — a capped
+      // primary hedges and escalates like any other — and the gate slot is
+      // released only when the whole composed attempt settles.
+      return yield* attemptAfterGate(input).pipe(
+        Effect.ensuring(Effect.sync(() => SessionMembershipGate.release(membership, gated))),
+      )
+    }
+    return yield* attemptAfterGate(input)
   })
 
   return { attempt }
