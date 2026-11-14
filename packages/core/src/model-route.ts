@@ -595,14 +595,23 @@ export const networkSuspect = (now = Date.now(), location?: string) =>
 
 const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
   const prefix = `${providerID}/`
-  let count = 0
+  // The corroboration count is per MODEL: a model cooling at several efforts is
+  // still one model. Traffic benches live on the leg's own map now, so both maps
+  // count — two sibling models erroring in the same window is exactly the
+  // evidence this demotion has always required, at whichever scope it landed.
+  const models = new Set<string>()
   let until = 0
   for (const [id, state] of health) {
     if (!id.startsWith(prefix) || state.cooldownUntil <= now) continue
-    count++
+    models.add(id)
     until = Math.max(until, state.cooldownUntil)
   }
-  return count >= currentConstants(location).network.providerModels ? until : 0
+  for (const [id, state] of trafficHealth) {
+    if (!id.startsWith(prefix) || state.cooldownUntil <= now) continue
+    models.add(id.slice(0, id.lastIndexOf("@")))
+    until = Math.max(until, state.cooldownUntil)
+  }
+  return models.size >= currentConstants(location).network.providerModels ? until : 0
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) =>
