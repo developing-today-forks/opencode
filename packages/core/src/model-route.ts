@@ -703,10 +703,41 @@ const quotaBenched = (state: HealthState | undefined, now: number) =>
  * credential-less target’s only exhaustion signal is this bench — it has no credential
  * whose known-full state a last-resort preference could consult - so without this read
  * a quota-benched leaf is indistinguishable from a merely cooling one to selection. */
-export const quotaCoolingDown = (target: Model.Ref, now = Date.now()) => {
+export const quotaCoolingDown = (target: Model.Ref, now = Date.now(), location?: string) => {
   const state = health.get(key(target))
   if (state) recover(target, state, now)
-  return quotaBenched(state, now)
+  if (quotaBenched(state, now)) return true
+  // A standing quota skip is the same exhaustion verdict in adjustment form:
+  // attempt-reported (#1976) or planted from the gatherer's snapshot
+  // (code#8086). Without this read, a target whose failures classify as
+  // plain rate limits (bench reason "retry-after", not a quota bench)
+  // counts as merely cooling to the last-resort preference even while a
+  // skip holds it out and the gatherer reads its window at 100% (#1806).
+  return activeAdjustments(now).some(
+    (item) =>
+      item.action === "skip" &&
+      (attemptQuotaSkip(item) || item.quotaSkipOrigin === "proactive") &&
+      adjustmentOn(item, now) &&
+      matches(item, target) &&
+      quotaSkipBlocks(item, now, location),
+  )
+}
+
+/** The earliest instant a standing quota skip on this target lifts (#1806):
+ * the re-admission a last-resort seat's recheck reports for a candidate the
+ * gatherer or an attempt has held out, whose exclusion reason carries no
+ * timestamp of its own. A blocking skip with no `until` never lifts by time
+ * and contributes no instant. */
+export const quotaSkipUntil = (target: Model.Ref, now = Date.now(), location?: string) => {
+  let earliest: number | undefined
+  for (const item of activeAdjustments(now)) {
+    if (item.action !== "skip") continue
+    if (!(attemptQuotaSkip(item) || item.quotaSkipOrigin === "proactive")) continue
+    if (!adjustmentOn(item, now) || !matches(item, target) || !quotaSkipBlocks(item, now, location)) continue
+    if (item.until === undefined) continue
+    if (earliest === undefined || item.until < earliest) earliest = item.until
+  }
+  return earliest
 }
 
 /** Whether one credential of the target is quota-dead under a quota-class bench right now
@@ -3496,7 +3527,18 @@ export const nextTarget = (
         const unavailableReason =
           unavailable?.get(index) ??
           (tried.has(index) ? "already-tried" : gateClosed ? "window-gate-closed" : undefined)
-        return unavailableReason ? [{ candidate: label(node.children[position]), reason: unavailableReason }] : []
+        // Name the excluded leaf itself (#1806): labelling every leaf of a
+        // node with the node's label sent one diagnosis hunting for a wall
+        // on the wrong member.
+        const leafTarget = definition.targets[index]
+        return unavailableReason
+          ? [
+              {
+                candidate: leafTarget ? `${leafTarget.providerID}/${leafTarget.id}` : label(node.children[position]),
+                reason: unavailableReason,
+              },
+            ]
+          : []
       })
     })
     if (positions.length === 0) {

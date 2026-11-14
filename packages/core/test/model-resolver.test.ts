@@ -2446,6 +2446,56 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.effect("a last-resort seat carries the excluded candidate's re-admission as its recheck instant (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        // pa is quota-dead on a long bench; pb merely cooling on a shorter one.
+        // Nothing is ready: the last resort seats pb (the non-full preference),
+        // and the seat reports pa's bench end — the instant a retry after a
+        // failed attempt on this seat should re-check, instead of spinning on
+        // the short schedule into the same wall.
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now())
+        const resolved = yield* resolver.resolveModel(route)
+        expect(targetOf(resolved)).toBe("pb")
+        expect(resolved.routing?.recheckAt).toBe(ModelRoute.cooldownUntil(targetA, Date.now()))
+      }),
+    )
+  })
+
+  it.live("after the recheck instant a fresh resolution draws the re-admitted leaf as a ready seat (#1806)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    const targetB = ModelRoute.ref({ providerID: "pb", model: b.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        ModelRoute.failed(targetA, ModelRoute.policy(), Date.now(), { quota: true })
+        ModelRoute.failed(targetB, ModelRoute.policy(), Date.now(), { retryAfterMs: 1200 })
+        // Nothing is ready: the last-resort seat is pb, carrying a recheck
+        // instant. pb's own bench is the short one — once it passes, the
+        // re-resolution a waited retry performs draws pb as an ordinary
+        // ready seat (no recheck), which is the completion shape the
+        // runner's recheck wait exists to reach.
+        const first = yield* resolver.resolveModel(route)
+        expect(targetOf(first)).toBe("pb")
+        expect(first.routing?.recheckAt).toBeDefined()
+        yield* Effect.sleep("1500 millis")
+        const second = yield* resolver.resolveModel(route)
+        expect(targetOf(second)).toBe("pb")
+        expect(second.routing?.recheckAt).toBeUndefined()
+      }),
+    )
+  })
+
   it.live("admits exactly one half-open probe when a quota window reset learned after the bench passes (#1123)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

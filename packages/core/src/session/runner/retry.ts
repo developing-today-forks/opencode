@@ -31,6 +31,19 @@ export interface Decision {
 /** Bound provider-requested delays so a hostile or buggy retry-after cannot stall a session for hours. */
 const RETRY_AFTER_MAX = Duration.toMillis("15 minutes")
 
+/** A retry decided for a failed attempt on a last-resort seat waits for the
+ * seat's recheck instant — the earliest moment an excluded candidate
+ * re-admits (#1806) — instead of re-resolving on the short schedule into
+ * the same wall. Bounded by the same cap as provider-requested delays:
+ * past it, the retry re-resolves and re-evaluates rather than parking the
+ * session on a stale instant. */
+export const withRecheckFloor = (decision: Decision, recheckAt: number | undefined, now = Date.now()): Decision => {
+  if (recheckAt === undefined) return decision
+  const wait = recheckAt - now
+  if (wait <= decision.delay) return decision
+  return { ...decision, delay: Math.min(wait, RETRY_AFTER_MAX) }
+}
+
 const retryAfter = (input: Input) => {
   if (input.cause.reason._tag === "RateLimit" || input.cause.reason._tag === "ProviderInternal")
     return input.cause.reason.retryAfterMs === undefined
