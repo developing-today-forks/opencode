@@ -942,6 +942,14 @@ export const plantGatheredQuotaWall = (
   const id = quotaModelSkipID(target)
   const wall = gatheredQuotaWall(target, readings, now, location)
   if (wall) {
+    // The documented invariant above, on the plant side (#2332): a standing
+    // record that is not this plant's own — an attempt-reported skip above
+    // all — is left untouched, exactly as the lift path below already
+    // leaves it. Overwriting it would flip its origin to "proactive", and
+    // a later headroom reading would then lift it on the snapshot's word,
+    // defeating the attempt path's own re-admission rules (#1974).
+    const standing = adjustments.find((item) => item.id === id)
+    if (standing && standing.quotaSkipOrigin !== "proactive") return undefined
     addAdjustment({
       id,
       match: `${target.providerID}/${target.id}`,
