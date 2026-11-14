@@ -2617,6 +2617,37 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.live("an expired auth bench admits exactly one probe resolution, never ordinary candidacy (#9950)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], ordered)
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        ModelRoute.failed(targetA, ModelRoute.policy({ quotaCooldownMs: 250 }), Date.now(), { auth: true })
+        yield* Effect.sleep("400 millis")
+        // The bench expired into probe-pending: the resolution that picks the door is its
+        // probe, and it carries the claim.
+        const probe = yield* resolver.resolveModel(route)
+        expect(targetOf(probe)).toBe("pa")
+        expect(probe.routing?.probeClaim).toBeDefined()
+        // While that probe is outstanding the door is out of ordinary candidacy: the next
+        // resolution seats the sibling instead of piling onto the still-unproven door.
+        const ordinary = yield* resolver.resolveModel(route)
+        expect(targetOf(ordinary)).toBe("pb")
+        expect(ordinary.routing?.probeClaim).toBeUndefined()
+        // Handing the unattempted claim back makes the probe due again for a fresh pick.
+        const claim = probe.routing!.probeClaim!
+        expect(ModelRoute.releaseBenchProbe(targetA, claim.credentialID, claim.claimedAt, claim.token)).toBe(true)
+        expect(ModelRoute.probeDue(targetA, undefined)).toBe(true)
+        const again = yield* resolver.resolveModel(route)
+        expect(targetOf(again)).toBe("pa")
+        expect(again.routing?.probeClaim).toBeDefined()
+      }),
+    )
+  })
+
   it.live("a load failure settles both probe scopes of the pick (#1486)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")
