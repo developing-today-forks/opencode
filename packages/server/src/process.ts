@@ -16,6 +16,7 @@ import { NetAddress } from "effect/net"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { ListenOptions, Socket } from "node:net"
 import { ServerAuth } from "./auth"
+import { closeTrackedPtySockets, terminateTrackedPtySockets, trackedPtySocketCount } from "./handlers/pty-socket"
 import { isAllowedCorsOrigin } from "./cors"
 import { adoptInheritedSocket } from "./inherited-socket"
 import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
@@ -159,6 +160,9 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     const waitForRequests = Effect.gen(function* () {
       while (inFlight.size > 0) yield* Effect.sleep("10 millis")
     })
+    const waitForPtySockets = Effect.gen(function* () {
+      while (trackedPtySocketCount() > 0) yield* Effect.sleep("10 millis")
+    })
     return {
       address: bound.http.address,
       shutdown: shutdown.await,
@@ -175,6 +179,17 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
           yield* Effect.sync(() => {
             bound.server.close()
           })
+          // PTY WebSockets outlive their HTTP upgrade, so inFlight never sees them (#2284):
+          // close them deliberately, wait a short bounded drain for the close frames to flush,
+          // then force-close whatever remains rather than holding shutdown for them.
+          yield* Effect.sync(() => closeTrackedPtySockets())
+          if (trackedPtySocketCount() > 0) yield* waitForPtySockets.pipe(Effect.timeoutOption(ptySocketDrainBound))
+          if (trackedPtySocketCount() > 0) {
+            yield* Effect.logWarning("force-closing PTY sockets that did not drain", {
+              sockets: trackedPtySocketCount(),
+            })
+            yield* terminateTrackedPtySockets()
+          }
           const sessions = yield* runningSessions
           if (sessions.length > 0 || inFlight.size > 0)
             yield* Effect.logInfo("draining running sessions and requests", {
@@ -226,6 +241,9 @@ const EVENT_STREAM_PATH = "/api/event"
 // request on such a connection usually arrives within one round trip; this covers a slow one without
 // letting idle keep-alive connections hold shutdown.
 const drainLinger = Duration.millis(500)
+// How long a drain waits for deliberately closed PTY sockets to finish before force-closing
+// the rest: long enough for a close frame to flush, far below any request grace (#2284).
+const ptySocketDrainBound = Duration.seconds(2)
 
 function listen(options: {
   readonly hostname: string

@@ -40,6 +40,9 @@ export interface PtyOutbox {
   readonly overflowed: () => boolean
   // Completes the first time the outbox overflows; never completes otherwise.
   readonly whenOverflowed: Effect.Effect<void>
+  // Shuts the queue down: a drain blocked in Queue.take dies, so a connection whose writer has
+  // stalled can be force-closed during server shutdown (see trackPtySocket).
+  readonly shutdown: Effect.Effect<void>
 }
 
 export const makePtyOutbox = (maxBytes: number = PTY_OUTBOX_MAX_BYTES) =>
@@ -75,12 +78,43 @@ export const makePtyOutbox = (maxBytes: number = PTY_OUTBOX_MAX_BYTES) =>
       queuedBytes: () => retained,
       overflowed: () => overflow,
       whenOverflowed: Deferred.await(overflowSignal),
+      shutdown: Queue.shutdown(queue),
     }
     return outbox
   })
 
 // Outbound frames flow through one queue drained by a single writer so replay, live output, and the close
 // frame keep their order. Either side closing ends the connection normally, and every exit detaches.
+// Graceful-shutdown tracking for live PTY connections (#2284). An upgraded WebSocket outlives
+// its HTTP request, so the server drain in process.ts cannot see it through request tracking:
+// the connect handler registers one handle per connection and unregisters when runPtySocket
+// exits. The drain first closes every handle deliberately — the close frame queues behind any
+// retained output, the writer delivers it, and runPtySocket's ensuring detaches the PTY
+// attachment — then force-closes whatever is still registered after its bounded wait by
+// shutting the outboxes down.
+export interface PtySocketShutdownHandle {
+  readonly close: () => void
+  readonly terminate: Effect.Effect<void>
+}
+
+const ptySocketShutdownHandles = new Set<PtySocketShutdownHandle>()
+
+export const trackPtySocket = (handle: PtySocketShutdownHandle): (() => void) => {
+  ptySocketShutdownHandles.add(handle)
+  return () => {
+    ptySocketShutdownHandles.delete(handle)
+  }
+}
+
+export const trackedPtySocketCount = (): number => ptySocketShutdownHandles.size
+
+export const closeTrackedPtySockets = (): void => {
+  for (const handle of [...ptySocketShutdownHandles]) handle.close()
+}
+
+export const terminateTrackedPtySockets = (): Effect.Effect<void> =>
+  Effect.forEach([...ptySocketShutdownHandles], (handle) => handle.terminate, { discard: true })
+
 export function runPtySocket<R>(input: {
   readonly socket: Socket.Socket
   readonly outbox: Queue.Dequeue<Outbound>

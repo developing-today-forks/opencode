@@ -3,6 +3,11 @@ import { createConnection } from "node:net"
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { it } from "../../core/test/lib/effect"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { OpenCode } from "../../client/src/promise/index"
+import { trackedPtySocketCount } from "../src/handlers/pty-socket"
 import { ServerProcess } from "../src/process"
 
 it.live("authenticates API requests behind the frontend transform while allowing browser preflight", () =>
@@ -437,3 +442,65 @@ const startingServer = Effect.fnUntraced(function* (
   )
   return { base: new URL(yield* Deferred.await(listening)), starting }
 })
+
+it.live("closes an open PTY websocket deliberately during shutdown instead of waiting out the grace", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-process-pty-drain-"))),
+      (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
+    )
+    const server = yield* ServerProcess.start<never, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      app: { version: "test-version" },
+      database: { path: ":memory:" },
+      models: { fetch: false },
+      config: { directory, project: false, content: "{}" },
+      fs: { filewatcher: false },
+    })
+    const base = HttpServer.formatAddress(server.address)
+    const client = OpenCode.make({ baseUrl: base, headers: { authorization: `Basic ${btoa("opencode:secret")}` } })
+    const location = { directory }
+    const terminal = yield* Effect.promise(() =>
+      client.pty.create({
+        location,
+        command: "/bin/sh",
+        args: ["-c", "stty -echo; printf 'ready\\n'; sleep 60"],
+        cwd: directory,
+      }),
+    )
+    const state = { closed: false, code: 0 }
+    yield* Effect.promise(async () => {
+      const token = await client.pty.connect.token({ location, ptyID: terminal.data.id, "x-opencode-ticket": "1" })
+      const url = new URL(`/api/pty/${terminal.data.id}/connect`, base)
+      url.protocol = "ws:"
+      url.searchParams.set("location[directory]", directory)
+      url.searchParams.set("ticket", token.data.ticket)
+      const socket = new WebSocket(url)
+      socket.addEventListener("close", (event) => {
+        state.closed = true
+        state.code = event.code
+      })
+      // Wait until the connection is registered with the shutdown lifecycle.
+      const deadline = Date.now() + 10_000
+      while (trackedPtySocketCount() !== 1) {
+        if (Date.now() > deadline) throw new Error("PTY websocket was never tracked")
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    })
+    expect(trackedPtySocketCount()).toBe(1)
+
+    const started = Date.now()
+    // A 30-second grace with nothing that can cut the drain short: the drain must finish on
+    // the PTY socket's deliberate close, not on the grace expiring.
+    const drainFiber = yield* server.drain("30 seconds", Effect.never).pipe(Effect.forkChild)
+    yield* Fiber.join(drainFiber)
+    const elapsed = Date.now() - started
+
+    expect(state.closed).toBeTrue()
+    expect(state.code).toBe(1001)
+    expect(trackedPtySocketCount()).toBe(0)
+    expect(elapsed).toBeLessThan(15_000)
+  }),
+)

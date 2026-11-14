@@ -17,7 +17,7 @@ import {
 } from "@opencode/protocol/groups/pty"
 import { locationErrors, requestRef, response } from "../location"
 import { PtyEnvironment } from "../pty-environment"
-import { makePtyOutbox, runPtySocket } from "./pty-socket"
+import { makePtyOutbox, runPtySocket, trackPtySocket } from "./pty-socket"
 
 const ticketScope = Effect.gen(function* () {
   const location = yield* Location.Service
@@ -176,8 +176,14 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
                 : undefined
 
             const socket = yield* Effect.orDie(ctx.request.upgrade)
-            // TODO: Integrate graceful-shutdown socket tracking before clients migrate to this route.
             const outbox = yield* makePtyOutbox()
+            // Register with the shutdown lifecycle (#2284): a graceful drain closes this socket
+            // deliberately (close code 1001) instead of dropping it at process exit. Untracked
+            // when runPtySocket exits, on every path.
+            const untrackPtySocket = trackPtySocket({
+              close: () => void outbox.offer(new Socket.CloseEvent(1001, "server shutting down")),
+              terminate: outbox.shutdown,
+            })
             const attachment = yield* pty
               .attach(ctx.params.ptyID, {
                 cursor,
@@ -214,7 +220,7 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
                   if (decoded !== undefined) attachment.write(decoded)
                 }),
               detach: () => attachment?.detach(),
-            })
+            }).pipe(Effect.ensuring(Effect.sync(untrackPtySocket)))
             return HttpServerResponse.empty()
           }).pipe(Effect.provide(locations.get(ref)), locationErrors)
         }),
