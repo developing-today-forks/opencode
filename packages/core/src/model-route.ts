@@ -1476,6 +1476,7 @@ export interface SettingsConfig {
     readonly fallbackMs?: number
     readonly feedTtlMs?: number
     readonly balanceDeadThreshold?: number
+    readonly rootStartMaxPct?: number
   }
   readonly escalation?: {
     readonly enabled?: boolean
@@ -3784,6 +3785,9 @@ export interface Constants {
     readonly fallbackMs: number
     readonly feedTtlMs: number
     readonly balanceDeadThreshold: number
+    /** Percent of a quota window at or above which a new root session is not started
+     * on the pool (#566). Subsessions are unaffected. */
+    readonly rootStartMaxPct: number
   }
   readonly escalation: { readonly outcomeWindow: number }
   readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
@@ -3813,6 +3817,7 @@ export const DEFAULT_CONSTANTS: Constants = {
     // shouldFeedQuota's default: how often quota snapshots are fed into the gate.
     feedTtlMs: 60_000,
     balanceDeadThreshold: QuotaSnapshot.DEFAULT_BALANCE_DEAD_THRESHOLD,
+    rootStartMaxPct: QuotaSnapshot.DEFAULT_ROOT_START_MAX_PCT,
   },
   escalation: { outcomeWindow: OUTCOME_WINDOW },
   network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },

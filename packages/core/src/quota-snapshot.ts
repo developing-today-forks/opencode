@@ -238,3 +238,31 @@ export const isKnownFull = (
           balanceDeadThreshold +
             Number.EPSILON * Math.max(1, Math.abs(snapshot.remaining), Math.abs(balanceDeadThreshold)))
     : snapshot.percent !== null && snapshot.percent >= 100 && (snapshot.resetAt === null || snapshot.resetAt > now))
+
+/** The default root-session start threshold for #566: a new root session is not started
+ * on a pool at or above this percent of a quota window. Subsessions are unaffected —
+ * they may be placed up to 100% and stop there. */
+export const DEFAULT_ROOT_START_MAX_PCT = 85
+
+/**
+ * Whether a snapshot blocks STARTING a new root session on its pool (#566 root-start
+ * gate): a fresh, known window percent at or above `maxPct` whose reset is still ahead.
+ * The same evidence discipline as `isKnownFull` applies — an unknown or stale snapshot
+ * is never a wall. Balance snapshots are excluded: a credit balance has no meaningful
+ * percent of a window (its `percent` is a synthetic dead/alive marker from `derive`),
+ * and balance pools are governed by the dead-balance gate in `isKnownFull` instead.
+ * A window whose reset has already passed no longer blocks: the reading belongs to
+ * the previous period. This predicate judges a snapshot only; which selections are
+ * root-session starts is the caller's distinction (the placement wiring is the next
+ * #566 slice).
+ */
+export const blocksRootStart = (
+  snapshot: Snapshot,
+  now: number,
+  maxPct: number = DEFAULT_ROOT_START_MAX_PCT,
+): boolean =>
+  known(snapshot) &&
+  snapshot.balance !== true &&
+  snapshot.percent !== null &&
+  snapshot.percent >= maxPct &&
+  (snapshot.resetAt === null || snapshot.resetAt > now)

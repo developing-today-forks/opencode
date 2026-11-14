@@ -670,6 +670,12 @@ export class QuotaGate extends Schema.Class<QuotaGate>("Config.ModelRoute.Settin
       description: "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1.",
     })
     .pipe(optional),
+  rootStartMaxPct: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(100))
+    .annotate({
+      description:
+        "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85.",
+    })
+    .pipe(optional),
 }) {}
 
 /** Escalation: when a route races its next target because the current one keeps giving up. */
