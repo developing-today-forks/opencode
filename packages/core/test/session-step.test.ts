@@ -2977,6 +2977,161 @@ describe("SessionStep failover classes (#1806)", () => {
   )
 })
 
+// code#9549: a dead or walled leg must end on its first failure — the target is
+// benched (the shared record other selections read) and the turn fails over in
+// the same turn — even when the retry hook grants a retry and the route's
+// per-target attempt budget would otherwise allow more tries. Before the fix,
+// a granted retry re-issued the request on the same target: sessions burned
+// 1,000+ calls on a provider that had already answered "account disabled".
+describe("SessionStep dead and walled legs (code#9549)", () => {
+  const attemptWith = (error: AIError) =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      const db = (yield* Database.Service).db
+      const llm = yield* TestLLM.Test
+      const logged: ModelRouteLog.Event[] = []
+      ModelRouteLog.setSink((event) => void logged.push(event))
+      const sessionID = Session.ID.create()
+      const assistantMessageID = SessionMessage.ID.create()
+      const steps = yield* SessionStep.make.pipe(
+        Effect.provide(
+          Layer.mock(Snapshot.Service)({
+            capture: () => Effect.succeed(undefined),
+            files: () => Effect.succeed([]),
+          }),
+        ),
+      )
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "dead-leg",
+          directory: "/project",
+          version: "test",
+        })
+        .run()
+      const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+      const cost = [
+        {
+          input: Money.USDPerMillionTokens.make(1),
+          output: Money.USDPerMillionTokens.make(2),
+          cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+        },
+      ]
+      const limit = { context: 100_000, output: 1_000 }
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const fallback = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      let fallbackCalls = 0
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("dead-leg"),
+          target: primary.ref,
+          // Three requests per target: without the dead-leg guard, a granted
+          // retry would spend them all on the dead target.
+          attempts: 3,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => {
+            fallbackCalls++
+            return Effect.succeed(fallback)
+          },
+        },
+      })
+      yield* llm.push(TestLLM.failAfter(error))
+      const result = yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          // The hook grants every retry it is offered: the step must still
+          // refuse to re-issue on a dead or walled target.
+          retry: () => Effect.succeed({ retry: true, attempt: 1, delay: 0 }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+      const attempts = logged.flatMap((event) => (event.kind === "attempt" ? [event.row] : []))
+      ModelRouteLog.setSink(undefined)
+      return { result, fallbackCalls, fallback, primary, attempts, requests: yield* llm.requests() }
+    })
+
+  it.effect("fails over on the first account-disabled refusal and benches the target", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback, primary, attempts, requests } = yield* attemptWith(
+        new AIError({
+          reason: new AuthenticationError({
+            message:
+              "This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.",
+          }),
+        }),
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+      // Exactly one call was spent on the dead leg, and its attempt row names
+      // the failover destination.
+      expect(requests).toHaveLength(1)
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]).toMatchObject({ outcome: "failure", failed_over_to: "anthropic/backup" })
+      // The bench is the shared dead-leg record: later selections skip it.
+      expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
+    }),
+  )
+
+  it.effect("fails over on the first quota exhaustion stated in the provider's words", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, fallback, primary, requests } = yield* attemptWith(
+        new AIError({
+          reason: new UnknownProviderError({
+            message: "Individual quota reached. Please upgrade your subscription to increase your limits.",
+          }),
+        }),
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result))
+        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
+      expect(fallbackCalls).toBe(1)
+      expect(requests).toHaveLength(1)
+      expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
+    }),
+  )
+
+  it.effect("still retries a transient failure on the same target within its attempt budget", () =>
+    Effect.gen(function* () {
+      const { result, fallbackCalls, requests } = yield* attemptWith(
+        new AIError({ reason: new ProviderInternalError({ message: "primary unavailable" }) }),
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result)) expect(result.value._tag).toBe("Retry")
+      expect(fallbackCalls).toBe(0)
+      expect(requests).toHaveLength(1)
+    }),
+  )
+})
+
+
 // #1903: a provider that keeps completing with a few tokens and no message
 // (no text, no reasoning, no tool call) recorded every attempt as a success
 // and looped the session forever. Three in a row now count as a failed
