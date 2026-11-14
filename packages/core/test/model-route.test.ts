@@ -894,7 +894,7 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBe(0)
   })
 
-  test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
+  test("a quota reset never arms an auth bench probe, and the reactive fallback reset never arms one", () => {
     const now = 900_000_000
     const resetAt = now + 5 * 3_600_000
     ModelRoute.resetHealth()
@@ -908,6 +908,126 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     ModelRoute.observeQuotaFailure(target, "cred-fallback", undefined, now + 10)
     expect(ModelRoute.activeBenches(now + 11)[0]?.quotaResetAt).toBeUndefined()
     expect(ModelRoute.probeDue(target, "cred-fallback", now + day)).toBe(false)
+  })
+})
+
+describe("ModelRoute auth bench probe (#9950)", () => {
+  const policy = ModelRoute.policy({ cooldownMs: 60_000, quotaCooldownMs: 900_000 })
+  const target = ModelRoute.ref({ providerID: "auth-probe-provider", model: "authy" })
+  const sample = { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }
+
+  test("an expired auth bench converts to probe-pending: one probe is due, ordinary candidacy stays closed", () => {
+    const now = 1_000_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true })
+    const expiry = now + 900_000
+    expect(ModelRoute.cooldownUntil(target, now)).toBe(expiry)
+    // While the bench stands there is no probe: the auth bench has no window to roll over.
+    expect(ModelRoute.probeDue(target, undefined, now + 1)).toBe(false)
+    expect(ModelRoute.probePending(target, undefined, now + 1)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, undefined, now + 1)).toBe(false)
+
+    // The expiry read converts the bench instead of readmitting the door outright.
+    expect(ModelRoute.cooldownUntil(target, expiry)).toBe(0)
+    expect(ModelRoute.probePending(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.activeBenches(expiry)).toEqual([
+      {
+        providerID: "auth-probe-provider",
+        modelID: "authy",
+        until: expiry,
+        reason: "auth",
+        consecutiveFailures: 1,
+        probeDue: true,
+        probeClaimed: false,
+      },
+    ])
+
+    // Exactly one probe: the first claim wins and the door stays closed behind it.
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.probePending(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.activeBenches(expiry)[0]?.probeClaimed).toBe(true)
+  })
+
+  test("a released auth probe claim leaves the bench probe-pending and the probe due again", () => {
+    const now = 1_100_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true })
+    const expiry = now + 900_000
+    expect(ModelRoute.cooldownUntil(target, expiry)).toBe(0)
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.probePending(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, expiry)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry + 1)).toBe(true)
+  })
+
+  test("probe success reseats the door and clears the escalation ladder", () => {
+    const now = 1_200_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true })
+    const expiry = now + 900_000
+    expect(ModelRoute.cooldownUntil(target, expiry)).toBe(0)
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry, token)).toBe(true)
+    ModelRoute.completed(target, policy, sample, expiry + 1, undefined, undefined, { claimedAt: expiry, token })
+    expect(ModelRoute.probePending(target, undefined, expiry + 1)).toBe(false)
+    expect(ModelRoute.cooldownUntil(target, expiry + 1)).toBe(0)
+    expect(ModelRoute.activeBenches(expiry + 1)).toEqual([])
+    // The ladder cleared with the bench: the next auth failure starts at the base again.
+    ModelRoute.failed(target, policy, expiry + 2, { auth: true })
+    expect(ModelRoute.cooldownUntil(target, expiry + 2)).toBe(expiry + 2 + 900_000)
+  })
+
+  test("probe failure re-benches on the escalated ladder, and the new bench converts again at its expiry", () => {
+    const now = 1_300_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true })
+    const expiry = now + 900_000
+    expect(ModelRoute.cooldownUntil(target, expiry)).toBe(0)
+    const token = ModelRoute.nextProbeClaimToken()
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry, token)).toBe(true)
+    ModelRoute.failed(target, policy, expiry + 1, { auth: true }, undefined, undefined, { claimedAt: expiry, token })
+    // Second consecutive failure: the long bench doubles, and nothing is probe-pending yet.
+    const secondExpiry = expiry + 1 + 1_800_000
+    expect(ModelRoute.cooldownUntil(target, expiry + 1)).toBe(secondExpiry)
+    expect(ModelRoute.probePending(target, undefined, expiry + 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, expiry + 1)).toBe(false)
+    // At the new expiry the cycle repeats: one more probe, not full candidacy.
+    expect(ModelRoute.cooldownUntil(target, secondExpiry)).toBe(0)
+    expect(ModelRoute.probePending(target, undefined, secondExpiry)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, secondExpiry)).toBe(true)
+  })
+
+  test("a credential's auth bench converts and probes independently of its siblings and the target", () => {
+    const now = 1_400_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-dead")
+    const expiry = now + 900_000
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-dead", expiry)).toBe(0)
+    expect(ModelRoute.probePending(target, "cred-dead", expiry)).toBe(true)
+    expect(ModelRoute.probeDue(target, "cred-dead", expiry)).toBe(true)
+    expect(ModelRoute.probePending(target, "cred-alive", expiry)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-alive", expiry)).toBe(false)
+    expect(ModelRoute.probePending(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, "cred-dead", expiry)).toBe(true)
+    ModelRoute.completed(target, policy, sample, expiry + 1, "cred-dead")
+    expect(ModelRoute.probePending(target, "cred-dead", expiry + 1)).toBe(false)
+  })
+
+  test("an ordinary failure bench never becomes probe-pending at expiry", () => {
+    const now = 1_500_000_000
+    ModelRoute.resetHealth()
+    ModelRoute.failed(target, policy, now)
+    const expiry = ModelRoute.cooldownUntil(target, now)
+    expect(expiry).toBeGreaterThan(now)
+    expect(ModelRoute.cooldownUntil(target, expiry)).toBe(0)
+    expect(ModelRoute.probePending(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, undefined, expiry)).toBe(false)
+    expect(ModelRoute.activeBenches(expiry)).toEqual([])
   })
 })
 

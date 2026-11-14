@@ -248,7 +248,11 @@ export const ref = (target: { providerID: string; model: string; variant?: strin
 /** One target's (or one credential's) failure-health state. `benchReason` / `benchQuotaResetAt`
  * describe the bench in force: why it was planted, and the trustworthy quota window reset it is
  * bounded by when one is known (#1123). `probeClaimedAt` marks the single half-open probe a bench
- * admits at that reset while the bench itself still stands. `probeClaimToken` is the claim's unique
+ * admits at that reset while the bench itself still stands. `probePendingAt` is an expired auth
+ * bench's conversion (#9950): an auth bench has no window reset to probe at, so at expiry it
+ * converts to probe-pending instead of readmitting the door outright — the bench's expiry is
+ * remembered here, candidacy stays closed, and exactly one probe decides whether the door
+ * reseats or re-benches. `probeClaimToken` is the claim's unique
  * identity (#1486): the millisecond alone collides when a claim settles and another is spent
  * within the same millisecond, so every spend stamps a fresh token and every settle/release
  * lands only when its token still names the outstanding claim. */
@@ -259,6 +263,7 @@ interface HealthState {
   consecutiveFailures: number
   benchReason?: string
   benchQuotaResetAt?: number
+  probePendingAt?: number
   probeClaimedAt?: number
   probeClaimToken?: number
 }
@@ -403,9 +408,15 @@ const recover = (
   credentialID?: string,
 ) => {
   if (state.cooldownUntil === 0 || state.cooldownUntil > now) return
+  // An auth bench converts at expiry instead of clearing (#9950): the refusal it answers
+  // cannot heal by itself and there is no quota window to roll over, so the door stays out
+  // of ordinary candidacy as probe-pending until one probe settles it — a success reseats
+  // (see completed()), a failure re-benches on the escalated ladder (see bench()). The
+  // escalation count survives, exactly as it does for every other recover().
+  if (state.benchReason === "auth") state.probePendingAt = state.cooldownUntil
   state.cooldownUntil = 0
   state.samples = []
-  state.benchReason = undefined
+  if (state.probePendingAt === undefined) state.benchReason = undefined
   state.benchQuotaResetAt = undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
@@ -545,6 +556,7 @@ const bench = (
         : "failure"
   state.benchReason = reason
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
+  state.probePendingAt = undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
   logHealth(
@@ -621,23 +633,38 @@ const releaseQuotaBenches = (inScope: (id: string) => boolean, now: number) => {
 
 const probeDueState = (state: HealthState | undefined, now: number) =>
   state !== undefined &&
-  state.cooldownUntil > now &&
-  state.benchQuotaResetAt !== undefined &&
-  state.benchQuotaResetAt <= now &&
-  state.probeClaimedAt === undefined
+  state.probeClaimedAt === undefined &&
+  ((state.cooldownUntil > now &&
+    state.benchQuotaResetAt !== undefined &&
+    state.benchQuotaResetAt <= now) ||
+    (state.probePendingAt !== undefined && state.probePendingAt <= now))
 
-/** Whether the bench on this target (or on this credential of it, when one is named) is holding
- * past a known quota window reset, so a half-open probe is due: the window has rolled over, the
- * bench has not, and no probe is outstanding yet. The independent quota gate still applies on
+/** Whether the bench on this target (or on this credential of it, when one is named) admits a
+ * half-open probe now: a quota bench holding past a known window reset (the window has rolled
+ * over, the bench has not), or an auth bench that expired into probe-pending (#9950) — and no
+ * probe is outstanding yet in either case. The independent quota gate still applies on
  * top of this — a probe never bypasses a gate whose own reset is still ahead. */
 export const probeDue = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) =>
   probeDueState(credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target)), now)
 
+/** Whether this scope's bench stands in the auth probe-pending state (#9950): its auth bench
+ * expired and converted, so the door is out of ordinary candidacy until one probe settles it.
+ * True both while the probe is due and while its claim is outstanding — candidacy consults
+ * this together with probeDue: due admits the one probe pick, outstanding excludes everyone.
+ * Reading it converts an expired auth bench exactly like the cooldown reads do. */
+export const probePending = (target: Model.Ref, credentialID: string | undefined, now = Date.now()) => {
+  const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
+  if (state) recover(target, state, now, credentialID)
+  return state?.probePendingAt !== undefined
+}
+
 /** Claims the one half-open probe a due bench admits. Exactly one claim succeeds: while it is
  * outstanding the bench keeps excluding ordinary candidacy, a probe success ends the bench
  * (see completed()), and a probe failure re-benches through failed() on the escalated ladder,
- * bounded by the next known reset when there is one. A claim that never reports an outcome
- * stops mattering when the bench itself expires.
+ * bounded by the next known reset when there is one. An auth probe-pending bench (#9950) is
+ * claimed the same way at its expiry; its claim settles through the same two outcomes, and a
+ * claim that never reports an outcome is handed back by the release paths, not by a timer —
+ * the pending bench itself has no later expiry to fall back on.
  *
  * `token` names this spend (#1486): pass one token per pick so every scope the pick claims
  * shares the pick's identity. Omitted, a fresh token is minted for the scope. */
@@ -654,8 +681,10 @@ export const claimBenchProbe = (
   logHealth(
     target,
     "bench-probe",
-    `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}`,
-    state.benchQuotaResetAt,
+    state.probePendingAt !== undefined
+      ? `probe at auth bench expiry${credentialID ? ` credential:${credentialID}` : ""}`
+      : `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}`,
+    state.probePendingAt ?? state.benchQuotaResetAt,
     credentialID,
   )
   return true
@@ -683,7 +712,7 @@ export const releaseBenchProbe = (
     target,
     "bench-probe-release",
     `probe claim released without an outcome${credentialID ? ` credential:${credentialID}` : ""}`,
-    state.benchQuotaResetAt,
+    state.probePendingAt ?? state.benchQuotaResetAt,
     credentialID,
   )
   return true
@@ -1105,18 +1134,19 @@ export interface ActiveBench {
 
 /** Every bench in force at `now` — target-level and per-credential — soonest expiry first.
  * Reading it changes nothing: expired benches are simply absent, so a target benched with no
- * attempts in the stats window is still visible here. */
+ * attempts in the stats window is still visible here. An auth bench that already converted
+ * to probe-pending on an earlier read is in force here too, reported at its expiry instant. */
 export const activeBenches = (now = Date.now()): ActiveBench[] => {
   const benches: ActiveBench[] = []
   const collect = (id: string, state: HealthState, credentialID?: string) => {
-    if (state.cooldownUntil <= now) return
+    if (state.cooldownUntil <= now && state.probePendingAt === undefined) return
     const base = credentialID ? id.slice(0, id.lastIndexOf("#")) : id
     const slash = base.indexOf("/")
     benches.push({
       providerID: base.slice(0, slash),
       modelID: base.slice(slash + 1),
       ...(credentialID ? { credentialID } : {}),
-      until: state.cooldownUntil,
+      until: state.cooldownUntil > 0 ? state.cooldownUntil : (state.probePendingAt ?? state.cooldownUntil),
       reason: state.benchReason ?? "unknown",
       consecutiveFailures: state.consecutiveFailures,
       ...(state.benchQuotaResetAt !== undefined ? { quotaResetAt: state.benchQuotaResetAt } : {}),
@@ -1370,6 +1400,7 @@ export const failed = (
           prior.samples = []
           prior.benchReason = undefined
           prior.benchQuotaResetAt = undefined
+          prior.probePendingAt = undefined
           prior.probeClaimedAt = undefined
           prior.probeClaimToken = undefined
         }
@@ -1451,6 +1482,7 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now()) => {
     state.cooldownUntil = now + policy.cooldownMs
     state.benchReason = "slow"
     state.benchQuotaResetAt = undefined
+    state.probePendingAt = undefined
     state.probeClaimedAt = undefined
     state.probeClaimToken = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)
@@ -2575,7 +2607,7 @@ export const providerQuotaBlocked = (
  * (recover), but a success on a claimed half-open probe ends the bench outright (#1123) — the
  * probe was admitted precisely to learn whether the leaf serves again, and it does. */
 const endBench = (target: Model.Ref, state: HealthState, now: number, credentialID?: string) => {
-  if (state.probeClaimedAt === undefined || state.cooldownUntil <= now) {
+  if (state.probePendingAt === undefined && (state.probeClaimedAt === undefined || state.cooldownUntil <= now)) {
     recover(target, state, now, credentialID)
     return
   }
@@ -2583,6 +2615,7 @@ const endBench = (target: Model.Ref, state: HealthState, now: number, credential
   state.samples = []
   state.benchReason = undefined
   state.benchQuotaResetAt = undefined
+  state.probePendingAt = undefined
   state.probeClaimedAt = undefined
   state.probeClaimToken = undefined
   logHealth(
@@ -2638,6 +2671,7 @@ export const completed = (
     state.cooldownUntil = now + policy.cooldownMs
     state.benchReason = "slow"
     state.benchQuotaResetAt = undefined
+    state.probePendingAt = undefined
     state.probeClaimedAt = undefined
     state.probeClaimToken = undefined
     logHealth(target, "cooldown-start", "slow", state.cooldownUntil)

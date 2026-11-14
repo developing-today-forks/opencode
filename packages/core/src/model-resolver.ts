@@ -763,8 +763,13 @@ export const layer = Layer.effect(
           const candidates = credentialsByProvider.get(target.providerID)
           if (!candidates || candidates.length === 0) return undefined
           for (const id of candidates) {
+            // An auth bench that expired into probe-pending (#9950) also holds the credential
+            // out: it is servable only by the one probe pick while its probe is due, never by
+            // ordinary candidacy, and not at all while that probe is outstanding.
             const cooling =
-              ModelRoute.credentialCooldownUntil(target, id, at) > at && !ModelRoute.probeDue(target, id, at)
+              (ModelRoute.credentialCooldownUntil(target, id, at) > at ||
+                ModelRoute.probePending(target, id, at)) &&
+              !ModelRoute.probeDue(target, id, at)
             if (cooling) continue
             if (ModelRoute.credentialQuotaBlocked(id, at, locationDirectory) !== undefined) continue
             return { id, activate: id !== candidates[0] }
@@ -968,12 +973,20 @@ export const layer = Layer.effect(
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
             // the target, below — so a probe is never consumed by a target the route passed over.
-            const targetProbe = until > now && ModelRoute.probeDue(target, undefined, now)
-            const credentialProbe =
-              credentialUntil > now && credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            // Auth benches probe the same way at their expiry (#9950): the bench has expired
+            // (until is past), so the probe-pending state, not the timer, is what holds the
+            // leaf out — due admits the one probe pick, an outstanding claim excludes everyone.
+            const targetProbe = ModelRoute.probeDue(target, undefined, now)
+            const credentialProbe = credentialID !== undefined && ModelRoute.probeDue(target, credentialID, now)
+            const targetProbePending = ModelRoute.probePending(target, undefined, now)
+            const credentialProbePending =
+              credentialID !== undefined && ModelRoute.probePending(target, credentialID, now)
             if (until > now && !targetProbe) unavailable.set(index, `cooldown-until:${until}`)
             else if (credentialUntil > now && !credentialProbe)
               unavailable.set(index, `credential-cooldown-until:${credentialUntil}`)
+            else if (targetProbePending && !targetProbe) unavailable.set(index, "auth-probe-in-flight")
+            else if (credentialProbePending && !credentialProbe)
+              unavailable.set(index, "credential-auth-probe-in-flight")
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
             else if (providerBlock)
               unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
@@ -984,7 +997,9 @@ export const layer = Layer.effect(
             else if (isOverLimit) unavailable.set(index, "over-limit")
             return (
               (until <= now || targetProbe) &&
+              (!targetProbePending || targetProbe) &&
               (credentialUntil <= now || credentialProbe) &&
+              (!credentialProbePending || credentialProbe) &&
               quotaBlock === undefined &&
               providerBlock === undefined &&
               membershipHeld <= now &&
