@@ -469,8 +469,22 @@ export function Prompt(props: PromptProps) {
         // row and can never push the composer out of view. The full
         // text still lands in the draft via the finish frame.
         const flat = snapshot.partialText.replace(/\s+/g, " ").trim()
-        const preview = flat.length > 240 ? `…${flat.slice(-240)}` : flat
-        return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref} — live preview, not in your draft yet: ${preview}`
+        const bounded = flat.length > 240 ? `…${flat.slice(-240)}` : flat
+        // Reserve visible columns for the preview itself: the audio
+        // name and the model ref are truncated independently (each
+        // to at most a quarter of the terminal width, the same
+        // truncateMiddle idiom the file path above uses), the
+        // explanatory phrase shortens on narrow terminals, and the
+        // preview takes whatever columns remain — so a long name or
+        // ref can never crowd the preview off the single line.
+        const width = dimensions().width
+        const name = Locale.truncateMiddle(snapshot.audio?.name ?? "audio", Math.max(8, Math.floor(width / 4)))
+        const ref = Locale.truncateMiddle(registration.ref, Math.max(8, Math.floor(width / 4)))
+        const phrase = width >= 80 ? " — live preview, not in your draft yet: " : " — preview: "
+        const prefix = `Transcribing ${name} with ${ref}${phrase}`
+        const budget = Math.max(16, width - prefix.length)
+        const preview = bounded.length > budget ? `…${bounded.slice(-(budget - 1))}` : bounded
+        return `${prefix}${preview}`
       case "error":
         return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
       default:
