@@ -894,14 +894,20 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.credentialCooldownUntil(target, "cred-serving", resetAt + 1)).toBe(0)
   })
 
-  test("no probe for auth benches, and the reactive fallback reset never arms one", () => {
+  test("a quota reset never arms an auth bench's probe early; the probe comes at the bench's own expiry (code#9950)", () => {
     const now = 900_000_000
     const resetAt = now + 5 * 3_600_000
     ModelRoute.resetHealth()
     ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth")
     ModelRoute.observeCredentialQuota(target, "cred-auth", knownFull(resetAt, now + 1), now + 1)
-    expect(ModelRoute.probeDue(target, "cred-auth", resetAt)).toBe(false)
-    expect(ModelRoute.claimBenchProbe(target, "cred-auth", resetAt)).toBe(false)
+    // While the auth bench stands (900_000 from `now`), the learned quota reset arms
+    // nothing: an auth bench has no window to roll over.
+    expect(ModelRoute.probeDue(target, "cred-auth", now + 899_999)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, "cred-auth", now + 899_999)).toBe(false)
+    // At the bench's own expiry the probe comes due (code#9950) — by then the reset
+    // is long past, and it is the expiry, not the reset, that admits the probe.
+    expect(ModelRoute.probeDue(target, "cred-auth", resetAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-auth", resetAt)).toBe(true)
 
     ModelRoute.resetHealth()
     exhaustLadder(now, "cred-fallback")
