@@ -461,11 +461,15 @@ export function Prompt(props: PromptProps) {
         if (!snapshot.partialText)
           return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref}…`
         // The live preview is a status line, not the transcript:
-        // show only a bounded trailing excerpt so a long stream
-        // cannot push the composer out of view. The full text
-        // still lands in the draft via the finish frame.
-        const preview =
-          snapshot.partialText.length > 240 ? `…${snapshot.partialText.slice(-240)}` : snapshot.partialText
+        // flatten it to a single line (line breaks in the streamed
+        // text collapse to spaces) and show only a bounded trailing
+        // excerpt, and the status element below renders this state
+        // with wrapMode="none" + truncate — so however narrow or
+        // short the terminal is, the preview occupies exactly one
+        // row and can never push the composer out of view. The full
+        // text still lands in the draft via the finish frame.
+        const flat = snapshot.partialText.replace(/\s+/g, " ").trim()
+        const preview = flat.length > 240 ? `…${flat.slice(-240)}` : flat
         return `Transcribing ${snapshot.audio?.name ?? "audio"} with ${registration.ref} — live preview, not in your draft yet: ${preview}`
       case "error":
         return `Voice: ${snapshot.error ?? "something went wrong."}${snapshot.audio ? " The audio is still held locally — /voice-send retries, /voice-discard discards it." : ""}`
@@ -2005,7 +2009,11 @@ export function Prompt(props: PromptProps) {
             </Show>
             <Show when={voice().state !== "idle"}>
               <box width="100%" flexShrink={0} paddingBottom={1}>
-                <text fg={theme.text.muted} wrapMode="word">
+                <text
+                  fg={theme.text.muted}
+                  wrapMode={voice().state === "submitting" && voice().partialText ? "none" : "word"}
+                  truncate={voice().state === "submitting" && !!voice().partialText}
+                >
                   {voiceStatusText()}
                 </text>
               </box>
