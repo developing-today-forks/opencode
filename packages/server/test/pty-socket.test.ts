@@ -2,7 +2,14 @@ import { expect } from "bun:test"
 import { Deferred, Effect, Exit, Fiber, Queue } from "effect"
 import { Socket } from "effect/socket"
 import { it } from "../../core/test/lib/effect"
-import { makePtyOutbox, PTY_OUTBOX_OVERFLOW_CLOSE_CODE, type Outbound, runPtySocket } from "../src/handlers/pty-socket"
+import {
+  makePtyOutbox,
+  PTY_OUTBOX_OVERFLOW_CLOSE_CODE,
+  type Outbound,
+  runPtySocket,
+  trackedPtySocketCount,
+  withPtySocketTracked,
+} from "../src/handlers/pty-socket"
 
 const connection = Effect.gen(function* () {
   const inbound = yield* Queue.unbounded<string | Uint8Array, Socket.SocketError>()
@@ -230,5 +237,42 @@ it.live("overflow with a permanently stalled writer detaches at the deadline wit
     expect(yield* Fiber.await(fiber)).toEqual(Exit.void)
     expect(state.written).toEqual([])
     expect(state.detached).toBeTrue()
+  }),
+)
+
+const shutdownHandle = () => ({ close: () => {}, terminate: Effect.void })
+
+it.live("withPtySocketTracked untracks after a successful run", () =>
+  Effect.gen(function* () {
+    yield* withPtySocketTracked(
+      shutdownHandle(),
+      Effect.sync(() => {
+        expect(trackedPtySocketCount()).toBe(1)
+      }),
+    )
+    expect(trackedPtySocketCount()).toBe(0)
+  }),
+)
+
+// Regression test for #2454: an attach failure outside the two caught tags (or any other
+// failure after registration) must not leak the shutdown handle — before the fix the only
+// untrack was an ensuring on the later runPtySocket call, which a failed attach never reached.
+it.live("withPtySocketTracked untracks when the wrapped effect fails", () =>
+  Effect.gen(function* () {
+    const exit = yield* Effect.exit(
+      withPtySocketTracked(shutdownHandle(), Effect.fail(new Error("attach failed outside the caught tags"))),
+    )
+    expect(Exit.isFailure(exit)).toBeTrue()
+    expect(trackedPtySocketCount()).toBe(0)
+  }),
+)
+
+it.live("withPtySocketTracked untracks when the wrapped effect is interrupted", () =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(withPtySocketTracked(shutdownHandle(), Effect.never))
+    yield* Effect.sleep("10 millis")
+    expect(trackedPtySocketCount()).toBe(1)
+    yield* Fiber.interrupt(fiber)
+    expect(trackedPtySocketCount()).toBe(0)
   }),
 )
