@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { ModelRoute } from "@opencode/core/model-route"
-import type { QuotaSnapshot } from "@opencode/core/quota-snapshot"
+import { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 
 const target = ModelRoute.ref({ providerID: "root-start-provider", model: "gpt-6-luna" })
 const now = 500_000_000
@@ -81,6 +81,23 @@ describe("ModelRoute root-start gate (#566 slice 2)", () => {
     expect(ModelRoute.providerRootStartBlocked(target, now)).toEqual({ until: resetAt })
     ModelRoute.onSettingsConfig(() => ({ quotaGate: { rootStartEnabled: false } }))
     expect(ModelRoute.providerRootStartBlocked(target, now)).toBeUndefined()
+  })
+
+  test("a retained snapshot that ages past the max age stops blocking, even with no reset", () => {
+    // The stored stale flag is stamped at derivation; a snapshot retained
+    // without a fresher observation must still age out at judgement time.
+    ModelRoute.observeProviderQuota(target, snap({ resetAt: null }), now)
+    expect(ModelRoute.providerRootStartBlocked(target, now)).toEqual({ until: null })
+    const aged = now + QuotaSnapshot.DEFAULT_MAX_AGE_MS + 1
+    expect(ModelRoute.providerRootStartBlocked(target, aged)).toBeUndefined()
+    expect(ModelRoute.rootStartBlocked(target, undefined, aged)).toBeUndefined()
+  })
+
+  test("a retained credential snapshot that ages past the max age stops blocking", () => {
+    ModelRoute.observeCredentialQuota(target, "cred-aging", snap({ resetAt: null }), now)
+    expect(ModelRoute.credentialRootStartBlocked("cred-aging", now)).toEqual({ until: null })
+    const aged = now + QuotaSnapshot.DEFAULT_MAX_AGE_MS + 1
+    expect(ModelRoute.credentialRootStartBlocked("cred-aging", aged)).toBeUndefined()
   })
 
   test("a configured threshold replaces the default 85", () => {

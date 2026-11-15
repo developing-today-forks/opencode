@@ -3060,6 +3060,19 @@ export type SessionKind = "root" | "subsession"
 
 export const sessionKind = (parentID?: string | null): SessionKind => (parentID ? "subsession" : "root")
 
+/** A retained snapshot judged at `now` (#566 slice 2): the stored `stale`
+ * flag is stamped when the snapshot is derived, so a snapshot retained
+ * without a fresher observation would otherwise keep its derivation-time
+ * freshness forever — a retained 90% reading with no reset would wall root
+ * starts indefinitely. Recompute staleness from `observedAt` at judgement
+ * time, the same rule the feed paths apply (see the `stale:` recomputation
+ * in the quota readers above): a snapshot older than the max age is stale,
+ * and a stale snapshot is never a wall. */
+const judgedSnapshot = (snapshot: QuotaSnapshot.Snapshot, now: number): QuotaSnapshot.Snapshot =>
+  snapshot.stale || now - snapshot.observedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS
+    ? snapshot
+    : { ...snapshot, stale: true }
+
 /** The root-start gate on one credential at `now` (#566 slice 2): `{ until }`
  * (the snapshot's reset, null when it gave none) while the credential's latest
  * snapshot blocks starting a new root session on its pool, undefined while a
@@ -3076,7 +3089,7 @@ export const credentialRootStartBlocked = (
   if (!gate.rootStartEnabled) return undefined
   const state = credentialQuota.get(credentialID)
   if (!state) return undefined
-  return QuotaSnapshot.blocksRootStart(state.snapshot, now, gate.rootStartMaxPct)
+  return QuotaSnapshot.blocksRootStart(judgedSnapshot(state.snapshot, now), now, gate.rootStartMaxPct)
     ? { until: state.snapshot.resetAt }
     : undefined
 }
@@ -3093,7 +3106,7 @@ export const providerRootStartBlocked = (
   if (!gate.rootStartEnabled) return undefined
   const state = providerQuota.get(target.providerID)
   if (!state) return undefined
-  return QuotaSnapshot.blocksRootStart(state.snapshot, now, gate.rootStartMaxPct)
+  return QuotaSnapshot.blocksRootStart(judgedSnapshot(state.snapshot, now), now, gate.rootStartMaxPct)
     ? { until: state.snapshot.resetAt }
     : undefined
 }
