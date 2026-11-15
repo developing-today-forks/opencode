@@ -234,7 +234,9 @@ export const fromWebSocket = (
     const messages = yield* Queue.unbounded<string | Uint8Array, AIError | Cause.Done<void>>()
 
     const oversized = (message: string | Uint8Array) =>
-      typeof message === "string" ? new Blob([message]).size > MAX_FRAME_BYTES : message.byteLength > MAX_FRAME_BYTES
+      typeof message === "string"
+        ? Buffer.byteLength(message, "utf8") > MAX_FRAME_BYTES
+        : message.byteLength > MAX_FRAME_BYTES
     const rejectOversized = (message: string | Uint8Array) => {
       if (!oversized(message)) return false
       Queue.failCauseUnsafe(
