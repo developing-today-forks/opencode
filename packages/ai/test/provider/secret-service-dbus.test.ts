@@ -58,3 +58,11 @@ test("a non-canonical XDG_RUNTIME_DIR names the synthesized session-bus address 
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
   expect(constructedWith).toEqual(["unix:path=/tmp/opencode-secret-service-test-xdg/bus"])
 })
+
+test("a literal % in XDG_RUNTIME_DIR is percent-escaped in the synthesized address (#2473)", async () => {
+  if (typeof process.getuid !== "function") return
+  delete process.env.DBUS_SESSION_BUS_ADDRESS
+  process.env.XDG_RUNTIME_DIR = "/tmp/opencode-secret-service-test-%-xdg"
+  await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
+  expect(constructedWith).toEqual(["unix:path=/tmp/opencode-secret-service-test-%25-xdg/bus"])
+})
