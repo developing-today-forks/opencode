@@ -27,15 +27,19 @@ mock.module("@napi-rs/keyring", () => ({ AsyncEntry: RecordingEntry }))
 const { lookupSecretService } = await import("../../src/providers/secret-service.js")
 
 const originalBusAddress = process.env.DBUS_SESSION_BUS_ADDRESS
+const originalXdgRuntimeDir = process.env.XDG_RUNTIME_DIR
 
 afterEach(() => {
   if (originalBusAddress === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS
   else process.env.DBUS_SESSION_BUS_ADDRESS = originalBusAddress
+  if (originalXdgRuntimeDir === undefined) delete process.env.XDG_RUNTIME_DIR
+  else process.env.XDG_RUNTIME_DIR = originalXdgRuntimeDir
   constructedWith.length = 0
 })
 
 test("an absent session-bus address is synthesized before the entry is constructed (#2313)", async () => {
   if (typeof process.getuid !== "function") return
+  delete process.env.XDG_RUNTIME_DIR
   delete process.env.DBUS_SESSION_BUS_ADDRESS
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
   expect(constructedWith).toEqual([`unix:path=/run/user/${process.getuid()}/bus`])
@@ -45,4 +49,20 @@ test("an explicit bogus session-bus address is left alone and still resolves und
   process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/opencode-secret-service-test-unavailable"
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBeUndefined()
   expect(constructedWith).toEqual(["unix:path=/opencode-secret-service-test-unavailable"])
+})
+
+test("a non-canonical XDG_RUNTIME_DIR names the synthesized session-bus address (#2473)", async () => {
+  if (typeof process.getuid !== "function") return
+  delete process.env.DBUS_SESSION_BUS_ADDRESS
+  process.env.XDG_RUNTIME_DIR = "/tmp/opencode-secret-service-test-xdg"
+  await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
+  expect(constructedWith).toEqual(["unix:path=/tmp/opencode-secret-service-test-xdg/bus"])
+})
+
+test("a literal % in XDG_RUNTIME_DIR is percent-escaped in the synthesized address (#2473)", async () => {
+  if (typeof process.getuid !== "function") return
+  delete process.env.DBUS_SESSION_BUS_ADDRESS
+  process.env.XDG_RUNTIME_DIR = "/tmp/opencode-secret-service-test-%-xdg"
+  await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
+  expect(constructedWith).toEqual(["unix:path=/tmp/opencode-secret-service-test-%25-xdg/bus"])
 })

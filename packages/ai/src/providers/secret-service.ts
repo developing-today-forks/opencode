@@ -8,10 +8,23 @@ export const lookupSecretService = async (service: string, username: string): Pr
   // non-user systemd unit, a detached or ssh spawn) finds no bus, and the
   // read below fails silently to undefined. The secret-tool readers this
   // helper replaced synthesized the canonical per-user address for exactly
-  // that launch shape (#2313); restore it here. An address already present
-  // — even a bogus one — is never overridden.
+  // that launch shape (#2313); restore it here. When XDG_RUNTIME_DIR is
+  // set it names the session bus instead: synthesizing the canonical
+  // /run/user/<uid> address anyway would point the binding at a bus that
+  // is not the session's whenever the runtime dir is non-canonical
+  // (#2473). An address already present — even a bogus one — is never
+  // overridden.
   if (!process.env.DBUS_SESSION_BUS_ADDRESS && typeof process.getuid === "function") {
-    const address = `unix:path=/run/user/${process.getuid()}/bus`
+    const xdg = process.env.XDG_RUNTIME_DIR?.replace(/\/+$/, "")
+    const path = xdg ? xdg + "/bus" : "/run/user/" + process.getuid() + "/bus"
+    // D-Bus address values are percent-decoded by the bus parser, so a
+    // literal % (or any byte outside the unreserved set) in the runtime
+    // dir would otherwise name a different path than the configured one.
+    const escaped = Array.from(new TextEncoder().encode(path), (byte) => {
+      const char = String.fromCharCode(byte)
+      return /[A-Za-z0-9._/-]/.test(char) ? char : "%" + byte.toString(16).toUpperCase().padStart(2, "0")
+    }).join("")
+    const address = "unix:path=" + escaped
     process.env.DBUS_SESSION_BUS_ADDRESS = address
     // Under Bun, process.env is a JS-level copy: native addons read the
     // libc environment, which the assignment above never reaches (verified
