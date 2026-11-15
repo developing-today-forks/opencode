@@ -25,15 +25,17 @@ import {
  * one). The ChatGPT accounts live under the self-contained instance
  * integrations (_openai.main, _openai.alt), so the base provider folds
  * instance credentials into its per-credential answer. The quota id is
- * `_openai` (renamed from `codex`, code#8163): no Codex surface remains
- * in the measurement path; `codex` survives only in `disabledBy`, the
- * #1823-pattern pin keeping a legacy config's `codex` entry in
- * disabled_providers from hiding these rows.
+ * `_openai` (renamed from `codex`, code#8163): the canonical id is
+ * `_openai`, and `codex` survives as a legacy alias in `aliases` and
+ * `credentialAliases` (#2460) so the documented `opencode quota ... codex`
+ * lookup and credentials still stored with integrationID `codex` keep
+ * resolving, plus in `disabledBy`, the #1823-pattern pin keeping a legacy
+ * config's `codex` entry in disabled_providers from hiding these rows.
  */
 
 export const providerId = "_openai"
 export const providerName = "OpenAI"
-export const aliases = ["openai", "_openai", "chatgpt"]
+export const aliases = ["openai", "_openai", "chatgpt", "codex"]
 
 const fetchQuotaForEntry = async (
   ctx: QuotaContext,
@@ -234,7 +236,7 @@ export const provider: QuotaProvider = {
   providerId,
   providerName,
   aliases,
-  credentialAliases: ["openai", "_openai", "chatgpt"],
+  credentialAliases: ["openai", "_openai", "chatgpt", "codex"],
   disabledBy: ["codex"],
   foldInstanceCredentials: true,
   isConfigured: (ctx) => {
