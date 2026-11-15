@@ -784,7 +784,10 @@ const refreshAndPersist = async (
   let currentRefreshToken = refreshToken
   // Adoptions are bounded: each one means another writer rotated the
   // pair under this renewal, and a file that changes under every
-  // attempt is a fight no renewal wins by spinning.
+  // attempt is a fight no renewal wins by spinning. The bound is a
+  // stop, not a shrug: past it, a re-read that proves the file holds a
+  // different token retires the renewal (below) instead of letting
+  // the loop present a token it knows is rotated out (#2467).
   let adoptions = 0
   /**
    * The multi-writer check (code#9549): re-read the file and adopt what
@@ -797,7 +800,25 @@ const refreshAndPersist = async (
     const stored = await readStoredCredential(effective)
     if (stored === undefined) return undefined
     if (storedCredentialServes(stored, now())) return stored
-    if (stored.refreshToken !== undefined && stored.refreshToken !== currentRefreshToken && adoptions < 3) {
+    if (stored.refreshToken !== undefined && stored.refreshToken !== currentRefreshToken) {
+      if (adoptions >= 3) {
+        // The adoption bound is spent and the file provably holds a
+        // different, newer refresh token: presenting
+        // currentRefreshToken now would replay a rotated-out,
+        // single-use token — the presentation this loop exists to
+        // never make (#2467, the rejection path included: a refusal
+        // for a replaced token must not be believed terminal either).
+        // Retire instead, on the same terms as an exchange that lands
+        // after a rotation: a plain ClaudeCodeRefreshError retires
+        // the renewal to the standing retry, whose next round
+        // re-reads the file with a fresh adoption bound and renews
+        // the stored token.
+        throw new ClaudeCodeRefreshError(
+          "Claude Code OAuth renewal re-read the credentials file after the adoption bound (3) was spent " +
+            "and found another writer's rotated refresh token; the rotated-out token was not presented, " +
+            "and the renewal retires to the standing retry, whose next round re-reads the stored credential.",
+        )
+      }
       currentRefreshToken = stored.refreshToken
       adoptions += 1
       emitRenewalEvent(effective, { kind: "adopted", at: now() })

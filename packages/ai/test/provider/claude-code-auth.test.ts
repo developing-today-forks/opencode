@@ -1141,6 +1141,53 @@ describe("claudeCodeAuth — renewal adopts another writer's rotation (code#9549
     expect(persisted.claudeAiOauth.refreshToken).toBe("ref-other-3")
   })
 
+  test("past the adoption bound, a renewal never presents a token the file has rotated out (#2467)", async () => {
+    // Every exchange is rate-limited, and another writer rotates the
+    // stored pair to a due pair before each retry — four rotations
+    // inside one renewal, one past the adoption bound (3). The oracle:
+    // every presented refresh token is the file's current token at
+    // presentation time. Before the fix, attempt 5 replayed the third
+    // rotation's token after the file had moved to the fourth.
+    const presented: Array<{ presented: string; current: string }> = []
+    const box: { store?: Map<string, string> } = {}
+    let rotations = 0
+    const { sources, store, refreshToken } = harness(() => rateLimited(), {
+      fetchFn: async (_url: string | URL | Request, init?: RequestInit) => {
+        const storeRef = box.store!
+        const presentedToken = new URLSearchParams(String(init?.body ?? "")).get("refresh_token")!
+        const currentToken = JSON.parse(storeRef.get(CREDENTIALS_PATH)!).claudeAiOauth.refreshToken as string
+        presented.push({ presented: presentedToken, current: currentToken })
+        if (presentedToken === "ref-rot-4") return rotated()
+        rotations += 1
+        storeRef.set(CREDENTIALS_PATH, blob("tok-other", `ref-rot-${rotations}`, NOW + 60_000))
+        return rateLimited()
+      },
+    })
+    box.store = store
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    // The request's renewal retires on the bound instead of replaying:
+    // it surfaces the retirement, and the standing retry it scheduled
+    // lands the renewal from the file's current token.
+    expect(JSON.stringify(error)).toContain("adoption bound")
+    const waitFor = async (condition: () => boolean) => {
+      for (let spins = 0; spins < 10_000; spins++) {
+        if (condition()) return
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+      throw new Error("condition never became true")
+    }
+    await waitFor(() => JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken === "tok-new")
+    expect(presented.map((entry) => entry.presented)).toEqual([
+      refreshToken,
+      "ref-rot-1",
+      "ref-rot-2",
+      "ref-rot-3",
+      "ref-rot-4",
+    ])
+    for (const entry of presented) expect(entry.presented).toBe(entry.current)
+    expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.refreshToken).toBe("ref-new")
+  })
+
   test("a renewal switches to the stored refresh token when another writer rotated to a pair that is itself due", async () => {
     const { sources, calls, refreshToken } = harness((call, store) => {
       if (call === 1) {
