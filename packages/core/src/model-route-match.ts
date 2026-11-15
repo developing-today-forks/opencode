@@ -63,7 +63,7 @@ export function compile(
   const each = (
     key: "include" | "exclude" | "contains" | "notContains",
     read: (text: string) => Result.Result<Predicate, string>,
-  ) => (ownValue(route, key) ?? []).flatMap((text, index) => keep([key, String(index)], read(text)))
+  ) => ((ownValue(route, key) as readonly string[] | undefined) ?? []).flatMap((text, index) => keep([key, String(index)], read(text)))
   const selects = [
     ...each("include", term),
     ...each("contains", substring),
