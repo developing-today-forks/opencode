@@ -301,6 +301,22 @@ let probeClaimSeq = 0
  * scope of the pick, so a same-millisecond re-claim after a settle can never collide. */
 export const nextProbeClaimToken = () => ++probeClaimSeq
 
+/** The oldest an outstanding probe claim may be while it still counts as the bench's one
+ * admitted attempt (#2455). A probe attempt is a single request; this bound sits far above
+ * any real attempt's duration, so a live claim is never cut off — but a claim whose owner
+ * vanished (its step fiber interrupted mid-probe, its session or process gone) cannot hold
+ * its leg out of candidacy for the life of the process: past the bound the claim is stale,
+ * the probe is due again, and the next claim re-stamps the scope. Settle and release are
+ * unaffected: they match on claimedAt/token, so a stale owner's late outcome still lands
+ * on its own claim and can never clear a fresher one. */
+export const PROBE_CLAIM_MAX_AGE_MS = 15 * 60_000
+
+/** Whether a state's outstanding probe claim is still live at `now`: claimed, and no
+ * older than PROBE_CLAIM_MAX_AGE_MS. Every read that treats a claim as blocking —
+ * probe-due, probe-in-flight, availability — judges liveness by this one rule. */
+const probeClaimLive = (state: HealthState, now: number) =>
+  state.probeClaimedAt !== undefined && now - state.probeClaimedAt <= PROBE_CLAIM_MAX_AGE_MS
+
 const health = new Map<string, HealthState>()
 
 /** Health of one credential serving one target (#6): two credentials behind one provider are
@@ -819,7 +835,7 @@ const releaseQuotaBenches = (inScope: (id: string) => boolean, now: number) => {
 
 const probeDueState = (state: HealthState | undefined, now: number) =>
   state !== undefined &&
-  state.probeClaimedAt === undefined &&
+  !probeClaimLive(state, now) &&
   ((state.cooldownUntil > now &&
     state.benchQuotaResetAt !== undefined &&
     state.benchQuotaResetAt <= now) ||
@@ -870,7 +886,9 @@ export const probeDue = (target: Model.Ref, credentialID: string | undefined, no
  * outstanding the bench keeps excluding ordinary candidacy, a probe success ends the bench
  * (see completed()), and a probe failure re-benches through failed() on the escalated ladder,
  * bounded by the next known reset when there is one. A claim that never reports an outcome
- * stops mattering when the bench itself expires.
+ * stops mattering when the bench itself expires — and, for a probe-pending bench (whose
+ * bench never expires), once the claim is older than PROBE_CLAIM_MAX_AGE_MS (#2455):
+ * probeDueState judges the stale claim no bar, so the next claim simply re-stamps the scope.
  *
  * `token` names this spend (#1486): pass one token per pick so every scope the pick claims
  * shares the pick's identity. Omitted, a fresh token is minted for the scope. */
@@ -921,12 +939,13 @@ export const claimBenchProbe = (
  * the only attempt the bench allows until it settles. Quota benches at their reset are
  * covered by their still-standing cooldown; this read exists for probe-pending auth
  * benches (code#9950), whose cooldown has already lapsed, so candidacy must consult
- * the claim itself. */
+ * the claim itself. A claim older than PROBE_CLAIM_MAX_AGE_MS no longer counts (#2455):
+ * its owner is gone, so the scope reads as not in flight and the probe is due again. */
 export const probeInFlight = (target: Model.Ref, credentialID: string | undefined, now = Date.now(), variant?: string) =>
   probeStates(target, credentialID, variant).some(
     ({ state }) =>
       state !== undefined &&
-      state.probeClaimedAt !== undefined &&
+      probeClaimLive(state, now) &&
       (state.probePending === true || state.cooldownUntil > now),
   )
 
@@ -1620,7 +1639,7 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
       ...(variant !== undefined ? { variant } : {}),
       class: label,
       reason:
-        state.probeClaimedAt !== undefined
+        probeClaimLive(state, now)
           ? `${label} bench expired; half-open probe in flight`
           : `${label} bench expired; half-open probe pending`,
       resume: "probe",

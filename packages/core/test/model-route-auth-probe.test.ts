@@ -122,6 +122,65 @@ describe("ModelRoute auth bench probe (code#9950)", () => {
     expect(entriesFor(now + 60_000)).toEqual([])
   })
 
+  test("a probe-pending claim that never settles goes stale at the claim bound and the probe is due again (#2455)", () => {
+    const now = 1_500_000_000
+    const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS
+    ModelRoute.failed(target, policy, now, { auth: true })
+    expect(ModelRoute.cooldownUntil(target, now + 900_000)).toBe(0)
+    expect(ModelRoute.claimBenchProbe(target, undefined, now + 900_000)).toBe(true)
+    // Within the bound the claim is the bench's one admitted attempt: nothing else is
+    // due and the scope reads in flight, exactly as before.
+    expect(ModelRoute.probeInFlight(target, undefined, now + 900_000 + bound)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, now + 900_000 + bound)).toBe(false)
+    expect(ModelRoute.claimBenchProbe(target, undefined, now + 900_000 + bound)).toBe(false)
+    // The owner vanished (step fiber interrupted mid-probe): past the bound the claim
+    // is stale — the probe is due again, availability says pending, not in flight.
+    const stale = now + 900_000 + bound + 1
+    expect(ModelRoute.probeInFlight(target, undefined, stale)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, stale)).toBe(true)
+    expect(entriesFor(stale)[0]?.reason).toBe("auth bench expired; half-open probe pending")
+    // A fresh claim re-stamps the scope; the stale owner's late release names the old
+    // claim, so it cannot clear the fresh one.
+    expect(ModelRoute.claimBenchProbe(target, undefined, stale)).toBe(true)
+    expect(ModelRoute.releaseBenchProbe(target, undefined, now + 900_000)).toBe(false)
+    expect(ModelRoute.probeInFlight(target, undefined, stale)).toBe(true)
+    // The fresh probe settles the bench outright.
+    ModelRoute.completed(target, policy, sample, stale + 1)
+    expect(ModelRoute.probeDue(target, undefined, stale + 1)).toBe(false)
+    expect(ModelRoute.probeInFlight(target, undefined, stale + 1)).toBe(false)
+    expect(entriesFor(stale + 1)).toEqual([])
+  })
+
+  test("a stale probe-pending claim reclaims at credential scope too (#2455)", () => {
+    const now = 1_600_000_000
+    const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS
+    ModelRoute.failed(target, policy, now, { auth: true }, "cred-stale")
+    expect(ModelRoute.credentialCooldownUntil(target, "cred-stale", now + 900_000)).toBe(0)
+    expect(ModelRoute.claimBenchProbe(target, "cred-stale", now + 900_000)).toBe(true)
+    const stale = now + 900_000 + bound + 1
+    expect(ModelRoute.probeInFlight(target, "cred-stale", stale)).toBe(false)
+    expect(ModelRoute.probeDue(target, "cred-stale", stale)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, "cred-stale", stale)).toBe(true)
+    expect(ModelRoute.probeInFlight(target, "cred-stale", stale)).toBe(true)
+    // The target scope was never claimed: nothing goes stale or due there.
+    expect(ModelRoute.probeDue(target, undefined, stale)).toBe(false)
+  })
+
+  test("a stale probe-pending claim reclaims at traffic (effort) scope too (#2455)", () => {
+    const now = 1_700_000_000
+    const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS
+    ModelRoute.failed(target, policy, now, { auth: true }, undefined, undefined, undefined, "xhigh")
+    expect(ModelRoute.cooldownUntil(target, now + 900_000, undefined, "xhigh")).toBe(0)
+    expect(ModelRoute.claimBenchProbe(target, undefined, now + 900_000, undefined, "xhigh")).toBe(true)
+    const stale = now + 900_000 + bound + 1
+    expect(ModelRoute.probeInFlight(target, undefined, stale, "xhigh")).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, stale, "xhigh")).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, stale, undefined, "xhigh")).toBe(true)
+    // The sibling effort was never benched or claimed.
+    expect(ModelRoute.probeDue(target, undefined, stale, "high")).toBe(false)
+    expect(ModelRoute.probeInFlight(target, undefined, stale, "high")).toBe(false)
+  })
+
   test("a success landing outside a claim (a session already on the door) also reseats a probe-pending bench", () => {
     const now = 1_400_000_000
     ModelRoute.failed(target, policy, now, { auth: true })
