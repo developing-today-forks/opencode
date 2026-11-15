@@ -78,7 +78,9 @@ export function compile(
   )
   if (problems.length > 0) return Result.fail(problems)
   return Result.succeed({
-    ...(route.include !== undefined || route.contains !== undefined || route.match !== undefined
+    ...(ownValue(route, "include") !== undefined ||
+    ownValue(route, "contains") !== undefined ||
+    ownValue(route, "match") !== undefined
       ? { selects: (candidate: Candidate) => selects.some((test) => test(candidate)) }
       : {}),
     excludes: (candidate) => excludes.some((test) => test(candidate)),
