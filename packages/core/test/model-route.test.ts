@@ -794,6 +794,26 @@ describe("ModelRoute quota bench probe (#1123)", () => {
     expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + 1)).toBe(true)
   })
 
+  test("a quota probe claim that never settles goes stale at the claim bound while its bench still stands (#2455)", () => {
+    const now = 875_000_000
+    const resetAt = now + 5 * 3_600_000
+    const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS
+    ModelRoute.resetHealth()
+    exhaustLadder(now)
+    ModelRoute.observeProviderQuota(target, knownFull(resetAt, now + 10), now + 10)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt)).toBe(true)
+    // Within the bound the outstanding claim still holds the probe.
+    expect(ModelRoute.probeDue(target, undefined, resetAt + bound)).toBe(false)
+    expect(ModelRoute.probeInFlight(target, undefined, resetAt + bound)).toBe(true)
+    // Past the bound the claim is stale even though the bench itself (a day long)
+    // still stands: the probe is due again and a fresh claim takes the scope.
+    expect(ModelRoute.probeInFlight(target, undefined, resetAt + bound + 1)).toBe(false)
+    expect(ModelRoute.probeDue(target, undefined, resetAt + bound + 1)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, resetAt + bound + 1)).toBe(true)
+    expect(ModelRoute.probeInFlight(target, undefined, resetAt + bound + 1)).toBe(true)
+    expect(ModelRoute.cooldownUntil(target, resetAt + bound + 1)).toBe(now + 7 + day)
+  })
+
   test("a stale token release cannot clear a same-millisecond re-claim (#1486)", () => {
     const now = 950_000_000
     const resetAt = now + 5 * 3_600_000
