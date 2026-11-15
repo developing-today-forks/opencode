@@ -55,7 +55,25 @@
 // with no request pending — a rate limit is a wait, not an outcome,
 // and the retry must not depend on the door's own traffic arriving:
 // on 2026-11-10 the door was quota-walled, the re-triggering traffic
-// was suppressed, and the pair never rotated (code#8102). The env token
+// was suppressed, and the pair never rotated (code#8102).
+//
+// The file has more than one writer: this server, the Claude Code CLI
+// itself, and any other opencode process on the machine all renew the
+// same login in place, and the in-memory single-flight maps below can
+// only coordinate ONE process. Anthropic rotates the refresh token on
+// every exchange, and a replayed rotated-out token is treated as a
+// stolen one — the whole token family can be revoked, killing even
+// the fresh pair another writer just persisted (the 2026-11-13 death:
+// a renewal landed at 11:36Z, successes ran until 12:23Z, and by
+// 13:00Z the stored token read as a dead 401 — code#9549). So a
+// renewal never trusts its starting snapshot: before every exchange
+// attempt it re-reads the file, and when another writer has already
+// rotated the pair it adopts the stored credential (or renews the
+// stored refresh token) instead of replaying the dead one; a grant
+// rejection is believed only once the file is re-read and still holds
+// the very token that was refused; and an exchange that lands after
+// another writer rotated discards its own pair rather than clobbering
+// theirs. The env token
 // (#1752) and a file credential with no refresh token still fail LOUDLY
 // once expired (see claudeCodeAuth) instead of silently degrading.
 import { Effect } from "effect"
@@ -351,6 +369,7 @@ export type RenewalEvent =
   | { readonly kind: "rate-limited"; readonly at: number; readonly attempt: number; readonly waitMs: number }
   | { readonly kind: "budget-exhausted"; readonly at: number; readonly waitedMs: number }
   | { readonly kind: "standing-scheduled"; readonly at: number }
+  | { readonly kind: "adopted"; readonly at: number }
   | { readonly kind: "transient-failure"; readonly at: number; readonly attempt: number; readonly message: string }
   | { readonly kind: "landed"; readonly at: number; readonly expiresAt: number | undefined }
   | { readonly kind: "rejected"; readonly at: number; readonly message: string }
@@ -375,6 +394,9 @@ const defaultRenewalEvent = (event: RenewalEvent): void => {
       return
     case "standing-scheduled":
       console.warn(`claude-code-auth: standing renewal retry scheduled at ${stamp}`)
+      return
+    case "adopted":
+      console.warn(`claude-code-auth: renewal adopted the credential another writer persisted at ${stamp} (code#9549)`)
       return
     case "transient-failure":
       console.warn(`claude-code-auth: renewal attempt ${event.attempt} failed transiently: ${event.message}`)
@@ -437,6 +459,23 @@ const retryAfterHeaderMs = (response: Response, now: number): number | undefined
   const date = Date.parse(raw)
   return Number.isNaN(date) ? undefined : Math.max(0, date - now)
 }
+
+/**
+ * The credentials file's CURRENT stored credential, read fresh — the
+ * multi-writer check (code#9549). The file is shared with the Claude
+ * Code CLI and every other opencode process on the machine, so the
+ * credential a renewal started from may already have been rotated by
+ * another writer. Expiry is not filtered here: an expired stored pair
+ * still names the live refresh token a renewal must work with.
+ */
+const readStoredCredential = async (sources: CredentialSources): Promise<ClaudeCodeCredential | undefined> => {
+  const contents = await (sources.readFile ?? defaultReadFile)(await credentialsFilePath(sources))
+  return contents !== undefined ? parseCredentialsFile(contents) : undefined
+}
+
+/** A stored credential that needs no renewal from us: it outlives the renewal lead window. */
+const storedCredentialServes = (stored: ClaudeCodeCredential, now: number): boolean =>
+  stored.expiresAt !== undefined && stored.expiresAt - now > RENEWAL_LEAD_MS
 
 /**
  * Exchange the credentials file's single-use refresh token for a new
@@ -517,6 +556,20 @@ const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: st
         : undefined,
     subscriptionType: typeof tokens.subscription_type === "string" ? tokens.subscription_type : undefined,
     scopes: typeof tokens.scope === "string" ? tokens.scope.split(" ").filter(Boolean) : undefined,
+  }
+  // Multi-writer guard (code#9549): if another writer rotated the pair
+  // while this exchange was in flight, their pair is the live one.
+  // Discard ours rather than clobbering it, and adopt theirs when it
+  // still serves; when it no longer serves, this error retires the
+  // renewal to the standing retry, whose next round re-reads the file
+  // and renews the stored token instead.
+  const storedNow = await readStoredCredential(sources)
+  if (storedNow !== undefined && storedNow.refreshToken !== undefined && storedNow.refreshToken !== refreshToken) {
+    if (storedCredentialServes(storedNow, now)) return storedNow
+    throw new ClaudeCodeRefreshError(
+      "Claude Code OAuth refresh landed after another writer rotated the credential; " +
+        "the rotated pair was discarded so the stored credential is not clobbered.",
+    )
   }
   try {
     await writeCredential(sources, oauth)
@@ -722,14 +775,86 @@ const refreshAndPersist = async (
   let waited = 0
   let backoff = RENEWAL_BACKOFF_BASE_MS
   let attempt = 0
+  // The refresh token this renewal is currently working with: it starts
+  // as the caller's snapshot and is REPLACED whenever the file shows
+  // another writer's rotation (code#9549). The snapshot token is
+  // single-use, and replaying a rotated-out token can revoke the whole
+  // token family — the fresh pair another writer just persisted dies
+  // with it.
+  let currentRefreshToken = refreshToken
+  // Adoptions are bounded: each one means another writer rotated the
+  // pair under this renewal, and a file that changes under every
+  // attempt is a fight no renewal wins by spinning. The bound is a
+  // stop, not a shrug: past it, a re-read that proves the file holds a
+  // different token retires the renewal (below) instead of letting
+  // the loop present a token it knows is rotated out (#2467).
+  let adoptions = 0
+  /**
+   * The multi-writer check (code#9549): re-read the file and adopt what
+   * another writer landed. Returns the stored credential when it
+   * already serves; adopts the stored refresh token (and returns
+   * undefined) when the stored pair still needs renewal; undefined
+   * when the file is unchanged or unreadable.
+   */
+  const adoptStored = async (): Promise<ClaudeCodeCredential | undefined> => {
+    const stored = await readStoredCredential(effective)
+    if (stored === undefined) return undefined
+    if (storedCredentialServes(stored, now())) return stored
+    if (stored.refreshToken !== undefined && stored.refreshToken !== currentRefreshToken) {
+      if (adoptions >= 3) {
+        // The adoption bound is spent and the file provably holds a
+        // different, newer refresh token: presenting
+        // currentRefreshToken now would replay a rotated-out,
+        // single-use token — the presentation this loop exists to
+        // never make (#2467, the rejection path included: a refusal
+        // for a replaced token must not be believed terminal either).
+        // Retire instead, on the same terms as an exchange that lands
+        // after a rotation: a plain ClaudeCodeRefreshError retires
+        // the renewal to the standing retry, whose next round
+        // re-reads the file with a fresh adoption bound and renews
+        // the stored token.
+        throw new ClaudeCodeRefreshError(
+          "Claude Code OAuth renewal re-read the credentials file after the adoption bound (3) was spent " +
+            "and found another writer's rotated refresh token; the rotated-out token was not presented, " +
+            "and the renewal retires to the standing retry, whose next round re-reads the stored credential.",
+        )
+      }
+      currentRefreshToken = stored.refreshToken
+      adoptions += 1
+      emitRenewalEvent(effective, { kind: "adopted", at: now() })
+    }
+    return undefined
+  }
   for (;;) {
+    // Before EVERY attempt (code#9549): a rate-limit wait can last
+    // minutes, and any writer on the machine may rotate the pair
+    // meanwhile. Never present a rotated-out refresh token.
+    const adopted = await adoptStored()
+    if (adopted !== undefined) {
+      emitRenewalEvent(effective, { kind: "landed", at: now(), expiresAt: adopted.expiresAt })
+      return adopted
+    }
     attempt += 1
     emitRenewalEvent(effective, { kind: "attempt", at: now(), attempt, standing: options.standing })
     try {
-      const credential = await exchangeRefreshToken(effective, refreshToken)
+      const credential = await exchangeRefreshToken(effective, currentRefreshToken)
       emitRenewalEvent(effective, { kind: "landed", at: now(), expiresAt: credential.expiresAt })
       return credential
     } catch (cause) {
+      if (cause instanceof ClaudeCodeRefreshRejected) {
+        // Believe a rejection only once the file still holds the very
+        // token that was refused (code#9549): a refusal for a token
+        // another writer already replaced says nothing about the
+        // stored login — adopt the stored pair, or retry with the
+        // stored refresh token, instead of declaring the login dead.
+        const before = currentRefreshToken
+        const adoptedAfterRejection = await adoptStored()
+        if (adoptedAfterRejection !== undefined) {
+          emitRenewalEvent(effective, { kind: "landed", at: now(), expiresAt: adoptedAfterRejection.expiresAt })
+          return adoptedAfterRejection
+        }
+        if (currentRefreshToken !== before) continue
+      }
       if (!(cause instanceof ClaudeCodeRefreshRateLimited)) throw cause
       const wait = Math.max(cause.retryAfterMs ?? backoff, 1_000)
       backoff = Math.min(backoff * 2, RENEWAL_BACKOFF_CAP_MS)

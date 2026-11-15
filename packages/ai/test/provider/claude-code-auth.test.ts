@@ -1039,6 +1039,173 @@ describe("claudeCodeAuth — OAuth renewal on an expired file credential (#1818)
   })
 })
 
+describe("claudeCodeAuth — renewal adopts another writer's rotation (code#9549)", () => {
+  const apply = (sources: CredentialSources) =>
+    Effect.runPromise(
+      claudeCodeAuth({ sources }).apply({
+        request: {},
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        body: "{}",
+        headers: Headers.empty,
+      }),
+    )
+
+  const NOW = 2_000
+  const blob = (accessToken: string, refreshToken: string, expiresAt: number) =>
+    JSON.stringify({
+      claudeAiOauth: { accessToken, refreshToken, expiresAt, subscriptionType: "max" },
+    })
+
+  // Each scenario is an independent credential (a unique refresh token
+  // per harness), for the same standing-renewal isolation the other
+  // describes use.
+  let scenario = 0
+  const harness = (
+    response: (call: number, store: Map<string, string>) => Response | Promise<Response>,
+    overrides: Partial<CredentialSources> = {},
+  ) => {
+    const refreshToken = `ref-9549-${++scenario}`
+    const store = new Map<string, string>([[CREDENTIALS_PATH, blob("tok-old", refreshToken, 1_000)]])
+    const calls: Array<{ url: string; body: string }> = []
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (path) => store.get(path),
+      writeFile: async (path, contents) => {
+        store.set(path, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async () => {},
+      fetchFn: async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), body: String(init?.body ?? "") })
+        return response(calls.length, store)
+      },
+      ...overrides,
+    }
+    return { sources, store, calls, refreshToken }
+  }
+
+  const rateLimited = () =>
+    new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "Retry-After": "1" } })
+
+  const rotated = () =>
+    new Response(
+      JSON.stringify({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 3600, subscription_type: "max" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+
+  test("a renewal that waited out a rate limit adopts the pair another writer landed instead of replaying the rotated-out token", async () => {
+    const { sources, store, calls } = harness((_call, store) => {
+      // Another writer (the CLI, a second opencode process) rotates
+      // the pair while this renewal sits in its rate-limit wait.
+      store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-1", NOW + 8 * 3_600_000))
+      return rateLimited()
+    })
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-other")
+    // The snapshot token was presented exactly once — the attempt
+    // already in flight when the other writer landed — and never
+    // replayed after the wait.
+    expect(calls).toHaveLength(1)
+    // The other writer's pair was adopted, not clobbered.
+    expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken).toBe("tok-other")
+  })
+
+  test("a grant rejection for a token another writer already replaced is adopted, not declared a dead login", async () => {
+    const { sources, store, calls } = harness((_call, store) => {
+      store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-2", NOW + 8 * 3_600_000))
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
+    })
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-other")
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken).toBe("tok-other")
+  })
+
+  test("an exchange that lands after another writer rotated discards its pair instead of clobbering theirs", async () => {
+    const { sources, store, calls } = harness((_call, store) => {
+      store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-3", NOW + 8 * 3_600_000))
+      return rotated()
+    })
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-other")
+    expect(calls).toHaveLength(1)
+    const persisted = JSON.parse(store.get(CREDENTIALS_PATH)!)
+    expect(persisted.claudeAiOauth.accessToken).toBe("tok-other")
+    expect(persisted.claudeAiOauth.refreshToken).toBe("ref-other-3")
+  })
+
+  test("past the adoption bound, a renewal never presents a token the file has rotated out (#2467)", async () => {
+    // Every exchange is rate-limited, and another writer rotates the
+    // stored pair to a due pair before each retry — four rotations
+    // inside one renewal, one past the adoption bound (3). The oracle:
+    // every presented refresh token is the file's current token at
+    // presentation time. Before the fix, attempt 5 replayed the third
+    // rotation's token after the file had moved to the fourth.
+    const presented: Array<{ presented: string; current: string }> = []
+    const box: { store?: Map<string, string> } = {}
+    let rotations = 0
+    const { sources, store, refreshToken } = harness(() => rateLimited(), {
+      fetchFn: async (_url: string | URL | Request, init?: RequestInit) => {
+        const storeRef = box.store!
+        const presentedToken = new URLSearchParams(String(init?.body ?? "")).get("refresh_token")!
+        const currentToken = JSON.parse(storeRef.get(CREDENTIALS_PATH)!).claudeAiOauth.refreshToken as string
+        presented.push({ presented: presentedToken, current: currentToken })
+        if (presentedToken === "ref-rot-4") return rotated()
+        rotations += 1
+        storeRef.set(CREDENTIALS_PATH, blob("tok-other", `ref-rot-${rotations}`, NOW + 60_000))
+        return rateLimited()
+      },
+    })
+    box.store = store
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    // The request's renewal retires on the bound instead of replaying:
+    // it surfaces the retirement, and the standing retry it scheduled
+    // lands the renewal from the file's current token.
+    expect(JSON.stringify(error)).toContain("adoption bound")
+    const waitFor = async (condition: () => boolean) => {
+      for (let spins = 0; spins < 10_000; spins++) {
+        if (condition()) return
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+      throw new Error("condition never became true")
+    }
+    await waitFor(() => JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken === "tok-new")
+    expect(presented.map((entry) => entry.presented)).toEqual([
+      refreshToken,
+      "ref-rot-1",
+      "ref-rot-2",
+      "ref-rot-3",
+      "ref-rot-4",
+    ])
+    for (const entry of presented) expect(entry.presented).toBe(entry.current)
+    expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.refreshToken).toBe("ref-new")
+  })
+
+  test("a renewal switches to the stored refresh token when another writer rotated to a pair that is itself due", async () => {
+    const { sources, calls, refreshToken } = harness((call, store) => {
+      if (call === 1) {
+        // The other writer rotated, but their pair is already inside
+        // the lead window: renew the STORED token, never replay ours.
+        store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-4", NOW + 60_000))
+        return rateLimited()
+      }
+      return rotated()
+    })
+    const headers = await apply(sources)
+    expect(headers.authorization).toBe("Bearer tok-new")
+    expect(calls).toHaveLength(2)
+    expect(new URLSearchParams(calls[0].body).get("refresh_token")).toBe(refreshToken)
+    expect(new URLSearchParams(calls[1].body).get("refresh_token")).toBe("ref-other-4")
+  })
+})
+
 describe("standing renewal retry — the renewal outlives its request (code#8102)", () => {
   const apply = (sources: CredentialSources) =>
     Effect.runPromise(
