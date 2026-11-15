@@ -1814,6 +1814,7 @@ describe("ModelRoute machinery constants (experimental.model_route_settings)", (
         feedTtlMs: 60_000,
         balanceDeadThreshold: 0.1,
         rootStartMaxPct: 85,
+        rootStartEnabled: true,
       },
       escalation: { outcomeWindow: 5 },
       network: { windowMs: 30_000, providers: 3, providerModels: 2 },

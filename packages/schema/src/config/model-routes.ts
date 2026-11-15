@@ -676,6 +676,10 @@ export class QuotaGate extends Schema.Class<QuotaGate>("Config.ModelRoute.Settin
         "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85.",
     })
     .pipe(optional),
+  rootStartEnabled: Schema.Boolean.annotate({
+    description:
+      "Whether the root-start gate is applied in placement. When false, new root sessions are placed without regard to rootStartMaxPct (the known-full quota gate still applies). Defaults to true.",
+  }).pipe(optional),
 }) {}
 
 /** Escalation: when a route races its next target because the current one keeps giving up. */
