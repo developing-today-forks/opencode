@@ -25,6 +25,7 @@ import { ModelRouteLog } from "../../model-route-log.js"
 import { RouteAdjustTool } from "../../tool/plugin/route-adjust.js"
 import { RouteStatsTool } from "../../tool/plugin/route-stats.js"
 import { RouteUsageTool } from "../../tool/plugin/route-usage.js"
+import { ownValue } from "../../util/record.js"
 
 type SourceModel = {
   readonly ref: Model.Ref
@@ -1055,7 +1056,7 @@ function expandCollected(
       node.children.push(child)
       // A nested pool's weight key names a pool, so it matches in any case.
       const weight =
-        current.weights?.[key] ??
+        (current.weights ? ownValue(current.weights, key) : undefined) ??
         (child.node === undefined
           ? undefined
           : Object.entries(current.weights ?? {}).find(

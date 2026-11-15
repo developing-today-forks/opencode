@@ -2,6 +2,7 @@ export * as ModelRouteMatch from "./model-route-match.js"
 
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { Result } from "effect"
+import { ownValue } from "./util/record.js"
 
 /** A model as a pool's matching keys see it. */
 export interface Candidate {
@@ -62,7 +63,7 @@ export function compile(
   const each = (
     key: "include" | "exclude" | "contains" | "notContains",
     read: (text: string) => Result.Result<Predicate, string>,
-  ) => (route[key] ?? []).flatMap((text, index) => keep([key, String(index)], read(text)))
+  ) => (ownValue(route, key) ?? []).flatMap((text, index) => keep([key, String(index)], read(text)))
   const selects = [
     ...each("include", term),
     ...each("contains", substring),
