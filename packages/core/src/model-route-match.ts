@@ -64,13 +64,14 @@ export function compile(
     key: "include" | "exclude" | "contains" | "notContains",
     read: (text: string) => Result.Result<Predicate, string>,
   ) => ((ownValue(route, key) as readonly string[] | undefined) ?? []).flatMap((text, index) => keep([key, String(index)], read(text)))
+  const match = ownValue(route, "match") as string | undefined
   const selects = [
     ...each("include", term),
     ...each("contains", substring),
-    ...(route.match === undefined ? [] : keep(["match"], expression(route.match))),
+    ...(match === undefined ? [] : keep(["match"], expression(match))),
   ]
   const excludes = [...each("exclude", term), ...each("notContains", substring)]
-  const rules = (route.variantRules ?? []).flatMap((rule, index) =>
+  const rules = ((ownValue(route, "variantRules") as Keys["variantRules"]) ?? []).flatMap((rule, index) =>
     keep(["variantRules", String(index), "match"], expression(rule.match)).map((applies) => ({
       applies,
       map: rule.map,
@@ -78,9 +79,7 @@ export function compile(
   )
   if (problems.length > 0) return Result.fail(problems)
   return Result.succeed({
-    ...(ownValue(route, "include") !== undefined ||
-    ownValue(route, "contains") !== undefined ||
-    ownValue(route, "match") !== undefined
+    ...(ownValue(route, "include") !== undefined || ownValue(route, "contains") !== undefined || match !== undefined
       ? { selects: (candidate: Candidate) => selects.some((test) => test(candidate)) }
       : {}),
     excludes: (candidate) => excludes.some((test) => test(candidate)),
@@ -94,10 +93,10 @@ export function compile(
 export function problems(route: Keys): readonly Problem[] {
   const compiled = compile(route, () => undefined)
   return [
-    ...(route.targets === undefined &&
-    route.include === undefined &&
-    route.contains === undefined &&
-    route.match === undefined
+    ...(ownValue(route, "targets") === undefined &&
+    ownValue(route, "include") === undefined &&
+    ownValue(route, "contains") === undefined &&
+    ownValue(route, "match") === undefined
       ? [{ path: [], message: "it has no targets, include, contains or match" }]
       : []),
     ...(Result.isFailure(compiled) ? compiled.failure : []),
