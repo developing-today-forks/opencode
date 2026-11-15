@@ -146,7 +146,7 @@ export const layer = Layer.effect(
             ...(detail ? { detail } : {}),
           })
         }
-        return yield* resolver.resolveModel(selected, target.variant, session.id, requestTokens)
+        return yield* resolver.resolveModel(selected, target.variant, session.id, requestTokens, session.parentID)
       }),
     })
   }),

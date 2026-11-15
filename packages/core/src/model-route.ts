@@ -1992,6 +1992,7 @@ export interface SettingsConfig {
     readonly feedTtlMs?: number
     readonly balanceDeadThreshold?: number
     readonly rootStartMaxPct?: number
+    readonly rootStartEnabled?: boolean
   }
   readonly escalation?: {
     readonly enabled?: boolean
@@ -3046,6 +3047,69 @@ export const providerQuotaBlocked = (
   }
   return undefined
 }
+
+/** The session distinction the #566 placement gates judge by: a session with a
+ * parent (session `parentID`) is a subsession; a session without one is a root
+ * session. Only a NEW root session is gated by the root-start gate — a root
+ * session already being served by a target is not a start (the resolver's
+ * stickiness/continuity exemption), and subsessions are admitted up to the
+ * known-full gate's 100% stop, which is their hard PAYG stop: a known-full
+ * pool is excluded by credentialQuotaBlocked/providerQuotaBlocked before any
+ * attempt is spent on it. */
+export type SessionKind = "root" | "subsession"
+
+export const sessionKind = (parentID?: string | null): SessionKind => (parentID ? "subsession" : "root")
+
+/** The root-start gate on one credential at `now` (#566 slice 2): `{ until }`
+ * (the snapshot's reset, null when it gave none) while the credential's latest
+ * snapshot blocks starting a new root session on its pool, undefined while a
+ * root start is eligible there. Judged by QuotaSnapshot.blocksRootStart, so an
+ * unknown or stale snapshot is never a wall, and balance snapshots never block
+ * a root start (balance pools are governed by the dead-balance gate). The
+ * gate's `rootStartEnabled` switch restores quota-blind root starts when off. */
+export const credentialRootStartBlocked = (
+  credentialID: string,
+  now = Date.now(),
+  location?: string,
+): { readonly until: number | null } | undefined => {
+  const gate = currentConstants(location).quotaGate
+  if (!gate.rootStartEnabled) return undefined
+  const state = credentialQuota.get(credentialID)
+  if (!state) return undefined
+  return QuotaSnapshot.blocksRootStart(state.snapshot, now, gate.rootStartMaxPct)
+    ? { until: state.snapshot.resetAt }
+    : undefined
+}
+
+/** The root-start gate on one target's provider at `now` (#566 slice 2): the
+ * provider-scope mirror of `credentialRootStartBlocked`, judged from the
+ * provider's own retained snapshot alone. */
+export const providerRootStartBlocked = (
+  target: Model.Ref,
+  now = Date.now(),
+  location?: string,
+): { readonly until: number | null } | undefined => {
+  const gate = currentConstants(location).quotaGate
+  if (!gate.rootStartEnabled) return undefined
+  const state = providerQuota.get(target.providerID)
+  if (!state) return undefined
+  return QuotaSnapshot.blocksRootStart(state.snapshot, now, gate.rootStartMaxPct)
+    ? { until: state.snapshot.resetAt }
+    : undefined
+}
+
+/** Whether a new root session may start on this target at `now` (#566): the
+ * credential scope judges first (a credential's own snapshot is the tighter
+ * evidence), then the provider scope — the same composition selection uses
+ * for the known-full gate. */
+export const rootStartBlocked = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+): { readonly until: number | null } | undefined =>
+  (credentialID ? credentialRootStartBlocked(credentialID, now, location) : undefined) ??
+  providerRootStartBlocked(target, now, location)
 
 /** Ends a state's bench on a success: an ordinary success only ends an expired bench
  * (recover), but a success on a claimed half-open probe ends the bench outright (#1123) — the
@@ -4407,6 +4471,10 @@ export interface Constants {
     /** Percent of a quota window at or above which a new root session is not started
      * on the pool (#566). Subsessions are unaffected. */
     readonly rootStartMaxPct: number
+    /** Whether the root-start gate is applied in placement at all (#566): false
+     * restores quota-blind root starts for this gate (the known-full gate in
+     * credentialQuotaBlocked/providerQuotaBlocked still applies). */
+    readonly rootStartEnabled: boolean
   }
   readonly escalation: { readonly outcomeWindow: number }
   readonly network: { readonly windowMs: number; readonly providers: number; readonly providerModels: number }
@@ -4443,6 +4511,7 @@ export const DEFAULT_CONSTANTS: Constants = {
     feedTtlMs: 60_000,
     balanceDeadThreshold: QuotaSnapshot.DEFAULT_BALANCE_DEAD_THRESHOLD,
     rootStartMaxPct: QuotaSnapshot.DEFAULT_ROOT_START_MAX_PCT,
+    rootStartEnabled: true,
   },
   escalation: { outcomeWindow: OUTCOME_WINDOW },
   network: { windowMs: NETWORK_WINDOW_MS, providers: NETWORK_PROVIDERS, providerModels: PROVIDER_MODELS },

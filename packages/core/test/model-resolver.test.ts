@@ -2527,6 +2527,48 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  it.live("a new root session is redirected off a pool above rootStartMaxPct; a subsession is admitted (#566)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver([a, b], (resolver) =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        ModelRoute.observeProviderQuota(
+          targetA,
+          {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "pa",
+            percent: 90,
+            remaining: 10,
+            resetAt: now + 3_600_000,
+            observedAt: now,
+            stale: false,
+          },
+          now,
+        )
+        // The snapshot was fed at `now`: consume both providers' feed stamps so the
+        // resolution's own feed pass (TTL 60s) leaves the just-fed snapshot standing
+        // instead of reconciling it against the test's empty plan store.
+        ModelRoute.resetQuotaFeed()
+        ModelRoute.shouldFeedQuota(now, undefined, "pa")
+        ModelRoute.shouldFeedQuota(now, undefined, "pb")
+        // A new root session does not start on pa at 90% (default threshold 85): redirected to pb.
+        expect(targetOf(yield* resolver.resolveModel(route, undefined, "ses_root566"))).toBe("pb")
+        // A subsession (it carries a parentID) is admitted to pa: it may burn the pool to 100%.
+        expect(targetOf(yield* resolver.resolveModel(route, undefined, "ses_sub566", undefined, "ses_root566"))).toBe(
+          "pa",
+        )
+        // No session claims the resolution: no start is judged, pa serves as before.
+        expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
+        ModelRoute.resetQuotaFeed()
+      }),
+    )
+  })
+
   it.live("admits exactly one half-open probe when a quota window reset learned after the bench passes (#1123)", () => {
     ModelRoute.resetHealth()
     const a = leaf("pa")

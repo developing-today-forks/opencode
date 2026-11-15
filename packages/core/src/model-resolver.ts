@@ -226,6 +226,9 @@ export interface Interface {
     variant?: VariantID,
     sessionID?: string,
     requestTokens?: number,
+    /** The session's parent session id, when it is a subsession (#566): placement
+     * distinguishes root-session starts from subsessions through it. */
+    parentID?: string,
   ) => Effect.Effect<Resolved, Error>
 }
 
@@ -693,6 +696,10 @@ export const layer = Layer.effect(
       // of a bare RouteUnavailableError, so configuration and authorization
       // failures keep their identity for session error classification.
       readonly loadErrors: Array<Error>
+      /** The claiming session's kind for the #566 root-start gate, carried through
+       * the cascade so fallback branches judge starts exactly as the initial
+       * resolution does. Undefined when no session claims the resolution. */
+      readonly kind?: ModelRoute.SessionKind
     }
     const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
     const resolveRouteWithin = (
@@ -806,6 +813,7 @@ export const layer = Layer.effect(
         ): Resolved => {
           const branch = {
             tried: new Set(triedTargets),
+            kind: cascade.kind,
             triedRefs: new Set(cascade.triedRefs),
             visitedRoutes: new Set(cascade.visitedRoutes),
             chain: [...cascade.chain],
@@ -855,6 +863,7 @@ export const layer = Layer.effect(
               // through the Resolved each call returns and its own fallback.
               const branchTried = new Set(branch.tried)
               const branchState: CascadeState = {
+                kind: branch.kind,
                 triedRefs: new Set(branch.triedRefs),
                 visitedRoutes: new Set(branch.visitedRoutes),
                 chain: [...branch.chain],
@@ -947,6 +956,24 @@ export const layer = Layer.effect(
             ),
           )
           const overLimit = new Set<number>()
+          // The #566 root-start gate, judged per target: only a NEW root session
+          // is gated — a session this route already serves on the target (its
+          // sticky pick or its continuity current) is running, not starting, and
+          // subsessions are never root-start gated (their stop is the known-full
+          // gate at 100%). No session at all means no start to judge.
+          const rootStartBlockFor = (index: number) => {
+            if (cascade.kind !== "root" || sessionID === undefined) return undefined
+            const target = definition.targets[index]
+            if (ModelRoute.sessionTarget(definition.id, sessionID) === index) return undefined
+            if (ModelRoute.continuityOf(definition.id, sessionID)?.current === `${target.providerID}/${target.id}`)
+              return undefined
+            return ModelRoute.rootStartBlocked(
+              target,
+              effectiveCredential(target, now)?.id,
+              now,
+              locationDirectory,
+            )
+          }
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
             const until = ModelRoute.cooldownUntil(target, now, locationDirectory, servedVariantFor(index))
@@ -984,6 +1011,7 @@ export const layer = Layer.effect(
               : 0
             const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
             const providerBlock = ModelRoute.providerQuotaBlocked(target, now, locationDirectory)
+            const rootStartBlock = rootStartBlockFor(index)
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
             // one probe attempt instead of excluding the leaf until the ladder expires. This
             // admission is tentative — the claim is spent only when selection actually picks
@@ -1005,6 +1033,8 @@ export const layer = Layer.effect(
             else if (quotaBlock) unavailable.set(index, `quota-known-full-until:${quotaBlock.until ?? "unknown"}`)
             else if (providerBlock)
               unavailable.set(index, `provider-quota-known-full-until:${providerBlock.until ?? "unknown"}`)
+            else if (rootStartBlock)
+              unavailable.set(index, `root-start-blocked-until:${rootStartBlock.until ?? "unknown"}`)
             else if (membershipHeld > now) unavailable.set(index, `membership-held-until:${membershipHeld}`)
             else if (limited > now && !kept) unavailable.set(index, `provider-limit-until:${limited}`)
             else if (isSkipped) unavailable.set(index, isUserSkipped ? "user-skip" : "quota-skip")
@@ -1017,6 +1047,7 @@ export const layer = Layer.effect(
               !credentialProbeHeld &&
               quotaBlock === undefined &&
               providerBlock === undefined &&
+              rootStartBlock === undefined &&
               membershipHeld <= now &&
               (limited <= now || kept) &&
               !isSkipped &&
@@ -1079,7 +1110,12 @@ export const layer = Layer.effect(
               ? nonFull
               : usable.filter((index) => !longBenched(index))
             : nonFull
-          const eligible = ready.length > 0 ? ready : allowCooling ? lastResort : []
+          // A root start is refused rather than seated on a root-start-blocked
+          // pool (#566): the gate's answer is redirect-or-refuse, never a
+          // last-resort start above the threshold.
+          const startable =
+            cascade.kind === "root" ? lastResort.filter((index) => rootStartBlockFor(index) === undefined) : lastResort
+          const eligible = ready.length > 0 ? ready : allowCooling ? startable : []
           // A last-resort seat (nothing ready) carries the earliest moment an
           // excluded candidate re-admits (#1806): the untried candidates'
           // recorded exclusion instants and every non-eligible target's bench
@@ -1453,6 +1489,7 @@ export const layer = Layer.effect(
       variant: VariantID | undefined,
       sessionID: string | undefined,
       requestTokens: number | undefined,
+      parentID: string | undefined,
     ): Effect.Effect<Resolved, Error> =>
       Effect.gen(function* () {
         const loaded = yield* load(selected, variant)
@@ -1474,6 +1511,7 @@ export const layer = Layer.effect(
         const { candidate, route, index } = first
         const requestedVariant = variant === "default" ? undefined : variant
         const cascade: CascadeState = {
+          kind: sessionID === undefined ? undefined : ModelRoute.sessionKind(parentID),
           triedRefs: new Set([cascadeRefKey(route.targets[index])]),
           visitedRoutes: new Set([String(route.id)]),
           chain: [],
@@ -1494,6 +1532,7 @@ export const layer = Layer.effect(
             fallback: () => {
               const branchTried = new Set(seed)
               const branchState: CascadeState = {
+                kind: cascade.kind,
                 triedRefs: new Set(cascade.triedRefs),
                 visitedRoutes: new Set(cascade.visitedRoutes),
                 chain: [...cascade.chain],
@@ -1559,10 +1598,16 @@ export const layer = Layer.effect(
         } satisfies Resolved
       })
 
-    const resolveSelected = (selected: Info, variant?: VariantID, sessionID?: string, requestTokens?: number) => {
+    const resolveSelected = (
+      selected: Info,
+      variant?: VariantID,
+      sessionID?: string,
+      requestTokens?: number,
+      parentID?: string,
+    ) => {
       const definition = ModelRoute.definition(selected)
       if (selected.providerID !== ModelRoute.PROVIDER_ID && !definition)
-        return attachDirectRoute(selected, variant, sessionID, requestTokens)
+        return attachDirectRoute(selected, variant, sessionID, requestTokens, parentID)
       if (!definition || definition.targets.length === 0)
         return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
       const requestedVariant = variant === "default" ? undefined : variant
@@ -1575,6 +1620,7 @@ export const layer = Layer.effect(
           }),
         )
       const cascade: CascadeState = {
+        kind: sessionID === undefined ? undefined : ModelRoute.sessionKind(parentID),
         triedRefs: new Set(),
         visitedRoutes: new Set([String(definition.id)]),
         chain: [],
@@ -1654,8 +1700,8 @@ export const layer = Layer.effect(
         if (!selected) return undefined
         return yield* resolveSelected(selected, target?.variant, undefined, requestTokens)
       }),
-      resolveModel: (selected, variant, sessionID, requestTokens) =>
-        resolveSelected(selected, variant, sessionID, requestTokens),
+      resolveModel: (selected, variant, sessionID, requestTokens, parentID) =>
+        resolveSelected(selected, variant, sessionID, requestTokens, parentID),
     })
   }),
 )
