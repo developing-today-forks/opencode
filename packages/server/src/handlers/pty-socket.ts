@@ -108,6 +108,23 @@ export const trackPtySocket = (handle: PtySocketShutdownHandle): (() => void) =>
 
 export const trackedPtySocketCount = (): number => ptySocketShutdownHandles.size
 
+// Run `effect` with `handle` registered for graceful shutdown, and unregister it when the
+// effect exits on ANY path — success, failure, or interruption (#2454). Registration must be
+// scoped to the work it covers, never left to a later stage's ensuring: the PTY connect
+// handler previously registered before `pty.attach` but untracked only in an ensuring on the
+// later runPtySocket call, so an attach failure outside the caught tags (or an interruption
+// in between) leaked the handle for the life of the process and every later graceful
+// shutdown waited out the full drain bound on a dead outbox.
+export const withPtySocketTracked = <A, E, R>(
+  handle: PtySocketShutdownHandle,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => trackPtySocket(handle)),
+    () => effect,
+    (untrack) => Effect.sync(() => untrack()),
+  )
+
 export const closeTrackedPtySockets = (): void => {
   for (const handle of [...ptySocketShutdownHandles]) handle.close()
 }

@@ -17,7 +17,7 @@ import {
 } from "@opencode/protocol/groups/pty"
 import { locationErrors, requestRef, response } from "../location"
 import { PtyEnvironment } from "../pty-environment"
-import { makePtyOutbox, runPtySocket, trackPtySocket } from "./pty-socket"
+import { makePtyOutbox, runPtySocket, withPtySocketTracked } from "./pty-socket"
 
 const ticketScope = Effect.gen(function* () {
   const location = yield* Location.Service
@@ -178,49 +178,56 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
             const socket = yield* Effect.orDie(ctx.request.upgrade)
             const outbox = yield* makePtyOutbox()
             // Register with the shutdown lifecycle (#2284): a graceful drain closes this socket
-            // deliberately (close code 1001) instead of dropping it at process exit. Untracked
-            // when runPtySocket exits, on every path.
-            const untrackPtySocket = trackPtySocket({
-              close: () => void outbox.offer(new Socket.CloseEvent(1001, "server shutting down")),
-              terminate: outbox.shutdown,
-            })
-            const attachment = yield* pty
-              .attach(ctx.params.ptyID, {
-                cursor,
-                onData: (chunk) => void outbox.offer(chunk),
-                onEnd: () => void outbox.offer(new Socket.CloseEvent(1000)),
-              })
-              .pipe(
-                Effect.catchTags({
-                  "Pty.NotFoundError": () =>
-                    Effect.sync(() => {
-                      void outbox.offer(new Socket.CloseEvent(4404, "session not found"))
+            // deliberately (close code 1001) instead of dropping it at process exit. The
+            // registration is scoped by withPtySocketTracked to the whole attach + run section
+            // (#2454): it is untracked when that section exits on every path — a successful run,
+            // an attach failure outside the caught tags below, or an interruption in between —
+            // so a failed connect can never leak the handle into the shutdown drain.
+            yield* withPtySocketTracked(
+              {
+                close: () => void outbox.offer(new Socket.CloseEvent(1001, "server shutting down")),
+                terminate: outbox.shutdown,
+              },
+              Effect.gen(function* () {
+                const attachment = yield* pty
+                  .attach(ctx.params.ptyID, {
+                    cursor,
+                    onData: (chunk) => void outbox.offer(chunk),
+                    onEnd: () => void outbox.offer(new Socket.CloseEvent(1000)),
+                  })
+                  .pipe(
+                    Effect.catchTags({
+                      "Pty.NotFoundError": () =>
+                        Effect.sync(() => {
+                          void outbox.offer(new Socket.CloseEvent(4404, "session not found"))
+                        }),
+                      "Pty.ExitedError": () =>
+                        Effect.sync(() => {
+                          void outbox.offer(new Socket.CloseEvent(4404, "session exited"))
+                        }),
                     }),
-                  "Pty.ExitedError": () =>
-                    Effect.sync(() => {
-                      void outbox.offer(new Socket.CloseEvent(4404, "session exited"))
-                    }),
-                }),
-              )
-            if (attachment) {
-              for (const chunk of PtyProtocol.chunks(attachment.replay)) void outbox.offer(chunk)
-              void outbox.offer(PtyProtocol.metaFrame(attachment.cursor))
-              attachment.activate()
-            }
+                  )
+                if (attachment) {
+                  for (const chunk of PtyProtocol.chunks(attachment.replay)) void outbox.offer(chunk)
+                  void outbox.offer(PtyProtocol.metaFrame(attachment.cursor))
+                  attachment.activate()
+                }
 
-            yield* runPtySocket({
-              socket,
-              outbox: outbox.queue,
-              onDequeued: outbox.release,
-              onOverflow: outbox.whenOverflowed,
-              onMessage: (message) =>
-                Effect.sync(() => {
-                  if (!attachment) return
-                  const decoded = PtyProtocol.decodeInput(message)
-                  if (decoded !== undefined) attachment.write(decoded)
-                }),
-              detach: () => attachment?.detach(),
-            }).pipe(Effect.ensuring(Effect.sync(untrackPtySocket)))
+                yield* runPtySocket({
+                  socket,
+                  outbox: outbox.queue,
+                  onDequeued: outbox.release,
+                  onOverflow: outbox.whenOverflowed,
+                  onMessage: (message) =>
+                    Effect.sync(() => {
+                      if (!attachment) return
+                      const decoded = PtyProtocol.decodeInput(message)
+                      if (decoded !== undefined) attachment.write(decoded)
+                    }),
+                  detach: () => attachment?.detach(),
+                })
+              }),
+            )
             return HttpServerResponse.empty()
           }).pipe(Effect.provide(locations.get(ref)), locationErrors)
         }),
