@@ -83,7 +83,7 @@ const EXTENSION_MEDIA_TYPES: Readonly<Record<string, string>> = {
 export function voiceMediaType(name: string, declared?: string): string {
   if (declared) return declared
   const extension = name.split(".").pop()?.toLowerCase()
-  return (extension ? EXTENSION_MEDIA_TYPES[extension] : undefined) ?? ""
+  return (extension && Object.hasOwn(EXTENSION_MEDIA_TYPES, extension) ? EXTENSION_MEDIA_TYPES[extension] : undefined) ?? ""
 }
 
 function acceptedExtensions(registration: TranscriptionModelRegistration): string {

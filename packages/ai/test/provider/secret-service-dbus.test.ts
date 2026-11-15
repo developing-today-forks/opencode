@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 
 // The regression shape for #2313 is the environment the binding is
 // constructed under, so the keyring binding is replaced with a recording
@@ -34,15 +34,17 @@ afterEach(() => {
   constructedWith.length = 0
 })
 
-test("an absent session-bus address is synthesized before the entry is constructed (#2313)", async () => {
-  if (typeof process.getuid !== "function") return
-  delete process.env.DBUS_SESSION_BUS_ADDRESS
-  await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
-  expect(constructedWith).toEqual([`unix:path=/run/user/${process.getuid()}/bus`])
-})
+describe.skipIf(process.platform !== "linux")("secret-service dbus address handling", () => {
+  test("an absent session-bus address is synthesized before the entry is constructed (#2313)", async () => {
+    if (typeof process.getuid !== "function") return
+    delete process.env.DBUS_SESSION_BUS_ADDRESS
+    await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
+    expect(constructedWith).toEqual([`unix:path=/run/user/${process.getuid()}/bus`])
+  })
 
-test("an explicit bogus session-bus address is left alone and still resolves undefined (#2313)", async () => {
-  process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/opencode-secret-service-test-unavailable"
-  await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBeUndefined()
-  expect(constructedWith).toEqual(["unix:path=/opencode-secret-service-test-unavailable"])
+  test("an explicit bogus session-bus address is left alone and still resolves undefined (#2313)", async () => {
+    process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/opencode-secret-service-test-unavailable"
+    await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBeUndefined()
+    expect(constructedWith).toEqual(["unix:path=/opencode-secret-service-test-unavailable"])
+  })
 })

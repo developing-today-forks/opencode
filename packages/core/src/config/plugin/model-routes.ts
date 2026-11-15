@@ -1055,14 +1055,15 @@ function expandCollected(
       node.children.push(child)
       // A nested pool's weight key names a pool, so it matches in any case.
       const weight =
-        current.weights?.[key] ??
-        (child.node === undefined
-          ? undefined
-          : Object.entries(current.weights ?? {}).find(
-              ([name]) =>
-                name.toLowerCase() === key.toLowerCase() ||
-                name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
-            )?.[1])
+        Object.hasOwn(current.weights ?? {}, key)
+          ? current.weights?.[key]
+          : child.node === undefined
+            ? undefined
+            : Object.entries(current.weights ?? {}).find(
+                ([name]) =>
+                  name.toLowerCase() === key.toLowerCase() ||
+                  name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
+              )?.[1]
       node.weights.push(ModelRouteAutonomy.usesRules(current.autonomy) ? (weight ?? 1) : 1)
     }
     const applying = (list: readonly ModelRouteMatch.Rule[], candidate: ModelRouteMatch.Candidate) =>
