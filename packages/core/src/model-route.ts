@@ -1397,6 +1397,88 @@ export const plantGatheredQuotaWall = (
   return undefined
 }
 
+/** Provider gate state stated by the fleet gatherer's snapshot alone (fork
+ * #2479): the wall for providers whose gathered shape is a single provider-wide
+ * entry — no per-model windows, and no plan-derived feed to arm the provider
+ * gate — recorded at provider scope so the pre-attempt gates judge it exactly
+ * like a fed provider snapshot. The model-scope plant above is a route
+ * adjustment: it binds only routes that let the tuner decide and never reaches
+ * the root-start gate, so a seated leg of this shape kept taking one attempt
+ * per fresh session wave while its snapshot read 100% (opendesign: 42 attempts
+ * in 6h; cline-pass: 8 — all quota failures). This record is the same wall at
+ * the scope the snapshot itself names — the provider — and
+ * `providerQuotaBlocked` / `providerRootStartBlocked` consult it alongside the
+ * plan-fed state. Only a known-full reading is recorded; a fresh, complete
+ * below-full reading clears it; and it self-limits at the stated reset and
+ * under the staleness judgement the gates apply, so a gatherer that stops
+ * reporting cannot wall a provider forever. */
+const gatheredProviderQuota = new Map<string, QuotaGateState>()
+
+/** Feeds one target's gathered reading into the provider gate when the reading
+ * is the provider-wide shape (fork #2479): exactly one entry for the provider
+ * and no per-model reading for this target — the shape `gatheredQuotaWall`'s
+ * provider branch judges. Per-model shapes keep their model-scope plant, and
+ * several entries are per-account readings, which state no provider wall
+ * (Drew, 2026-11-07). Aggregation mirrors the wall's own: the reading's
+ * percent is the maximum over its windows, and the reset carried is the
+ * fullest window's own. Returns whether the gate record changed. */
+export const observeGatheredProviderWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): boolean => {
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  if (entries.length !== 1) return false
+  if (modelWindowReading(entries, target.providerID, target.id as string)) return false
+  const entry = entries[0]
+  let percent: number | undefined
+  let resetAt: number | null = null
+  let complete = entry.windows.length > 0
+  for (const window of entry.windows) {
+    if (window.usedPercent === null) {
+      complete = false
+      continue
+    }
+    if (percent === undefined || window.usedPercent >= percent) {
+      percent = window.usedPercent
+      resetAt = window.resetAt
+    }
+  }
+  if (percent === undefined) return false
+  // A stale reading is not evidence, in either direction (the wall's own rule).
+  if (now - entry.measuredAt > GATHERED_WALL_MAX_AGE_MS) return false
+  const snapshot = {
+    planID: "quota-current",
+    window: "gathered",
+    providerID: target.providerID,
+    percent,
+    remaining: null,
+    resetAt,
+    observedAt: entry.measuredAt,
+    stale: false,
+  }
+  const previous = gatheredProviderQuota.get(target.providerID)
+  if (QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
+    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    if (!previous?.gated)
+      logHealth(
+        target,
+        "quota-gated",
+        `provider:${target.providerID} quota-known-full (gathered)`,
+        resetAt ?? undefined,
+      )
+    return true
+  }
+  // Below full on the freshest reading: only whole evidence lifts the wall —
+  // a percent-less window is missing evidence, not headroom (the plant's own
+  // lift rule, at provider scope).
+  if (!complete || !previous) return false
+  gatheredProviderQuota.delete(target.providerID)
+  if (previous.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID} (gathered)`)
+  return true
+}
+
 export const releaseQuotaSkipsForCurrent = (
   target: Model.Ref,
   readings: readonly QuotaCurrent.ProviderReading[],
@@ -3021,29 +3103,58 @@ export const credentialQuotaBlocked = (
  * gate or not at all, never by the state of other leaves in its route group. A restored
  * provider balance record with no in-memory state yet is not judged here: its durable
  * `quota:` skip excludes through `skipped` until the first fed snapshot re-arms the
- * state, so the leaf stays out on its own provider's record either way. */
+ * state, so the leaf stays out on its own provider's record either way. The gatherer's
+ * provider-wide wall (fork #2479) is consulted after the fed state: a provider no plan
+ * feed carries can still stand walled on the gathered record. */
 export const providerQuotaBlocked = (
   target: Model.Ref,
   now = Date.now(),
   location?: string,
 ): { readonly until: number | null } | undefined => {
   const state = providerQuota.get(target.providerID)
-  if (!state) return undefined
-  // Judged exactly as the credential scope is (#1461): a threshold-derived hold blocks
-  // only a Location whose own threshold still judges the retained snapshot known-full;
-  // a retained reactive timed gate blocks every Location until its reset.
-  if (state.balanceHold) {
-    if (holdBlocks(state.balanceHold, state.snapshot, now, location)) return { until: null }
-    if (state.timedGateUntil !== undefined && state.timedGateUntil > now) return { until: state.timedGateUntil }
+  const fed = ((): { readonly until: number | null } | undefined => {
+    if (!state) return undefined
+    // Judged exactly as the credential scope is (#1461): a threshold-derived hold blocks
+    // only a Location whose own threshold still judges the retained snapshot known-full;
+    // a retained reactive timed gate blocks every Location until its reset.
+    if (state.balanceHold) {
+      if (holdBlocks(state.balanceHold, state.snapshot, now, location)) return { until: null }
+      if (state.timedGateUntil !== undefined && state.timedGateUntil > now) return { until: state.timedGateUntil }
+      return undefined
+    }
+    if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
+      state.gated = true
+      return { until: state.snapshot.resetAt }
+    }
+    if (state.gated) {
+      state.gated = false
+      logHealth(state.target, "quota-readmitted", `provider:${target.providerID}`)
+    }
     return undefined
-  }
-  if (QuotaSnapshot.isKnownFull(state.snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
-    state.gated = true
-    return { until: state.snapshot.resetAt }
-  }
-  if (state.gated) {
-    state.gated = false
-    logHealth(state.target, "quota-readmitted", `provider:${target.providerID}`)
+  })()
+  if (fed) return fed
+  // The gathered snapshot's provider-wide wall (fork #2479): a provider no
+  // plan-derived feed carries can still stand walled on the gatherer's own
+  // reading. Judged with the same known-full rule, and with staleness
+  // recomputed from the reading's own observation time — the root-start
+  // gate's discipline — so the record lapses when the gatherer stops
+  // reporting instead of holding on a derivation-time freshness stamp.
+  const gathered = gatheredProviderQuota.get(target.providerID)
+  if (gathered) {
+    if (
+      QuotaSnapshot.isKnownFull(
+        judgedSnapshot(gathered.snapshot, now),
+        now,
+        currentConstants(location).quotaGate.balanceDeadThreshold,
+      )
+    ) {
+      gathered.gated = true
+      return { until: gathered.snapshot.resetAt }
+    }
+    if (gathered.gated) {
+      gathered.gated = false
+      logHealth(gathered.target, "quota-readmitted", `provider:${target.providerID}`)
+    }
   }
   return undefined
 }
@@ -3105,10 +3216,17 @@ export const providerRootStartBlocked = (
   const gate = currentConstants(location).quotaGate
   if (!gate.rootStartEnabled) return undefined
   const state = providerQuota.get(target.providerID)
-  if (!state) return undefined
-  return QuotaSnapshot.blocksRootStart(judgedSnapshot(state.snapshot, now), now, gate.rootStartMaxPct)
-    ? { until: state.snapshot.resetAt }
-    : undefined
+  if (state && QuotaSnapshot.blocksRootStart(judgedSnapshot(state.snapshot, now), now, gate.rootStartMaxPct))
+    return { until: state.snapshot.resetAt }
+  // The gathered snapshot's provider-wide wall (fork #2479): a root start is
+  // refused on the gatherer's wall exactly as on a fed provider snapshot.
+  // This is the gate the model-scope plant could not reach — route
+  // adjustments never enter root-start judgement — which is why fresh
+  // session waves kept dealing walled legs of this shape as last resorts.
+  const gathered = gatheredProviderQuota.get(target.providerID)
+  if (gathered && QuotaSnapshot.blocksRootStart(judgedSnapshot(gathered.snapshot, now), now, gate.rootStartMaxPct))
+    return { until: gathered.snapshot.resetAt }
+  return undefined
 }
 
 /** Whether a new root session may start on this target at `now` (#566): the
@@ -3262,6 +3380,7 @@ export const resetHealth = () => {
   infraHolds.clear()
   credentialQuota.clear()
   providerQuota.clear()
+  gatheredProviderQuota.clear()
   quotaEvents.clear()
   restoredDemotionAttempts.clear()
   quotaFailureSources.clear()

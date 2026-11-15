@@ -3032,6 +3032,119 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
     expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
   })
 
+  test("a provider-wide gathered wall also gates the provider scope (fork #2479)", () => {
+    const now = 870_000_000
+    // The production shape: cline-pass and opendesign carry exactly one
+    // gathered entry, no per-model windows, and no plan-derived feed, so the
+    // model-scope plant was the only proactive record — and a route
+    // adjustment binds only rules routes and never reaches the root-start
+    // gate. Fresh session waves kept dealing the legs as last resorts and
+    // spending one attempt each into the wall (opendesign 42 attempts in 6h,
+    // cline-pass 8, all quota failures, while the snapshot read 100%). The
+    // wall must stand in the provider gate itself.
+    const leaf = ModelRoute.ref({ providerID: "cline-pass", model: "deepseek-v4.1-flash" })
+    const sibling = ModelRoute.ref({ providerID: "cline-pass", model: "mimo-v2.6-flash" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 21 * 86_400_000
+    const reading = (monthly: number, at: number) =>
+      gathered({
+        providerID: "cline-pass",
+        at,
+        windows: [
+          { name: "5h", usedPercent: 0, resetAt: at + 5 * hour },
+          { name: "weekly", usedPercent: 99, resetAt: now + 4 * 86_400_000 },
+          { name: "monthly", usedPercent: monthly, resetAt },
+        ],
+      })
+    // Nothing gates the provider before the feed.
+    expect(ModelRoute.providerQuotaBlocked(leaf, now)).toBeUndefined()
+    expect(ModelRoute.providerRootStartBlocked(leaf, now)).toBeUndefined()
+    expect(ModelRoute.observeGatheredProviderWall(leaf, reading(100, now), now)).toBe(true)
+    // The whole provider is gated until the stated reset — every leg of it,
+    // for continuations and for root starts alike.
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(sibling, now + 1)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerRootStartBlocked(leaf, now + 1)).toEqual({ until: resetAt })
+    // The stated reset passing re-admits on its own: no feed, no attempt.
+    expect(ModelRoute.providerQuotaBlocked(leaf, resetAt + 1)).toBeUndefined()
+    expect(ModelRoute.providerRootStartBlocked(leaf, resetAt + 1)).toBeUndefined()
+  })
+
+  test("a provider-wide gathered wall lifts on a fresh below-full reading, and partial evidence lifts nothing (fork #2479)", () => {
+    const now = 880_000_000
+    const leaf = ModelRoute.ref({ providerID: "opendesign", model: "mimo-v2.6-flash" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 2 * 86_400_000
+    const full = gathered({
+      providerID: "opendesign",
+      at: now,
+      windows: [
+        { name: "5h", usedPercent: 0, resetAt: now + 5 * hour },
+        { name: "7d", usedPercent: 100, resetAt },
+      ],
+    })
+    expect(ModelRoute.observeGatheredProviderWall(leaf, full, now)).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toEqual({ until: resetAt })
+    // A percent-less window is missing evidence, not headroom: the wall stands.
+    const partial = gathered({
+      providerID: "opendesign",
+      at: now + 15 * 60_000,
+      windows: [
+        { name: "5h", usedPercent: 0, resetAt: now + 5 * hour },
+        { name: "7d", usedPercent: null },
+      ],
+    })
+    expect(ModelRoute.observeGatheredProviderWall(leaf, partial, now + 15 * 60_000)).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 15 * 60_000 + 1)).toEqual({ until: resetAt })
+    // A fresh, complete reading below full on every window lifts the wall.
+    const room = gathered({
+      providerID: "opendesign",
+      at: now + 30 * 60_000,
+      windows: [
+        { name: "5h", usedPercent: 0, resetAt: now + 5 * hour },
+        { name: "7d", usedPercent: 40, resetAt: resetAt + 7 * 86_400_000 },
+      ],
+    })
+    expect(ModelRoute.observeGatheredProviderWall(leaf, room, now + 30 * 60_000)).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 30 * 60_000 + 1)).toBeUndefined()
+    expect(ModelRoute.providerRootStartBlocked(leaf, now + 30 * 60_000 + 1)).toBeUndefined()
+  })
+
+  test("per-model and per-account gathered shapes state no provider-wide gate (fork #2479)", () => {
+    const now = 890_000_000
+    const leaf = ModelRoute.ref({ providerID: "antigravity-direct", model: "gemini-3.8-flash" })
+    ModelRoute.resetHealth()
+    // A per-model reading at 100%: the model-scope plant governs this shape;
+    // no provider gate is stated.
+    const perModel = gathered({
+      providerID: "antigravity-direct",
+      at: now,
+      models: { "gemini-3.8-flash": [{ name: "weekly", usedPercent: 100, resetAt: now + 3 * 86_400_000 }] },
+    })
+    expect(ModelRoute.observeGatheredProviderWall(leaf, perModel, now)).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toBeUndefined()
+    // Several entries for one provider are per-account readings: no provider
+    // wall is synthesized from them, however full one account reads.
+    const codexLeaf = ModelRoute.ref({ providerID: "codex", model: "gpt-6-luna" })
+    const entry = (weekly: number) => ({
+      providerID: "codex",
+      measuredAt: now,
+      windows: [{ name: "weekly", usedPercent: weekly, resetAt: now + 3 * 86_400_000, measuredAt: now }],
+      models: {},
+    })
+    expect(ModelRoute.observeGatheredProviderWall(codexLeaf, [entry(100), entry(100)], now)).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(codexLeaf, now + 1)).toBeUndefined()
+    // A stale provider-wide reading states no wall either.
+    const stale = gathered({
+      providerID: "cline-pass",
+      at: now - 31 * 60_000,
+      windows: [{ name: "monthly", usedPercent: 100, resetAt: now + 21 * 86_400_000 }],
+    })
+    const clineLeaf = ModelRoute.ref({ providerID: "cline-pass", model: "deepseek-v4.1-flash" })
+    expect(ModelRoute.observeGatheredProviderWall(clineLeaf, stale, now)).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(clineLeaf, now + 1)).toBeUndefined()
+  })
+
   test("a stale or missing gathered reading plants nothing and lifts nothing (code#8086)", () => {
     const now = 840_000_000
     const leaf = ModelRoute.ref({ providerID: "cline-pass", model: "deepseek-v4.1-flash" })
