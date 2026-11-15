@@ -1468,6 +1468,55 @@ describe("codex isConfigured active credentials (#1811)", () => {
   })
 })
 
+describe("codex legacy alias restored (#2460)", () => {
+  // Oracle: the acceptance on opencode#2460 - the documented
+  // `opencode quota ... codex` lookup resolves to the renamed _openai
+  // provider, and a credential still stored with integrationID "codex"
+  // is found by isConfigured and by the per-credential fetch path
+  // (which matches rows on credentialAliases).
+  const oauth = { type: "oauth", access: "tok-fixture", refresh: "fixture", expires: 4_102_444_800_000 } as const
+  const reset = 4_102_444_800 // 2100-01-01 in epoch seconds
+  const ctxWith = (credentials: unknown[]) =>
+    ({
+      credentials,
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: {},
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: reset } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    }) as never
+
+  test("the name codex resolves to _openai", async () => {
+    const { resolveQuotaProviderName } = await import("../src/quota/index.js")
+    const ctx = ctxWith([])
+    expect(resolveQuotaProviderName(ctx, "codex")).toBe("_openai")
+    expect(resolveQuotaProviderName(ctx, "Codex")).toBe("_openai")
+  })
+
+  test("an active codex credential counts as configured; an inactive one does not", async () => {
+    const active = ctxWith([{ id: "row-codex", integrationID: "codex", active: true, value: oauth }])
+    expect(await codexProvider.isConfigured(active)).toBe(true)
+    const inactive = ctxWith([{ id: "row-codex-off", integrationID: "codex", active: false, value: oauth }])
+    expect(await codexProvider.isConfigured(inactive)).toBe(false)
+  })
+
+  test("the per-credential fetch path finds and fetches the stored codex credential", async () => {
+    // fetchQuotaForProviderInstances is the named-ask fetch: it matches
+    // credential rows on credentialAliases, so this is the fetchQuota
+    // leg of the #2460 acceptance without the all-provider listing.
+    const { fetchQuotaForProviderInstances } = await import("../src/quota/index.js")
+    const ctx = ctxWith([{ id: "row-codex", integrationID: "codex", active: true, value: oauth }])
+    const results = await fetchQuotaForProviderInstances(ctx, "_openai")
+    expect(results.some((result) => result.configured && result.ok)).toBe(true)
+  })
+})
+
 describe("cline-pass quota mapping (#1769)", () => {
   // Drive the real provider against a stubbed usage-limits response.
   const fetchWith = (payload: unknown) =>
