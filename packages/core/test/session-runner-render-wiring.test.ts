@@ -100,6 +100,29 @@ describe("card inputs from the plan store", () => {
   })
 })
 
+describe("wall directive latch (#2468)", () => {
+  test("a wall whose actions cannot be derived does not stay latched; a later wall can offer again", () => {
+    // The thin-store setup the fallback card exists to rescue: the
+    // plan store cannot supply the card's actions yet.
+    const dataDir = tempDataDir()
+    const sessionID = "ses_render_wiring_wall_latch"
+    Wiring.clearSession(sessionID)
+    const wall: RenderCard.QuotaWall = { providerID: "anthropic", modelID: "claude-sonnet-5" }
+    Wiring.offerWall(sessionID, wall)
+    expect(Wiring.wallDirective(sessionID, wall, dataDir)).toBeUndefined()
+    // No card was built, so no wall stays offered: the next wall in
+    // this session is not suppressed by a latch nothing can settle.
+    expect(Wiring.offeredWall(sessionID)).toBeUndefined()
+    // Once the store gains the inputs, a second wall offers again and
+    // its directive is built; that wall stays latched for its answer.
+    seedStore(dataDir)
+    Wiring.offerWall(sessionID, wall)
+    expect(Wiring.wallDirective(sessionID, wall, dataDir)).toBeDefined()
+    expect(Wiring.offeredWall(sessionID)).toBeDefined()
+    Wiring.clearSession(sessionID)
+  })
+})
+
 describe("chooser directive", () => {
   test("fires once for a bare route with the render tool, then latches", () => {
     const dataDir = tempDataDir()

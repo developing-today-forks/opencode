@@ -164,14 +164,23 @@ export const chooserDirective = (input: {
  * The quota-fallback directive for a wall the step ended in, when the
  * plan store can supply the card's three actions. Undefined when it
  * cannot — the caller then ends the step with the original error, as
- * before.
+ * before. A wall that produces no directive must not stay latched
+ * (#2468): the step latched it before anyone knew a card could be
+ * built, and a latch that outlives a cardless wall disables the
+ * fallback remedy for the rest of the session, so an underivable
+ * directive clears the session's offered wall here — the mirror of
+ * the chooser marking asked only after its tiers are known.
  */
 export const wallDirective = (
+  sessionID: string,
   wall: SessionRunnerRenderCard.QuotaWall,
   dataDir?: string,
 ): string | undefined => {
   const actions = fallbackActionsFor(ModelPlan.readStore(dataDir), wall)
-  if (actions === undefined) return undefined
+  if (actions === undefined) {
+    clearWall(sessionID)
+    return undefined
+  }
   return SessionRunnerRenderCard.quotaFallbackDirective(wall, actions)
 }
 

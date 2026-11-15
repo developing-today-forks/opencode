@@ -360,8 +360,12 @@ const layer = Layer.effect(
             // the step keeps its original bare-error ending.
             const directive = (() => {
               try {
-                return SessionRunnerRenderWiring.wallDirective(outcome.wall)
+                return SessionRunnerRenderWiring.wallDirective(sessionID, outcome.wall)
               } catch {
+                // A directive that cannot even be built leaves no
+                // card, so the offered wall must not stay latched
+                // (#2468, the wallDirective undefined path).
+                SessionRunnerRenderWiring.clearWall(sessionID)
                 return undefined
               }
             })()
