@@ -1106,10 +1106,29 @@ export const layer = Layer.effect(
               servedVariantFor(index),
             )
           }
+          // An auth-benched leg is never dealt either, even as a last resort
+          // (#2555): an entitlement refusal cannot heal by itself, so the leg is
+          // dead until a credential or plan change — dealing it re-plants the
+          // bench and burns the attempt, hundreds of times an hour when a route
+          // whose other doors are quota-full has only the dead leg left. Its
+          // re-admission is the bench expiry's single probe (code#9950). When
+          // every usable leg is long-benched or auth-benched, this filter
+          // leaves the last resort empty and the turn is refused, exactly as
+          // the long-bench carve-out already provides.
+          const authBenched = (index: number) => {
+            const target = definition.targets[index]
+            return ModelRoute.authBenched(
+              target,
+              effectiveCredential(target, now)?.id,
+              now,
+              locationDirectory,
+              servedVariantFor(index),
+            )
+          }
           const lastResort = allowQuotaDeadLastResort
             ? nonFull.length > 0
               ? nonFull
-              : usable.filter((index) => !longBenched(index))
+              : usable.filter((index) => !longBenched(index) && !authBenched(index))
             : nonFull
           // A root start is refused rather than seated on a root-start-blocked
           // pool (#566): the gate's answer is redirect-or-refuse, never a
