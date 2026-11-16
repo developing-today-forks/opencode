@@ -701,7 +701,7 @@ export function ComposerAttachments(props: {
                             >
                               <img
                                 src={url() ?? ""}
-                                alt={attachment.filename}
+                                alt={attachment.filename || i18n.t("ui.message.attachment.alt")}
                                 class="w-[58px] h-[46px] rounded-[6px] object-cover"
                               />
                             </Dynamic>

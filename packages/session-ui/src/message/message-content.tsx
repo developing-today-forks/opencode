@@ -345,7 +345,7 @@ export function CurrentUserMessageDisplay(props: {
               return source.type === "uri" ? source.uri : `data:${file().mime};base64,${file().data}`
             }
 
-            const name = () => file().name ?? i18n.t("ui.message.attachment.alt")
+            const name = () => file().name || i18n.t("ui.message.attachment.alt")
             const image = () => file().mime.startsWith("image/")
 
             return (
