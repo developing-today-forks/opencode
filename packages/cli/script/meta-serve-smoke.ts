@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 // Run from the repository root with `bun packages/cli/script/meta-serve-smoke.ts`.
-// The OpenAI provider control uses a local SSE endpoint; only the Meta turn calls a real provider.
+// The OpenAI provider control uses a local SSE endpoint; only the _muse turn calls a real provider.
 
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -47,14 +47,20 @@ const config = {
     ...(openAIOnly
       ? {}
       : {
-          meta: {
-            package: "@ai-sdk/openai",
-            env: ["META_API_KEY"],
-            settings: { baseURL: "https://api.meta.ai/v1" },
+          // The Meta leg exercises the production door: the `_muse` custom
+          // provider (native @opencode/ai/providers/muse-direct, fork PR
+          // #1872), which exchanges the Muse account token from
+          // ~/.config/muse/auth.json at /muse-code/key for the plan's
+          // minted key. The retired direct `meta` door (provider `meta`,
+          // @ai-sdk/openai, META_API_KEY, muse-wonder-1.0) died on
+          // 2026-10-30 when Meta tightened client attestation on that
+          // path; do not re-point this leg back at it — see #431.
+          _muse: {
+            package: "@opencode/ai/providers/muse-direct",
             models: {
-              "muse-wonder-1.0": {
-                name: "Muse Wonder smoke",
-                package: "@ai-sdk/openai",
+              "muse-spark-1.3-contributor": {
+                name: "Muse Spark 1.3 Contributor smoke",
+                package: "@opencode/ai/providers/muse-direct",
                 limit: modelLimit,
               },
             },
@@ -104,7 +110,7 @@ const server = Bun.spawn(["bun", "run", "dev", "serve", "--hostname", "127.0.0.1
 try {
   await ready(serverURL, headers, server)
   await turn("openai", "smoke-model", "openai-smoke-ok", serverURL, headers, env)
-  if (!openAIOnly) await turn("meta", "muse-wonder-1.0", undefined, serverURL, headers, env)
+  if (!openAIOnly) await turn("_muse", "muse-spark-1.3-contributor", undefined, serverURL, headers, env)
 } catch (error) {
   // The server's own diagnostics are the only way to see why a turn failed before any
   // streaming started, so surface them instead of discarding them with the process.
