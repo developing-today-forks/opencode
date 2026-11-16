@@ -28,6 +28,7 @@ import {
   type TranscriptionModelRegistration,
 } from "@opencode/core/transcription-facade"
 import { ownValue } from "@opencode/core/util/record"
+import { readBoundedResponseText } from "@opencode/util/http-body"
 
 export type { TranscriptionModelRegistration }
 
@@ -330,6 +331,28 @@ function voiceForm(input: {
   return form
 }
 
+/** A transcript envelope is text plus provenance; 1 MiB is far above any
+ * legitimate transcript of the façade's 600 s duration cap, so the read
+ * stays bounded without truncating a real answer. */
+const MAX_VOICE_RESPONSE_BYTES = 1024 * 1024
+
+/** Parse the façade's JSON body through the bounded reader. An unparsable,
+ * oversized, or cut-short body reads as undefined so the caller keeps its
+ * status-based mapping instead of surfacing a raw payload. */
+async function voiceResponseBody(response: Response): Promise<unknown> {
+  const text = await readBoundedResponseText(
+    response,
+    MAX_VOICE_RESPONSE_BYTES,
+    () => new VoiceTranscriptionError("The transcription response was too large to read."),
+  ).catch(() => undefined)
+  if (text === undefined) return undefined
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+
 /** One batch call to the façade (§6.2: submitting calls the façade
  * once). Parses the §2.3 normalized envelope and maps §2.4 typed
  * errors to actionable composer messages. */
@@ -352,7 +375,7 @@ export async function submitVoiceTranscription(input: {
       `Could not reach the transcription façade at ${endpoint}. Check that the server is running, then retry — your audio is still held locally.`,
     )
   }
-  const body: unknown = await response.json().catch(() => undefined)
+  const body = await voiceResponseBody(response)
   if (!response.ok) {
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
     throw actionableError(
@@ -489,7 +512,7 @@ export async function submitVoiceTranscriptionStream(input: {
     )
   }
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => undefined)
+    const body = await voiceResponseBody(response)
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
     throw actionableError(
       response.status,
