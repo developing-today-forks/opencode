@@ -12,12 +12,15 @@ import {
   type ToolCall,
 } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Scope, Stream } from "effect"
+import { Cause, Clock, Context, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Scope, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
+import { FSUtil } from "@opencode/util/fs-util"
+import { join } from "node:path"
+import { PlanSuggestions } from "../plan-suggestions.js"
 import { Tool } from "../../tool.js"
 import { ToolOutput } from "../../tool-output.js"
 import { QuestionTool } from "../../tool/plugin/question.js"
@@ -308,7 +311,39 @@ export const make = Effect.gen(function* () {
     onNone: () => undefined,
     onSome: (value) => value.directory as string,
   })
+  // FSUtil is read from the ambient context WITHOUT adding a layer requirement
+  // to SessionStep.make (compositions enumerate this environment, and the
+  // FileAccess layer already brings FSUtil wherever it is present): when no FS
+  // is in context, the plan-suggestion hook below simply yields no notices.
+  const fs = yield* Effect.contextWith((context: Context.Context<never>) =>
+    Effect.succeed(Context.getOption(context as Context.Context<FSUtil.Service>, FSUtil.Service)),
+  )
   const toolOutput = yield* ToolOutput.Service
+
+  /** Post-turn ExecutionPlan suggestions (issue #10): when a turn finishes with
+   * file changes, read the active plans from the Project Knowledge plans
+   * directory and compute the notice lines carried on Step.Ended. Suggest-first
+   * (ruling Q3): this only ever reads plans — it never writes them — and any
+   * failure (no plans directory, no FS service, diff unavailable) yields no
+   * notices; suggestions must never fail a turn. */
+  const planNotices = Effect.fnUntraced(function* (input: {
+    readonly from?: Snapshot.ID
+    readonly to?: Snapshot.ID
+  }) {
+    if (!locationDirectory || Option.isNone(fs) || !input.from || !input.to) return undefined
+    const directory = join(locationDirectory, PlanSuggestions.PLANS_RELATIVE_DIRECTORY)
+    const entries = yield* fs.value.readDirectoryEntries(directory)
+    const markdowns = yield* Effect.forEach(
+      entries.filter((entry) => entry.type === "file" && entry.name.endsWith(".md")),
+      (entry) => fs.value.readFileStringSafe(join(directory, entry.name)),
+      { concurrency: 4 },
+    )
+    const plans = markdowns.filter((markdown): markdown is string => markdown !== undefined)
+    if (plans.length === 0) return undefined
+    const diffs = yield* snapshots.diff({ from: input.from, to: input.to })
+    const notices = PlanSuggestions.planNoticesForTurn(plans, diffs)
+    return notices.length > 0 ? notices : undefined
+  })
 
   const run = Effect.fn("SessionStep.run")(function* (
     input: Input,
@@ -971,6 +1006,12 @@ export const make = Effect.gen(function* () {
           const usage = record.finish
             ? { cost: SessionUsage.calculateCost(input.model.cost, record.finish.tokens), tokens: record.finish.tokens }
             : undefined
+          const notices =
+            record.finish && usage && !record.failure && files?.length
+              ? yield* planNotices({ from: startSnapshot, to: snapshot }).pipe(
+                  Effect.orElseSucceed(() => undefined),
+                )
+              : undefined
           if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
           if (record.finish && usage && !record.failure)
             yield* bus.publish(SessionEvent.Step.Ended, {
@@ -982,6 +1023,7 @@ export const make = Effect.gen(function* () {
               ...usage,
               snapshot,
               files,
+              ...(notices ? { planNotices: notices } : {}),
             })
         }
 

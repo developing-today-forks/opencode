@@ -385,6 +385,7 @@ export namespace Step {
       tokens: TokenUsage.Info,
       snapshot: Snapshot.ID.pipe(optional),
       files: Schema.Array(RelativePath).pipe(optional),
+      planNotices: Schema.Array(Schema.String).pipe(optional),
     },
   })
   export type Ended = typeof Ended.Type
