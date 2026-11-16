@@ -28,6 +28,7 @@ import {
   type TranscriptionModelRegistration,
 } from "@opencode/core/transcription-facade"
 import { ownValue } from "@opencode/core/util/record"
+import { deadlineSignal, readBoundedResponseText, readExcerptResponseText } from "@opencode/util/http-body"
 
 export type { TranscriptionModelRegistration }
 
@@ -310,9 +311,62 @@ function voiceForm(input: {
   return form
 }
 
+/** The façade's own upstream bound (`REQUEST_TIMEOUT` in
+ * packages/core/src/transcription-facade.ts): the client mirrors it so a
+ * façade that accepts the connection and never answers fails the
+ * submission instead of leaving the composer in `submitting` forever. */
+export const VOICE_REQUEST_DEADLINE_MS = 120_000
+
+/** Streaming idle bound, mirroring the façade's per-event
+ * `STREAM_IDLE_TIMEOUT`: the client re-arms the deadline on every frame,
+ * so a long stream that keeps emitting is never cut off while a peer that
+ * goes silent fails typed with the audio retained. */
+export const VOICE_STREAM_IDLE_MS = 120_000
+
+/** Caps on what one answer may buffer in the TUI: the batch envelope is
+ * read with refuse semantics (a transcript envelope is small — 1 MiB
+ * leaves generous headroom) and the error path keeps a diagnostics-only
+ * excerpt, so a buggy or hostile façade cannot grow the process without
+ * limit (#2462, design #1127). */
+export const VOICE_RESPONSE_MAX_BYTES = 1024 * 1024
+export const VOICE_ERROR_MAX_BYTES = 64 * 1024
+
+const unreachableFacade = (endpoint: string) =>
+  new VoiceTranscriptionError(
+    `Could not reach the transcription façade at ${endpoint}. Check that the server is running, then retry — your audio is still held locally.`,
+  )
+
+const deadlineExceeded = (deadlineMs: number) =>
+  new VoiceTranscriptionError(
+    `The transcription façade did not answer within ${deadlineMs} ms. Retry, or discard the audio and re-record — your audio is still held locally.`,
+  )
+
+const streamStalled = (idleMs: number) =>
+  new VoiceTranscriptionError(
+    `The transcription stream went quiet for ${idleMs} ms. Retry — your audio is still held locally.`,
+  )
+
+/** Parse a JSON body without letting a malformed payload escape as a raw
+ * `SyntaxError`: the callers map an unparseable answer to their typed §2.4
+ * failure, exactly as `response.json().catch(() => undefined)` did. */
+function parseJsonBody(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+function errorFromBody(body: unknown): { message?: string; code?: string } | undefined {
+  return (body as { error?: { message?: string; code?: string } } | undefined)?.error
+}
+
 /** One batch call to the façade (§6.2: submitting calls the façade
  * once). Parses the §2.3 normalized envelope and maps §2.4 typed
- * errors to actionable composer messages. */
+ * errors to actionable composer messages. The call carries a deadline
+ * and every body is read through a bounded or excerpt reader (#2462):
+ * a façade that never answers, or answers without end, fails typed
+ * instead of hanging the composer or buffering without limit. */
 export async function submitVoiceTranscription(input: {
   readonly url: string
   readonly headers?: Readonly<Record<string, string>>
@@ -320,24 +374,42 @@ export async function submitVoiceTranscription(input: {
   readonly registration: TranscriptionModelRegistration
   readonly audio: VoiceAudio
   readonly language?: string
+  /** Deadline override for tests; defaults to `VOICE_REQUEST_DEADLINE_MS`. */
+  readonly deadlineMs?: number
 }): Promise<VoiceTranscriptionResult> {
   const doFetch = input.fetch ?? fetch
   const form = voiceForm(input)
   const endpoint = `${input.url.replace(/\/$/, "")}/v1/audio/transcriptions`
+  const deadlineMs = input.deadlineMs ?? VOICE_REQUEST_DEADLINE_MS
+  const signal = deadlineSignal(undefined, deadlineMs)
   let response: Response
   try {
-    response = await doFetch(endpoint, { method: "POST", headers: { ...input.headers }, body: form })
+    response = await doFetch(endpoint, { method: "POST", headers: { ...input.headers }, body: form, signal })
   } catch {
-    throw new VoiceTranscriptionError(
-      `Could not reach the transcription façade at ${endpoint}. Check that the server is running, then retry — your audio is still held locally.`,
-    )
+    throw signal.aborted ? deadlineExceeded(deadlineMs) : unreachableFacade(endpoint)
   }
-  const body: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
-    const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
+    const body = parseJsonBody(await readExcerptResponseText(response, VOICE_ERROR_MAX_BYTES, signal))
+    const error = errorFromBody(body)
     throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
   }
-  return envelopeResult(body as TranscriptionEnvelope, input.registration)
+  let text: string
+  try {
+    text = await readBoundedResponseText(
+      response,
+      VOICE_RESPONSE_MAX_BYTES,
+      () =>
+        new VoiceTranscriptionError("The transcription façade's answer exceeded the response cap. Try a shorter clip."),
+    )
+  } catch (error) {
+    if (error instanceof VoiceTranscriptionError) throw error
+    throw signal.aborted
+      ? deadlineExceeded(deadlineMs)
+      : new VoiceTranscriptionError(
+          "The transcription façade's answer could not be read. Retry — your audio is still held locally.",
+        )
+  }
+  return envelopeResult(parseJsonBody(text) as TranscriptionEnvelope, input.registration)
 }
 
 // ------------------------------------------------------------ streaming (§6.4)
@@ -443,7 +515,9 @@ const MAX_PENDING_FRAME_LENGTH = 1024 * 1024
  * arrive; resolves with the finish frame's result. Pre-stream
  * failures keep the §2.4 JSON error mapping of the batch path; a
  * stream that ends without a finish frame fails typed, with the
- * audio-retry guidance. */
+ * audio-retry guidance. The deadline here is idle-based, not total:
+ * the façade's stream may legitimately outlive a batch call, so each
+ * frame re-arms it and only a silent peer aborts (#2462). */
 export async function submitVoiceTranscriptionStream(input: {
   readonly url: string
   readonly headers?: Readonly<Record<string, string>>
@@ -452,21 +526,34 @@ export async function submitVoiceTranscriptionStream(input: {
   readonly audio: VoiceAudio
   readonly language?: string
   readonly onPartial?: (text: string) => void
+  /** Idle bound override for tests; defaults to `VOICE_STREAM_IDLE_MS`. */
+  readonly idleMs?: number
 }): Promise<VoiceTranscriptionResult> {
   const doFetch = input.fetch ?? fetch
   const form = voiceForm({ ...input, stream: true })
   const endpoint = `${input.url.replace(/\/$/, "")}/v1/audio/transcriptions`
+  const idleMs = input.idleMs ?? VOICE_STREAM_IDLE_MS
+  // The controller covers the wait for response headers: aborting it
+  // cancels the request (and its body) the way a real fetch does.
+  const controller = new AbortController()
+  let headerTimer: ReturnType<typeof setTimeout> | undefined
   let response: Response
   try {
-    response = await doFetch(endpoint, { method: "POST", headers: { ...input.headers }, body: form })
+    headerTimer = setTimeout(() => controller.abort(), idleMs)
+    response = await doFetch(endpoint, {
+      method: "POST",
+      headers: { ...input.headers },
+      body: form,
+      signal: controller.signal,
+    })
   } catch {
-    throw new VoiceTranscriptionError(
-      `Could not reach the transcription façade at ${endpoint}. Check that the server is running, then retry — your audio is still held locally.`,
-    )
+    throw controller.signal.aborted ? streamStalled(idleMs) : unreachableFacade(endpoint)
+  } finally {
+    clearTimeout(headerTimer)
   }
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => undefined)
-    const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
+    const body = parseJsonBody(await readExcerptResponseText(response, VOICE_ERROR_MAX_BYTES))
+    const error = errorFromBody(body)
     throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
   }
   if (!response.body)
@@ -483,8 +570,28 @@ export async function submitVoiceTranscriptionStream(input: {
     }
     if (assembler.result === undefined) input.onPartial?.(assembler.provisional)
   }
+  // One read raced against the idle bound: a peer that stops sending
+  // (without closing) fails typed and the reader is cancelled instead
+  // of leaving the composer awaiting forever.
+  const nextChunk = () =>
+    new Promise<{ readonly done: boolean; readonly value?: Uint8Array }>((resolve, reject) => {
+      const readTimer = setTimeout(() => {
+        void reader.cancel().catch(() => undefined)
+        reject(streamStalled(idleMs))
+      }, idleMs)
+      reader.read().then(
+        (result) => {
+          clearTimeout(readTimer)
+          resolve(result)
+        },
+        (error) => {
+          clearTimeout(readTimer)
+          reject(error)
+        },
+      )
+    })
   while (!terminated) {
-    const { done: eof, value } = await reader.read()
+    const { done: eof, value } = await nextChunk()
     if (value) buffer += decoder.decode(value, { stream: true })
     let split = buffer.indexOf("\n\n")
     while (split >= 0) {
