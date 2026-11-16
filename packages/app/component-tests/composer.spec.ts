@@ -231,6 +231,7 @@ for (const draft of ["empty-draft", "multiline-draft", "mixed-attachments"]) {
 
     if (draft === "mixed-attachments") {
       await expect(component.getByAltText("layout.png")).toBeVisible()
+      await expect(component.getByRole("button", { name: "layout.png" })).toBeVisible()
       await expect(component.getByText("Keep the normal flow flat", { exact: true })).toBeVisible()
     }
   })

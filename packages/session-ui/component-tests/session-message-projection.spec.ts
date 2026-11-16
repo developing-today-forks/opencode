@@ -76,6 +76,7 @@ story("renders aliased and long custom model notices", async ({ mount, page }) =
 story("renders user image, file attachment, file reference, and agent reference", async ({ mount }) => {
   const timeline = await mount("current-session-timeline-rows--conversation", { args: { scenario: "attachments" } })
   await expect(timeline.getByAltText("pixel.png")).toBeVisible()
+  await expect(timeline.getByRole("button", { name: "pixel.png" })).toBeVisible()
   await expect(timeline.getByText("tsconfig.json")).toBeVisible()
   await expect(timeline.getByText("@src/a.ts", { exact: true })).toBeVisible()
   await expect(timeline.getByText("@explore", { exact: true })).toBeVisible()

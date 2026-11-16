@@ -27,7 +27,17 @@
   }
 
   &[data-clickable] {
+    appearance: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: start;
     cursor: pointer;
+
+    &:focus-visible {
+      outline: 2px solid var(--v2-border-border-focus);
+      outline-offset: 2px;
+    }
   }
 
   [data-slot="attachment-card-title"],

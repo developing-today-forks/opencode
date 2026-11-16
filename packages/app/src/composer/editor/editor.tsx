@@ -12,6 +12,7 @@ import {
   type JSX,
 } from "solid-js"
 import { createStore } from "solid-js/store"
+import { Dynamic } from "solid-js/web"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 import { createMediaQuery } from "@solid-primitives/media"
 import { FileIcon } from "@opencode/ui/file-icon"
@@ -692,12 +693,18 @@ export function ComposerAttachments(props: {
                         <>
                           {/* Keep loading local; the route boundary would detach the screen and drop editor focus. */}
                           <Suspense fallback={<div class="w-[58px] h-[46px]" />}>
-                            <img
-                              src={url() ?? ""}
-                              alt={attachment.filename}
-                              class="w-[58px] h-[46px] rounded-[6px] object-cover"
+                            <Dynamic
+                              component={props.onAttachmentClick ? "button" : "div"}
+                              type={props.onAttachmentClick ? "button" : undefined}
                               onClick={() => props.onAttachmentClick?.(attachment)}
-                            />
+                              class="block rounded-[6px] border-0 bg-transparent p-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-v2-border-border-focus"
+                            >
+                              <img
+                                src={url() ?? ""}
+                                alt={attachment.filename || i18n.t("ui.message.attachment.alt")}
+                                class="w-[58px] h-[46px] rounded-[6px] object-cover"
+                              />
+                            </Dynamic>
                           </Suspense>
                           <div class="absolute inset-0 rounded-[6px] shadow-[inset_0_0_0_0.5px_var(--v2-border-border-base)] pointer-events-none" />
                         </>
