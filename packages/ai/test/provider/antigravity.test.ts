@@ -248,6 +248,40 @@ it.effect("convertSchema lowers const to a one-element enum (#1557)", () =>
       type: "STRING",
       enum: ["b"],
     })
+    // Numeric/boolean enum members narrow the same way: membership is
+    // judged on stringified members, matching how scalar consts ride
+    // the string-valued proto enum (#2447).
+    expect(convertSchema({ type: "integer", enum: [1, 2], const: 2 })).toEqual({
+      type: "INTEGER",
+      enum: ["2"],
+    })
+    expect(convertSchema({ type: "boolean", enum: [true, false], const: false })).toEqual({
+      type: "BOOLEAN",
+      enum: ["false"],
+    })
+    // A genuine non-member const leaves the declared enum untouched.
+    expect(convertSchema({ type: "integer", enum: [1, 2], const: 3 })).toEqual({
+      type: "INTEGER",
+      enum: [1, 2],
+    })
+    expect(convertSchema({ type: "string", enum: ["a", "b"], const: "z" })).toEqual({
+      type: "STRING",
+      enum: ["a", "b"],
+    })
+    // A differently typed member that only matches after
+    // stringification is NOT a member: the declared enum is preserved
+    // (CodeRabbit finding on PR #2531).
+    expect(convertSchema({ type: "string", enum: [1, "other"], const: "1" })).toEqual({
+      type: "STRING",
+      enum: [1, "other"],
+    })
+    // An object enum member is never stringified by the membership
+    // test (a crafted member could throw); a scalar member still
+    // narrows normally alongside it (CodeRabbit finding on PR #2531).
+    expect(convertSchema({ type: "string", enum: ["ok", { toString: null }], const: "ok" })).toEqual({
+      type: "STRING",
+      enum: ["ok"],
+    })
     // Non-scalar consts cannot ride a string enum and are dropped — the
     // deliberate disposition documented in convertSchemaNode (#1557).
     expect(convertSchema({ type: "object", const: { a: 1 } })).toEqual({ type: "OBJECT" })
