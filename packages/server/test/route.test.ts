@@ -101,6 +101,36 @@ it.live("rejects a malformed route override and stores nothing", () =>
   }),
 )
 
+it.live("rejects an already-expired route override and stores nothing", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-endpoint-")))
+    const file = path.join(tmp.path, "route-overrides.json")
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => ModelRouteOverrides.setFilePath(file)),
+      () =>
+        Effect.gen(function* () {
+          const server = yield* startServer(tmp.path)
+
+          // save() drops expired entries, so a 200 here would answer with the override
+          // silently missing from the list; the server must refuse it instead.
+          const posted = yield* Effect.promise(() =>
+            fetch(new URL("/api/route/overrides", server.base), {
+              method: "POST",
+              headers: { ...server.headers, "content-type": "application/json" },
+              body: JSON.stringify({ ...draft, id: "test-override-expired", until: Date.now() - 1_000 }),
+            }),
+          )
+          expect(posted.status).toBe(400)
+
+          const listed = yield* list(server.base, server.headers)
+          expect(listed.status).toBe(200)
+          expect(ids(listed.body)).toEqual([])
+        }),
+      () => Effect.sync(() => ModelRouteOverrides.setFilePath(undefined)),
+    )
+  }),
+)
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }

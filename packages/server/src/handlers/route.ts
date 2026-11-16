@@ -25,6 +25,13 @@ export const RouteHandler = HttpApiBuilder.group(Api, "server.route", (handlers)
           return yield* new InvalidRequestError({
             message: `Route override is malformed and was not stored: ${ctx.payload.id}`,
           })
+        // The store's save() drops entries that are already expired, and parse() keeps a finite
+        // `until` regardless of now — so accepting the POST would answer 200 with the entry
+        // silently missing from the returned list.
+        if (item.until !== undefined && item.until <= Date.now())
+          return yield* new InvalidRequestError({
+            message: `Route override is already expired and was not stored: ${ctx.payload.id}`,
+          })
         ModelRouteOverrides.add(item)
         return { data: ModelRouteOverrides.current() }
       }),
