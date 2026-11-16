@@ -26,7 +26,7 @@ import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider, teamIdOf } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
-import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
+import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult, withQuotaLegDeadline } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -2975,5 +2975,25 @@ describe("opencode-go instance fold (popesdrew labelled row)", () => {
     const listing = await listConfiguredQuotaProviders(goCtx())
     expect(listing).toContain("opencode-go.popesdrew")
     expect(listing).toContain("opencode-go.developing-today-0")
+  })
+})
+
+describe("withQuotaLegDeadline", () => {
+  test("resolves with the leg result when it settles in time", async () => {
+    await expect(withQuotaLegDeadline("fast", Promise.resolve(42), 1_000)).resolves.toBe(42)
+  })
+
+  test("rejects with QuotaLegDeadlineError when the leg never settles", async () => {
+    const never = new Promise<number>(() => {})
+    const err = await withQuotaLegDeadline("wedged", never, 25).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).name).toBe("QuotaLegDeadlineError")
+    expect((err as Error).message).toContain("wedged")
+  })
+
+  test("propagates a leg rejection unchanged", async () => {
+    const boom = new Error("boom")
+    const err = await withQuotaLegDeadline("throws", Promise.reject(boom), 1_000).catch((e: unknown) => e)
+    expect(err).toBe(boom)
   })
 })
