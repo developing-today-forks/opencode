@@ -23,7 +23,7 @@
 //     every other provider keeps the full env block;
 //   * the CLI's client headers (`x-app: cli`, `claude-cli/<version>`
 //     User-Agent; version tracks the release this emulation was verified
-//     against - Claude Code 2.1.306, the fleet's installed CLI). The
+//     against - Claude Code 2.1.325, the latest upstream CLI release (wire-verified 2026-11-16; stamps track latest upstream, not the laptop install — Drew 2026-11-16)). The
 //     route's static User-Agent below is only the default: session
 //     requests carry the harness's own UA in `request.http.headers`,
 //     which the transport merges over route headers, so
@@ -54,7 +54,7 @@ export const IDENTITY_SYSTEM_TEXT = "You are Claude Code, Anthropic's official C
 export const OAUTH_BETA_HEADER = "claude-code-20250219,oauth-2025-04-20"
 
 /** The CLI's User-Agent grammar: `claude-cli/<version> (external, cli)`. Version = the verified CLI release. */
-export const CLI_USER_AGENT = "claude-cli/2.1.306 (external, cli)"
+export const CLI_USER_AGENT = "claude-cli/2.1.325 (external, cli)"
 
 export type OptionsInput = AnthropicMessages.OptionsInput
 export type ProviderOptionsInput = AnthropicMessages.ProviderOptionsInput

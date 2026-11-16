@@ -117,9 +117,9 @@ describe("Antigravity token refresh bounding (#1469)", () => {
 })
 
 describe("FALLBACK_UA - the audited agy wire identity", () => {
-  test("is the value captured from the installed CLI's wire (agy 1.5.0)", () => {
+  test("is the value MITM-captured from the latest upstream CLI's wire (agy 1.5.9)", () => {
     expect(FALLBACK_UA).toBe(
-      "antigravity/cli/1.5.0 (aidev_client; os_type=linux; arch=amd64; cl=1013440158; auth_method=consumer)",
+      "antigravity/cli/1.5.9 (aidev_client; os_type=linux; arch=amd64; cl=1021519450; auth_method=consumer)",
     )
     expect(FALLBACK_UA).toMatch(
       /^antigravity\/cli\/\d+\.\d+\.\d+ \(aidev_client; os_type=linux; arch=amd64; cl=\d+; auth_method=consumer\)$/,

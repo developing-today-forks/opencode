@@ -179,8 +179,8 @@ describe("vibeAuth - the Vibe CLI's User-Agent, stamped after the transport merg
       }),
     )
 
-  test("CLI_USER_AGENT is the audited binary's wire value (mistral-vibe 3.1.0)", () => {
-    expect(CLI_USER_AGENT).toBe("mistral-client-python/Mistral-Vibe/3.1.0")
+  test("CLI_USER_AGENT is the audited binary's wire value (mistral-vibe 3.1.2)", () => {
+    expect(CLI_USER_AGENT).toBe("mistral-client-python/Mistral-Vibe/3.1.2")
   })
 
   test("the static apiKey path stamps the Vibe UA over the session UA", async () => {

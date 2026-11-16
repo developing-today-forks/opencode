@@ -93,12 +93,14 @@ export const resolveApiKey = async (sources: CredentialSources = {}): Promise<st
 /**
  * The CLI version this emulation tracks. The gateway keys behavior on
  * the `x-command-code-version` header (the CLI sends its own version),
- * so the value must move with the installed CLI; 1.74.1 is the fleet's
- * installed release, whose bundle this protocol was extracted from.
- * Deployments on a different CLI release override it via the provider's
- * `cliVersion` setting.
+ * so the value must move with the LATEST upstream CLI (Drew 2026-11-16:
+ * stamps track latest upstream, not the laptop install); 1.89.1 is the
+ * latest upstream release (npm-verified 2026-11-16; header/URL/path sets
+ * identical to 1.88.5). The protocol itself was extracted from the
+ * 1.74.1 bundle. Deployments on a different CLI release override it via
+ * the provider's `cliVersion` setting.
  */
-export const CLI_VERSION = "1.74.1"
+export const CLI_VERSION = "1.89.1"
 
 /** The CLI's per-request headers (bundle: buildCommandApiHeaders). */
 export const cliHeaders = (apiKey: string, cliVersion: string = CLI_VERSION) => ({

@@ -217,8 +217,8 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
   // the CLI UA reaches the wire only because auth re-stamps it here.
   const sessionHeaders = () => Headers.fromInput({ "User-Agent": "opencode/prod/test/cli" })
 
-  test("CLI_USER_AGENT is the audited binary's value (claude 2.1.306)", () => {
-    expect(ClaudeCodeMessages.CLI_USER_AGENT).toBe("claude-cli/2.1.306 (external, cli)")
+  test("CLI_USER_AGENT is the audited binary's value (claude 2.1.325)", () => {
+    expect(ClaudeCodeMessages.CLI_USER_AGENT).toBe("claude-cli/2.1.325 (external, cli)")
   })
 
   test("the credentials-file path stamps the CLI UA over the session UA", async () => {
