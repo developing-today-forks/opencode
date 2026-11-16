@@ -109,9 +109,12 @@ jobs:
   # Recovery is workflow-level and bounded: exactly one recompute, on the
   # alternate macos-15 runner pool, and only when the primary leg left no
   # hash artifact. This job has no continue-on-error: if it fails, the run fails.
+  # #2539: a cancelled needs-job skips dependents under the default
+  # success() gate, so without `if: always()` this fallback never engaged.
   compute-hash-darwin-fallback:
     timeout-minutes: 20
     needs: compute-hash
+    if: always() && needs.compute-hash.result != 'skipped'
     runs-on: macos-15
 
     steps:
@@ -186,7 +189,15 @@ jobs:
   update-hashes:
     timeout-minutes: 15
     needs: [compute-hash, compute-hash-darwin-fallback]
-    if: github.event_name != 'pull_request'
+    # #2539: when the darwin leg is cancelled, compute-hash result is
+    # 'cancelled' and the default success() gate would skip the restamp even
+    # though the fallback recovered the hash. Gate explicitly: proceed on a
+    # successful fallback when compute-hash succeeded or was cancelled (a
+    # 'failure' there means a linux leg failed, preserving the old skip).
+    if: >
+      always() && github.event_name != 'pull_request'
+      && needs.compute-hash-darwin-fallback.result == 'success'
+      && (needs.compute-hash.result == 'success' || needs.compute-hash.result == 'cancelled')
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04
 
@@ -245,7 +256,11 @@ jobs:
               jq --arg sys "$SYSTEM" --arg h "$HASH" '.nodeModules[$sys] = $h' "$HASH_FILE" > tmp.json
               mv tmp.json "$HASH_FILE"
             else
-              echo "::warning::Missing hash for ${SYSTEM}"
+              # #2539 follow-up (CodeRabbit on #2540): the update-hashes gate
+              # accepts a 'cancelled' compute-hash result, so a cancelled
+              # linux leg must not silently commit a partial restamp.
+              echo "::error::Missing hash for ${SYSTEM}; refusing to commit a partial restamp"
+              exit 1
             fi
           done
 
