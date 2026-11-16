@@ -1,6 +1,7 @@
 export * as SessionRunnerRenderCard from "./render-card.js"
 
 import { ModelPlan } from "../../model-plan.js"
+import { ownValue } from "../../util/record.js"
 
 /**
  * The render-card seam (opencode#2384 slices 2–3, design A — agent-invoked,
@@ -69,7 +70,7 @@ const ESCAPE_MAP: Record<string, string> = {
   "'": "&#39;",
 }
 
-const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (char) => ESCAPE_MAP[char] ?? char)
+const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (char) => ownValue(ESCAPE_MAP, char) ?? char)
 
 const capitalizeTier = (tier: string): string => (tier ? tier.charAt(0).toUpperCase() + tier.slice(1) : tier)
 
