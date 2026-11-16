@@ -256,7 +256,11 @@ jobs:
               jq --arg sys "$SYSTEM" --arg h "$HASH" '.nodeModules[$sys] = $h' "$HASH_FILE" > tmp.json
               mv tmp.json "$HASH_FILE"
             else
-              echo "::warning::Missing hash for ${SYSTEM}"
+              # #2539 follow-up (CodeRabbit on #2540): the update-hashes gate
+              # accepts a 'cancelled' compute-hash result, so a cancelled
+              # linux leg must not silently commit a partial restamp.
+              echo "::error::Missing hash for ${SYSTEM}; refusing to commit a partial restamp"
+              exit 1
             fi
           done
 
