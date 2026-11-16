@@ -17,6 +17,11 @@ export default defineConfig({
   output: "server",
   adapter: cloudflare({
     imageService: "passthrough",
+    // Astro 7's Cloudflare adapter defaults to prerendering in workerd, which
+    // resolves satteri's WASM browser binding (its optional wasm32 package is
+    // not installed on native platforms). Node prerendering matches the
+    // adapter behavior before the astro 5 -> 7 jump.
+    prerenderEnvironment: "node",
   }),
   devToolbar: {
     enabled: false,
@@ -26,6 +31,16 @@ export default defineConfig({
   },
   markdown: {
     rehypePlugins: [rehypeHeadingIds, [rehypeAutolinkHeadings, { behavior: "wrap" }]],
+  },
+  vite: {
+    environments: {
+      // Starlight's Steps, Tabs, and FileTree components import satteri at module
+      // scope. Bundling its napi loader into the prerender chunks breaks native
+      // binding resolution, so let Node load the real package during prerender.
+      prerender: {
+        resolve: { external: ["satteri"] },
+      },
+    },
   },
   build: {},
   integrations: [
