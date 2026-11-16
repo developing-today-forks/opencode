@@ -4,12 +4,15 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
 import { expect, spyOn, test } from "bun:test"
-import { Effect, FileSystem, Layer, PlatformError, Stream } from "effect"
+import { Effect, FileSystem, Layer, PlatformError, Redacted, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { releaseMaxResponseBytes, Updater } from "../src/services/updater"
 import { testEffect } from "../../core/test/lib/effect"
+
+const unwrap = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value
 
 const it = testEffect(NodeServices.layer)
 
@@ -113,7 +116,7 @@ function fixture(
             Effect.suspend(() => {
               if (command._tag !== "StandardCommand") return Effect.die("Unexpected piped install command")
               const lookup = command.command === "git" && command.args[0] === "--exec-path"
-              if (!lookup) commands.push([command.command, ...command.args])
+              if (!lookup) commands.push([command.command, ...command.args.map(unwrap)])
               const result = lookup
                 ? { stdout: Buffer.from(`${path.join(git, "mingw64", "libexec", "git-core")}\n`) }
                 : respond(command)
@@ -182,7 +185,7 @@ it.live("vp removes the package from its managed global store", () =>
     Effect.gen(function* () {
       const test = yield* fixture((command) => {
         expect(command.command).toBe("bun")
-        expect(existsSync(command.args[4])).toBe(true)
+        expect(existsSync(unwrap(command.args[4]))).toBe(true)
         return { exitCode, stderr: Buffer.from("bun install failed") }
       })
       const result = yield* test.updater.upgrade("bun", "v2.3.4-beta.1").pipe(Effect.flip, Effect.option)
@@ -209,7 +212,7 @@ it.live("bun ignores install cache cleanup failures", () =>
   it.live(`curl uses the V2 installer and cleans its directory: ${failure}`, () =>
     Effect.gen(function* () {
       const test = yield* fixture((command) => {
-        const installer = command.command === "curl" ? command.args[2] : command.args[0]
+        const installer = command.command === "curl" ? unwrap(command.args[2]) : unwrap(command.args[0])
         expect(existsSync(path.dirname(installer))).toBe(true)
         return {
           exitCode:

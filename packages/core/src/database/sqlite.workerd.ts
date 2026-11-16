@@ -183,6 +183,7 @@ const make = (options: Config) =>
       (yield* SqlClient.make({
         acquirer,
         compiler,
+        driver: "sqlite-workerd",
         transactionAcquirer,
         transactionService: WorkerdTransaction,
         spanAttributes: [

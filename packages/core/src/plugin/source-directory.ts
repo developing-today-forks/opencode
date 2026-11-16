@@ -11,7 +11,7 @@ export const discover = Effect.fn("PluginSourceDirectory.discover")(function* (
   directory: string,
 ) {
   const children = (yield* Effect.forEach(names, (source) =>
-    fs.readDirectoryEntries(path.join(directory, source)).pipe(
+    fs.readDirEntries(path.join(directory, source)).pipe(
       Effect.orElseSucceed(() => []),
       Effect.map((entries) => entries.map((entry) => ({ ...entry, target: path.join(directory, source, entry.name) }))),
     ),

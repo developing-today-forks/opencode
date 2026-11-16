@@ -5,7 +5,7 @@ import { isArrayNonEmpty } from "effect/Array"
 import * as NodeSink from "@effect/platform-node/NodeSink"
 // ast-grep-ignore: no-star-import
 import * as NodeStream from "@effect/platform-node/NodeStream"
-import { Deferred, Effect, Exit, FileSystem, Layer, Path, PlatformError, Predicate, Sink, Stream } from "effect"
+import { Deferred, Effect, Exit, FileSystem, Layer, Path, PlatformError, Predicate, Redacted, Sink, Stream } from "effect"
 import type { Scope } from "effect"
 import { ChildProcess } from "effect/process"
 import {
@@ -24,6 +24,9 @@ import { makeGlobalNode } from "./effect/app-node.js"
 import { filesystem, path } from "./effect/app-node-platform.js"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
+
+const unwrap = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value
 
 // A child that exits before it reads its stdin makes the next write fail with EPIPE, or ERR_STREAM_DESTROYED once the
 // stream is torn down. The child's exit status and output are still the result, so this error is not a failure.
@@ -130,8 +133,15 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
     return path.resolve(opts.cwd)
   })
 
-  const env = (opts: ChildProcess.CommandOptions) =>
-    opts.extendEnv ? { ...globalThis.process.env, ...opts.env } : opts.env
+  const env = (opts: ChildProcess.CommandOptions) => {
+    if (opts.env === undefined) return opts.extendEnv ? globalThis.process.env : undefined
+    const result: Record<string, string | undefined> = opts.extendEnv ? { ...globalThis.process.env } : {}
+    for (const [key, value] of Object.entries(opts.env)) {
+      if (value === undefined) delete result[key]
+      else result[key] = unwrap(value)
+    }
+    return result
+  }
 
   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
     Stream.isStream(x) ? "pipe" : x
@@ -308,7 +318,7 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
     Effect.callback<Spawned, PlatformError.PlatformError>((resume) => {
       const closed = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
       const exited = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
-      const proc = launch(command.command, command.args, opts)
+      const proc = launch(command.command, command.args.map(unwrap), opts)
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
       proc.on("error", (err) => {

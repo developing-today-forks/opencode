@@ -121,14 +121,14 @@ export const cleanup = Effect.fn("Shell.cleanup")(function* () {
   const fs = yield* FSUtil.Service
   const global = yield* Global.Service
   const directory = path.join(global.data, DIRECTORY)
-  const projects = yield* fs.readDirectoryEntries(directory).pipe(
+  const projects = yield* fs.readDirEntries(directory).pipe(
     Effect.map((entries) => entries.filter((entry) => entry.type === "directory")),
     Effect.orElseSucceed(() => []),
   )
   const files = yield* Effect.forEach(
     projects,
     (project) =>
-      fs.readDirectoryEntries(path.join(directory, project.name)).pipe(
+      fs.readDirEntries(path.join(directory, project.name)).pipe(
         Effect.map((entries) =>
           entries.flatMap((entry) =>
             entry.type === "file" && /^sh_[0-9a-f]{12}.*\.out$/.test(entry.name)
