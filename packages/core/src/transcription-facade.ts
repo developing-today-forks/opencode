@@ -88,6 +88,41 @@ export interface TranscriptionModelRegistration {
 
 const MIB = 1024 * 1024
 
+/**
+ * Multipart overhead allowance for the route-level body bound (#2433):
+ * a transcription request body is the audio file plus multipart
+ * boundaries, part headers and the non-file form fields, so the body
+ * bound is the audio cap plus this small named allowance — never a
+ * second hard-coded upload cap.
+ */
+export const MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+/** The request-body bound for one registration: its audio cap plus
+ * the multipart overhead allowance. */
+export const transcriptionBodyLimit = (registration: TranscriptionModelRegistration): number =>
+  registration.maxUploadBytes + MULTIPART_OVERHEAD_BYTES
+
+/**
+ * The route-level request-body bound (#2433): the largest body bound
+ * among the registrations visible to the caller. The handler enforces
+ * this bound while reading — a declared content-length over it is
+ * refused up front and a streamed body is cut off at it — because the
+ * resolved registration is only known after the multipart form (which
+ * carries the model field) has been parsed. The per-registration cap
+ * itself is still enforced exactly by parseTranscriptionRequest once
+ * the registration is resolved. When no provider is enabled the
+ * visible set is empty; the bound then falls back to all
+ * registrations, so the route safety limit still applies (the request
+ * itself will answer model_not_found after the bounded read).
+ */
+export const maxTranscriptionBodyLimit = (enabledProviders?: ReadonlySet<string>): number => {
+  const visible = TRANSCRIPTION_MODELS.filter(
+    (model) => enabledProviders === undefined || enabledProviders.has(model.providerID),
+  )
+  const registrations = visible.length > 0 ? visible : TRANSCRIPTION_MODELS
+  return Math.max(...registrations.map(transcriptionBodyLimit))
+}
+
 export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration> = [
   {
     ref: "openai/whisper-1",

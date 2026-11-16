@@ -34,7 +34,60 @@ interface TranscriptionRequestContext {
 export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
   Effect.gen(function* () {
     const contentType = Option.getOrElse(Headers.get(ctx.request.headers, "content-type"), () => "")
-    const body = yield* ctx.request.arrayBuffer.pipe(Effect.catchCause(() => Effect.succeed(null)))
+    // Config gating identical to chat providers (§3): a provider
+    // absent from the location enabled catalog has its
+    // transcription refs vanish from resolution too. The catalog is
+    // read before the body so the body bound below derives from the
+    // visible registrations (#2433).
+    const models = yield* Model.Service
+    const catalog = yield* models.catalog()
+    const enabledProviders = new Set(catalog.map((model) => model.providerID))
+    // Bounded body read (#2433): the 25 MiB cap in the facade only
+    // runs after parsing, so without a bound here the route would
+    // materialize the whole body (and further copies) before the cap
+    // could run. The bound derives from the visible registrations
+    // maxUploadBytes plus the multipart overhead allowance — see
+    // TranscriptionFacade.maxTranscriptionBodyLimit.
+    const bodyLimit = TranscriptionFacade.maxTranscriptionBodyLimit(enabledProviders)
+    const tooLarge = (observed: string) =>
+      errorResponse(
+        413,
+        `request body is too large: ${observed}; the transcription limit is ${bodyLimit} bytes ` +
+          `(largest registered audio cap plus multipart overhead)`,
+        "audio_too_large",
+      )
+    const declaredLength = Number(Option.getOrElse(Headers.get(ctx.request.headers, "content-length"), () => ""))
+    if (Number.isFinite(declaredLength) && declaredLength > bodyLimit)
+      return tooLarge(`content-length declares ${declaredLength} bytes`)
+    // Streamed cutoff: takeUntilEffect ends the stream normally (a
+    // failure here would surface as a server error in the web
+    // handler) as soon as the running total crosses the bound, so a
+    // body that stalls after crossing it is answered 413 from the
+    // bytes already delivered instead of waiting for the rest.
+    let streamedTotal = 0
+    const read = yield* Effect.result(
+      ctx.request.stream.pipe(
+        Stream.takeUntilEffect((chunk) =>
+          Effect.sync(() => {
+            streamedTotal += chunk.length
+            return streamedTotal > bodyLimit
+          }),
+        ),
+        Stream.runCollect,
+      ),
+    )
+    if (streamedTotal > bodyLimit) return tooLarge("it crossed the limit while reading")
+    const body: Uint8Array<ArrayBuffer> | null = Result.isFailure(read)
+      ? null
+      : (() => {
+          const bytes = new Uint8Array(streamedTotal)
+          let offset = 0
+          for (const chunk of read.success) {
+            bytes.set(chunk, offset)
+            offset += chunk.length
+          }
+          return bytes
+        })()
     const form = body
       ? yield* Effect.promise(() =>
           new Response(body, { headers: { "content-type": contentType } }).formData(),
@@ -63,12 +116,6 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
         }
       }
     }
-    // Config gating identical to chat providers (§3): a provider
-    // absent from the location's enabled catalog has its
-    // transcription refs vanish from resolution too.
-    const models = yield* Model.Service
-    const catalog = yield* models.catalog()
-    const enabledProviders = new Set(catalog.map((model) => model.providerID))
     const parsed = TranscriptionFacade.parseTranscriptionRequest({ fields, file }, enabledProviders)
     if (!parsed.ok) return errorResponse(parsed.error.status, parsed.error.message, parsed.error.code)
     const facade = yield* TranscriptionFacade.Service
