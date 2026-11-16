@@ -346,6 +346,43 @@ jobs:
         working-directory: services/www
         run: bun run check:generated
 
+  turso-engine:
+    # TursoDB backend coverage (issue #2505): the database and messaging
+    # suites against OPENCODE_DB_ENGINE=turso, including the Tantivy search
+    # path. Same dispatch/schedule-only tier as the rest of this workflow
+    # (no pull_request trigger, #1401); the tantivyQuery unit test above
+    # also runs on the stock engine inside `unit`.
+    timeout-minutes: 20
+    name: basic turso-engine
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Run database and messaging suites on the TursoDB backend
+        working-directory: packages/core
+        env:
+          OPENCODE_DB_ENGINE: turso
+        run: |
+          bun run test \
+            test/database.test.ts \
+            test/database-drizzle.test.ts \
+            test/database-migration.test.ts \
+            test/database-busy-retry.test.ts \
+            test/messaging-search.test.ts \
+            test/messaging.test.ts \
+            test/messaging-log.test.ts \
+            test/messaging-template.test.ts
+
   build:
     # Main tier only (ci-policy.md): build runs on push to main, the
     # nightly schedule and manual dispatch -- the only events this
@@ -558,7 +595,7 @@ jobs:
   # stages whose results the e2e aggregator job above re-asserts, so every
   # failure in this workflow surfaces in at least one of these needs.
   ci-fix:
-    needs: [unit, build, e2e]
+    needs: [unit, turso-engine, build, e2e]
     if: failure()
     timeout-minutes: 10
     permissions:

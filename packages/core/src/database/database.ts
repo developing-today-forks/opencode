@@ -98,7 +98,11 @@ export function layer(options: Options = { path: ":memory:" }) {
       if (filename === ":memory:") return provide(filename)
       const file = isAbsolute(filename) ? filename : join((yield* Global.Service).data, filename)
       yield* Effect.promise(() => restrictToOwner(file))
-      return provide(file)
+      // TursoDB materializes its WAL file on open, after the pre-open chmod
+      // above, with the process umask instead of the database's mode (#2505).
+      // Re-tighten after the connection is built so sidecars created at open
+      // time are owner-only too; a no-op on backends that inherit the mode.
+      return provide(file).pipe(Layer.tap(() => Effect.promise(() => restrictToOwner(file))))
     }),
   )
 }
