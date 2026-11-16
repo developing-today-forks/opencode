@@ -335,6 +335,30 @@ export const Plugin = define({
         editor.update(ModelRoute.PROVIDER_ID, id, (model) => {
           Object.assign(model, info)
         })
+        // This build runs after the provider plugin's model transform, and the
+        // Object.assign above writes the whole route model over any configured
+        // overrides that transform did apply (#239): replay the configured
+        // opencode-route overrides here, exactly as for a route created in the
+        // retarget transform above, so disabled/name/limit hold for pools
+        // built in this transform too.
+        const routeProviderItems = configuredRouteProviderItems(loaded.entries)
+        const routeProviderBaseURL = routeProviderItems.some((item) => item.settings?.baseURL !== undefined)
+        for (const item of routeProviderItems) {
+          const config = item.models?.[id]
+          if (!config) continue
+          applyModelConfig(
+            editor,
+            item,
+            {
+              providerID: String(ModelRoute.PROVIDER_ID),
+              baseURL: routeProviderBaseURL,
+              models: new Map([[id, { inherit: false }]]),
+            },
+            String(ModelRoute.PROVIDER_ID),
+            id,
+            config,
+          )
+        }
       })
       reportedByModels = report(diagnostics, reportedByModels)
     })
