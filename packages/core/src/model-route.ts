@@ -1488,7 +1488,6 @@ export const releaseQuotaSkipsForCurrent = (
   const entries = readings.filter((reading) => reading.providerID === target.providerID)
   if (entries.length === 0) return []
   const own = modelWindowReading(entries, target.providerID, target.id as string)
-  if (!own) return []
   const threshold = currentConstants(location).quotaGate.balanceDeadThreshold
   const asSnapshot = (reading: { percent: number; resetAt: number | null; observedAt: number }) => ({
     planID: "quota-current",
@@ -1500,21 +1499,25 @@ export const releaseQuotaSkipsForCurrent = (
     observedAt: reading.observedAt,
     stale: now - reading.observedAt > QuotaSnapshot.DEFAULT_MAX_AGE_MS,
   })
-  const ownSnapshot = asSnapshot(own)
   // An incomplete freshest reading — some window of the model's measurement
   // carries no percent — is not whole evidence of headroom (#2036): it lifts
   // nothing, exactly as a stale or full reading lifts nothing.
-  if (!own.complete) return []
-  if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
+  if (own) {
+    if (!own.complete) return []
+    const ownSnapshot = asSnapshot(own)
+    if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
+  }
   const modelSkipID = quotaModelSkipID(target)
   const providerStanding = adjustments.some(
     (item) => item.id === `quota:${target.providerID}` && attemptQuotaSkip(item),
   )
   // While a provider-wide record stands, this model's headroom alone lifts nothing —
   // not even its own record beneath it: the leaf is out at provider scope, so only
-  // provider-wide headroom (below) re-admits anything.
-  const released = !providerStanding
-    ? releaseQuotaSkipsForSnapshot(target, ownSnapshot, now, location).filter((id) => id === modelSkipID)
+  // provider-wide headroom (below) re-admits anything. With no model-keyed reading at
+  // all (the gatherer's provider-windows shape, e.g. `_claude`), there is no model
+  // headroom to judge, and provider-wide headroom alone judges the provider record.
+  const released = !providerStanding && own
+    ? releaseQuotaSkipsForSnapshot(target, asSnapshot(own), now, location).filter((id) => id === modelSkipID)
     : []
   if (!providerStanding) return released
   // A provider-wide record stands: it lifts only on provider-wide headroom — the
