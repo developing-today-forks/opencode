@@ -1,5 +1,15 @@
 import { Schema } from "effect"
 
+// Named because `createSchemaClass` subclasses reference this base through the
+// `create` overloads: declaration emit cannot serialize the inferred cyclic type.
+export interface NamedErrorClass<Name extends string = string, Data = unknown> {
+  new (data: Data, options?: ErrorOptions): NamedError & { readonly data: Data; readonly name: Name }
+  readonly Schema: Schema.Top
+  readonly EffectSchema: Schema.Top
+  readonly tag: Name
+  isInstance(input: unknown): input is NamedError
+}
+
 export abstract class NamedError extends Error {
   abstract schema(): Schema.Top
   abstract toObject(): { name: string; data: unknown }
@@ -16,11 +26,14 @@ export abstract class NamedError extends Error {
     name: Name,
     data: DataSchema,
   ): ReturnType<typeof NamedError.createSchemaClass<Name, DataSchema>>
-  static create<Name extends string>(name: Name, data: Schema.Top | Schema.Struct.Fields) {
+  static create<Name extends string>(name: Name, data: Schema.Top | Schema.Struct.Fields): NamedErrorClass<Name, any> {
     return NamedError.createSchemaClass(name, Schema.isSchema(data) ? data : Schema.Struct(data))
   }
 
-  public static createSchemaClass<Name extends string, DataSchema extends Schema.Top>(name: Name, data: DataSchema) {
+  public static createSchemaClass<Name extends string, DataSchema extends Schema.Top>(
+    name: Name,
+    data: DataSchema,
+  ): NamedErrorClass<Name, Schema.Schema.Type<DataSchema>> {
     const schema = Schema.Struct({
       name: Schema.Literal(name),
       data,
@@ -42,7 +55,7 @@ export abstract class NamedError extends Error {
         this.name = name
       }
 
-      static isInstance(input: unknown): input is InstanceType<typeof result> {
+      static isInstance(input: unknown): input is NamedError {
         return NamedError.hasName(input, name)
       }
 

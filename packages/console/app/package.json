@@ -4,13 +4,14 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "bun check --no-script --noEmit",
     "test": "bun test",
     "dev": "vite dev --host 0.0.0.0",
     "dev:enterprise": "bun --watch script/dev-enterprise.ts",
     "dev:remote": "bun sst shell --stage=dev bun dev",
     "build": "bun ./script/generate-sitemap.ts && vite build && bun ../../schema/script/config-schema.ts ./.output/public/config.json",
-    "start": "vite start"
+    "start": "vite start",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "1.15.2",
@@ -31,7 +32,7 @@
   },
   "devDependencies": {
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "@webgpu/types": "0.1.54",
     "typescript": "catalog:",
     "wrangler": "4.50.0"

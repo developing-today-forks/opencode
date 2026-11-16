@@ -74,13 +74,14 @@ for (const scenario of ["typing", "cursor-movement", "cursor-noop", "submit-clea
         // (which already discards superseded writes). This fixture is ASCII only.
         if (counts) {
           const parse = JSON.parse
-          JSON.parse = (value, reviver) => {
+          JSON.parse = (value: string, reviver?: Parameters<typeof parse>[1]) => {
             if (probe.active && typeof value === "string" && value.startsWith('{"prompt":[')) {
               probe.encodes++
               probe.bytes += value.length
             }
 
-            return parse(value, reviver)
+            if (reviver === undefined) return parse(value)
+            return parse(value, reviver as (this: unknown, key: string, value: unknown) => unknown)
           }
         }
 

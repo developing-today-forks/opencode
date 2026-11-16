@@ -47,10 +47,11 @@
   },
   "scripts": {
     "generate:progress-indicator": "bun script/generate-session-progress-indicator.ts",
-    "typecheck": "tsgo -b",
+    "typecheck": "bun check --no-script -b",
     "test": "bun test src --only-failures",
     "test:components": "playwright test --config playwright.components.config.ts",
-    "test:components:ui": "playwright test --config playwright.components.config.ts --ui"
+    "test:components:ui": "playwright test --config playwright.components.config.ts --ui",
+    "typecheck:tsc": "tsc -b"
   },
   "devDependencies": {
     "@babel/core": "7.29.7",
@@ -60,7 +61,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "babel-preset-solid": "1.9.15",
     "vite": "catalog:",
     "vite-plugin-solid": "catalog:"

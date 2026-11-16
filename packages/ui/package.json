@@ -91,11 +91,12 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "bun check --no-script",
     "test": "bun test src --only-failures",
     "dev": "vite",
     "generate:tailwind": "bun run script/tailwind.ts",
-    "generate:v2-oc2": "bun run script/build-oc2-v2-overrides.ts"
+    "generate:v2-oc2": "bun run script/build-oc2-v2-overrides.ts",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "devDependencies": {
     "@babel/core": "7.29.7",
@@ -105,7 +106,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "babel-preset-solid": "1.9.15",
     "solid-js": "catalog:",
     "tailwindcss": "catalog:",

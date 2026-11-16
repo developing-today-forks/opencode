@@ -58,7 +58,7 @@ Terminal.prototype.open = function (element) {
       probe.draws++
 
       if (hidden) probe.hiddenDraws++
-      draw.apply(this, args)
+      draw.apply(this, args as Parameters<CanvasRenderingContext2D["drawImage"]>)
     }
   }
 }

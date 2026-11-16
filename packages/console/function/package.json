@@ -6,15 +6,16 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "bun check --no-script --noEmit",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
     "@tsconfig/node22": "22.0.2",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "typescript": "catalog:",
-    "@typescript/native-preview": "catalog:"
+    "@typescript/native": "catalog:",
+    "typescript": "catalog:"
   },
   "dependencies": {
     "@opencode/console-resource": "workspace:*"

@@ -3159,7 +3159,7 @@ describe("empty-completion streak (#1903)", () => {
     },
   } as const
 
-  const setup = (db: any, sessionID: Session.ID, slug: string) =>
+  const setup = (db: Database.Interface["db"], sessionID: Session.ID, slug: string) =>
     Effect.gen(function* () {
       yield* db
         .insert(ProjectTable)
@@ -3171,7 +3171,13 @@ describe("empty-completion streak (#1903)", () => {
         .run()
     })
 
-  const runAttempt = (steps: any, llm: any, sessionID: Session.ID, model: any, scripted: any) =>
+  const runAttempt = (
+    steps: Effect.Success<typeof SessionStep.make>,
+    llm: TestLLM.TestInterface,
+    sessionID: Session.ID,
+    model: Parameters<Effect.Success<typeof SessionStep.make>["attempt"]>[0]["model"],
+    scripted: TestLLM.Response,
+  ) =>
     Effect.gen(function* () {
       yield* llm.push(scripted)
       return yield* steps

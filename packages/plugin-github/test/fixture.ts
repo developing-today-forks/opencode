@@ -119,7 +119,9 @@ export const makeDeps = Effect.fn("test.github.deps")(function* (input: {
   const scope = yield* Scope.Scope
   const kv = memoryKV()
   const asserted: Parameters<PermissionDomain["assert"]>[0][] = []
-  const notified: Parameters<GitHubShared.Deps["sessions"]["synthetic"]>[0][] = []
+  // Named inline: the inferred parameter type lives in generated client code
+  // that declaration emit cannot reference.
+  const notified: Array<{ readonly text: string; readonly metadata?: unknown }> = []
   const permission: GitHubShared.Deps["permission"] = {
     assert: (assertion) => Effect.sync(() => void asserted.push(assertion)),
   }
