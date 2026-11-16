@@ -464,3 +464,56 @@ it.effect("a route whose targets are all transform-created exists after the plug
   }),
 )
 
+it.effect("a pool built by the later model transform (matching keys) keeps its configured overrides (#239)", () =>
+  Effect.gen(function* () {
+    const plugins = yield* Plugin.Service
+    const source: Plugin.Generation = {
+      id: "pattern-route-source",
+      revision: "1",
+      effect: (ctx) =>
+        ctx.provider
+          .transform((editor) =>
+            editor.add({
+              info: { ...Provider.Info.empty(azure), activation: "enabled" },
+              models: [info("gpt-5-base"), info("gpt-5-mini")],
+            }),
+          )
+          .pipe(Effect.asVoid),
+    }
+    yield* plugins.activate([source])
+    const raw = {
+      providers: {
+        "opencode-route": {
+          models: {
+            patterned: { disabled: true, name: "Patterned Route" },
+          },
+        },
+      },
+      experimental: {
+        routes: {
+          models: {
+            patterned: { include: ["*base*"] },
+          },
+        },
+      },
+    }
+    const normalized = ConfigNormalize.normalize(raw)
+    if (normalized.type !== "normalized") throw new Error("the test config must normalize")
+    const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins)).pipe(
+      Effect.provide(Config.testLayer(entries)),
+    )
+    const models = yield* Model.Service
+    const patterned = yield* models.get(ModelRoute.PROVIDER_ID, Model.ID.make("patterned"))
+    expect(patterned).toBeDefined()
+    const definition = patterned ? ModelRoute.definition(patterned) : undefined
+    expect(definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/gpt-5-base"])
+    // The pool is built only in the later model transform (its include key
+    // defers it), after the provider plugin's override transform has run, so
+    // the routes plugin must apply the configured overrides itself: the
+    // disabled flag and the display name land on the patterned pool exactly
+    // as they do on a pool built in the provider transform.
+    expect(patterned?.enabled).toEqual(false)
+    expect(patterned?.name).toEqual("Patterned Route")
+  }),
+)
