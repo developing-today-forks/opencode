@@ -126,7 +126,20 @@ jobs:
   compute-hash-darwin-fallback:
     timeout-minutes: 20
     needs: compute-hash
-    if: always() && needs.compute-hash.result == 'cancelled'
+    # #2547: do not key this gate on the matrix result being
+    # 'cancelled'. The darwin leg's continue-on-error masks a
+    # cancelled leg in needs.compute-hash.result: run 43920489996
+    # had the leg cancelled with zero steps, the aggregate result
+    # was 'success', an `== 'cancelled'` gate skipped this job, and
+    # the run failed with the hash never recovered. Run whenever
+    # compute-hash ran and let the Decide step below no-op when the
+    # primary hash artifact already exists.
+    if: always() && needs.compute-hash.result != 'skipped'
+    # A fallback that never starts (macos-15 pool unavailable) must
+    # not fail an otherwise-green run: when the primary hash exists
+    # this job was a no-op anyway, and when it is missing
+    # update-hashes fails visibly on the absent artifact (#2544).
+    continue-on-error: true
     runs-on: macos-15
 
     steps:
