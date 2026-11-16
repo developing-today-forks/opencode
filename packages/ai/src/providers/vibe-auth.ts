@@ -266,15 +266,16 @@ const loadApiKeyEffect = (sources?: CredentialSources) =>
  * mistral-backend provider (real Mistral Vibe CLI 3.1.0, POST
  * /v1/chat/completions). The unprefixed form `Mistral-Vibe/3.1.0` is
  * what a generic-backend capture produces and is NOT what the real
- * Mistral route sends. The version tracks the fleet's installed
- * release (mistral-vibe 3.1.0, the uv-tool install in
- * ~/.local/share/uv/tools); move it when that install moves. Stamped
+ * Mistral route sends. The version tracks the LATEST upstream
+ * release (mistral-vibe 3.1.2, PyPI-verified 2026-11-16; the UA module
+ * is byte-identical 3.1.0 -> 3.1.2 — Drew 2026-11-16: stamps track
+ * latest upstream, not the laptop install). Stamped
  * in auth, after the transport's header merge, for the same reason as
  * claude-code-auth: a session request's own harness User-Agent would
  * otherwise override it and the wire would present OpenCode's
  * identity, not Vibe's.
  */
-export const CLI_USER_AGENT = "mistral-client-python/Mistral-Vibe/3.1.0"
+export const CLI_USER_AGENT = "mistral-client-python/Mistral-Vibe/3.1.2"
 
 /**
  * Bearer auth whose credential is the vibe binary's own sign-in credential,
