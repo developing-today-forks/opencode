@@ -24,7 +24,7 @@ export const CredentialHandler = HttpApiBuilder.group(Api, "server.credential", 
           })
         const created = yield* credential.create(ctx.payload)
         const entry = entries(yield* credential.list(created.integrationID)).find((item) => item.id === created.id)
-        return { data: entry ?? { ...created, active: false } }
+        return { data: entry ?? { ...created, active: false, value: Credential.redactedValue(created.value) } }
       }),
     )
     .handle(
