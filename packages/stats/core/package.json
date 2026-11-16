@@ -23,8 +23,9 @@
     "db:push": "drizzle-kit push --config=drizzle.config.ts",
     "db:studio": "drizzle-kit studio --config=drizzle.config.ts",
     "honeycomb:backfill": "bun src/honeycomb-backfill.ts",
-    "typecheck": "tsgo --noEmit",
-    "test": "bun test"
+    "typecheck": "bun check --no-script --noEmit",
+    "test": "bun test",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode/util": "workspace:*",
@@ -37,7 +38,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "drizzle-kit": "catalog:",
     "typescript": "catalog:"
   },

@@ -339,7 +339,9 @@ export const connect = Effect.fnUntraced(function* (
     const advertised = (capability: "tools" | "prompts" | "resources") =>
       Boolean(client.getServerCapabilities()?.[capability])
 
-    return {
+    // Named so declaration emit can serialize the cyclic handle (methods close over
+    // connection state and return the handle itself).
+    const connection: Connection = {
       modern: client.getProtocolEra() === "modern",
       instructions: client.getInstructions()?.trim() || undefined,
       tools: () =>
@@ -399,7 +401,9 @@ export const connect = Effect.fnUntraced(function* (
       onResourcesChanged: (callback) => {
         changed.resources = callback
       },
-    } satisfies Connection
+    }
+
+    return connection
   }
 
   const error = Cause.squash(exit.cause)

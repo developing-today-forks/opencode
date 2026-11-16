@@ -83,14 +83,48 @@ function initialComposerStore(initial?: InitialPrompt): ComposerStore {
   }
 }
 
-function createComposerStateValue(store: ComposerStore, setStore: SetStoreFunction<ComposerStore>) {
+// Named because `capture` returns the value itself: declaration emit cannot serialize the inferred cyclic type.
+export interface ComposerStateValue {
+  readonly store: [Accessor<ComposerStore>, SetStoreFunction<ComposerStore>]
+  readonly current: () => Prompt
+  readonly cursor: () => ComposerStore["cursor"]
+  readonly model: {
+    readonly current: () => ComposerStore["model"]
+    readonly set: (model: PromptModel | undefined) => void
+  }
+  readonly mode: {
+    readonly current: () => NonNullable<ComposerStore["mode"]>
+    readonly set: (mode: "normal" | "shell") => void
+  }
+  readonly retry: {
+    readonly current: () => ComposerStore["retry"]
+    readonly set: (retry: NonNullable<ComposerStore["retry"]>) => void
+  }
+  readonly context: {
+    readonly items: () => ComposerStore["context"]["items"]
+    add(item: ContextItem): void
+    remove(key: string): void
+    /** Removes the file comment or note with this commentID. */
+    removeComment(commentID: string): void
+    /** Edits the file comment or note with this commentID; only file comments carry a preview. */
+    updateComment(commentID: string, next: { readonly comment?: string; readonly preview?: string }): void
+    /** Replaces every item, as restoring a sent prompt replaces the whole draft. */
+    replace(items: ContextItem[]): void
+    replaceComments(items: ContextItem[]): void
+  }
+  readonly set: (prompt: Prompt, cursorPosition?: number) => void
+  readonly reset: () => void
+  readonly capture: () => ComposerStateValue
+}
+
+function createComposerStateValue(store: ComposerStore, setStore: SetStoreFunction<ComposerStore>): ComposerStateValue {
   const actions = createComposerActions(setStore)
 
   const clearRetry = () => {
     if (untrack(() => store.retry) !== undefined) setStore("retry", undefined)
   }
 
-  const value = {
+  const value: ComposerStateValue = {
     store: [() => store, setStore] satisfies [Accessor<ComposerStore>, SetStoreFunction<ComposerStore>],
     current: () => store.prompt,
     cursor: () => store.cursor,

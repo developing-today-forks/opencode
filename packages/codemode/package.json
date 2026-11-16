@@ -21,8 +21,9 @@
   },
   "scripts": {
     "build": "bun run script/build.ts",
-    "typecheck": "tsgo --noEmit",
-    "test": "bun test"
+    "typecheck": "bun check --no-script",
+    "test": "bun test",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "acorn": "8.15.0",
@@ -31,6 +32,6 @@
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:"
+    "@typescript/native": "catalog:"
   }
 }

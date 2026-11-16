@@ -22,8 +22,9 @@
   },
   "scripts": {
     "build": "bun run script/build.ts",
-    "typecheck": "tsgo --noEmit -p tsconfig.test.json",
-    "test": "bun test --timeout 30000"
+    "typecheck": "bun check --no-script --noEmit -p tsconfig.test.json",
+    "test": "bun test --timeout 30000",
+    "typecheck:tsc": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
     "@opencode/plugin": "workspace:*",
@@ -33,7 +34,7 @@
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "typescript": "catalog:"
   }
 }

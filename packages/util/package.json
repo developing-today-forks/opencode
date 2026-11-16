@@ -34,8 +34,9 @@
   "scripts": {
     "build": "bun run script/build.ts",
     "test": "bun test --path-ignore-patterns 'dist/**' --only-failures",
-    "typecheck": "tsgo --noEmit",
-    "typecheck:dist": "bun run build && bun typecheck --project tsconfig.dist.json"
+    "typecheck": "bun check --no-script",
+    "typecheck:dist": "bun run build && bun typecheck --project tsconfig.dist.json",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "@effect/opentelemetry": "catalog:",
@@ -69,6 +70,6 @@
     "@types/npm-package-arg": "6.1.4",
     "@types/npmcli__arborist": "6.3.3",
     "@types/pacote": "11.1.8",
-    "@typescript/native-preview": "catalog:"
+    "@typescript/native": "catalog:"
   }
 }

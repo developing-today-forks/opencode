@@ -6,11 +6,12 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "bun check --no-script --noEmit",
     "test": "bun test",
     "dev": "vite dev --host 0.0.0.0",
     "build": "vite build",
-    "start": "vite start"
+    "start": "vite start",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "@ibm/plex": "6.4.1",
@@ -32,7 +33,7 @@
     "@cloudflare/workers-types": "catalog:",
     "@types/bun": "catalog:",
     "@types/d3-scale": "4.0.9",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "typescript": "catalog:"
   },
   "engines": {

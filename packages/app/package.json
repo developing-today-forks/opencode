@@ -12,8 +12,8 @@
     "./index.css": "./src/index.css"
   },
   "scripts": {
-    "typecheck": "tsgo -b",
-    "typecheck:e2e": "tsgo -p e2e/tsconfig.json",
+    "typecheck": "bun check --no-script -b",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
     "start": "vite",
     "dev": "vite",
     "build": "vite build",
@@ -36,7 +36,8 @@
     "test:bench": "bun test ./e2e/performance/unit && playwright test --config e2e/performance/playwright.config.ts",
     "bench:tabs": "PLAYWRIGHT_BUILD=1 playwright test --config e2e/performance/playwright.config.ts timeline/session-tab-switch-benchmark.spec.ts --repeat-each=20 --workers=1 --retries=0 --reporter=line,./e2e/performance/tab-switch-reporter.ts",
     "bench:entry": "PLAYWRIGHT_BUILD=1 playwright test --config e2e/performance/playwright.config.ts timeline/session-entry-benchmark.spec.ts --repeat-each=20 --workers=1 --retries=0 --reporter=line,./e2e/performance/tab-switch-reporter.ts",
-    "test:bench:devex": "bun test ./e2e/performance/unit/desktop-startup.test.ts && playwright test --config e2e/performance/devex/playwright.config.ts"
+    "test:bench:devex": "bun test ./e2e/performance/unit/desktop-startup.test.ts && playwright test --config e2e/performance/devex/playwright.config.ts",
+    "typecheck:tsc": "tsc -b"
   },
   "license": "MIT",
   "devDependencies": {
@@ -49,7 +50,7 @@
     "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "babel-preset-solid": "1.9.15",
     "diff": "catalog:",
     "ghostty-web": "github:anomalyco/ghostty-web#83c0a07b8628b748aed073b232cb4b52a6ca11c1",

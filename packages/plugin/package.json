@@ -6,8 +6,9 @@
   "license": "MIT",
   "scripts": {
     "test": "bun test --only-failures",
-    "typecheck": "tsgo --noEmit",
-    "build": "tsc -p tsconfig.build.json"
+    "typecheck": "bun check --no-script",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "exports": {
     ".": "./src/promise/index.ts",
@@ -65,8 +66,8 @@
     "@tsconfig/node22": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
+    "@typescript/native": "catalog:",
     "solid-js": "catalog:",
-    "typescript": "catalog:",
-    "@typescript/native-preview": "catalog:"
+    "typescript": "catalog:"
   }
 }
