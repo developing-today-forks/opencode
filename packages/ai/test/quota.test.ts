@@ -39,6 +39,7 @@ import {
   listConfiguredQuotaProviders,
   listConfiguredQuotaProvidersDetailed,
   quotaProbeFailureResult,
+  withQuotaLegDeadline,
 } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
@@ -3239,3 +3240,24 @@ describe("google quota leg — per-project no-quota-surface probe (R33)", () => 
     expect(ids).not.toContain("google")
   })
 })
+
+describe("withQuotaLegDeadline", () => {
+  test("resolves with the leg result when it settles in time", async () => {
+    await expect(withQuotaLegDeadline("fast", Promise.resolve(42), 1_000)).resolves.toBe(42)
+  })
+
+  test("rejects with QuotaLegDeadlineError when the leg never settles", async () => {
+    const never = new Promise<number>(() => {})
+    const err = await withQuotaLegDeadline("wedged", never, 25).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).name).toBe("QuotaLegDeadlineError")
+    expect((err as Error).message).toContain("wedged")
+  })
+
+  test("propagates a leg rejection unchanged", async () => {
+    const boom = new Error("boom")
+    const err = await withQuotaLegDeadline("throws", Promise.reject(boom), 1_000).catch((e: unknown) => e)
+    expect(err).toBe(boom)
+  })
+})
+
