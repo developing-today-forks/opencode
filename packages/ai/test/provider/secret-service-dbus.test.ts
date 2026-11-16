@@ -46,6 +46,7 @@ test("an absent session-bus address is synthesized before the entry is construct
 })
 
 test("an explicit bogus session-bus address is left alone and still resolves undefined (#2313)", async () => {
+  if (process.platform !== "linux") return
   process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/opencode-secret-service-test-unavailable"
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBeUndefined()
   expect(constructedWith).toEqual(["unix:path=/opencode-secret-service-test-unavailable"])
