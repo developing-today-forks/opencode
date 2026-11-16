@@ -391,6 +391,42 @@ export const fetchQuotaForProviderInstances = async (
   return results ?? [await provider.fetchQuota(ctx)]
 }
 
+/**
+ * Per-provider deadline for a full quota run. Legs are awaited
+ * serially, so one wedged leg freezes the entire run: on
+ * 2026-11-16 the antigravity leg blocked forever on a Secret
+ * Service read parked behind a locked gnome-keyring unlock
+ * prompt, the quota subcommand never returned, and every fleet
+ * quota gatherer tick died on its 240s subcommand cap with all
+ * pool reads frozen. A leg that exceeds the deadline (or
+ * throws) now lands as an error result for that provider only
+ * and the run completes. 60s sits well above the slowest
+ * healthy leg observed (~35s) and well below the gatherer cap.
+ */
+export const QUOTA_LEG_DEADLINE_MS = 60_000
+
+export const withQuotaLegDeadline = async <T>(
+  providerId: string,
+  work: Promise<T>,
+  deadlineMs: number = QUOTA_LEG_DEADLINE_MS,
+): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`quota provider "${providerId}" exceeded the ${deadlineMs}ms leg deadline`)
+          err.name = "QuotaLegDeadlineError"
+          reject(err)
+        }, deadlineMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /** Fetch every configured provider (the default `opencode quota` run). */
 export const fetchAllQuota = async (
   ctx: QuotaContext,
@@ -399,7 +435,23 @@ export const fetchAllQuota = async (
   const { providerIds, probeFailures } = await listConfiguredQuotaProvidersDetailed(ctx, { includeDisabled })
   const out: { providerId: string; results: QuotaResult[] }[] = []
   for (const id of providerIds) {
-    out.push({ providerId: id, results: await fetchQuotaForProviderInstances(ctx, id) })
+    try {
+      out.push({ providerId: id, results: await withQuotaLegDeadline(id, fetchQuotaForProviderInstances(ctx, id)) })
+    } catch (err) {
+      out.push({
+        providerId: id,
+        results: [
+          buildResult({
+            providerId: id,
+            providerName: id,
+            ok: false,
+            configured: true,
+            error: err instanceof Error ? err.message : String(err),
+            failureClass: err instanceof Error && err.name === "QuotaLegDeadlineError" ? "leg-timeout" : "leg-error",
+          }),
+        ],
+      })
+    }
   }
   for (const failure of probeFailures) {
     out.push({ providerId: failure.providerId, results: [quotaProbeFailureResult(failure)] })
