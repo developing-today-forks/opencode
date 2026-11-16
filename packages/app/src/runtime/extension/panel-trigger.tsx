@@ -169,6 +169,7 @@ function SortableTrigger(props: {
         <Tabs.Trigger
           value={props.value}
           id={props.tab.dom?.tab}
+          class="group"
           aria-controls={props.active ? props.tab.dom?.panel : undefined}
           aria-label={props.tab.missing ? props.tab.title : undefined}
           onMiddleClick={props.tab.closable === false ? undefined : () => props.onClose(props.value)}
