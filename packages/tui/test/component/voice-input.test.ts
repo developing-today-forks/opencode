@@ -125,6 +125,23 @@ describe("state machine (§6.1/§6.2)", () => {
     expect(done.audio).toBeUndefined()
     expect(done.lastProvenance?.model).toBe("whisper-1")
   })
+
+  test("a second submit while one is in flight grants nothing (#2446 double-submit)", () => {
+    const machine = new VoiceInputMachine(registration)
+    machine.attach(audio())
+    // The caller (voiceSubmit in prompt/index.tsx) treats a returned
+    // submitting snapshot WITH audio as its facade-call grant.
+    const grants = [machine.beginSubmit(), machine.beginSubmit()].filter(
+      (snapshot) => snapshot.state === "submitting" && snapshot.audio,
+    )
+    expect(grants).toHaveLength(1)
+    // The in-flight submission is undisturbed: its audio is retained
+    // in the machine state and it still completes normally.
+    expect(machine.snapshot.state).toBe("submitting")
+    expect(machine.snapshot.audio?.name).toBe("clip.wav")
+    const done = machine.complete({ provider: "openai", model: "whisper-1", durationSeconds: 3.5 })
+    expect(done.state).toBe("idle")
+  })
 })
 
 describe("façade client (§2.3 envelope, §2.4 errors)", () => {
