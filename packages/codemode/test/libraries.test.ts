@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, setSystemTime, vi } from "bun:test"
 import { Effect, Schema } from "effect"
 import { CodeMode, Extension, Std, Tool } from "../src/index.js"
 
@@ -197,53 +197,73 @@ describe("std async helpers (#803)", () => {
 
   test("std.sleep waits out the full request when the host primitive caps a single wait", async () => {
     // A host primitive that caps one wait at 10ms, the way core caps one wait
-    // at 30s: a 500ms sleep must be re-waited in segments, never shortened to
-    // the cap, and a withTimeout deadline must fire at its requested time.
-    // The request is deliberately far above the cap so a late timer callback
-    // cannot cover it in one segment: a loaded runner may run a 10ms timer
-    // 35ms late, which made the old 35ms case look like one capped wait.
+    // at 30s: a 35ms sleep must be re-waited in segments, never shortened to
+    // the cap. The primitive advances a fake clock instead of waiting on the
+    // platform's timers, so the segmentation is exact everywhere: a real
+    // setTimeout(10) takes ~15.6ms on Windows, which made a call-count
+    // assertion flaky (#2518).
     const clampedCalls: Array<number> = []
     const clamped = Extension.make({
       name: "sleep",
       globals: {
-        [Std.sleepHostGlobal]: async (ms: number) => {
+        [Std.sleepHostGlobal]: (ms: number) => {
           clampedCalls.push(ms)
-          await new Promise((resolve) => setTimeout(resolve, Math.min(ms, 10)))
+          vi.advanceTimersByTime(Math.min(ms, 10))
+          return Promise.resolve()
         },
       },
     })
-    const runClamped = (code: string) =>
-      Effect.runPromise(CodeMode.make({ extensions: [clamped], libraries: [Std.library] }).execute(code))
-    const slept = await runClamped("const start = Date.now(); await std.sleep(500); return Date.now() - start")
-    expect(slept.ok).toBe(true)
-    if (slept.ok) expect(slept.value as number).toBeGreaterThanOrEqual(490)
-    // The host cap cannot cover the request, so std.sleep must ask again for
-    // the time still missing. No segment count is asserted beyond that: timer
-    // granularity decides how many fit. Every request after the first is a
-    // smaller remainder, and the first asks for the whole sleep.
-    expect(clampedCalls.length).toBeGreaterThanOrEqual(2)
-    expect(clampedCalls[0]).toBe(500)
-    // Each re-wait asks for the time still missing, so the remainders must
-    // never grow — but they can stay equal when the whole segment was spent
-    // inside a late host callback on a loaded runner.
-    for (const ms of clampedCalls) expect(ms).toBeGreaterThan(0)
-    for (let index = 1; index < clampedCalls.length; index++)
-      expect(clampedCalls[index]!).toBeLessThanOrEqual(clampedCalls[index - 1]!)
-    const timed = await runClamped(`
-      const start = Date.now();
-      let rejectedAt = -1;
-      const slow = (async () => { await std.sleep(600); return "slow"; })();
-      try {
-        await std.withTimeout(slow, 250);
-      } catch {
-        rejectedAt = Date.now() - start;
-      }
-      return rejectedAt;
-    `)
-    expect(timed.ok).toBe(true)
-    if (timed.ok) {
-      expect(timed.value as number).toBeGreaterThanOrEqual(220)
-      expect(timed.value as number).toBeLessThan(600)
+    vi.useFakeTimers()
+    try {
+      setSystemTime(new Date(0))
+      const runClamped = (code: string) =>
+        Effect.runPromise(CodeMode.make({ extensions: [clamped], libraries: [Std.library] }).execute(code))
+      const slept = await runClamped("const start = Date.now(); await std.sleep(35); return Date.now() - start")
+      expect(slept.ok).toBe(true)
+      // Never shortened: the program observes the full 35ms it asked for.
+      if (slept.ok) expect(slept.value as number).toBe(35)
+      // Each call asks for no more than the remainder, and the loop keeps
+      // asking until the request is covered: 35 → 25 → 15 → 5, then a call
+      // that covers the last 5ms.
+      expect(clampedCalls).toEqual([35, 25, 15, 5])
+    } finally {
+      setSystemTime()
+      vi.useRealTimers()
+    }
+  })
+
+  test("std.withTimeout fires at its requested deadline against a capped host wait", async () => {
+    // The deadline is one more `std.sleep`, so the same capped host primitive
+    // drives it: segmented 25 → 15 → 5, the deadline must fire at exactly
+    // 25ms on the virtual clock, never early (#2518).
+    const clampedCalls: Array<number> = []
+    const clamped = Extension.make({
+      name: "sleep",
+      globals: {
+        [Std.sleepHostGlobal]: (ms: number) => {
+          clampedCalls.push(ms)
+          vi.advanceTimersByTime(Math.min(ms, 10))
+          return Promise.resolve()
+        },
+      },
+    })
+    vi.useFakeTimers()
+    try {
+      setSystemTime(new Date(0))
+      const timed = await Effect.runPromise(
+        CodeMode.make({ extensions: [clamped], libraries: [Std.library] }).execute(`
+          const start = Date.now();
+          let rejectedAt = -1;
+          try { await std.withTimeout(new Promise(() => {}), 25); } catch { rejectedAt = Date.now() - start; }
+          return rejectedAt;
+        `),
+      )
+      expect(timed.ok).toBe(true)
+      if (timed.ok) expect(timed.value as number).toBe(25)
+      expect(clampedCalls).toEqual([25, 15, 5])
+    } finally {
+      setSystemTime()
+      vi.useRealTimers()
     }
   })
 
