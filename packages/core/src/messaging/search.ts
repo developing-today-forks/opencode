@@ -41,6 +41,18 @@ export function ftsQuery(query: string) {
 }
 
 /**
+ * A Tantivy query matching any whole word of the query, or undefined when the query has no words.
+ * Tantivy tokenizes documents on word boundaries, so — unlike the FTS5 trigram query above — this
+ * cannot narrow by partial words; texts that match only through a partial word stay ranked from
+ * the scan window instead (#2492).
+ */
+export function tantivyQuery(query: string) {
+  const words = Array.from(new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []))
+  if (words.length === 0) return undefined
+  return words.map((word) => `"${word}"`).join(" OR ")
+}
+
+/**
  * An FTS5 phrase matching the exact (case-insensitive) substring, or undefined when it is too short for the
  * trigram index. Surrounding whitespace is part of the substring, as in the SQL fallback.
  */
