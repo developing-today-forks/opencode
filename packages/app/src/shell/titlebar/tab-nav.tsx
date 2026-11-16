@@ -528,7 +528,7 @@ export function DraftTabItem(props: {
             event.preventDefault()
             event.stopPropagation()
           }}
-          class="hover-reveal relative z-10 group-hover:opacity-100 group-data-[active=true]:opacity-100 group-data-[editing=true]:opacity-100"
+          class="hover-reveal relative z-10 group-hover:opacity-100 group-focus-within:opacity-100 group-data-[active=true]:opacity-100 group-data-[editing=true]:opacity-100"
           onClick={closeTab}
           icon={<Icon name="xmark-small" />}
           aria-label={language.t("common.closeTab")}

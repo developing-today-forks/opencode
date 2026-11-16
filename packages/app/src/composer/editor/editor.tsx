@@ -632,7 +632,7 @@ export function ComposerAttachments(props: {
                 <button
                   type="button"
                   onClick={() => props.onCommentRemove?.(comment)}
-                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100"
+                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100 group-focus-within:opacity-100"
                   aria-label={props.removeLabel}
                 >
                   <Icon name="outline-xmark" class="text-v2-icon-icon-contrast" />
@@ -661,7 +661,7 @@ export function ComposerAttachments(props: {
                 <button
                   type="button"
                   onClick={() => props.onFileRemove?.(file)}
-                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100"
+                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100 group-focus-within:opacity-100"
                   aria-label={props.removeLabel}
                 >
                   <Icon name="outline-xmark" class="text-v2-icon-icon-contrast" />
@@ -715,7 +715,7 @@ export function ComposerAttachments(props: {
                 <button
                   type="button"
                   onClick={() => props.onAttachmentRemove(attachment)}
-                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100"
+                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100 group-focus-within:opacity-100"
                   aria-label={props.removeLabel}
                 >
                   <Icon name="outline-xmark" class="text-v2-icon-icon-contrast" />
@@ -737,7 +737,7 @@ export function ComposerAttachments(props: {
                 <button
                   type="button"
                   onClick={() => props.onUploadCancel?.(upload)}
-                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100"
+                  class="absolute -top-1 -end-1 size-4 rounded-full bg-v2-icon-icon-muted outline-solid outline-1 outline-v2-icon-icon-contrast flex items-center justify-center hover-reveal group-hover:opacity-100 group-focus-within:opacity-100"
                   aria-label={i18n.t("ui.promptInput.cancelUpload")}
                 >
                   <Icon name="outline-xmark" class="text-v2-icon-icon-contrast" />
