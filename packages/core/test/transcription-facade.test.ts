@@ -66,6 +66,24 @@ describe("TranscriptionFacade registry", () => {
     }
   })
 
+  test("the route body bound derives from the registration cap plus the multipart overhead (#2433)", () => {
+    const registration = TranscriptionFacade.resolveTranscriptionModel("openai/whisper-1")
+    expect(typeof registration).not.toBe("string")
+    if (typeof registration === "string") return
+    expect(TranscriptionFacade.transcriptionBodyLimit(registration)).toBe(
+      registration.maxUploadBytes + TranscriptionFacade.MULTIPART_OVERHEAD_BYTES,
+    )
+    expect(TranscriptionFacade.maxTranscriptionBodyLimit()).toBe(
+      Math.max(...TranscriptionFacade.TRANSCRIPTION_MODELS.map((model) => model.maxUploadBytes)) +
+        TranscriptionFacade.MULTIPART_OVERHEAD_BYTES,
+    )
+    expect(TranscriptionFacade.maxTranscriptionBodyLimit(new Set(["openai"]))).toBe(
+      TranscriptionFacade.transcriptionBodyLimit(registration),
+    )
+    // No enabled providers: the route safety bound falls back to all registrations.
+    expect(TranscriptionFacade.maxTranscriptionBodyLimit(new Set())).toBe(TranscriptionFacade.maxTranscriptionBodyLimit())
+  })
+
   test("a disabled provider's refs vanish from resolution", () => {
     const enabled = new Set<string>(["deepgram"])
     expect(typeof TranscriptionFacade.resolveTranscriptionModel("openai/whisper-1", enabled)).toBe("string")
