@@ -3451,6 +3451,43 @@ describe("ModelRoute reactive quota skip scoping and quota-driven re-admission (
     expect(ModelRoute.skipped(claude, judgedAt + 2)).toBe(true)
   })
 
+  test("a provider-wide attempt skip lifts on provider-window headroom when the gathered entry carries no model reading (#2554)", () => {
+    const now = 770_000_000
+    // The `_claude` gathered shape: provider windows only, and a per-model entry keyed by
+    // a family nickname rather than the full model id — so no reading is keyed to the target.
+    const haiku = ModelRoute.ref({ providerID: "_claude", model: "claude-haiku-5-5" })
+    const fable = ModelRoute.ref({ providerID: "_claude", model: "claude-fable-5-2" })
+    const resetAt = now + 3 * 86_400_000
+    ModelRoute.resetHealth()
+    ModelRoute.observeQuotaFailure(haiku, undefined, resetAt, now)
+    ModelRoute.observeQuotaFailure(fable, undefined, resetAt, now + 1)
+    expect(ModelRoute.skipped(haiku, now + 2)).toBe(true)
+    const judgedAt = now + 15 * 60_000
+    const claudeEntry = (windows: { "5h": number; "7d": number }) => [
+      {
+        providerID: "_claude",
+        measuredAt: judgedAt,
+        windows: [
+          { name: "5h", usedPercent: windows["5h"], resetAt: null, measuredAt: judgedAt },
+          { name: "7d", usedPercent: windows["7d"], resetAt: null, measuredAt: judgedAt },
+          { name: "Fable:7d", usedPercent: 0, resetAt: null, measuredAt: judgedAt },
+        ],
+        models: { Fable: [{ name: "7d", usedPercent: 0, resetAt: null, measuredAt: judgedAt }] },
+      },
+    ]
+    // Provider windows still read full: the provider record stands.
+    expect(ModelRoute.releaseQuotaSkipsForCurrent(haiku, claudeEntry({ "5h": 100, "7d": 100 }), judgedAt)).toEqual([])
+    expect(ModelRoute.skipped(haiku, judgedAt + 1)).toBe(true)
+    // Fresh below-full provider windows re-admit the provider on the reading's word, and
+    // the target's own record beneath it goes with it.
+    expect(ModelRoute.releaseQuotaSkipsForCurrent(haiku, claudeEntry({ "5h": 1, "7d": 2 }), judgedAt)).toEqual([
+      "quota-model:_claude:claude-haiku-5-5",
+      "quota:_claude",
+    ])
+    expect(ModelRoute.skipped(haiku, judgedAt + 2)).toBe(false)
+    expect(ModelRoute.skipped(fable, judgedAt + 2)).toBe(false)
+  })
+
   test("a fresher not-full snapshot releases a model-scoped reactive skip (#1974, #1976)", () => {
     const now = 760_000_000
     const resetAt = now + 3 * 86_400_000
