@@ -1410,10 +1410,10 @@ function expandCollected(
       }
     }
     if (compiled.success.selects) {
+      let matched = 0
       for (const entry of shared.models()) {
         const key = `${entry.providerID}/${entry.id}`
-        if (placed.has(key) || pin?.leftOut.models.has(key) || !compiled.success.selects(entry) || excluded(entry))
-          continue
+        if (pin?.leftOut.models.has(key) || !compiled.success.selects(entry) || excluded(entry)) continue
         const model = candidate(entry.providerID, entry.id)
         if (!model?.enabled) continue
         if (pin !== undefined && sitsOutPin(entry, model)) {
@@ -1430,6 +1430,8 @@ function expandCollected(
         const mapped = viaPinRules !== undefined ? viaPinRules : pin !== undefined ? levelMapped[pin.level] : undefined
         if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level))
           continue
+        matched++
+        if (placed.has(key)) continue
         const variantMap =
           pin !== undefined && viaPinRules !== undefined && viaPinRules !== false
             ? { ...levelMapped, [pin.level]: viaPinRules }
@@ -1459,6 +1461,8 @@ function expandCollected(
           ...(cacheFormat ? { cacheFormat } : {}),
         })
       }
+      if (matched === 0)
+        diagnostics.push(`pool ${routeID}'s matching keys select no models, so they add nothing`)
     }
     const declared = current.levels
     if (declared !== undefined && routeID !== id && pin === undefined)
