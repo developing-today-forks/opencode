@@ -352,14 +352,15 @@ export function CurrentUserMessageDisplay(props: {
               <Show
                 when={!image()}
                 fallback={
-                  <div
+                  <button
+                    type="button"
                     data-slot="user-message-attachment"
                     data-type="image"
                     data-clickable="true"
                     onClick={() => dialog.show(() => <ImagePreview src={url()} alt={name()} />)}
                   >
                     <img data-slot="user-message-attachment-image" src={url()} alt={name()} />
-                  </div>
+                  </button>
                 }
               >
                 <AttachmentCard

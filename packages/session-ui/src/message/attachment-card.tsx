@@ -1,4 +1,5 @@
 import type { JSX } from "solid-js"
+import { Dynamic } from "solid-js/web"
 import "./attachment-card.css"
 
 /** Shared 160px two-line card used by file and comment attachments. */
@@ -15,7 +16,9 @@ export function AttachmentCard(props: {
   children: JSX.Element
 }) {
   return (
-    <div
+    <Dynamic
+      component={props.clickable ? "button" : "div"}
+      type={props.clickable ? "button" : undefined}
       data-component="attachment-card"
       data-active={props.active ? "true" : undefined}
       data-clickable={props.clickable ? "true" : undefined}
@@ -28,6 +31,6 @@ export function AttachmentCard(props: {
         {props.title}
       </span>
       <span data-slot="attachment-card-subtitle">{props.children}</span>
-    </div>
+    </Dynamic>
   )
 }
