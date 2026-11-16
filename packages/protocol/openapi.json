@@ -860,7 +860,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Maximum number of sessions to return. Defaults to the newest 50 sessions."
+              "description": "Maximum number of sessions to return. Defaults to the newest 50 sessions and is capped at 200."
             },
             "required": false
           },
@@ -5668,6 +5668,76 @@
         },
         "description": "Embed text with a registered embedding model. The model is a catalog ref (local-embed/snowflake-arctic-embed-m-v2.0, the first registered backend — a local Snowflake Arctic Embed model run in-process by the native ONNX backend) or a bare embedding model id, resolved in-process against the embedding catalog; each registered model carries its own dimension and supported dimensions values, and an unsupported dimensions request is rejected. Input arrays pass through faithfully (varied lengths, no truncation at this layer). Answers in the OpenAI embeddings wire format; every call records a route_attempt row with session_id NULL like the other doors.",
         "summary": "Create embeddings (OpenAI-compatible)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "tags": ["completions"],
+        "operationId": "completions.transcriptions",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Transcribe audio with a registered transcription model (design specs/2026-11-08_design_voice-input-stt-facade.md §2). The request is multipart/form-data with OpenAI-compatible fields; the model is a concrete catalog ref (openai/whisper-1, the first registered backend) resolved in-process against the transcription registry, gated by the same provider config as chat. Batch only in phase 1: stream=true fails typed, never fake-streams. Answers in the normalized §2.3 envelope with §2.4 typed errors; every attempt records a route_attempt row with session_id NULL like the other doors. The payload schema here is nominal — the handler reads the multipart form itself.",
+        "summary": "Create a transcription (OpenAI-compatible)",
         "requestBody": {
           "content": {
             "application/json": {
@@ -16381,6 +16451,16 @@
                             "type": "number",
                             "minimum": 0,
                             "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                          },
+                          "rootStartMaxPct": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85."
+                          },
+                          "rootStartEnabled": {
+                            "type": "boolean",
+                            "description": "Whether the root-start gate is applied in placement. When false, new root sessions are placed without regard to rootStartMaxPct (the known-full quota gate still applies). Defaults to true."
                           }
                         },
                         "additionalProperties": false
@@ -16622,6 +16702,16 @@
                         "type": "number",
                         "minimum": 0,
                         "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                      },
+                      "rootStartMaxPct": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85."
+                      },
+                      "rootStartEnabled": {
+                        "type": "boolean",
+                        "description": "Whether the root-start gate is applied in placement. When false, new root sessions are placed without regard to rootStartMaxPct (the known-full quota gate still applies). Defaults to true."
                       }
                     },
                     "additionalProperties": false

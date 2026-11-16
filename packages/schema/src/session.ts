@@ -22,6 +22,12 @@ export type ID = SessionID
 export const Metadata = SessionMetadata
 export type Metadata = SessionMetadata
 
+/**
+ * The largest `session.list` page. It matches the messages page ceiling so one
+ * request cannot load the whole sessions table (and its per-page usage rollup).
+ */
+export const LIST_LIMIT_MAX = 200
+
 export const SubagentPolicy = SessionSubagentPolicy
 export type SubagentPolicy = SessionSubagentPolicy
 
