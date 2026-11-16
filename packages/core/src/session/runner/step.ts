@@ -40,6 +40,8 @@ import { SessionRunnerModel } from "./model.js"
 import { SessionMembershipGate } from "./membership-gate.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionHedge } from "./hedge.js"
+import { SessionRunnerRenderCard } from "./render-card.js"
+import { SessionRunnerRenderWiring } from "./render-wiring.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { materializeToolResult } from "./tool-result-content.js"
 
@@ -53,6 +55,11 @@ export type Outcome = Data.TaggedEnum<{
   }
   RecoverFull: {}
   Compacted: {}
+  /** The step hit a quota wall with the failover walk exhausted and the host
+   * render tool present (#2384 slice 3): the runner ends the step here and
+   * directs the next step to render the quota fallback card, instead of the
+   * turn dying on the bare error. */
+  QuotaWall: { readonly wall: SessionRunnerRenderCard.QuotaWall; readonly error: SessionError.Error }
   OutputLimit: { readonly needsContinuation: boolean }
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
@@ -69,6 +76,10 @@ interface Input {
   readonly continuation?: ContinuationLink
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
+  /** The step's advertised tool names, for host-tool detection (#2384): the
+   * render-card wiring engages only when `openchamber_render` is among them,
+   * and is inert — behavior byte-identical — when it is absent. */
+  readonly toolNames?: ReadonlyArray<string>
   /** The membership account the attempt's model draws from (#2253), when its provider
    * declares caps: the gate meters the start before any request goes out. Kept off
    * `model` so failover swaps of the resolved model cannot lose or duplicate it —
@@ -377,6 +388,28 @@ export const make = Effect.gen(function* () {
       readonly fiber: Fiber.Fiber<void, Permission.DeclinedError | QuestionTool.CancelledError>
     }> = []
     const interruptTools = Effect.suspend(() => Fiber.interruptAll(toolRuns.map((run) => run.fiber)))
+    // Render-card wiring (#2384): engaged only when the host render tool is
+    // in this step's tool set. A real render result is the user's submitted
+    // answer: parse it and apply it through the plan store as the tool
+    // completes, so the choice is durable before the turn moves on. A
+    // malformed store or result must never break the step — the seam's
+    // parser already answers `none` for anything unrecognized, and store
+    // failures are ignored here for the same reason.
+    const renderToolPresent = SessionRunnerRenderCard.hasRenderTool(input.toolNames ?? [])
+    const applyRenderToolResult = (call: ToolCall, content: ReadonlyArray<{ readonly type: string; readonly text?: string }>) =>
+      !renderToolPresent || call.name !== SessionRunnerRenderCard.RENDER_TOOL_NAME
+        ? Effect.void
+        : Effect.ignore(
+            Effect.try(() =>
+              SessionRunnerRenderWiring.applyToolResult({
+                sessionID: input.sessionID,
+                result: content
+                  .filter((item) => item.type === "text")
+                  .map((item) => item.text ?? "")
+                  .join(""),
+              }),
+            ),
+          )
     const executeTool = (call: ToolCall) => {
       if (input.prepared.request.toolChoice?.type === "none")
         return new Tool.Error({ message: "Tools are disabled after the maximum agent steps" })
@@ -399,6 +432,7 @@ export const make = Effect.gen(function* () {
             fileAccess.authorizeRead,
           ).pipe(Effect.map((content) => ({ ...result, content }))),
         ),
+        Effect.tap((result) => applyRenderToolResult(call, result.content)),
       )
     }
 
@@ -1036,6 +1070,41 @@ export const make = Effect.gen(function* () {
           !tools.interrupted
         )
           return Outcome.Continue({ error: llmError, decision: retry })
+
+        // Quota wall (#2384 slice 3): every serving path above — same-target
+        // retry, credential switch, route failover, continuation — has had
+        // its chance and none served, so this quota-class failure is the
+        // step's fall-through. With the host render tool present, end the
+        // step in the structured quota-wall state instead of the bare
+        // error: the runner directs the next step to render the quota
+        // fallback card and apply the submitted fallback in the same turn.
+        // Offered at most once per session until a render answer settles
+        // it, so a turn that ignores the card still ends on the next wall.
+        // Without the render tool nothing here changes.
+        if (
+          renderToolPresent &&
+          llmFailure &&
+          failureError &&
+          (quotaClassification !== undefined || isQuotaFailure(llmFailure)) &&
+          !streamInterrupted &&
+          tools.declines.length === 0 &&
+          !tools.interrupted &&
+          SessionRunnerRenderWiring.offeredWall(input.sessionID) === undefined
+        ) {
+          const hint = failureHint(llmFailure)
+          const wall: SessionRunnerRenderCard.QuotaWall = {
+            providerID: String(input.model.ref.providerID),
+            modelID: String(input.model.ref.id),
+            ...(hint.quotaResetAtMs !== undefined
+              ? { resetAt: hint.quotaResetAtMs }
+              : hint.retryAfterMs !== undefined
+                ? { resetAt: Date.now() + hint.retryAfterMs }
+                : {}),
+            ...(failureError.message ? { message: failureError.message } : {}),
+          }
+          SessionRunnerRenderWiring.offerWall(input.sessionID, wall)
+          return Outcome.QuotaWall({ wall, error: failureError })
+        }
 
         if (Exit.isFailure(stream)) return yield* Effect.failCause(stream.cause)
         if (tools.declines.length > 0) {

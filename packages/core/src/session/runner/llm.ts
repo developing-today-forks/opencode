@@ -2,7 +2,7 @@ export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai"
 import { and, desc, eq, inArray, sql } from "drizzle-orm"
-import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
+import { Cause, Duration, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
@@ -29,6 +29,10 @@ import { llmClient } from "../../effect/app-node-platform.js"
 import { StepFailedError } from "../error.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { SessionStep } from "./step.js"
+import { SessionRunnerRenderWiring } from "./render-wiring.js"
+import { Model } from "@opencode/schema/model"
+import { Provider } from "@opencode/schema/provider"
+import { ModelPlan } from "../../model-plan.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
@@ -247,6 +251,79 @@ const layer = Layer.effect(
           first.model.routing?.attempts === undefined ? undefined : Math.max(0, first.model.routing.attempts - 1),
       })
       let initial: SessionContext.Loaded | undefined = first
+      // Tier chooser (#2384 slice 2): a step that resolved without a route
+      // under a hosted session asks the user before provider spend. The
+      // directive goes in as a synthetic message and the context reloads
+      // below, so this step's own request already carries it. The wiring
+      // latches per session and stays inert without the render tool, a
+      // bare route, or tiered models in the plan store; a store that
+      // cannot be read must not break the step either.
+      const chooserDirective = (() => {
+        try {
+          return SessionRunnerRenderWiring.chooserDirective({
+            sessionID,
+            toolNames: first.tools.definitions.map((tool) => tool.name),
+            routeBare: first.model.routing === undefined,
+          })
+        } catch {
+          return undefined
+        }
+      })()
+      if (chooserDirective !== undefined) {
+        yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: chooserDirective })
+        initial = undefined
+      }
+      // Render answers (#2384, PR #2452 review F2/F3): a tier choice or
+      // a quota-fallback answer recorded by the previous step's render
+      // tap takes effect before this step's request is prepared. A
+      // model choice (or a quota switch, resolved through the plan
+      // store) is published as ModelSelected — the same event the
+      // session service's switchModel publishes, with the previous
+      // model — and the context reloads so this step resolves the new
+      // model. A quota wait sleeps until the wall's reset. A pending
+      // application that cannot be applied must not break the step.
+      const pendingRender = (() => {
+        try {
+          return SessionRunnerRenderWiring.takePendingApplication(sessionID)
+        } catch {
+          return undefined
+        }
+      })()
+      if (pendingRender !== undefined) {
+        const renderModelKey =
+          pendingRender.modelChoice?.model ??
+          (pendingRender.instruction?.kind === "switch"
+            ? (() => {
+                try {
+                  return SessionRunnerRenderWiring.modelForProviderTier(
+                    ModelPlan.readStore(),
+                    pendingRender.instruction.providerID,
+                    pendingRender.instruction.tier,
+                  )
+                } catch {
+                  return undefined
+                }
+              })()
+            : undefined)
+        if (renderModelKey !== undefined) {
+          const separator = renderModelKey.indexOf("/")
+          if (separator > 0) {
+            yield* bus.publish(SessionEvent.ModelSelected, {
+              sessionID,
+              model: Model.Ref.make({
+                providerID: Provider.ID.make(renderModelKey.slice(0, separator)),
+                id: Model.ID.make(renderModelKey.slice(separator + 1)),
+              }),
+              previous: first.session.model,
+            })
+            initial = undefined
+          }
+        }
+        if (pendingRender.instruction?.kind === "wait" && pendingRender.instruction.until !== undefined) {
+          const waitMs = pendingRender.instruction.until - Date.now()
+          if (waitMs > 0) yield* Effect.sleep(Duration.millis(waitMs))
+        }
+      }
       let recoverOverflow = true
       let recoverContinuation = true
       while (true) {
@@ -295,6 +372,7 @@ const layer = Layer.effect(
           ...(continuationOf === undefined ? {} : { continuation: { of: continuationOf, index: continuationIndex } }),
           agent: loaded.agent.id,
           model: loaded.model,
+          toolNames: loaded.tools.definitions.map((tool) => tool.name),
           ...(loaded.model.membership ? { membership: loaded.model.membership } : {}),
           prepared,
           estimatedInputTokens: SessionCompaction.estimateContext(loaded),
@@ -328,6 +406,27 @@ const layer = Layer.effect(
           Failover: Effect.fnUntraced(function* (outcome) {
             yield* modelTransport.close(sessionID)
             initial = { ...loaded, model: outcome.model }
+          }),
+          QuotaWall: Effect.fnUntraced(function* (outcome) {
+            // Quota fallback (#2384 slice 3): direct the next step to
+            // render the quota fallback card, and continue the turn into
+            // it. When the plan store cannot supply the card's actions,
+            // the step keeps its original bare-error ending.
+            const directive = (() => {
+              try {
+                return SessionRunnerRenderWiring.wallDirective(sessionID, outcome.wall)
+              } catch {
+                // A directive that cannot even be built leaves no
+                // card, so the offered wall must not stay latched
+                // (#2468, the wallDirective undefined path).
+                SessionRunnerRenderWiring.clearWall(sessionID)
+                return undefined
+              }
+            })()
+            if (directive === undefined) return yield* new StepFailedError({ error: outcome.error })
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: directive })
+            const continued: StepResult = { needsContinuation: true }
+            return continued
           }),
           Continue: Effect.fnUntraced(function* (outcome) {
             yield* retry.wait({
