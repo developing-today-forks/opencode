@@ -34,6 +34,18 @@ const STATE_LIMIT = 1_000
 
 const chooserAskedSessions = new Set<string>()
 const offeredWalls = new Map<string, SessionRunnerRenderCard.QuotaWall>()
+const cardTiers = new Map<string, ModelPlan.Tier>()
+const pendingApplications = new Map<string, PendingApplication>()
+
+/** A render answer's not-yet-applied routing effect, drained by the runner loop. */
+export interface PendingApplication {
+  /** The model a tier-choice answer picked, as a "provider/model" store key. */
+  readonly modelChoice?: { readonly tier: ModelPlan.Tier; readonly model: string }
+  /** The routing instruction of a quota-fallback answer. */
+  readonly instruction?:
+    | { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier }
+    | { readonly kind: "wait"; readonly until?: number }
+}
 
 const bound = <T>(map: Map<string, T> | Set<string>) => {
   while (map.size > STATE_LIMIT) {
@@ -64,12 +76,33 @@ export const offerWall = (sessionID: string, wall: SessionRunnerRenderCard.Quota
 
 export const clearWall = (sessionID: string) => {
   offeredWalls.delete(sessionID)
+  cardTiers.delete(sessionID)
+}
+
+/**
+ * Takes (and clears) the pending routing effect a render answer left
+ * for this session, if any. The runner loop drains this before the
+ * next model request: a tier choice or a quota switch selects its
+ * model, a quota wait delays the request. Draining is destructive so
+ * an answer is applied exactly once.
+ */
+export const takePendingApplication = (sessionID: string): PendingApplication | undefined => {
+  const pending = pendingApplications.get(sessionID)
+  pendingApplications.delete(sessionID)
+  return pending
+}
+
+const recordPending = (sessionID: string, pending: PendingApplication) => {
+  pendingApplications.set(sessionID, { ...pendingApplications.get(sessionID), ...pending })
+  bound(pendingApplications)
 }
 
 /** Drops every latch for a session (tests and session teardown). */
 export const clearSession = (sessionID: string) => {
   chooserAskedSessions.delete(sessionID)
   offeredWalls.delete(sessionID)
+  cardTiers.delete(sessionID)
+  pendingApplications.delete(sessionID)
 }
 
 const TIER_ORDER: ReadonlyArray<ModelPlan.Tier> = ["cheap", "standard", "frontier"]
@@ -91,6 +124,17 @@ export const tiersFromStore = (store: ModelPlan.Store): SessionRunnerRenderCard.
   }
   return tiers
 }
+
+/** The first model (by store key) a provider carries at a tier, when it carries one. */
+export const modelForProviderTier = (
+  store: ModelPlan.Store,
+  providerID: string,
+  tier: ModelPlan.Tier,
+): string | undefined =>
+  Object.keys(store.models)
+    .filter((key) => key.startsWith(`${providerID}/`) && store.models[key]?.tier === tier)
+    .sort()
+    .at(0)
 
 /** The tier the plan store records for one model, when it records one. */
 export const tierOfModel = (store: ModelPlan.Store, providerID: string, modelID: string): ModelPlan.Tier | undefined =>
@@ -181,6 +225,16 @@ export const wallDirective = (
     clearWall(sessionID)
     return undefined
   }
+  // Capture the tier the card was built with (the wait action carries
+  // it, including the "standard" fallback for a walled model the store
+  // has no entry for): the answer must be parsed against the card the
+  // user actually saw, not a store read at answer time, which may
+  // lack the entry or have been edited since (#2452 review F1).
+  const waitAction = actions.find((action) => action.kind === "wait-for-reset")
+  if (waitAction !== undefined) {
+    cardTiers.set(sessionID, waitAction.tier)
+    bound(cardTiers)
+  }
   return SessionRunnerRenderCard.quotaFallbackDirective(wall, actions)
 }
 
@@ -189,6 +243,8 @@ export interface Applied {
   readonly answer: SessionRunnerRenderCard.RenderAnswer
   /** The user-source plan note recorded for the answer, when one was. */
   readonly note?: ModelPlan.NoteInput
+  /** The model a tier-choice answer picked, for the runner to select as the session model. */
+  readonly modelChoice?: { readonly tier: ModelPlan.Tier; readonly model: string }
   /** The routing instruction of a quota-fallback answer, when the answer was one. */
   readonly instruction?:
     | { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier }
@@ -216,7 +272,7 @@ export const applyToolResult = (input: {
   const wall = offeredWall(input.sessionID)
   const store = ModelPlan.readStore(input.dataDir)
   const currentTier =
-    wall === undefined ? undefined : tierOfModel(store, wall.providerID, wall.modelID)
+    wall === undefined ? undefined : (cardTiers.get(input.sessionID) ?? tierOfModel(store, wall.providerID, wall.modelID))
   const answer = SessionRunnerRenderCard.parseRenderAnswer(input.result, {
     ...(wall?.providerID !== undefined ? { currentProvider: wall.providerID } : {}),
     ...(currentTier !== undefined ? { currentTier } : {}),
@@ -228,7 +284,12 @@ export const applyToolResult = (input: {
     const applied = SessionRunnerRenderCard.applyTierChoice(store, answer.choice, now)
     ModelPlan.writeStore(applied.store, input.dataDir)
     ModelPlan.addNote(applied.note, now, input.dataDir)
-    return { answer, note: applied.note }
+    // The choice is recorded as pending so the runner loop selects it
+    // as the session model before the next request (#2452 review F2):
+    // the plan store alone does not move a session whose current model
+    // has no routing.
+    recordPending(input.sessionID, { modelChoice: answer.choice })
+    return { answer, note: applied.note, modelChoice: answer.choice }
   }
   const effectiveWall: SessionRunnerRenderCard.QuotaWall = wall ?? {
     providerID: answer.choice.provider,
@@ -236,5 +297,9 @@ export const applyToolResult = (input: {
   }
   const applied = SessionRunnerRenderCard.applyQuotaFallback(answer.choice, effectiveWall)
   ModelPlan.addNote(applied.note, now, input.dataDir)
+  // The instruction is recorded as pending so the runner loop applies
+  // it before the next model request (#2452 review F3): returning it
+  // alone was not enough while the step's render tap discarded it.
+  recordPending(input.sessionID, { instruction: applied.instruction })
   return { answer, note: applied.note, instruction: applied.instruction }
 }

@@ -2,7 +2,7 @@ export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai"
 import { and, desc, eq, inArray, sql } from "drizzle-orm"
-import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
+import { Cause, Duration, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
@@ -30,6 +30,9 @@ import { StepFailedError } from "../error.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { SessionStep } from "./step.js"
 import { SessionRunnerRenderWiring } from "./render-wiring.js"
+import { Model } from "@opencode/schema/model"
+import { Provider } from "@opencode/schema/provider"
+import { ModelPlan } from "../../model-plan.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
@@ -269,6 +272,57 @@ const layer = Layer.effect(
       if (chooserDirective !== undefined) {
         yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: chooserDirective })
         initial = undefined
+      }
+      // Render answers (#2384, PR #2452 review F2/F3): a tier choice or
+      // a quota-fallback answer recorded by the previous step's render
+      // tap takes effect before this step's request is prepared. A
+      // model choice (or a quota switch, resolved through the plan
+      // store) is published as ModelSelected — the same event the
+      // session service's switchModel publishes, with the previous
+      // model — and the context reloads so this step resolves the new
+      // model. A quota wait sleeps until the wall's reset. A pending
+      // application that cannot be applied must not break the step.
+      const pendingRender = (() => {
+        try {
+          return SessionRunnerRenderWiring.takePendingApplication(sessionID)
+        } catch {
+          return undefined
+        }
+      })()
+      if (pendingRender !== undefined) {
+        const renderModelKey =
+          pendingRender.modelChoice?.model ??
+          (pendingRender.instruction?.kind === "switch"
+            ? (() => {
+                try {
+                  return SessionRunnerRenderWiring.modelForProviderTier(
+                    ModelPlan.readStore(),
+                    pendingRender.instruction.providerID,
+                    pendingRender.instruction.tier,
+                  )
+                } catch {
+                  return undefined
+                }
+              })()
+            : undefined)
+        if (renderModelKey !== undefined) {
+          const separator = renderModelKey.indexOf("/")
+          if (separator > 0) {
+            yield* bus.publish(SessionEvent.ModelSelected, {
+              sessionID,
+              model: Model.Ref.make({
+                providerID: Provider.ID.make(renderModelKey.slice(0, separator)),
+                id: Model.ID.make(renderModelKey.slice(separator + 1)),
+              }),
+              previous: first.session.model,
+            })
+            initial = undefined
+          }
+        }
+        if (pendingRender.instruction?.kind === "wait" && pendingRender.instruction.until !== undefined) {
+          const waitMs = pendingRender.instruction.until - Date.now()
+          if (waitMs > 0) yield* Effect.sleep(Duration.millis(waitMs))
+        }
       }
       let recoverOverflow = true
       let recoverContinuation = true

@@ -228,6 +228,74 @@ describe("answer application through the plan store", () => {
     Wiring.clearSession(sessionID)
   })
 
+  test("a wait answer parses against the card tier when the walled model has no store entry (F1)", () => {
+    const dataDir = tempDataDir()
+    seedStore(dataDir)
+    const sessionID = "ses_render_wiring_apply_wait_no_store_entry"
+    Wiring.clearSession(sessionID)
+    const resetAt = Date.UTC(2026, 10, 15)
+    // The walled model is not in the plan store, so the card was built
+    // with the "standard" fallback tier; the wait answer names it.
+    const wall: RenderCard.QuotaWall = { providerID: "anthropic", modelID: "claude-unlisted-1", resetAt }
+    Wiring.offerWall(sessionID, wall)
+    expect(Wiring.wallDirective(sessionID, wall, dataDir)).toBeDefined()
+    const applied = Wiring.applyToolResult({
+      sessionID,
+      result: hostResult({ action: "fallback", provider: "anthropic", tier: "standard" }),
+      dataDir,
+      now: "2026-11-14T01:00:00Z",
+    })
+    expect(applied?.instruction).toEqual({ kind: "wait", until: resetAt })
+    // The wait is also the pending application the runner loop drains (F3).
+    expect(Wiring.takePendingApplication(sessionID)).toEqual({ instruction: { kind: "wait", until: resetAt } })
+    expect(Wiring.takePendingApplication(sessionID)).toBeUndefined()
+    Wiring.clearSession(sessionID)
+  })
+
+  test("a tier-choice answer leaves the chosen model as the pending application (F2)", () => {
+    const dataDir = tempDataDir()
+    seedStore(dataDir)
+    const sessionID = "ses_render_wiring_apply_tier_pending"
+    Wiring.clearSession(sessionID)
+    const applied = Wiring.applyToolResult({
+      sessionID,
+      result: hostResult({ tier: "frontier", model: "openai/gpt-5.1" }),
+      dataDir,
+      now: "2026-11-14T01:00:00Z",
+    })
+    expect(applied?.modelChoice).toEqual({ tier: "frontier", model: "openai/gpt-5.1" })
+    expect(Wiring.takePendingApplication(sessionID)).toEqual({
+      modelChoice: { tier: "frontier", model: "openai/gpt-5.1" },
+    })
+    expect(Wiring.takePendingApplication(sessionID)).toBeUndefined()
+    Wiring.clearSession(sessionID)
+  })
+
+  test("a switch answer leaves its instruction as the pending application (F3)", () => {
+    const dataDir = tempDataDir()
+    seedStore(dataDir)
+    const sessionID = "ses_render_wiring_apply_switch_pending"
+    Wiring.clearSession(sessionID)
+    Wiring.offerWall(sessionID, {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-5",
+      resetAt: Date.UTC(2026, 10, 15),
+    })
+    Wiring.applyToolResult({
+      sessionID,
+      result: hostResult({ action: "fallback", provider: "openai", tier: "standard" }),
+      dataDir,
+      now: "2026-11-14T01:00:00Z",
+    })
+    expect(Wiring.takePendingApplication(sessionID)).toEqual({
+      instruction: { kind: "switch", providerID: "openai", tier: "standard" },
+    })
+    // The switch target resolves through the plan store.
+    expect(Wiring.modelForProviderTier(ModelPlan.readStore(dataDir), "openai", "standard")).toBe("openai/gpt-5.1")
+    expect(Wiring.modelForProviderTier(ModelPlan.readStore(dataDir), "openai", "frontier")).toBeUndefined()
+    Wiring.clearSession(sessionID)
+  })
+
   test("chat answers and answerless results change nothing", () => {
     const dataDir = tempDataDir()
     seedStore(dataDir)
