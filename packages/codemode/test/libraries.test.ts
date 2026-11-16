@@ -214,7 +214,11 @@ describe("std async helpers (#803)", () => {
     const slept = await runClamped("const start = Date.now(); await std.sleep(35); return Date.now() - start")
     expect(slept.ok).toBe(true)
     if (slept.ok) expect(slept.value as number).toBeGreaterThanOrEqual(30)
-    expect(clampedCalls.length).toBeGreaterThanOrEqual(3)
+    // The 10ms host cap cannot cover a 35ms request, so std.sleep must ask the
+    // host again for the remainder. Assert only that re-wait, not a segment
+    // count: timer granularity decides how many segments fit (Windows rounds a
+    // 10ms timeout up to ~16ms, so one segment can cover more than 10ms).
+    expect(clampedCalls.length).toBeGreaterThanOrEqual(2)
     const timed = await runClamped(`
       const start = Date.now();
       let rejectedAt = -1;
