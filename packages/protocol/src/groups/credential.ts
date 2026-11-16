@@ -11,7 +11,8 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
       OpenApi.annotations({
         identifier: "credential.list",
         summary: "List credentials",
-        description: "List every stored integration credential, including its secret value.",
+        description:
+          "List every stored integration credential, including its secret value. Session-cookie credentials are provider-only: listings return their metadata with the cookie redacted.",
       }),
     ),
   )

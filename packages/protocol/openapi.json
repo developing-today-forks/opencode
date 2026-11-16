@@ -5680,6 +5680,76 @@
         }
       }
     },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "tags": ["completions"],
+        "operationId": "completions.transcriptions",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Transcribe audio with a registered transcription model (design specs/2026-11-08_design_voice-input-stt-facade.md §2). The request is multipart/form-data with OpenAI-compatible fields; the model is a concrete catalog ref (openai/whisper-1, the first registered backend) resolved in-process against the transcription registry, gated by the same provider config as chat. Batch only in phase 1: stream=true fails typed, never fake-streams. Answers in the normalized §2.3 envelope with §2.4 typed errors; every attempt records a route_attempt row with session_id NULL like the other doors. The payload schema here is nominal — the handler reads the multipart form itself.",
+        "summary": "Create a transcription (OpenAI-compatible)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/v1/messages": {
       "post": {
         "tags": ["completions"],
@@ -8238,7 +8308,7 @@
             }
           }
         },
-        "description": "List every stored integration credential, including its secret value.",
+        "description": "List every stored integration credential, including its secret value. Session-cookie credentials are provider-only: listings return their metadata with the cookie redacted.",
         "summary": "List credentials"
       },
       "post": {
@@ -16381,6 +16451,16 @@
                             "type": "number",
                             "minimum": 0,
                             "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                          },
+                          "rootStartMaxPct": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85."
+                          },
+                          "rootStartEnabled": {
+                            "type": "boolean",
+                            "description": "Whether the root-start gate is applied in placement. When false, new root sessions are placed without regard to rootStartMaxPct (the known-full quota gate still applies). Defaults to true."
                           }
                         },
                         "additionalProperties": false
@@ -16622,6 +16702,16 @@
                         "type": "number",
                         "minimum": 0,
                         "description": "A credit balance at or below this USD amount is treated as exhausted. Defaults to 0.1."
+                      },
+                      "rootStartMaxPct": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "A new root session is not started on a pool at or above this percent of a quota window; subsessions may be placed up to 100%. Defaults to 85."
+                      },
+                      "rootStartEnabled": {
+                        "type": "boolean",
+                        "description": "Whether the root-start gate is applied in placement. When false, new root sessions are placed without regard to rootStartMaxPct (the known-full quota gate still applies). Defaults to true."
                       }
                     },
                     "additionalProperties": false
@@ -18180,6 +18270,26 @@
         "required": ["type", "methodID", "refresh", "access", "expires"],
         "additionalProperties": false
       },
+      "Credential.SessionCookie": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["session-cookie"]
+          },
+          "cookie": {
+            "type": "string"
+          },
+          "workspaceID": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          }
+        },
+        "required": ["type", "cookie", "workspaceID"],
+        "additionalProperties": false
+      },
       "Credential.Value": {
         "anyOf": [
           {
@@ -18190,6 +18300,9 @@
           },
           {
             "$ref": "#/components/schemas/Credential.External"
+          },
+          {
+            "$ref": "#/components/schemas/Credential.SessionCookie"
           }
         ]
       },

@@ -61,6 +61,6 @@ function entries(credentials: Credential.Info[]) {
     integrationID: item.integrationID,
     label: item.label,
     active: selected.get(item.integrationID) === item.id,
-    value: item.value,
+    value: Credential.redactedValue(item.value),
   }))
 }

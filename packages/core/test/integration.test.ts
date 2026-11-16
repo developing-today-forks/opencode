@@ -685,6 +685,54 @@ describe("Integration", () => {
         }),
     )
   })
+
+  it.effect("never projects or resolves session-cookie credentials as connections", () =>
+    Effect.gen(function* () {
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const integrationID = Integration.ID.make("opendesign")
+      yield* integrations.transform((editor) =>
+        editor.method.update({
+          integrationID,
+          method: { type: "key", label: "API key" },
+        }),
+      )
+      const key = yield* credentials.create({
+        integrationID,
+        label: "Key",
+        value: Credential.Key.make({ type: "key", key: "secret" }),
+      })
+      const cookie = yield* credentials.create({
+        integrationID,
+        label: "Session",
+        value: Credential.SessionCookie.make({
+          type: "session-cookie",
+          cookie: "fixture-cookie",
+          workspaceID: "wrk_fixture",
+        }),
+      })
+
+      // The key is the integration's only connection; the session cookie is invisible.
+      expect((yield* integrations.get(integrationID))?.connections).toEqual([
+        { type: "credential", method: "key", id: key.id, label: "Key" },
+      ])
+      expect(yield* integrations.connection.active(integrationID)).toEqual({
+        type: "credential",
+        method: "key",
+        id: key.id,
+        label: "Key",
+      })
+
+      // Even a connection ref naming the cookie's id cannot resolve it out of the store.
+      expect(
+        yield* integrations.connection.resolve({ type: "credential", method: "key", id: cookie.id, label: "Session" }),
+      ).toBeUndefined()
+
+      yield* credentials.remove(key.id)
+      expect((yield* integrations.get(integrationID))?.connections).toEqual([])
+      expect(yield* integrations.connection.active(integrationID)).toBeUndefined()
+    }),
+  )
 })
 
 describe("AuthorizationError", () => {

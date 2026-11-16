@@ -408,14 +408,22 @@ const layer = Layer.effect(
     })
 
     const resolveConnections = (entry: Entry | undefined, saved: readonly Credential.Info[]) => {
+      // A session-cookie credential is provider-only (code#5060): the server holds it
+      // for the provider's own calls, so it is never projected as a connection a
+      // provider could resolve and use as its login.
       const credentials = saved
-        .map((credential) => ({
-          type: "credential" as const,
-          id: credential.id,
-          label: credential.label,
-          method: credential.value.type,
-          ...(credential.value.type === "key" ? {} : { methodID: credential.value.methodID }),
-        }))
+        .flatMap((credential) => {
+          if (credential.value.type === "session-cookie") return []
+          return [
+            {
+              type: "credential" as const,
+              id: credential.id,
+              label: credential.label,
+              method: credential.value.type,
+              ...(credential.value.type === "key" ? {} : { methodID: credential.value.methodID }),
+            },
+          ]
+        })
         .toReversed()
       const env = (entry?.methods ?? [])
         .filter((method) => method.type === "env")
@@ -742,6 +750,9 @@ const layer = Layer.effect(
           }
           const credential = yield* credentials.get(connection.id)
           if (!credential) return undefined
+          // Provider-only (code#5060): connection resolution never hands out a
+          // session cookie; the provider's own server-side surface reads it instead.
+          if (credential.value.type === "session-cookie") return undefined
           if (credential.value.type !== "oauth") return credential.value
           // Externally renewed credentials (e.g. imported from the Muse by
           // credential/codex-sync) keep their external owner as the sole refresher;
