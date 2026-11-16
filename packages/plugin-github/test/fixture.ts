@@ -4,12 +4,15 @@ import { Agent } from "@opencode/schema/agent"
 import { Session } from "@opencode/schema/session"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { Tool } from "@opencode/schema/tool"
-import { Effect, Schema, Scope } from "effect"
+import { Effect, Redacted, Schema, Scope } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import path from "node:path"
 import { GitHubClient } from "../src/client.js"
 import { GitHubProcess } from "../src/process.js"
 import type { GitHubShared } from "../src/shared.js"
+
+const unwrap = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value
 
 export interface Request {
   readonly method: string
@@ -45,7 +48,9 @@ export function fakeGitHub(routes: Record<string, Reply | Route>) {
         url: request.url,
         path: url.pathname,
         // Effect keeps request parameters apart from the URL until the request is sent.
-        query: Object.fromEntries([...url.searchParams, ...request.urlParams.params]),
+        query: Object.fromEntries(
+          [...url.searchParams, ...request.urlParams.params].map(([key, value]) => [key, unwrap(value)] as const),
+        ),
         headers: request.headers,
         body,
       }

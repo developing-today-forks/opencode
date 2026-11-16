@@ -332,7 +332,7 @@ export const make = Effect.gen(function* () {
   }) {
     if (!locationDirectory || Option.isNone(fs) || !input.from || !input.to) return undefined
     const directory = join(locationDirectory, PlanSuggestions.PLANS_RELATIVE_DIRECTORY)
-    const entries = yield* fs.value.readDirectoryEntries(directory)
+    const entries = yield* fs.value.readDirEntries(directory)
     const markdowns = yield* Effect.forEach(
       entries.filter((entry) => entry.type === "file" && entry.name.endsWith(".md")),
       (entry) => fs.value.readFileStringSafe(join(directory, entry.name)),
@@ -513,8 +513,10 @@ export const make = Effect.gen(function* () {
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
         // Cancelled before the start snapshot existed: record nothing, as when the capture preceded the request.
-        if (Exit.hasInterrupts(stream) && !publisher.hasStarted() && !pendingStartSnapshot.pollUnsafe())
-          return yield* Effect.failCause(stream.cause)
+        if (Exit.hasInterrupts(stream) && !publisher.hasStarted() && !pendingStartSnapshot.pollUnsafe()) {
+          if (Exit.isFailure(stream)) return yield* Effect.failCause(stream.cause)
+          return yield* Effect.interrupt
+        }
         if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
         if (streamInterrupted) yield* interruptTools
         const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)

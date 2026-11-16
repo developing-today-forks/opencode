@@ -176,7 +176,7 @@ const readFileAttachment = Effect.fn("SessionPrompt.readFileAttachment")(functio
     .pipe(Effect.mapError(() => new AttachmentError({ uri, message: `Unable to read attachment: ${uri}` })))
   if (info.type === "Directory") {
     const entries = yield* fs
-      .readDirectoryEntries(target)
+      .readDirEntries(target)
       .pipe(Effect.mapError(() => new AttachmentError({ uri, message: `Unable to read attachment: ${uri}` })))
     return {
       bytes: Buffer.from(

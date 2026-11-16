@@ -64,7 +64,7 @@ export namespace FSUtil {
       options?: WriteAtomicOptions,
     ) => Effect.Effect<void, Error>
     readonly writeJsonAtomic: (path: string, data: unknown, options?: WriteAtomicOptions) => Effect.Effect<void, Error>
-    readonly readDirectoryEntries: (path: string) => Effect.Effect<DirEntry[], Error>
+    readonly readDirEntries: (path: string) => Effect.Effect<DirEntry[], Error>
     readonly resolve: (path: string) => Effect.Effect<string>
     readonly findUp: (target: string, start: string, stop?: string) => Effect.Effect<string[], Error>
     readonly up: (options: UpOptions) => Effect.Effect<string[], Error>
@@ -78,7 +78,7 @@ export namespace FSUtil {
   export const use = serviceUse(Service)
 
   // Exported so simulation can wrap this layer and override the methods that
-  // bypass the injected FileSystem (readDirectoryEntries, scan, globUp).
+  // bypass the injected FileSystem (readDirEntries, scan, globUp).
   export const layer = Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -105,7 +105,7 @@ export namespace FSUtil {
         return info?.type === "File"
       })
 
-      const readDirectoryEntries = Effect.fn("FileSystem.readDirectoryEntries")(function* (dirPath: string) {
+      const readDirEntries = Effect.fn("FileSystem.readDirEntries")(function* (dirPath: string) {
         return yield* Effect.tryPromise({
           try: async () => {
             const entries = await readdir(dirPath, { withFileTypes: true })
@@ -116,7 +116,7 @@ export namespace FSUtil {
               }),
             )
           },
-          catch: (cause) => new FileSystemError({ method: "readDirectoryEntries", cause }),
+          catch: (cause) => new FileSystemError({ method: "readDirEntries", cause }),
         })
       })
 
@@ -459,7 +459,7 @@ export namespace FSUtil {
         readFileStringSafe,
         isDir,
         isFile,
-        readDirectoryEntries,
+        readDirEntries,
         resolve,
         readJson,
         writeJson,

@@ -1,11 +1,14 @@
 import { describe, expect } from "bun:test"
 import { readFile } from "node:fs/promises"
 import path from "node:path"
-import { Effect } from "effect"
+import { Effect, Redacted } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import { GitHubActions } from "../src/actions.js"
 import { it, withEnv } from "./lib"
 import { fakeGitHub, find, makeDeps, run, type Reply, type Route } from "./fixture"
+
+const unwrap = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value
 
 const env = { GH_TOKEN: "test-token", GITHUB_TOKEN: undefined }
 
@@ -17,7 +20,10 @@ function wrap(github: ReturnType<typeof fakeGitHub>, raw: Record<string, string>
   const queries: Array<{ path: string; query: Record<string, string> }> = []
   const http = HttpClient.make((request) => {
     const url = new URL(request.url)
-    queries.push({ path: url.pathname, query: Object.fromEntries(request.urlParams.params) })
+    queries.push({
+      path: url.pathname,
+      query: Object.fromEntries(request.urlParams.params.map(([key, value]) => [key, unwrap(value)] as const)),
+    })
     const text = raw[`${request.method} ${url.pathname}`]
     if (text === undefined) return github.http.execute(request)
     github.requests.push({

@@ -186,7 +186,7 @@ const baseLayer = Layer.effect(
           ),
         )
         if (info.type !== "Directory") return yield* missing
-        return yield* fs.readDirectoryEntries(directory).pipe(
+        return yield* fs.readDirEntries(directory).pipe(
           Effect.orDie,
           Effect.map((items) =>
             items
