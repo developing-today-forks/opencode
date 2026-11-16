@@ -131,6 +131,7 @@
     "@parcel/watcher": "2.5.1",
     "@silvia-odwyer/photon-node": "0.3.4",
     "@standard-schema/spec": "catalog:",
+    "@tursodatabase/database": "0.8.3",
     "bun-pty": "0.4.11",
     "diff": "catalog:",
     "drizzle-orm": "catalog:",
