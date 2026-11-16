@@ -268,6 +268,20 @@ it.effect("convertSchema lowers const to a one-element enum (#1557)", () =>
       type: "STRING",
       enum: ["a", "b"],
     })
+    // A differently typed member that only matches after
+    // stringification is NOT a member: the declared enum is preserved
+    // (CodeRabbit finding on PR #2531).
+    expect(convertSchema({ type: "string", enum: [1, "other"], const: "1" })).toEqual({
+      type: "STRING",
+      enum: [1, "other"],
+    })
+    // An object enum member is never stringified by the membership
+    // test (a crafted member could throw); a scalar member still
+    // narrows normally alongside it (CodeRabbit finding on PR #2531).
+    expect(convertSchema({ type: "string", enum: ["ok", { toString: null }], const: "ok" })).toEqual({
+      type: "STRING",
+      enum: ["ok"],
+    })
     // Non-scalar consts cannot ride a string enum and are dropped — the
     // deliberate disposition documented in convertSchemaNode (#1557).
     expect(convertSchema({ type: "object", const: { a: 1 } })).toEqual({ type: "OBJECT" })
