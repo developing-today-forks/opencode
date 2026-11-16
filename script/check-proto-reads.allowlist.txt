@@ -304,3 +304,5 @@ packages/ai/src/quota/providers/turso.ts :: (wanted && Object.hasOwn(TURSO_PLAN_
 packages/ai/src/utils/media-type.ts :: if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand as keyof typeof FTYP_BRANDS] :: guarded: Object.hasOwn at the same site (#2392)
 packages/core/src/mime.ts :: if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand] :: guarded: Object.hasOwn at the same site (#2392)
 packages/core/src/transcription-facade.ts :: const value = form.fields[name] ?? form.fields[`${name}[]`] :: validated: string/array checks at the same site return [] for any other value; callers pass literal field names (#2392)
+packages/core/src/session/runner/render-card.ts :: const summary = action.summary ?? action.label ?? `${FALLBACK_LABELS[action.kind]}: ${action.provider}/${action.tier}` :: safe: action.kind is the closed FallbackKind union and FALLBACK_LABELS is Record<FallbackKind, string> (#2475)
+packages/core/src/session/runner/render-card.ts :: const heading = action.label ?? FALLBACK_LABELS[action.kind] :: safe: action.kind is the closed FallbackKind union and FALLBACK_LABELS is Record<FallbackKind, string> (#2475)
