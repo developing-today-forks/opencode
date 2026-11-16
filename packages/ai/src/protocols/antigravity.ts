@@ -302,7 +302,8 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
   // Scalar consts (string/number/boolean) map to enum: [String(value)]:
   // the proto enum is string-valued, so non-string scalars ride
   // stringified. A const that is a member of a declared enum narrows
-  // the enum to the pin; a const outside the declared enum leaves the
+  // the enum to the pin (membership judged on stringified members,
+  // matching how scalar consts ride the string-valued proto enum); a const outside the declared enum leaves the
   // enum untouched (the declared enum is the stronger constraint).
   // Non-scalar consts (object/array/null) cannot be represented in a
   // string enum and are dropped — that is the deliberate disposition,
@@ -314,7 +315,7 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
     if (typeof pinned === "string" || typeof pinned === "number" || typeof pinned === "boolean") {
       const value = String(pinned)
       if (Array.isArray(out.enum)) {
-        if (out.enum.includes(value)) out.enum = [value]
+        if (out.enum.map((member) => String(member)).includes(value)) out.enum = [value]
       } else {
         out.enum = [value]
       }
