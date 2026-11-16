@@ -118,15 +118,25 @@ jobs:
   # failure - runner never assigned, under the 20 min job timeout, no
   # competing run, cancel-in-progress is false). That no-op fallback then
   # gated update-hashes, failing the whole green run. So the fallback
-  # engages only when recovery may be needed, i.e. compute-hash concluded
-  # 'cancelled' (a zero-step-cancelled darwin leg cancels the job despite
-  # its continue-on-error; a merely *failed* darwin leg still yields
-  # 'success' and is caught visibly by the missing-hash guard in
-  # update-hashes). On the all-green path no macos runner is occupied.
+  # engages only when recovery may be needed, i.e. compute-hash did NOT
+  # conclude 'success'.
+  # #2547: the #2544 narrowing (`== 'cancelled'`) never engaged. Run
+  # 43920489996 (on the #2545 merge) had the darwin leg zero-step-cancelled
+  # yet the fallback SKIPPED and update-hashes SKIPPED with it - so a
+  # zero-step-cancelled darwin leg does NOT surface as result 'cancelled'
+  # (the `!= 'failure'` clause in update-hashes also evaluated false,
+  # pinning the observed value to a non-success, non-cancelled result).
+  # Do not enumerate non-success values: gate on `!= 'success'` so ANY
+  # non-green compute-hash engages the fallback, and let the `decide`
+  # artifact check below no-op when the darwin hash already exists (e.g.
+  # a linux leg failed but darwin succeeded). On the all-green path no
+  # macos runner is occupied. A merely *failed* darwin leg still yields
+  # 'success' via its continue-on-error and is caught visibly by the
+  # missing-hash guard in update-hashes.
   compute-hash-darwin-fallback:
     timeout-minutes: 20
     needs: compute-hash
-    if: always() && needs.compute-hash.result == 'cancelled'
+    if: always() && needs.compute-hash.result != 'success'
     runs-on: macos-15
 
     steps:
@@ -201,17 +211,21 @@ jobs:
   update-hashes:
     timeout-minutes: 15
     needs: [compute-hash, compute-hash-darwin-fallback]
-    # #2539: when the darwin leg is cancelled, compute-hash result is
-    # 'cancelled' and the default success() gate would skip the restamp even
-    # though the fallback recovered the hash. Gate explicitly.
-    # #2544: the fallback is now narrow (only runs when compute-hash was
-    # cancelled), so the all-green path must NOT wait on it: proceed when
-    # compute-hash succeeded (fallback correctly skipped as unnecessary),
-    # or when the fallback recovered a cancelled compute-hash. A 'failure'
-    # (a linux leg failed) still blocks the restamp either way.
+    # #2539: when the darwin leg is cancelled, the default success() gate
+    # would skip the restamp even though the fallback recovered the hash.
+    # Gate explicitly.
+    # #2544: the fallback is narrow (skipped when compute-hash was green),
+    # so the all-green path must NOT wait on it: proceed when compute-hash
+    # succeeded (fallback correctly skipped as unnecessary), or when the
+    # fallback recovered a non-green compute-hash.
+    # #2547: do NOT add a `!= 'failure'` clause here. Run 43920489996
+    # proved a zero-step-cancelled darwin leg surfaces as a non-success,
+    # non-'cancelled' compute-hash result, so such a clause blocks recovery
+    # of exactly the case the fallback exists for. A genuinely failed
+    # linux leg is still caught fail-closed by the missing-hash guard
+    # below (refuses to commit a partial restamp, exits 1).
     if: >
       always() && github.event_name != 'pull_request'
-      && needs.compute-hash.result != 'failure'
       && (needs.compute-hash.result == 'success'
         || needs.compute-hash-darwin-fallback.result == 'success')
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -272,9 +286,9 @@ jobs:
               jq --arg sys "$SYSTEM" --arg h "$HASH" '.nodeModules[$sys] = $h' "$HASH_FILE" > tmp.json
               mv tmp.json "$HASH_FILE"
             else
-              # #2539 follow-up (CodeRabbit on #2540): the update-hashes gate
-              # accepts a 'cancelled' compute-hash result, so a cancelled
-              # linux leg must not silently commit a partial restamp.
+              # #2539 follow-up (CodeRabbit on #2540), still true after #2547:
+              # the update-hashes gate now runs on fallback success too, so a
+              # failed linux leg must not silently commit a partial restamp.
               echo "::error::Missing hash for ${SYSTEM}; refusing to commit a partial restamp"
               exit 1
             fi
