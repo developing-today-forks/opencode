@@ -30,13 +30,21 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/st
 // releasing a shared semaphore resumes the waiting object's fiber inside the
 // releasing object's I/O context, where its first storage call is rejected as
 // cross-object I/O.
-const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>) =>
+interface BackendCapabilities {
+  readonly supportsTuningPragmas: boolean
+  readonly supportsForeignKeyToggle: boolean
+}
+
+const databaseLayer = (
+  lock: Effect.Effect<Semaphore.Semaphore>,
+  capabilities: BackendCapabilities = { supportsTuningPragmas, supportsForeignKeyToggle },
+) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
       const db = yield* makeDatabase
 
-      if (supportsTuningPragmas) {
+      if (capabilities.supportsTuningPragmas) {
         // Set before journal_mode, so the journal switch waits out a lock a predecessor still holds.
         yield* db.run("PRAGMA busy_timeout = 5000")
         yield* db.run("PRAGMA journal_mode = WAL")
@@ -45,7 +53,7 @@ const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>) =>
         yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
       }
       // Durable Object SQLite always enforces foreign keys and rejects the pragma.
-      if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
+      if (capabilities.supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
       const semaphore = yield* lock
       yield* semaphore.withPermit(DatabaseMigration.apply(db))
 
@@ -68,10 +76,24 @@ function lockFor(filename: string) {
 export function layer(options: Options = { path: ":memory:" }) {
   return Layer.unwrap(
     Effect.gen(function* () {
+      // Issue #2492 spike: OPENCODE_DB_ENGINE=turso swaps the database backend to
+      // TursoDB (the Rust SQLite rewrite) behind this same seam. The module is
+      // imported lazily so its native driver loads only when selected; the
+      // default backend and its capability flags are unchanged otherwise.
+      const turso =
+        process.env.OPENCODE_DB_ENGINE === "turso"
+          ? yield* Effect.promise(() => import("./sqlite.turso.js"))
+          : undefined
       const provide = (filename: string) =>
-        databaseLayer(filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename))).pipe(
-          Layer.provide(sqliteLayer({ filename })),
-        )
+        databaseLayer(
+          filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename)),
+          turso
+            ? {
+                supportsTuningPragmas: turso.supportsTuningPragmas,
+                supportsForeignKeyToggle: turso.supportsForeignKeyToggle,
+              }
+            : undefined,
+        ).pipe(Layer.provide((turso?.sqliteLayer ?? sqliteLayer)({ filename })))
       const filename = options.path ?? ":memory:"
       if (filename === ":memory:") return provide(filename)
       const file = isAbsolute(filename) ? filename : join((yield* Global.Service).data, filename)
