@@ -365,7 +365,7 @@ export const make = Effect.gen(function* () {
       !renderToolPresent || call.name !== SessionRunnerRenderCard.RENDER_TOOL_NAME
         ? Effect.void
         : Effect.ignore(
-            Effect.sync(() =>
+            Effect.try(() =>
               SessionRunnerRenderWiring.applyToolResult({
                 sessionID: input.sessionID,
                 result: content
