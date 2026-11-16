@@ -203,7 +203,22 @@ export class VoiceInputMachine {
     return this.#snapshot
   }
 
+  /** Grant a submission: reviewing/error audio moves to submitting.
+   * A call while a submission is already in flight grants nothing:
+   * it returns the in-flight state WITHOUT the audio, so a caller
+   * guarding on the returned snapshot (state + audio) treats the
+   * repeat as a no-op instead of calling the facade a second time
+   * for the same audio (#2446). The machine's own snapshot is left
+   * untouched, so the in-flight submission still completes or fails
+   * with its audio retained (section 6.2). */
   beginSubmit(): VoiceSnapshot {
+    if (this.#snapshot.state === "submitting") {
+      return {
+        state: "submitting",
+        elapsedSeconds: this.#snapshot.elapsedSeconds,
+        ...(this.#snapshot.partialText ? { partialText: this.#snapshot.partialText } : {}),
+      }
+    }
     const audio = this.#snapshot.audio
     if (!audio || (this.#snapshot.state !== "reviewing" && this.#snapshot.state !== "error")) return this.#snapshot
     this.#snapshot = { state: "submitting", audio, elapsedSeconds: 0 }
