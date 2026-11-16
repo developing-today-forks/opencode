@@ -223,14 +223,15 @@ jobs:
   update-hashes:
     timeout-minutes: 15
     needs: [compute-hash, compute-hash-darwin-fallback]
-    # #2539: when the darwin leg is cancelled, compute-hash result is
-    # not 'success' and the default success() gate would skip the restamp even
+    # #2539: when a cancelled darwin leg yields a non-success aggregate,
+    # the default success() gate would skip the restamp even
     # though the fallback recovered the hash. Gate explicitly.
     # #2544: THIS gate (not the fallback's) carries the incident fix. Run
     # 43911677987 failed all-green because update-hashes required the
     # (no-op) fallback's success and the platform cancelled that no-op
     # job. So: proceed when compute-hash succeeded, whatever the fallback
-    # did, or when the fallback recovered the hash. A 'failure' (a linux
+    # did, or when the fallback recovered the hash. This gate is evaluated
+    # only after the fallback finishes or skips. A 'failure' (a linux
     # leg failed) still blocks the restamp either way.
     if: >
       always() && github.event_name != 'pull_request'
