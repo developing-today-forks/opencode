@@ -8,6 +8,7 @@ import {
   TranscriptionStreamAssembler,
   submitVoiceTranscription,
   submitVoiceTranscriptionStream,
+  VOICE_RESPONSE_MAX_BYTES,
   validateVoiceAudio,
   voiceMediaType,
   voicePrivacyNotice,
@@ -170,6 +171,9 @@ describe("façade client (§2.3 envelope, §2.4 errors)", () => {
       audio: audio(),
     })
     expect(seen?.url).toBe("http://localhost:4096/v1/audio/transcriptions")
+    // The call carries a deadline (#2462): the signal aborts a façade that
+    // never answers.
+    expect(seen?.init?.signal).toBeInstanceOf(AbortSignal)
     const form = seen?.init?.body as FormData
     expect(form.get("model")).toBe("openai/whisper-1")
     expect((form.get("file") as File).name).toBe("clip.wav")
@@ -212,6 +216,44 @@ describe("façade client (§2.3 envelope, §2.4 errors)", () => {
       audio: audio(),
     }).catch((caught) => caught)
     expect((error as Error).message).toContain("still held locally")
+  })
+
+  test("a façade that accepts the request and never answers fails at its deadline", async () => {
+    // Headers arrive, the body stalls: the signal the call carries aborts the
+    // read, so the composer leaves submitting instead of waiting forever.
+    const stalls = (async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            signal.addEventListener("abort", () => controller.error(new Error("aborted")), { once: true })
+          },
+        }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch
+    const started = Date.now()
+    const error = await submitVoiceTranscription({
+      url: "http://localhost:4096",
+      fetch: stalls,
+      registration,
+      audio: audio(),
+      deadlineMs: 25,
+    }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("did not answer within 25 ms")
+    expect(Date.now() - started).toBeGreaterThanOrEqual(24)
+  })
+
+  test("an oversized answer is refused at the cap instead of buffered", async () => {
+    const error = await submitVoiceTranscription({
+      url: "http://localhost:4096",
+      fetch: okFetch({ text: "x".repeat(VOICE_RESPONSE_MAX_BYTES + 1) }),
+      registration,
+      audio: audio(),
+    }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("response cap")
   })
 })
 
@@ -339,6 +381,7 @@ describe("streaming partials (§6.4)", () => {
     })
     expect((seen.init?.body as FormData).get("stream")).toBe("true")
     expect((seen.init?.body as FormData).get("model")).toBe("google/gemini-3.5-transcribe")
+    expect(seen.init?.signal).toBeInstanceOf(AbortSignal)
     expect(partials).toEqual(["Did it ", "Did it release ship?"])
     expect(result.text).toBe("Did it release ship?")
     expect(result.provenance.provider).toBe("google")
@@ -352,6 +395,34 @@ describe("streaming partials (§6.4)", () => {
       audio: audio(),
     }).catch((caught) => caught)
     expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("still held locally")
+  })
+
+  test("a stream that goes quiet fails at the idle bound with the audio retained", async () => {
+    // The peer sends one delta and then neither emits nor closes: the idle
+    // deadline re-armed per frame is what ends the submission (#2462), while
+    // a stream that keeps emitting is never cut off.
+    const stalls = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"type":"transcript.text.delta","delta":"hi"}\n\n'))
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )) as unknown as typeof fetch
+    const partials: string[] = []
+    const error = await submitVoiceTranscriptionStream({
+      url: "http://localhost:4096",
+      fetch: stalls,
+      registration: streamRegistration,
+      audio: audio(),
+      onPartial: (text) => partials.push(text),
+      idleMs: 25,
+    }).catch((caught) => caught)
+    expect(partials).toEqual(["hi"])
+    expect(error).toBeInstanceOf(VoiceTranscriptionError)
+    expect((error as Error).message).toContain("went quiet for 25 ms")
     expect((error as Error).message).toContain("still held locally")
   })
 
