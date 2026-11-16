@@ -1,4 +1,4 @@
-// Fidelity corpus for the three packages/ai tool-schema translators — design #1684, phase 1 (issue #1685).
+// Fidelity corpus for the packages/ai tool-schema projections — design #1684, phases 1 (issue #1685) + 4 (task 12732).
 //
 // ORACLE: the disposition tables in this file are the oracle (model-based testing: the tables are the
 // model of each translator's intended semantics, per design #1684's contract — every keyword, in every
@@ -17,10 +17,11 @@
 //
 // Recorded approximations (probed against live endpoints by the family fixes, not changed here):
 // Gemini loop-cut to {} (#1585), antigravity anyOf->oneOf fold for Anthropic targets (#1550), Moonshot
-// prefixItems fold when `items` is absent. `objectRoot`'s object-root forcing lives in the unexported
-// tools() layer of tool-schema.ts (it drops a root-level `not: {type:"null"}` / branch-only anyOf and
-// forces type:"object"); ToolSchemaProjection.moonshot itself does not apply it, so the moonshot table
-// asserts the direct projection and this note records the forcing at the layer above.
+// prefixItems fold when `items` is absent. `objectRoot`'s object-root forcing — it drops a root-level
+// `not: {type:"null"}` / branch-only anyOf and forces type:"object" — has its own disposition table
+// (objectRootTable, phase 4); ToolSchemaProjection.moonshot itself does not apply it, so the moonshot
+// table asserts the direct projection. The phase-4 ratchet at the bottom of this file fails when a new
+// projection or keyword arrives without a disposition entry.
 import { describe, expect, test } from "bun:test"
 import { convertSchema } from "../src/protocols/antigravity.js"
 import { GeminiJsonSchema } from "../src/protocols/utils/gemini-json-schema.js"
@@ -899,6 +900,68 @@ export const moonshotTable: ReadonlyArray<Row> = [
   },
 ]
 
+// Phase 4 (#1684): objectRoot runs inside the tools() pipeline on EVERY tool
+// schema before any protocol body is built, so its two drops needed rows of
+// their own instead of the comment-only note they had since phase 1.
+export const objectRootTable: ReadonlyArray<Row> = [
+  {
+    shape: "empty schema forces an object root",
+    disposition: "preserved",
+    input: {},
+    expected: { type: "object" },
+  },
+  {
+    shape: "bare properties map forces an object root",
+    disposition: "preserved",
+    input: { properties: { a: { type: "string" } } },
+    expected: { type: "object", properties: { a: { type: "string" } } },
+  },
+  {
+    shape: "root not:{type:null} is dropped",
+    disposition: "approximated",
+    direction: "widening",
+    note: "Effect's empty-struct marker: the negation of null is implied by the forced object root, so dropping it widens nothing in practice.",
+    input: { not: { type: "null" } },
+    expected: { type: "object" },
+  },
+  {
+    shape: "root not:{type:null} dropped beside siblings",
+    disposition: "approximated",
+    direction: "widening",
+    input: { not: { type: "null" }, description: "d" },
+    expected: { type: "object", description: "d" },
+  },
+  {
+    shape: "branch-only anyOf is dropped",
+    disposition: "approximated",
+    direction: "widening",
+    note: "A branch-only anyOf (every branch a bare {type:object}) describes the object root itself; the forced root keeps that meaning while admitting schemas the branch list would reject.",
+    input: { anyOf: [{ type: "object" }] },
+    expected: { type: "object" },
+  },
+  {
+    shape: "non-branch anyOf is kept beside the forced root",
+    disposition: "preserved",
+    input: { anyOf: [{ type: "string" }, { type: "object", properties: { a: { type: "string" } } }] },
+    expected: {
+      type: "object",
+      anyOf: [{ type: "string" }, { type: "object", properties: { a: { type: "string" } } }],
+    },
+  },
+  {
+    shape: "typed roots pass through untouched",
+    disposition: "preserved",
+    input: { type: "object", properties: {} },
+    expected: { type: "object", properties: {} },
+  },
+  {
+    shape: "non-object typed roots pass through untouched",
+    disposition: "preserved",
+    input: { type: "string" },
+    expected: { type: "string" },
+  },
+]
+
 const translators = [
   {
     name: "antigravity convertSchema",
@@ -914,6 +977,11 @@ const translators = [
     name: "ToolSchemaProjection.moonshot",
     table: moonshotTable,
     run: (row: Row) => ToolSchemaProjection.moonshot(structuredClone(row.input) as never),
+  },
+  {
+    name: "ToolSchemaProjection.objectRoot",
+    table: objectRootTable,
+    run: (row: Row) => ToolSchemaProjection.objectRoot(structuredClone(row.input) as never),
   },
 ] as const
 
@@ -948,8 +1016,7 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     expect(row?.issue).toBeUndefined()
   })
 
-  test("known-lossy rows cannot link a closed issue", () => {
-    // #1574 closed completed on 2026-11-05 via PR #1647 while its Moonshot row
+  test("known-lossy rows cannot link a closed issue", () => {    // #1574 closed completed on 2026-11-05 via PR #1647 while its Moonshot row
     // still pointed at it as a live known-lossy link; the row was reclassified
     // to approximated/widening under #1933. When a known-lossy row's issue
     // closes, reclassify the row (or re-link it to a live tracking issue) in
@@ -965,5 +1032,118 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
         expect(closedIssues.has(row.issue ?? ""), row.shape).toBe(false)
       }
     }
+  })
+
+  // Phase-4 ratchet (#1684): a new translator, or a new keyword in a
+  // translator, must arrive with a disposition row — otherwise the corpus
+  // fails here first, not silently on the wire.
+  test("projection registry: every exported projection is dispositioned or declared passthrough", () => {
+    // convertSchema and GeminiJsonSchema live outside ToolSchemaProjection
+    // (protocols/antigravity.ts and protocols/utils/gemini-json-schema.ts).
+    const external: Record<string, string> = {
+      "antigravity convertSchema": "tabled as antigravityTable above",
+      "GeminiJsonSchema.normalize": "tabled as geminiTable above",
+    }
+    // ToolSchemaProjection members with no disposition table, and why.
+    const passthrough: Record<string, string> = {
+      // openAI/responses are the identity projection: no keyword changes
+      // meaning, so there is nothing to disposition.
+      "ToolSchemaProjection.openAI": "identity projection",
+      "ToolSchemaProjection.responses": "identity projection",
+      // tools is the pipeline (objectRoot + model routing), pinned by
+      // tool-schema-projection.test.ts rather than a disposition table.
+      "ToolSchemaProjection.tools": "pipeline",
+    }
+    const tabled = new Set(translators.map((translator) => translator.name))
+    const exported = new Set(Object.keys(ToolSchemaProjection).map((key) => `ToolSchemaProjection.${key}`))
+    // ToolSchemaProjection members exercised under a different corpus name.
+    const tabledByExport: Record<string, string> = {
+      "ToolSchemaProjection.gemini": "GeminiJsonSchema.normalize",
+      "ToolSchemaProjection.moonshot": "ToolSchemaProjection.moonshot",
+      "ToolSchemaProjection.objectRoot": "ToolSchemaProjection.objectRoot",
+    }
+    // Every tabled translator is a known projection (exported or declared external).
+    for (const name of tabled) expect(exported.has(name) || name in external, name).toBe(true)
+    // Every exported projection is tabled (possibly under another name) or declared passthrough.
+    for (const name of exported)
+      expect(tabled.has(tabledByExport[name] ?? name) || name in passthrough, name).toBe(true)
+    // No stale declarations: every declared name still exists.
+    for (const name of [
+      ...Object.keys(external),
+      ...Object.keys(passthrough),
+      ...Object.keys(tabledByExport),
+      ...Object.values(tabledByExport),
+    ])
+      expect(tabled.has(name) || exported.has(name), name).toBe(true)
+  })
+
+  test("antigravity allowlist: adding or dropping a keyword fails here first", () => {
+    // convertSchema silently drops anything outside SCHEMA_FIELDS, so the
+    // allowlist boundary itself is frozen: every keyword below is probed on a
+    // root that carries it, and the probe fails if the keyword's kept/dropped
+    // fate changes. A newly supported keyword must extend this map AND gain a
+    // disposition row in antigravityTable in the same change.
+    const probes: ReadonlyArray<readonly [keyword: string, value: unknown, fate: "kept" | "dropped"]> = [
+      ["format", "date-time", "kept"],
+      ["title", "t", "kept"],
+      ["description", "d", "kept"],
+      ["nullable", true, "kept"],
+      ["default", "x", "kept"],
+      ["enum", ["a"], "kept"],
+      ["example", "y", "kept"],
+      ["propertyOrdering", ["v"], "kept"],
+      ["minProperties", 1, "kept"],
+      ["maxProperties", 4, "kept"],
+      ["minLength", 1, "kept"],
+      ["maxLength", 9, "kept"],
+      ["pattern", "^a", "kept"],
+      ["minimum", 1, "kept"],
+      ["maximum", 9, "kept"],
+      ["minItems", 0, "kept"],
+      ["maxItems", 9, "kept"],
+      ["items", { type: "string" }, "kept"],
+      ["prefixItems", [{ type: "string" }], "kept"],
+      ["anyOf", [{ type: "string" }], "kept"],
+      ["oneOf", [{ type: "string" }], "kept"],
+      ["allOf", [{ type: "string" }], "kept"],
+      ["not", { type: "string" }, "kept"],
+      ["$schema", "https://json-schema.org/draft/2020-12/schema", "dropped"],
+      ["additionalProperties", false, "dropped"],
+      ["contains", { type: "string" }, "dropped"],
+      ["if", { type: "string" }, "dropped"],
+      ["contentEncoding", "base64", "dropped"],
+      ["$comment", "hi", "dropped"],
+      ["unevaluatedProperties", false, "dropped"],
+      ["patternProperties", { "^x": { type: "number" } }, "dropped"],
+      ["$defs", { x: { type: "string" } }, "dropped"],
+      ["definitions", { x: { type: "string" } }, "dropped"],
+      ["dependentSchemas", { a: { type: "string" } }, "dropped"],
+      ["dependencies", { a: ["b"] }, "dropped"],
+      ["examples", ["a"], "dropped"],
+    ]
+    for (const [keyword, value, fate] of probes) {
+      const output = convertSchema(
+        { type: "object", properties: { v: { type: "string" } }, required: ["v"], [keyword]: value },
+        false,
+      ) as Record<string, unknown>
+      expect(Object.hasOwn(output, keyword) ? "kept" : "dropped", keyword).toBe(fate)
+    }
+  })
+
+  test("unknown keywords: rewriting translators preserve, the allowlist drops (deliberately)", () => {
+    const canary = "x-fleet-ratchet-canary"
+    const input = { type: "object", properties: { v: { type: "string", [canary]: { any: ["thing"] } } } }
+    // Gemini and Moonshot rewrite only their named shapes: a keyword they do
+    // not know must ride through verbatim. If either starts dropping unknown
+    // keywords, that is a new silent drop and needs a disposition row.
+    expect(GeminiJsonSchema.normalize(structuredClone(input) as never)).toEqual(input)
+    expect(ToolSchemaProjection.moonshot(structuredClone(input) as never)).toEqual(input)
+    // Antigravity's contract is the opposite: the allowlist drops what it
+    // does not know (antigravityTable's unsupported-keywords row). If it ever
+    // preserves an unknown keyword, that row's expected output is stale.
+    const converted = convertSchema(structuredClone(input), false) as {
+      properties: { v: Record<string, unknown> }
+    }
+    expect(Object.hasOwn(converted.properties.v, canary)).toBe(false)
   })
 })

@@ -118,6 +118,7 @@ const tools = (entries: LLMRequest["tools"], model: LanguageModel): LLMRequest["
 export const ToolSchemaProjection = {
   gemini,
   moonshot,
+  objectRoot,
   openAI,
   responses,
   tools,
