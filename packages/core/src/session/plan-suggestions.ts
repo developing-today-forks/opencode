@@ -73,8 +73,7 @@ export const planNoticesForTurn = (plans: readonly string[], diffs: readonly Fil
 export const acceptSuggestion = (
   markdown: string,
   suggestion: Pick<ExecutionPlan.Suggestion, "stepIndex" | "text">,
-): string =>
-  ExecutionPlan.applyCheck(markdown, suggestion)
+): string => ExecutionPlan.applyCheck(markdown, suggestion)
 
 /** Dismiss a suggestion: the plan, unchanged. Dismissing is the uncheck path (Q3). */
 export const dismissSuggestion = (markdown: string): string => markdown
