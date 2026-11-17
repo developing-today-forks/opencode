@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import path from "node:path"
 import Ajv2020 from "ajv/dist/2020.js"
 import { Effect, Schema, SchemaGetter } from "effect"
 import { z } from "zod"
@@ -68,6 +70,77 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "websearch", input: WebSearchTool.Input },
   { name: "write", input: WriteTool.Input },
 ]
+
+
+// Completeness guard for the hand-written inventory above (#1902). The set of
+// registered built-in tool names is derived mechanically from the registration
+// surfaces - the tool-plugin modules named by PluginInternal's imports, plus
+// the editor-registered tools added by call sites in src/plugin and
+// src/config/plugin (plan-info, model-routes) - so a tool registered without a
+// meta-validated inventory entry (or an inventory entry for a tool that no
+// longer exists) turns this suite red instead of escaping validation silently.
+const srcDir = path.join(import.meta.dir, "../src")
+const readSrc = (rel: string) => readFileSync(path.join(srcDir, rel), "utf8")
+const toSrcRel = (fromRel: string, spec: string) =>
+  path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), spec)).replace(/\.js$/, ".ts")
+
+const exportedToolName = (source: string) => source.match(/export const name = "([^"]+)"/)?.[1]
+
+// Every `(editor|draft).add({ ... })` in a tool-plugin module registers one
+// tool. Its full name is the literal `name:` (or the module's exported `name`
+// for the shorthand form), prefixed by the add's `options.namespace` when one
+// is declared. Name and namespace both appear before `execute:` in every
+// registration, so the segment between `.add({` and `execute:` is enough.
+const namesFromModule = (rel: string): string[] => {
+  const source = readSrc(rel)
+  const own = exportedToolName(source)
+  const names: string[] = []
+  for (const match of source.matchAll(/(?:editor|draft)\.add\(\{/g)) {
+    const rest = source.slice(match.index + match[0].length)
+    const end = rest.indexOf("execute:")
+    if (end === -1) continue
+    const segment = rest.slice(0, end)
+    const literal = segment.match(/name:\s*"([^"]+)"/)?.[1]
+    const name = literal ?? (/(^|\n)\s*name,\s*\n/.test(segment) ? own : undefined)
+    if (!name) continue
+    const namespace = segment.match(/namespace:\s*"([^"]+)"/)?.[1]
+    names.push(namespace ? `${namespace}_${name}` : name)
+  }
+  return names
+}
+
+const registeredBuiltinToolNames = (): Set<string> => {
+  const names = new Set<string>()
+  const internalRel = "plugin/internal.ts"
+  const internal = readSrc(internalRel)
+  // Surface 1: tool-plugin modules PluginInternal imports.
+  for (const match of internal.matchAll(/import \{ (\w+) \} from "([^"]*\/tool\/plugin\/[^"]+)"/g)) {
+    namesFromModule(toSrcRel(internalRel, match[2])).forEach((name) => names.add(name))
+  }
+  // Surface 2: tools registered by `.add(editor, ...)` call sites outside the
+  // tool-plugin modules themselves (PlanInfoTool via src/plugin/plan-info.ts,
+  // the route tools via src/config/plugin/model-routes.ts).
+  for (const rel of ["plugin/plan-info.ts", "config/plugin/model-routes.ts"]) {
+    const source = readSrc(rel)
+    const imports = new Map(
+      [...source.matchAll(/import \{ (\w+) \} from "([^"]+)"/g)].map((m) => [m[1], m[2]]),
+    )
+    for (const match of source.matchAll(/(\w+)\.add\(editor/g)) {
+      const spec = imports.get(match[1])
+      if (!spec || !spec.includes("/tool/plugin/")) continue
+      const name = exportedToolName(readSrc(toSrcRel(rel, spec)))
+      if (name) names.add(name)
+    }
+  }
+  return names
+}
+
+test("built-in tool inventory is complete against the registration surfaces", () => {
+  const registered = registeredBuiltinToolNames()
+  const inventoried = new Set(builtinInputs.map((entry) => entry.name))
+  expect([...registered].filter((name) => !inventoried.has(name)).sort()).toEqual([])
+  expect([...inventoried].filter((name) => !registered.has(name)).sort()).toEqual([])
+})
 
 const context = {
   sessionID: Session.ID.make("ses_tool_schema"),
