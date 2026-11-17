@@ -592,10 +592,41 @@ const normalizeStreamToolID = (state: ParserState, source: string) => {
   }
 }
 
-const toolText = (tool: MistralToolDelta) => {
+const toolText = (tool: MistralToolDelta): string | AIError => {
   const value = tool.function?.arguments
   if (typeof value === "string") return value
-  return value === null || value === undefined ? "" : ProviderShared.encodeJson(value)
+  if (value === null || value === undefined) return ""
+  // #2229 (from #1707 §2-G3): a non-object scalar (or array) arguments value
+  // can never form a valid tool input object. Error explicitly at the
+  // protocol boundary instead of encodeJson-quoting it into a downstream
+  // object-expectation failure.
+  if (typeof value !== "object" || Array.isArray(value))
+    return ProviderShared.eventError(
+      ADAPTER,
+      `Mistral Chat tool call arguments must be a JSON object, got ${Array.isArray(value) ? "array" : typeof value}`,
+      ProviderShared.encodeJson(value),
+    )
+  return ProviderShared.encodeJson(value)
+}
+
+/**
+ * #2229: the JSON kind of a completed arguments payload when it parses to a
+ * non-object scalar, else undefined. Empty input is the zero-argument case
+ * and stays valid; unparseable input keeps parseToolInput's uniform
+ * invalid-JSON error, so only the scalar case is claimed here.
+ */
+const scalarArgumentsKind = (raw: string): string | undefined => {
+  const text = raw.trim()
+  if (text === "") return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (parsed === null) return "null"
+  if (Array.isArray(parsed)) return "array"
+  return typeof parsed === "object" ? undefined : typeof parsed
 }
 
 const appendTools = Effect.fnUntraced(function* (
@@ -622,7 +653,9 @@ const appendTools = Effect.fnUntraced(function* (
       existing || pending ? { id: existing?.id ?? pending?.id ?? "", state } : normalizeStreamToolID(state, source)
     state = normalized.state
     const name = existing?.name ?? pending?.name ?? (delta.function?.name?.trim() || undefined)
-    const text = `${pending?.input ?? ""}${toolText(delta)}`
+    const textPart = toolText(delta)
+    if (textPart instanceof AIError) return yield* textPart
+    const text = `${pending?.input ?? ""}${textPart}`
     if (!name) {
       state = {
         ...state,
@@ -712,6 +745,20 @@ const step = Effect.fnUntraced(function* (state: ParserState, event: MistralEven
       "Mistral Chat tool call delta is missing a name",
       ProviderShared.encodeJson(event),
     )
+  // #2229: accumulated arguments that parse to a non-object scalar error
+  // explicitly here, at the protocol boundary, instead of flowing downstream
+  // as a tool input that fails object expectations.
+  if (!incomplete) {
+    const scalar = Object.values(withTools.tools).find(
+      (tool) => tool !== undefined && scalarArgumentsKind(tool.input) !== undefined,
+    )
+    if (scalar)
+      return yield* ProviderShared.eventError(
+        ADAPTER,
+        `Mistral Chat tool call ${scalar.name} arguments must be a JSON object, got ${scalarArgumentsKind(scalar.input)}`,
+        scalar.input,
+      )
+  }
   const finished =
     !incomplete && Object.keys(withTools.tools).length > 0
       ? yield* ToolStream.finishAll(ADAPTER, withTools.tools)
