@@ -137,4 +137,63 @@ if (process.platform !== "win32") {
       }),
     ),
   )
+
+  // Coverage for #2486: capture is bounded by a total cap and one page is clamped, so a
+  // runaway command cannot exhaust the disk and one output request cannot allocate the
+  // whole capture. The oracle is the documented constants: size stops at MAX_OUTPUT_BYTES
+  // with truncated reported, and a page never exceeds MAX_OUTPUT_PAGE_BYTES while paging
+  // still reconstructs the capture byte-identically.
+  it.live("capture stops growing at the total cap and reports truncated", () =>
+    provide(
+      Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const info = yield* shell.create({
+          shell: "/bin/sh",
+          command: `head -c ${Shell.MAX_OUTPUT_BYTES + 1024} /dev/zero | tr '\\0' a`,
+          timeout: 0,
+        })
+        yield* shell.wait(info.id)
+        const page = yield* shell.output(info.id, { cursor: 0, limit: 16 })
+        expect(page.size).toBe(Shell.MAX_OUTPUT_BYTES)
+        expect(page.truncated).toBe(true)
+        expect(page.output).toBe("a".repeat(16))
+        const caught = yield* shell.output(info.id, { cursor: Shell.MAX_OUTPUT_BYTES })
+        expect(caught).toEqual({
+          output: "",
+          cursor: Shell.MAX_OUTPUT_BYTES,
+          size: Shell.MAX_OUTPUT_BYTES,
+          truncated: true,
+        })
+      }),
+    ),
+  )
+
+  it.live("a page request above the clamp is clamped and paging stays byte-identical", () =>
+    provide(
+      Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const total = Shell.MAX_OUTPUT_PAGE_BYTES + Shell.MAX_OUTPUT_PAGE_BYTES / 2
+        const info = yield* shell.create({
+          shell: "/bin/sh",
+          command: `yes 0123456789abcde | head -c ${total}`,
+          timeout: 0,
+        })
+        yield* shell.wait(info.id)
+        const expected = "0123456789abcde\n".repeat(total / 16)
+        const first = yield* shell.output(info.id, { cursor: 0, limit: Shell.MAX_OUTPUT_BYTES })
+        expect(first.size).toBe(total)
+        expect(first.truncated).toBe(false)
+        expect(first.output.length).toBe(Shell.MAX_OUTPUT_PAGE_BYTES)
+        expect(first.cursor).toBe(Shell.MAX_OUTPUT_PAGE_BYTES)
+        let rest = ""
+        let cursor = first.cursor
+        while (cursor < first.size) {
+          const page = yield* shell.output(info.id, { cursor })
+          rest += page.output
+          cursor = page.cursor
+        }
+        expect(first.output + rest).toBe(expected)
+      }),
+    ),
+  )
 }

@@ -257,6 +257,7 @@ export function TabNavItem(props: {
         disabled={editing() || props.dragging}
         aria-haspopup="menu"
         aria-expanded={menu.open}
+        aria-current={props.active ? "page" : undefined}
         data-slot="tab-link"
         data-titlebar-tab-link
         href={props.href}
@@ -469,6 +470,7 @@ export function DraftTabItem(props: {
       <a
         data-slot="tab-link"
         data-titlebar-tab-link
+        aria-current={props.active ? "page" : undefined}
         href={props.href}
         draggable={false}
         onDragStart={(event) => {
