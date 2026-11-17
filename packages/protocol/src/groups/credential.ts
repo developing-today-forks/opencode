@@ -1,7 +1,7 @@
 import { Credential } from "@opencode/schema/credential"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
-import { ConflictError } from "../errors.js"
+import { ConflictError, CredentialNotFoundError } from "../errors.js"
 
 export const CredentialGroup = HttpApiGroup.make("server.credential")
   .add(
@@ -34,6 +34,7 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
       params: { credentialID: Credential.ID },
       payload: Schema.Struct({ label: Schema.String }),
       success: HttpApiSchema.NoContent,
+      error: CredentialNotFoundError,
     })
       .annotateMerge(
         OpenApi.annotations({
@@ -48,6 +49,7 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
     HttpApiEndpoint.post("credential.activate", "/api/credential/:credentialID/activate", {
       params: { credentialID: Credential.ID },
       success: HttpApiSchema.NoContent,
+      error: CredentialNotFoundError,
     })
       .annotateMerge(
         OpenApi.annotations({
@@ -61,6 +63,7 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
     HttpApiEndpoint.delete("credential.remove", "/api/credential/:credentialID", {
       params: { credentialID: Credential.ID },
       success: HttpApiSchema.NoContent,
+      error: CredentialNotFoundError,
     })
       .annotateMerge(
         OpenApi.annotations({

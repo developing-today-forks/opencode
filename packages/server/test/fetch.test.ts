@@ -191,13 +191,34 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
   }),
 )
 
-it.live("activates credentials through the HttpApi", () =>
+it.live("answers 404 when activating a missing credential through the HttpApi", () =>
   Effect.gen(function* () {
     const handler = yield* ServerFetch.make(options)
     const response = yield* Effect.promise(() =>
       handler(new Request("http://opencode.local/api/credential/cred_missing/activate", { method: "POST" })),
     )
-    expect(response.status).toBe(204)
+    expect(response.status).toBe(404)
+  }),
+)
+
+it.live("answers 404 when updating or removing a missing credential through the HttpApi", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options)
+    const updated = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/credential/cred_missing", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ label: "renamed" }),
+        }),
+      ),
+    )
+    expect(updated.status).toBe(404)
+
+    const removed = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/api/credential/cred_missing", { method: "DELETE" })),
+    )
+    expect(removed.status).toBe(404)
   }),
 )
 

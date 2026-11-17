@@ -1,5 +1,5 @@
 import { Credential } from "@opencode/core/credential"
-import { ConflictError } from "@opencode/protocol/errors"
+import { ConflictError, CredentialNotFoundError } from "@opencode/protocol/errors"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Api } from "../api"
@@ -31,6 +31,7 @@ export const CredentialHandler = HttpApiBuilder.group(Api, "server.credential", 
       "credential.update",
       Effect.fn(function* (ctx) {
         const credential = yield* Credential.Service
+        yield* requireCredential(credential, ctx.params.credentialID)
         yield* credential.update(ctx.params.credentialID, { label: ctx.payload.label })
         return HttpApiSchema.NoContent.make()
       }),
@@ -39,6 +40,7 @@ export const CredentialHandler = HttpApiBuilder.group(Api, "server.credential", 
       "credential.activate",
       Effect.fn(function* (ctx) {
         const credential = yield* Credential.Service
+        yield* requireCredential(credential, ctx.params.credentialID)
         yield* credential.activate(ctx.params.credentialID)
         return HttpApiSchema.NoContent.make()
       }),
@@ -47,11 +49,27 @@ export const CredentialHandler = HttpApiBuilder.group(Api, "server.credential", 
       "credential.remove",
       Effect.fn(function* (ctx) {
         const credential = yield* Credential.Service
+        yield* requireCredential(credential, ctx.params.credentialID)
         yield* credential.remove(ctx.params.credentialID)
         return HttpApiSchema.NoContent.make()
       }),
     ),
 )
+
+// The core service silently no-ops on a missing credential (internal
+// callers rely on that), so the HTTP surface checks existence itself:
+// a missing ID must answer 404, not a 204 that looks like a successful
+// revoke/activate/update (#2527).
+const requireCredential = Effect.fn("CredentialHandler.requireCredential")(function* (
+  credential: Credential.Interface,
+  credentialID: Credential.ID,
+) {
+  if (yield* credential.get(credentialID)) return
+  return yield* new CredentialNotFoundError({
+    credentialID,
+    message: `Credential not found: ${credentialID}`,
+  })
+})
 
 // Credential listings order each integration's selected credential last.
 function entries(credentials: Credential.Info[]) {
