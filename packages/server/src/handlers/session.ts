@@ -642,11 +642,10 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.inbox.cancel",
         Effect.fn(function* (ctx) {
-          yield* session.cancelInbox({ sessionID: ctx.params.sessionID, inboxID: ctx.params.inboxID }).pipe(
-            Effect.catchTag("Session.NotFoundError", missingSession),
-            Effect.catchTag("Session.InboxConflictError", () => Effect.void),
+          return yield* pendingMutation(
+            session.cancelInbox({ sessionID: ctx.params.sessionID, inboxID: ctx.params.inboxID }),
+            "Pending input cannot be cancelled",
           )
-          return HttpApiSchema.NoContent.make()
         }),
       )
       .handle(
