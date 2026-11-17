@@ -1653,6 +1653,7 @@ describe("ModelResolver routes", () => {
     run: (resolver: ModelResolver.Interface) => Effect.Effect<A, E>,
     integration?: unknown,
     dataDir?: string,
+    defaultModel?: Info,
   ) => {
     const provider = Provider.Info.make({
       ...Provider.Info.empty(leaves[0].providerID),
@@ -1668,6 +1669,8 @@ describe("ModelResolver routes", () => {
             get: (providerID, id) =>
               Effect.succeed(leaves.find((item) => item.providerID === providerID && item.id === id)),
             all: () => Effect.succeed(leaves),
+            default: () => Effect.succeed(defaultModel),
+            available: () => Effect.succeed(leaves),
           }),
           Layer.mock(
             Integration.Service,
@@ -2566,6 +2569,54 @@ describe("ModelResolver routes", () => {
         expect(targetOf(yield* resolver.resolveModel(route))).toBe("pa")
         ModelRoute.resetQuotaFeed()
       }),
+    )
+  })
+
+
+  it.live("a new root session on the DEFAULT model is redirected off a pool above rootStartMaxPct; a subsession is admitted (#2622)", () => {
+    ModelRoute.resetHealth()
+    const a = leaf("pa")
+    const b = leaf("pb")
+    const route = routed([a, b], { ...ordered })
+    const targetA = ModelRoute.ref({ providerID: "pa", model: a.id })
+    return withResolver(
+      [a, b, route],
+      (resolver) =>
+        Effect.gen(function* () {
+          const now = Date.now()
+          ModelRoute.observeProviderQuota(
+            targetA,
+            {
+              planID: "plan",
+              window: "five-hours",
+              providerID: "pa",
+              percent: 90,
+              remaining: 10,
+              resetAt: now + 3_600_000,
+              observedAt: now,
+              stale: false,
+            },
+            now,
+          )
+          // As in the #566 explicit-path test above: consume both providers' feed
+          // stamps so the resolution's own feed pass leaves the fed snapshot standing.
+          ModelRoute.resetQuotaFeed()
+          ModelRoute.shouldFeedQuota(now, undefined, "pa")
+          ModelRoute.shouldFeedQuota(now, undefined, "pb")
+          // resolve(undefined, ...) is the runner's default-model path
+          // (session/runner/model.ts). Before #2622 it carried no session context,
+          // so cascade.kind was undefined and the root-start gate never judged the
+          // start: a new root session would have started on pa at 90%.
+          expect(targetOf((yield* resolver.resolve(undefined, undefined, "ses_root2622"))!)).toBe("pb")
+          // A subsession on the default model is admitted to pa, as on the explicit path.
+          expect(targetOf((yield* resolver.resolve(undefined, undefined, "ses_sub2622", "ses_root2622"))!)).toBe("pa")
+          // No session claims the resolution: no start is judged, pa serves as before.
+          expect(targetOf((yield* resolver.resolve(undefined))!)).toBe("pa")
+          ModelRoute.resetQuotaFeed()
+        }),
+      undefined,
+      undefined,
+      route,
     )
   })
 
