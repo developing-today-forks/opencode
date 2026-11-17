@@ -127,6 +127,15 @@ export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundErro
   { httpApiStatus: 404 },
 ) {}
 
+export class CredentialNotFoundError extends Schema.TaggedError<CredentialNotFoundError>()(
+  "CredentialNotFoundError",
+  {
+    credentialID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class FileNotFoundError extends Schema.TaggedError<FileNotFoundError>()(
   "FileNotFoundError",
   {
