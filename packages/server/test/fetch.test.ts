@@ -298,6 +298,30 @@ it.live("applies custom CORS origins to HTTP responses and PTY ticket checks", (
             ),
           )
           expect(persistentConnect.status).toBe(allowed ? 400 : 403)
+
+          // #2465: an oversized or malformed attachment_id is rejected with
+          // the same 400 as a bad cursor, before any socket upgrade or
+          // attach — it is never echoed in the attached frame or forwarded
+          // to the daemon verbatim.
+          const oversizedAttachment = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                `http://opencode.local/api/experimental/persistent-pty/pty_missing/connect?attachment_id=${"a".repeat(129)}`,
+                { headers: { origin, authorization: `Basic ${btoa("opencode:secret")}` } },
+              ),
+            ),
+          )
+          expect(oversizedAttachment.status).toBe(allowed ? 400 : 403)
+
+          const malformedAttachment = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                "http://opencode.local/api/experimental/persistent-pty/pty_missing/connect?attachment_id=bad%20id%2Fwith%20spaces",
+                { headers: { origin, authorization: `Basic ${btoa("opencode:secret")}` } },
+              ),
+            ),
+          )
+          expect(malformedAttachment.status).toBe(allowed ? 400 : 403)
         }),
     )
 

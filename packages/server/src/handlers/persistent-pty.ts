@@ -1,4 +1,5 @@
 import { PersistentPty } from "@opencode/core/persistent-pty"
+import { PersistentPty as PersistentPtySchema } from "@opencode/schema/persistent-pty"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import { ForbiddenError, PtyNotFoundError, ServiceUnavailableError } from "@opencode/protocol/errors"
 import {
@@ -6,7 +7,7 @@ import {
   PTY_CONNECT_TOKEN_HEADER,
   PTY_CONNECT_TOKEN_HEADER_VALUE,
 } from "@opencode/protocol/groups/persistent-pty"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
@@ -121,6 +122,8 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
           const framedInput = url.searchParams.get("input_protocol") === "1"
           const attachmentID = url.searchParams.get("attachment_id") ?? crypto.randomUUID()
           if (!Number.isSafeInteger(cursor) || cursor < 0) return HttpServerResponse.empty({ status: 400 })
+          if (!Schema.is(PersistentPtySchema.AttachmentID)(attachmentID))
+            return HttpServerResponse.empty({ status: 400 })
 
           const socket = yield* Effect.orDie(ctx.request.upgrade)
           const outbox = yield* makePtyOutbox()

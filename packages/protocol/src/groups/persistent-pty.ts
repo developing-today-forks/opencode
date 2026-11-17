@@ -117,7 +117,14 @@ export const PersistentPtyGroup = HttpApiGroup.make("server.experimental")
           parameters: [
             ...(operation.parameters ?? []),
             ...["cursor", "role", "attachment_id", "takeover", "input_protocol", PTY_CONNECT_TICKET_QUERY].map(
-              (name) => ({ in: "query", name, schema: { type: "string" } }),
+              (name) =>
+                name === "attachment_id"
+                  ? {
+                      in: "query",
+                      name,
+                      schema: { type: "string", maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+                    }
+                  : { in: "query", name, schema: { type: "string" } },
             ),
           ],
         }),

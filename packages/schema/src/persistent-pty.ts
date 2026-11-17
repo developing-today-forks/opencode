@@ -33,8 +33,21 @@ export const CreateInput = Schema.Struct({
 }).annotate({ identifier: "PersistentPty.CreateInput" })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 
+/**
+ * Client-supplied attachment identity for a persistent PTY connection.
+ * Server-generated ids are UUIDs; a client may supply its own only in this
+ * bounded token shape (1-128 chars, alphanumeric start, then
+ * alphanumeric / `.` / `_` / `-`) so the value can be echoed in protocol
+ * frames and retained as attachment state without size or charset abuse.
+ * The connect handler rejects anything else with a 400 (#2465).
+ */
+export const AttachmentID = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+).annotate({ identifier: "PersistentPty.AttachmentID" })
+export type AttachmentID = typeof AttachmentID.Type
+
 export const UpdateInput = Schema.Struct({
-  attachmentID: optional(Schema.String),
+  attachmentID: optional(AttachmentID),
   size: Schema.Struct({ cols: PositiveInt, rows: PositiveInt }),
 }).annotate({ identifier: "PersistentPty.UpdateInput" })
 export interface UpdateInput extends Schema.Schema.Type<typeof UpdateInput> {}
