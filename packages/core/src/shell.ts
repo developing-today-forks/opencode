@@ -35,12 +35,29 @@ export const DIRECTORY = "shell"
 export const DEFAULT_OUTPUT_LIMIT = 65536
 
 /**
+ * Total capture cap (#2486): one command's combined stdout/stderr file never grows past
+ * 10 MiB — the same bound the VCS patch paths use (`MAX_TOTAL_PATCH_BYTES` in vcs/patch.ts).
+ * Past the cap the pump keeps draining the process (so it never blocks on a full pipe) but
+ * discards the bytes, and the capture reports `truncated` instead of looking complete.
+ */
+export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+
+/**
+ * Page clamp (#2486): one `output` page never materialises more than 1 MiB in memory, so a
+ * single request cannot allocate the whole capture file. The largest legitimate caller
+ * (session shell) pages at exactly 1 MiB; readers wanting more (result() with a configured
+ * max_bytes above 1 MiB) page repeatedly and stay byte-identical.
+ */
+export const MAX_OUTPUT_PAGE_BYTES = 1024 * 1024
+
+/**
  * Paging inputs at the service boundary. Callers reach the service directly (in-process, plugins), so a cursor or
  * limit may arrive unvalidated even though the HTTP schema restricts both to NonNegativeInt: non-finite or negative
- * values mean "absent" and take the defaults, anything else is floored to an integer. The limit has no upper clamp —
- * valid callers page with limits above the default (session shell reads 1 MiB, result() reads the configured
- * max_bytes) and must stay byte-identical — but 0 clamps up to a 1-byte page so paging always advances, matching the
- * pageLimit convention in messaging.ts (#949). The returned cursor is therefore always a NonNegativeInt.
+ * values mean "absent" and take the defaults, anything else is floored to an integer. The limit clamps to
+ * MAX_OUTPUT_PAGE_BYTES (see above) — callers page with limits above the default (session shell reads 1 MiB,
+ * result() reads the configured max_bytes in repeated pages) and stay byte-identical — and 0 clamps up to a
+ * 1-byte page so paging always advances, matching the pageLimit convention in messaging.ts (#949). The
+ * returned cursor is therefore always a NonNegativeInt.
  */
 function outputCursor(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value) || value < 0) return 0
@@ -67,7 +84,7 @@ function timeoutDuration(value: number) {
 
 function outputLimit(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value) || value < 0) return DEFAULT_OUTPUT_LIMIT
-  return Math.max(Math.floor(value), 1)
+  return Math.min(Math.max(Math.floor(value), 1), MAX_OUTPUT_PAGE_BYTES)
 }
 
 type Info = Shell.Info
@@ -81,6 +98,8 @@ type Active = {
   file: string
   size: number
   newlines: number
+  // True once the capture hit MAX_OUTPUT_BYTES and later output was discarded (#2486).
+  truncated: boolean
   // Resolves with the terminal Info once the command exits, times out, or is killed. A wait
   // started after termination resolves immediately from the already-completed deferred.
   done: Deferred.Deferred<Info, NotFoundError>
@@ -236,7 +255,8 @@ const layer = () =>
         const command = yield* require(id)
         const cursor = outputCursor(input?.cursor)
         const limit = outputLimit(input?.limit)
-        if (cursor >= command.size) return { output: "", cursor: command.size, size: command.size, truncated: false }
+        if (cursor >= command.size)
+          return { output: "", cursor: command.size, size: command.size, truncated: command.truncated }
         const start = cursor
         const length = Math.min(limit, command.size - start)
         const buffer = Buffer.alloc(length)
@@ -258,7 +278,7 @@ const layer = () =>
           output: buffer.subarray(0, bytesRead).toString("utf8"),
           cursor: start + bytesRead,
           size: command.size,
-          truncated: false,
+          truncated: command.truncated,
         }
       })
 
@@ -273,10 +293,25 @@ const layer = () =>
           const maxLines = limits?.max_lines ?? ToolOutput.MAX_LINES
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const latest = yield* output(info.id, { cursor: Number.MAX_SAFE_INTEGER })
-          const page = yield* output(info.id, { cursor: Math.max(0, latest.size - maxBytes), limit: maxBytes })
+          // Page the tail in clamped pages (#2486): output() bounds one page to
+          // MAX_OUTPUT_PAGE_BYTES, so a maxBytes above the clamp is accumulated over
+          // several pages and stays byte-identical to one big read.
+          const tailStart = Math.max(0, latest.size - maxBytes)
+          let tail = ""
+          let tailCursor = tailStart
+          while (tailCursor < latest.size) {
+            const step = yield* output(info.id, {
+              cursor: tailCursor,
+              limit: maxBytes - (tailCursor - tailStart),
+            })
+            if (step.cursor <= tailCursor) break
+            tail += step.output
+            tailCursor = step.cursor
+          }
+          const page = { output: tail }
           const lines = page.output.split("\n")
           if (page.output.endsWith("\n")) lines.pop()
-          const truncated = latest.size > maxBytes || lines.length > maxLines
+          const truncated = latest.truncated || latest.size > maxBytes || lines.length > maxLines
           const text = lines.length > maxLines ? lines.slice(-maxLines).join("\n") : page.output
           const total = (yield* require(info.id)).newlines + (page.output.endsWith("\n") ? 0 : 1)
           const shown = Math.min(lines.length, maxLines)
@@ -378,6 +413,7 @@ const layer = () =>
                 file,
                 size: 0,
                 newlines: 0,
+                truncated: false,
                 done: Deferred.makeUnsafe<Info, NotFoundError>(),
               }
               commands.set(id, command)
@@ -387,10 +423,20 @@ const layer = () =>
               const pump = handle.all.pipe(
                 Stream.runForEach((chunk: Uint8Array) =>
                   Effect.sync(() => {
-                    stream.write(chunk)
-                    command.size += chunk.length
+                    // Bound the capture file (#2486): keep only up to MAX_OUTPUT_BYTES in
+                    // total. Past the cap, keep draining (discard the chunk) so the process
+                    // never blocks on a full pipe, and mark the capture truncated.
+                    const room = MAX_OUTPUT_BYTES - command.size
+                    if (room <= 0) {
+                      command.truncated = true
+                      return
+                    }
+                    const kept = chunk.length <= room ? chunk : chunk.subarray(0, room)
+                    if (kept.length < chunk.length) command.truncated = true
+                    stream.write(kept)
+                    command.size += kept.length
                     // Count while streaming so truncation notices never rescan the output file.
-                    for (let index = chunk.indexOf(10); index !== -1; index = chunk.indexOf(10, index + 1))
+                    for (let index = kept.indexOf(10); index !== -1; index = kept.indexOf(10, index + 1))
                       command.newlines++
                   }),
                 ),
