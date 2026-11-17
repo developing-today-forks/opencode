@@ -25,14 +25,21 @@ export const RouteHandler = HttpApiBuilder.group(Api, "server.route", (handlers)
           return yield* new InvalidRequestError({
             message: `Route override is malformed and was not stored: ${ctx.payload.id}`,
           })
-        // The store's save() drops entries that are already expired, and parse() keeps a finite
-        // `until` regardless of now — so accepting the POST would answer 200 with the entry
-        // silently missing from the returned list.
-        if (item.until !== undefined && item.until <= Date.now())
+        // Routing cannot resolve excludeWindows names yet (no window map is passed when an
+        // override is evaluated), so such an override would never apply. Refuse it instead.
+        if (item.schedule?.excludeWindows?.length)
+          return yield* new InvalidRequestError({
+            message: `Route override names excludeWindows, which cannot be resolved yet, and was not stored: ${ctx.payload.id}`,
+          })
+        // One clock read for both the expiry check and the write: the store's save() drops
+        // entries that are already expired, so a later read could silently drop the entry
+        // after a 200 answer.
+        const now = Date.now()
+        if (item.until !== undefined && item.until <= now)
           return yield* new InvalidRequestError({
             message: `Route override is already expired and was not stored: ${ctx.payload.id}`,
           })
-        ModelRouteOverrides.add(item)
+        ModelRouteOverrides.add(item, now)
         return { data: ModelRouteOverrides.current() }
       }),
     )

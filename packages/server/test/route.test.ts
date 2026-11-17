@@ -131,6 +131,40 @@ it.live("rejects an already-expired route override and stores nothing", () =>
   }),
 )
 
+it.live("rejects a route override that names excludeWindows and stores nothing", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-endpoint-")))
+    const file = path.join(tmp.path, "route-overrides.json")
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => ModelRouteOverrides.setFilePath(file)),
+      () =>
+        Effect.gen(function* () {
+          const server = yield* startServer(tmp.path)
+
+          // Routing has no window map at evaluation time, so an unresolved excludeWindows
+          // name would leave the override inert; the server must refuse it.
+          const posted = yield* Effect.promise(() =>
+            fetch(new URL("/api/route/overrides", server.base), {
+              method: "POST",
+              headers: { ...server.headers, "content-type": "application/json" },
+              body: JSON.stringify({
+                ...draft,
+                id: "test-override-exclude-windows",
+                schedule: { daysOfWeek: [1], excludeWindows: ["maintenance"] },
+              }),
+            }),
+          )
+          expect(posted.status).toBe(400)
+
+          const listed = yield* list(server.base, server.headers)
+          expect(listed.status).toBe(200)
+          expect(ids(listed.body)).toEqual([])
+        }),
+      () => Effect.sync(() => ModelRouteOverrides.setFilePath(undefined)),
+    )
+  }),
+)
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
