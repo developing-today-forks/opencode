@@ -639,7 +639,8 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
         OpenApi.annotations({
           identifier: "session.inbox.cancel",
           summary: "Cancel inbox input",
-          description: "Cancel an inbox item that has not yet been delivered. Unknown or already-settled items conflict (409), matching steer/queue.",
+          description:
+            "Cancel an inbox item that has not yet been delivered. Unknown or already-settled items conflict (409), matching steer/queue.",
         }),
       ),
     )
