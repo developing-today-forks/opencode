@@ -70,7 +70,10 @@ export const planNoticesForTurn = (plans: readonly string[], diffs: readonly Fil
  * suggestion's step checked. The caller persists the returned
  * markdown to the plan file; nothing is written here.
  */
-export const acceptSuggestion = (markdown: string, suggestion: Pick<ExecutionPlan.Suggestion, "stepIndex">): string =>
+export const acceptSuggestion = (
+  markdown: string,
+  suggestion: Pick<ExecutionPlan.Suggestion, "stepIndex" | "text">,
+): string =>
   ExecutionPlan.applyCheck(markdown, suggestion)
 
 /** Dismiss a suggestion: the plan, unchanged. Dismissing is the uncheck path (Q3). */

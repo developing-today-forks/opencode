@@ -138,6 +138,68 @@ describe("ExecutionPlan accept / uncheck (Q3)", () => {
     expect(ExecutionPlan.applyUncheck(checked, 0)).toBe(plan)
   })
 
+  // Oracle: issue #2521 — a suggestion is computed against an earlier
+  // plan and accepted later; accepting must never flip a step other
+  // than the one the suggestion describes.
+  test("applyCheck after a step is prepended checks the intended step, never the prepended one", () => {
+    const [suggestion] = ExecutionPlan.suggest(plan, {
+      added: ["packages/web/server/routes.ts"],
+      modified: [],
+      deleted: [],
+    })
+    const edited = plan.replace(
+      "- [ ] 1. Scaffold API routes",
+      "- [ ] 0. Verify the flaky integration test\n- [ ] 1. Scaffold API routes",
+    )
+    const next = ExecutionPlan.applyCheck(edited, suggestion!)
+    const steps = ExecutionPlan.parse(next)
+    expect(steps[0]!.text).toContain("Verify the flaky integration test")
+    expect(steps[0]!.checked).toBe(false)
+    expect(steps[1]!.text).toBe(suggestion!.text)
+    expect(steps[1]!.checked).toBe(true)
+  })
+
+  test("applyCheck refuses (no write) when the plan no longer contains the suggested step", () => {
+    const [suggestion] = ExecutionPlan.suggest(plan, {
+      added: ["packages/web/server/routes.ts"],
+      modified: [],
+      deleted: [],
+    })
+    const edited = plan.replace("- [ ] 1. Scaffold API routes in `packages/web/server/routes.ts`\n", "")
+    expect(ExecutionPlan.applyCheck(edited, suggestion!)).toBe(edited)
+  })
+
+  test("suggestion id is content-stable: the same step text keeps its id after an insertion above it", () => {
+    const changes = { added: ["packages/web/server/routes.ts"], modified: [], deleted: [] }
+    const [before] = ExecutionPlan.suggest(plan, changes)
+    const edited = plan.replace(
+      "- [ ] 1. Scaffold API routes",
+      "- [ ] 0. Verify the flaky integration test\n- [ ] 1. Scaffold API routes",
+    )
+    const [after] = ExecutionPlan.suggest(edited, changes)
+    expect(after!.text).toBe(before!.text)
+    expect(after!.id).toBe(before!.id)
+    expect(after!.stepIndex).not.toBe(before!.stepIndex)
+  })
+
+  test("applyUncheck with a suggestion reference follows the same content rule after an insertion", () => {
+    const [suggestion] = ExecutionPlan.suggest(plan, {
+      added: ["packages/web/server/routes.ts"],
+      modified: [],
+      deleted: [],
+    })
+    const checked = ExecutionPlan.applyCheck(plan, suggestion!)
+    const edited = checked.replace(
+      "- [x] 1. Scaffold API routes",
+      "- [x] 0. Verify the flaky integration test\n- [x] 1. Scaffold API routes",
+    )
+    const next = ExecutionPlan.applyUncheck(edited, suggestion!)
+    const steps = ExecutionPlan.parse(next)
+    expect(steps[0]!.checked).toBe(true)
+    expect(steps[1]!.text).toBe(suggestion!.text)
+    expect(steps[1]!.checked).toBe(false)
+  })
+
   test("notice names the step and, for explicit matches, the completing files", () => {
     const [suggestion] = ExecutionPlan.suggest(plan, {
       added: ["packages/web/server/routes.ts"],

@@ -162,8 +162,14 @@ const pathTokens = (file: string): string[] => {
   return [...tokens]
 }
 
+// Content-stable, as Suggestion.id documents: the id hashes the
+// step's text only, never its position, so inserting or removing a
+// step above it does not re-key the bookkeeping for this step. Two
+// steps with identical text share an id by construction — the id
+// names content, and accept resolves among same-text steps by the
+// recorded position (see resolveStep).
 const suggestionID = (step: Step) =>
-  `plan-step-${step.index}-${crypto.createHash("sha256").update(step.text).digest("hex").slice(0, 8)}`
+  `plan-step-${crypto.createHash("sha256").update(step.text).digest("hex").slice(0, 8)}`
 
 /**
  * Suggest check-offs for a turn's file changes. Pure: the plan markdown is
@@ -236,23 +242,54 @@ export const notice = (suggestion: Suggestion) =>
     ? `Plan step ${suggestion.stepIndex + 1} suggested for check-off: ${suggestion.text} (files complete: ${suggestion.matchedFiles.join(", ")})`
     : `Plan step ${suggestion.stepIndex + 1} suggested for check-off (inferred scope, please confirm): ${suggestion.text}`
 
-const flip = (markdown: string, stepIndex: number, checked: boolean): string => {
+const flipLine = (markdown: string, line: number, checked: boolean): string => {
   const lines = markdown.split("\n")
-  let seen = -1
-  for (let line = 0; line < lines.length; line++) {
-    const match = stepPattern.exec(lines[line]!)
-    if (!match) continue
-    seen++
-    if (seen !== stepIndex) continue
-    lines[line] = lines[line]!.replace(/\[( |x|X)\]/, checked ? "[x]" : "[ ]")
-    return lines.join("\n")
-  }
-  return markdown
+  const raw = lines[line]
+  if (raw === undefined || !stepPattern.test(raw)) return markdown
+  lines[line] = raw.replace(/\[( |x|X)\]/, checked ? "[x]" : "[ ]")
+  return lines.join("\n")
+}
+
+/**
+ * Resolve the step a suggestion (or a step reference) describes in
+ * the CURRENT plan. A suggestion is computed against an earlier plan
+ * and accepted later, after the agent may have edited the plan, so
+ * position alone is not identity: when the reference carries the
+ * step's text, the step is found by content — the recorded position
+ * only breaks ties between steps with identical text — and a plan
+ * that no longer contains the step resolves to nothing, so the
+ * caller refuses instead of flipping whatever now sits at the old
+ * position (#2521). A bare position (no text) keeps the legacy
+ * positional meaning for callers that hold nothing else.
+ */
+const resolveStep = (
+  markdown: string,
+  ref: { readonly stepIndex: number; readonly text?: string },
+): Step | undefined => {
+  const steps = parse(markdown)
+  if (ref.text === undefined) return steps[ref.stepIndex]
+  const matches = steps.filter((step) => step.text === ref.text)
+  return matches.find((step) => step.index === ref.stepIndex) ?? matches[0]
 }
 
 /** Accept a suggestion: return the plan with that step checked. The only write path a suggestion has. */
-export const applyCheck = (markdown: string, suggestion: Pick<Suggestion, "stepIndex">) =>
-  flip(markdown, suggestion.stepIndex, true)
+export const applyCheck = (
+  markdown: string,
+  suggestion: Pick<Suggestion, "stepIndex"> & Partial<Pick<Suggestion, "text">>,
+): string => {
+  const step = resolveStep(markdown, suggestion)
+  // The plan no longer contains the suggested step: refuse (no
+  // write) rather than check whatever step now holds its position.
+  if (!step) return markdown
+  return flipLine(markdown, step.line, true)
+}
 
 /** Uncheck a step (the manual adjust path after an accepted check). Dismissing a suggestion needs no call: it changes nothing. */
-export const applyUncheck = (markdown: string, stepIndex: number) => flip(markdown, stepIndex, false)
+export const applyUncheck = (
+  markdown: string,
+  target: number | (Pick<Suggestion, "stepIndex"> & Partial<Pick<Suggestion, "text">>),
+): string => {
+  const step = resolveStep(markdown, typeof target === "number" ? { stepIndex: target } : target)
+  if (!step) return markdown
+  return flipLine(markdown, step.line, false)
+}
