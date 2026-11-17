@@ -9,6 +9,8 @@ import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
+import { MAX_JSON_BODY_BYTES, readBoundedJsonBody } from "../src/handlers/completions"
+import { Headers, HttpServerRequest } from "effect/http"
 
 const events = [
   LLMEvent.textDelta({ id: "t1", text: "Hello" }),
@@ -696,5 +698,88 @@ it.live("chained façade calls create no sessions", () =>
     expect(res.status).toBe(200)
     const sessions = (yield* Effect.promise(() => res.json())) as { data: Array<unknown> }
     expect(sessions.data).toHaveLength(0)
+  }),
+)
+
+// #2314: JSON bodies are bounded while reading. The reader's oracle is
+// its `limit` argument; the routes use MAX_JSON_BODY_BYTES.
+const fakeRequest = (chunks: Uint8Array[], headers?: Record<string, string>) =>
+  ({
+    headers: Headers.fromInput(headers ?? {}),
+    stream: Stream.fromIterable(chunks),
+  }) as unknown as HttpServerRequest.HttpServerRequest
+
+it.live("bounded JSON reader refuses a declared length over the limit without reading", () =>
+  Effect.gen(function* () {
+    let pulled = false
+    const request = {
+      headers: Headers.fromInput({ "content-length": "101" }),
+      stream: Stream.unwrap(
+        Effect.sync(() => {
+          pulled = true
+          return Stream.fromIterable([new TextEncoder().encode("{}")])
+        }),
+      ),
+    } as unknown as HttpServerRequest.HttpServerRequest
+    const result = yield* readBoundedJsonBody(request, 100)
+    expect(result.tooLarge).toContain("content-length declares 101 bytes")
+    expect(result.tooLarge).toContain("100 bytes")
+    expect(pulled).toBe(false)
+  }),
+)
+
+it.live("bounded JSON reader cuts a chunked body off at the limit", () =>
+  Effect.gen(function* () {
+    const chunk = new TextEncoder().encode("x".repeat(64))
+    const result = yield* readBoundedJsonBody(fakeRequest([chunk, chunk, chunk]), 100)
+    expect(result.tooLarge).toContain("crossed the limit while reading")
+    expect(result.body).toBeNull()
+  }),
+)
+
+it.live("bounded JSON reader parses an ordinary body and nulls an unparseable one", () =>
+  Effect.gen(function* () {
+    const ok = yield* readBoundedJsonBody(
+      fakeRequest([new TextEncoder().encode('{"model":"workhorse","n":'), new TextEncoder().encode("1}")]),
+      100,
+    )
+    expect(ok.tooLarge).toBeNull()
+    expect(ok.body).toEqual({ model: "workhorse", n: 1 })
+    expect(ok.raw).toContain('"workhorse"')
+    const bad = yield* readBoundedJsonBody(fakeRequest([new TextEncoder().encode("not json")]), 100)
+    expect(bad.tooLarge).toBeNull()
+    expect(bad.body).toBeNull()
+  }),
+)
+
+it.live("rejects an oversized chat body with 413 before Generate is called", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const before = captured.length
+    const res = yield* post(handler, {
+      model: "workhorse",
+      messages: [{ role: "user", content: "x".repeat(MAX_JSON_BODY_BYTES) }],
+    })
+    expect(res.status).toBe(413)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; code?: string } }
+    expect(body.error.message).toContain("too large")
+    expect(body.error.code).toBe("request_too_large")
+    expect(captured.length).toBe(before)
+  }),
+)
+
+it.live("rejects an oversized messages body with 413 in the messages envelope", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const before = captured.length
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      messages: [{ role: "user", content: "x".repeat(MAX_JSON_BODY_BYTES) }],
+    })
+    expect(res.status).toBe(413)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.message).toContain("too large")
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(captured.length).toBe(before)
   }),
 )

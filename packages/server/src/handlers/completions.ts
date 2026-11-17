@@ -3,8 +3,8 @@ import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Global } from "@opencode/util/global"
-import { Cause, Effect, Result, Stream } from "effect"
-import { HttpServerResponse } from "effect/http"
+import { Cause, Effect, Option, Result, Stream } from "effect"
+import { Headers, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
 import { awaitPlugins, locationErrors } from "../location"
@@ -41,22 +41,89 @@ const streamIsQuota = (cause: Cause.Cause<unknown>) => {
 }
 
 /**
- * The request body as raw text plus its parsed form. The raw text is the
- * pass-through candidate (#1146): on a dialect match Generate forwards it
+ * The JSON body bound for the completions façades (#2314): a JSON API
+ * request carries a conversation history plus inline media, so the cap
+ * is generous — 16 MiB — but it is a hard bound enforced WHILE
+ * reading, never after materialization. A declared content-length over
+ * the bound is refused up front; a chunked body (no declared length)
+ * is cut off the moment its streamed total crosses the bound, and the
+ * handler answers a deterministic 413 instead of buffering the rest.
+ * The transcription door (#2433) enforces the same shape for its
+ * multipart bodies; this is that pattern generalized to JSON.
+ */
+export const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+
+export interface BoundedJsonBody {
+  readonly raw: string
+  readonly body: unknown
+  /** Non-null when the body crossed the bound: the 413 message. */
+  readonly tooLarge: string | null
+}
+
+const tooLargeMessage = (observed: string, limit: number) =>
+  `request body is too large: ${observed}; the JSON body limit is ${limit} bytes`
+
+/**
+ * Read a JSON request body under a byte bound (oracle: `limit`). The
+ * streamed cutoff uses takeUntilEffect exactly like the transcription
+ * reader, so a body that stalls after crossing the bound is answered
+ * 413 from the bytes already delivered instead of being waited on.
+ * A failed read keeps the old discipline: raw "" / body null, which
+ * the callers' wire validation answers as before.
+ */
+export const readBoundedJsonBody = (
+  request: HttpServerRequest.HttpServerRequest,
+  limit: number = MAX_JSON_BODY_BYTES,
+) =>
+  Effect.gen(function* () {
+    const declaredLength = Number(Option.getOrElse(Headers.get(request.headers, "content-length"), () => ""))
+    if (Number.isFinite(declaredLength) && declaredLength > limit)
+      return {
+        raw: "",
+        body: null,
+        tooLarge: tooLargeMessage(`content-length declares ${declaredLength} bytes`, limit),
+      } satisfies BoundedJsonBody
+    let streamedTotal = 0
+    const read = yield* Effect.result(
+      request.stream.pipe(
+        Stream.takeUntilEffect((chunk) =>
+          Effect.sync(() => {
+            streamedTotal += chunk.length
+            return streamedTotal > limit
+          }),
+        ),
+        Stream.runCollect,
+      ),
+    )
+    if (streamedTotal > limit)
+      return {
+        raw: "",
+        body: null,
+        tooLarge: tooLargeMessage("it crossed the limit while reading", limit),
+      } satisfies BoundedJsonBody
+    if (Result.isFailure(read)) return { raw: "", body: null, tooLarge: null } satisfies BoundedJsonBody
+    const bytes = new Uint8Array(streamedTotal)
+    let offset = 0
+    for (const chunk of read.success) {
+      bytes.set(chunk, offset)
+      offset += chunk.length
+    }
+    const raw = new TextDecoder().decode(bytes)
+    try {
+      return { raw, body: JSON.parse(raw), tooLarge: null } satisfies BoundedJsonBody
+    } catch {
+      return { raw, body: null, tooLarge: null } satisfies BoundedJsonBody
+    }
+  })
+
+/**
+ * The request body as raw text plus its parsed form, read under
+ * MAX_JSON_BODY_BYTES (#2314). The raw text is the pass-through
+ * candidate (#1146): on a dialect match Generate forwards it
  * byte-for-byte, so the door must not round-trip it through JSON first.
  * Unparseable bodies parse to null and fail wire validation as before.
  */
-const requestBody = (ctx: { request: { text: Effect.Effect<string, unknown> } }) =>
-  ctx.request.text.pipe(
-    Effect.catchCause(() => Effect.succeed("")),
-    Effect.map((raw) => {
-      try {
-        return { raw, body: JSON.parse(raw) }
-      } catch {
-        return { raw, body: null }
-      }
-    }),
-  )
+const requestBody = (ctx: { request: HttpServerRequest.HttpServerRequest }) => readBoundedJsonBody(ctx.request)
 
 const errorResponse = (status: number, message: string, type: string, code?: string) =>
   HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type, code), { status })
@@ -108,7 +175,8 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
+            const { raw, body, tooLarge } = yield* requestBody(ctx)
+            if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
             const parsed = Completions.parseChatRequest(body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
             const input = { ...parsed.value.input, dialect: "chat" as const, rawBody: raw }
@@ -154,7 +222,8 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
+            const { raw, body, tooLarge } = yield* requestBody(ctx)
+            if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
             const parsed = Completions.parseResponsesRequest(body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
             const generate = yield* Generate.Service
@@ -282,8 +351,9 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
-            const parsed = Embeddings.parseEmbeddingsRequest(body)
+            const bounded = yield* readBoundedJsonBody(ctx.request)
+            if (bounded.tooLarge) return errorResponse(413, bounded.tooLarge, "invalid_request_error", "request_too_large")
+            const parsed = Embeddings.parseEmbeddingsRequest(bounded.body)
             if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
             const embeddings = yield* Embeddings.Service
             const result = yield* Effect.result(
@@ -316,7 +386,10 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             // malformed body is a 400 in the plain {error} envelope,
             // never a 500 from the upstream path, and an array body is
             // refused before anything reaches upstream (#2938 guard).
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
+            const bounded = yield* readBoundedJsonBody(ctx.request)
+            if (bounded.tooLarge)
+              return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(bounded.tooLarge), { status: 413 })
+            const body = bounded.body
             if (body === null)
               return HttpServerResponse.jsonUnsafe(SystemOne.errorBody("Invalid JSON body: not valid JSON"), { status: 400 })
             const parsed = SystemOne.parseSystemOneRequest(body)
@@ -340,7 +413,8 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
         (ctx) =>
           Effect.gen(function* () {
             yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
+            const { raw, body, tooLarge } = yield* requestBody(ctx)
+            if (tooLarge) return messagesErrorResponse(413, tooLarge, "invalid_request_error")
             const parsed = Completions.parseMessagesRequest(body)
             if (!parsed.ok) return messagesErrorResponse(400, parsed.error, "invalid_request_error")
             const input = { ...parsed.value.input, dialect: "messages" as const, rawBody: raw }
