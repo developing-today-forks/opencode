@@ -127,6 +127,47 @@ it.effect("tools lower through the Mistral Chat route; parallel_tool_calls follo
   }),
 )
 
+// #2232 (from #1707 §1-G2): the combined fixture — reasoningEffort "high" and
+// a tool call in ONE request. The preset tests and the tools test above cover
+// each half separately; this one pins the interaction so neither the preset
+// path nor the tool-lowering path can drop the other's output.
+it.effect("tools lower alongside reasoning_effort high: preset default and explicit provider option", () =>
+  Effect.gen(function* () {
+    const tools = [
+      ToolDefinition.make({
+        name: "get_weather",
+        description: "Get weather",
+        inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      }),
+    ]
+    // Oracle: the compiled wire body carries BOTH the preset's
+    // reasoning_effort/temperature and the lowered tool definition.
+    const preset = yield* compileRequest(LLM.request({ model, messages: [Message.user("weather?")], tools }))
+    const presetBody = preset.body as {
+      reasoning_effort?: string
+      temperature?: number
+      tools?: Array<{ function?: { name?: string } }>
+    }
+    expect(presetBody.reasoning_effort).toBe("high")
+    expect(presetBody.temperature).toBe(1.0)
+    expect(presetBody.tools?.[0]?.function?.name).toBe("get_weather")
+
+    const explicit = Vibe.configure({
+      apiKey: "fixture-key",
+      providerOptions: { reasoningEffort: "high" },
+    }).model("mistral-vibe-cli-latest")
+    const explicitCompiled = yield* compileRequest(
+      LLM.request({ model: explicit, messages: [Message.user("weather?")], tools }),
+    )
+    const explicitBody = explicitCompiled.body as {
+      reasoning_effort?: string
+      tools?: Array<{ function?: { name?: string } }>
+    }
+    expect(explicitBody.reasoning_effort).toBe("high")
+    expect(explicitBody.tools?.[0]?.function?.name).toBe("get_weather")
+  }),
+)
+
 it.effect("stream: SSE chunks become text + usage, and the only auth header is the Bearer key", () =>
   Effect.gen(function* () {
     const calls: Array<{ headers: Headers }> = []
