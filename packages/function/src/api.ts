@@ -232,6 +232,12 @@ export default new Hono<{ Bindings: Env }>()
     } catch {
       return c.json({ error: "invalid json" }, { status: 400 })
     }
+    // JSON parsing does not guarantee an object: a `null` (or array /
+    // scalar) body is a malformed request, answered 400 before any
+    // field is read from it (#2564).
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({ error: "invalid body" }, { status: 400 })
+    }
     // Verify the request before any side effect (#2564): Feishu sends the
     // app verification token on both the url_verification challenge and
     // event callbacks (body.token, or body.header.token on the v2 schema).

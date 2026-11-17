@@ -97,4 +97,10 @@ describe("feishu webhook verification (#2564)", () => {
     expect(res.status).toBe(400)
     expect(fetches).toEqual([])
   })
+
+  test("answers a null JSON body with 400, not 500", async () => {
+    const res = await post("null")
+    expect(res.status).toBe(400)
+    expect(fetches).toEqual([])
+  })
 })
