@@ -1,6 +1,6 @@
 import { FileSystem } from "@opencode/core/filesystem"
 import { RelativePath } from "@opencode/core/schema"
-import { FileNotFoundError } from "@opencode/protocol/errors"
+import { FileNotFoundError, FileTooLargeError } from "@opencode/protocol/errors"
 import { Effect, Option, Stream } from "effect"
 import { type HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
@@ -50,7 +50,15 @@ export const FileSystemHandler = HttpApiBuilder.group(Api, "server.fs", (handler
         response(
           Effect.gen(function* () {
             const fs = yield* FileSystem.Service
-            return yield* fs.write({ path: ctx.query.path, data: ctx.payload })
+            return yield* fs.write({ path: ctx.query.path, data: ctx.payload }).pipe(
+              Effect.mapError(
+                (error) =>
+                  new FileTooLargeError({
+                    path: error.path,
+                    message: `File too large: ${error.size} bytes exceeds the ${error.max}-byte write limit`,
+                  }),
+              ),
+            )
           }),
         ),
       )

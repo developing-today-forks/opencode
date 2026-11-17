@@ -3,7 +3,7 @@ import { Location } from "@opencode/schema/location"
 import { PositiveInt } from "@opencode/schema/schema"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
-import { FileNotFoundError } from "../errors.js"
+import { FileNotFoundError, FileTooLargeError } from "../errors.js"
 import { LocationQuery, locationQueryOpenApi } from "./location.js"
 
 const ListQuery = Schema.Struct({
@@ -80,6 +80,7 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
       query: WriteQuery,
       payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
       success: Location.response(FileSystem.Write),
+      error: FileTooLargeError,
     })
       .annotateMerge(locationQueryOpenApi)
       .annotateMerge(
@@ -87,7 +88,7 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
           identifier: "experimental.fs.write",
           summary: "Write file",
           description:
-            "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
+            "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Bodies over 10 MiB are rejected with 413 before any directory or file is created. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
         }),
       ),
   )
