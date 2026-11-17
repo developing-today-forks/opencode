@@ -43,12 +43,16 @@ describe("plan-wall benches (code#10128)", () => {
     expect(bench?.variant).toBeUndefined()
   })
 
-  test("a plain auth refusal keeps its existing terms: benched per effort, never dead to last resort", () => {
+  test("a plain auth refusal keeps its bench terms: benched per effort, not at pool scope", () => {
     const now = 2_000_000
     ModelRoute.failed(target, policy, now, { auth: true })
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 900_000)
     expect(ModelRoute.cooldownUntil(target, now, undefined, "xhigh")).toBe(0)
-    expect(ModelRoute.lastResortDead(target, undefined, now)).toBe(false)
+    // Dead to last-resort dealing under the auth rule (#2555, merged after this
+    // lane was cut): a standing auth bench counts as dead in its own right. The
+    // wall adds nothing here \u2014 what separates the classes is scope: auth benches
+    // the answered effort's traffic scope, a plan wall benches the pool scope.
+    expect(ModelRoute.lastResortDead(target, undefined, now)).toBe(true)
   })
 
   test("a transient failure is not walled: short traffic bench, never dead", () => {
