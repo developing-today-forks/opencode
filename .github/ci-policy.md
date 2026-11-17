@@ -158,20 +158,31 @@ Never pair `queue: max` with a `cancel-in-progress` expression that
 can evaluate true for `issues`/`pull_request_target` events — GitHub
 rejects that combination and the workflow never runs.
 
-## Backstop guard (#2322)
+## Backstop guard (#2322, extended by #2409)
 
 The `test` workflow's nightly schedule is this repo's full-main
 backstop (see "How the classes map"). It was found `disabled_manually`
 on 2026-11-12 with no recorded decision to disable it, and re-enabled
 the same day. A disabled workflow fails silently — the schedule simply
-never fires — so the state is guarded operationally:
+never fires — so the state is guarded operationally.
 
-- Check: `gh workflow list --all` must report `test` as `active`.
-  Anything else (`disabled_manually`, `disabled_inactivity`) removes
-  the backstop and is a CI-health bug, not a posture.
+The guard covers every dispatch-only tier workflow, not just `test`:
+`check` was found `disabled_manually` next (#2409 — it is the only
+place typecheck runs; re-enabled 2026-11-15, first post-enable dispatch
+verified green on `main`, run 43996456394), and `nix-eval` and
+`storybook` were still `disabled_manually` with no recorded decision
+when the guard was extended to them on 2026-11-17; both were enabled
+the same day, with verification dispatches on `main` (runs 44011572773
+and 44011578553).
+
+- Check: `gh workflow list --all` must report `test`, `check`,
+  `nix-eval`, and `storybook` as `active`. Anything else
+  (`disabled_manually`, `disabled_inactivity`) removes the backstop
+  and is a CI-health bug, not a posture.
 - The repo-health sweep for this repo verifies that state on its
   regular pass and re-files it against this policy when it drifts;
-  re-enabling is `gh workflow enable test` plus a dispatched
-  verification run on `main` that must reach the build and e2e jobs.
-- Disabling `test` deliberately requires recording the decision and
-  its replacement backstop in this file first.
+  re-enabling is `gh workflow enable <name>` plus a dispatched
+  verification run on `main` that must reach the workflow's jobs
+  (for `test`, the build and e2e jobs; for `check`, basic typecheck).
+- Disabling any of them deliberately requires recording the decision
+  and its replacement backstop in this file first.
