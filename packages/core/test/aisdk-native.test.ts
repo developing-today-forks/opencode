@@ -94,6 +94,22 @@ describe("AISDKNative", () => {
     })
   })
 
+  test("maps the meta provider's AI SDK spellings to the native Meta packages (G1, #2230)", () => {
+    // The meta config block spells `@ai-sdk/openai` on purpose: the HOSTS rewrite
+    // in aisdk-native.ts is the only thing that lands it on the fork-native Meta
+    // Responses package instead of the real AI SDK OpenAI package. Pin every
+    // protocol spelling so removing the HOSTS entry fails here first.
+    expect(map("@ai-sdk/openai", { baseURL: "https://api.meta.ai/v1" }, "test-model", "meta")?.package).toBe(
+      "@opencode/ai/providers/meta/responses",
+    )
+    expect(map("@ai-sdk/openai-compatible", {}, "test-model", "meta")?.package).toBe(
+      "@opencode/ai/providers/meta/chat",
+    )
+    expect(map("@ai-sdk/anthropic", {}, "test-model", "meta")?.package).toBe(
+      "@opencode/ai/providers/meta/messages",
+    )
+  })
+
   test("maps Anthropic settings and request options to the native provider", () => {
     expect(
       map("@ai-sdk/anthropic", {

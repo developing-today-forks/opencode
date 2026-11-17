@@ -106,6 +106,17 @@ const HOSTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
     "@ai-sdk/mistral": "@opencode/ai/providers/google-vertex/mistral",
   },
   "kimi-for-coding": protocols("moonshot"),
+  // G1 (#2230, from #1707 §5): the meta provider config block deliberately spells
+  // `@ai-sdk/openai`, and this HOSTS entry is what makes that spelling land on the
+  // fork-native Meta packages (openai -> meta/responses, openai-compatible ->
+  // meta/chat, anthropic -> meta/messages) instead of the real AI SDK OpenAI
+  // package. The rewrite is applied when provider/model records are built
+  // (provider.ts, model.ts); the raw load path in aisdk.ts does NOT rewrite, so a
+  // specifier that reached it unrewritten would silently diverge to upstream
+  // OpenAI. Coverage for this entry is pinned in aisdk-native.test.ts; do not
+  // remove the entry or the tests without re-checking the meta config block.
+  // This comment makes the coverage explicit only — it does not enable the
+  // meta provider, which stays under its existing disabled-provider gate.
   meta: protocols("meta"),
   minimax: protocols("minimax"),
   "minimax-cn": protocols("minimax"),
