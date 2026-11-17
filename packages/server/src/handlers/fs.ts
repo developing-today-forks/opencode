@@ -118,7 +118,14 @@ function isNotModified(request: HttpServerRequest.HttpServerRequest, etag: strin
 
 function matchesIfRange(ifRange: string | undefined, etag: string, lastModified: string | undefined) {
   if (ifRange === undefined) return true
-  if (/^\s*(w\/)?"/i.test(ifRange)) return stripWeak(ifRange) === stripWeak(etag)
+  if (/^\s*(w\/)?"/i.test(ifRange)) {
+    // If-Range entity tags use strong comparison (RFC 9110 section 13.1.5): both
+    // the request tag and the current validator must be strong and their opaque
+    // tags must match exactly. A weak tag on either side never matches, so the
+    // weak emitted ETag (W/"size-mtime") always falls back to a full 200.
+    if (/^\s*w\//i.test(ifRange) || /^\s*w\//i.test(etag)) return false
+    return ifRange.trim() === etag.trim()
+  }
   return lastModified !== undefined && Date.parse(ifRange) === Date.parse(lastModified)
 }
 
