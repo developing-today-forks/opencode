@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { DurableObject } from "cloudflare:workers"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto"
 import { jwtVerify } from "jose"
 import { createAppAuth } from "@octokit/auth-app"
 import { Octokit } from "@octokit/rest"
@@ -210,8 +210,13 @@ export default new Hono<{ Bindings: Env }>()
     return c.json({ info, messages })
   })
   .post("/feishu", async (c) => {
-    const body = (await c.req.json()) as {
+    let body: {
       challenge?: string
+      token?: string
+      header?: {
+        event_type?: string
+        token?: string
+      }
       event?: {
         message?: {
           message_id?: string
@@ -222,17 +227,42 @@ export default new Hono<{ Bindings: Env }>()
         }
       }
     }
-    console.log(JSON.stringify(body, null, 2))
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: "invalid json" }, { status: 400 })
+    }
+    // Verify the request before any side effect (#2564): Feishu sends the
+    // app verification token on both the url_verification challenge and
+    // event callbacks (body.token, or body.header.token on the v2 schema).
+    // An unconfigured token fails closed - an unverifiable request is
+    // never relayed.
+    const expected = Resource.FEISHU_VERIFICATION_TOKEN.value
+    if (!expected) {
+      console.error("Feishu webhook rejected: FEISHU_VERIFICATION_TOKEN is not configured")
+      return c.json({ error: "feishu verification not configured" }, { status: 503 })
+    }
+    const provided = body.token ?? body.header?.token
+    const digest = (value: string) => createHash("sha256").update(value).digest()
+    if (typeof provided !== "string" || !timingSafeEqual(digest(provided), digest(expected))) {
+      return c.json({ error: "unauthorized" }, { status: 401 })
+    }
+    // Log only what an operator needs - never the message content (#2564).
+    console.log(
+      `Feishu event: ${body.header?.event_type ?? (body.challenge ? "url_verification" : "event")} message_id=${body.event?.message?.message_id ?? "none"}`,
+    )
     const challenge = body.challenge
     if (challenge) return c.json({ challenge })
 
     const content = body.event?.message?.content
-    const parsed =
-      typeof content === "string" && content.trim().startsWith("{")
-        ? (JSON.parse(content) as {
-            text?: string
-          })
-        : undefined
+    let parsed: { text?: string } | undefined
+    if (typeof content === "string" && content.trim().startsWith("{")) {
+      try {
+        parsed = JSON.parse(content) as { text?: string }
+      } catch {
+        return c.json({ error: "invalid message content" }, { status: 400 })
+      }
+    }
     const text = typeof parsed?.text === "string" ? parsed.text : typeof content === "string" ? content : ""
 
     let message = text.trim().replace(/^@_user_\d+\s*/, "")
