@@ -1132,6 +1132,54 @@ describe("claudeCodeAuth — renewal adopts another writer's rotation (code#9549
     expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken).toBe("tok-other")
   })
 
+  test("a load that adopts a rotated token joins a concurrent load already renewing that token", async () => {
+    let releaseOld!: () => void
+    let releaseAdopted!: () => void
+    let oldEntered!: () => void
+    let adoptedEntered!: () => void
+    const oldStarted = new Promise<void>((resolve) => (oldEntered = resolve))
+    const adoptedStarted = new Promise<void>((resolve) => (adoptedEntered = resolve))
+    const oldResponse = new Promise<void>((resolve) => (releaseOld = resolve))
+    const adoptedResponse = new Promise<void>((resolve) => (releaseAdopted = resolve))
+    const { sources, store, calls, refreshToken } = harness(() => rotated(), {
+      fetchFn: async (_url: string | URL | Request, init?: RequestInit) => {
+        const token = new URLSearchParams(String(init?.body ?? "")).get("refresh_token")!
+        calls.push({ url: OAUTH_TOKEN_URL, body: String(init?.body ?? "") })
+        if (token === refreshToken) {
+          oldEntered()
+          await oldResponse
+          return rateLimited()
+        }
+        if (token === "ref-adopted") {
+          adoptedEntered()
+          await adoptedResponse
+          return rotated()
+        }
+        throw new Error(`unexpected refresh token: ${token}`)
+      },
+    })
+
+    const originalLoad = apply(sources)
+    await oldStarted
+    // Another writer rotates to a pair that still needs renewal. A new
+    // load starts its exchange before the original renewal's rate-limit
+    // retry re-reads the file and adopts the same token.
+    store.set(CREDENTIALS_PATH, blob("tok-rotated", "ref-adopted", NOW - 1))
+    const rotatedLoad = apply(sources)
+    await adoptedStarted
+    releaseOld()
+    // Before the fix, the original load starts a second exchange of
+    // ref-adopted instead of joining rotatedLoad's single-flight entry.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    releaseAdopted()
+    await Promise.all([originalLoad, rotatedLoad])
+
+    const adoptedExchanges = calls.filter(
+      (call) => new URLSearchParams(call.body).get("refresh_token") === "ref-adopted",
+    )
+    expect(adoptedExchanges).toHaveLength(1)
+  })
+
   test("an exchange that lands after another writer rotated discards its pair instead of clobbering theirs", async () => {
     const { sources, store, calls } = harness((_call, store) => {
       store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-3", NOW + 8 * 3_600_000))
