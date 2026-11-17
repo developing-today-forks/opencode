@@ -22,6 +22,19 @@ export const WriteInput = Schema.Struct({
 })
 export type WriteInput = typeof WriteInput.Type
 
+/**
+ * Write size cap (#2502): one fs.write body never exceeds 10 MiB — the same bound the
+ * shell capture and VCS patch paths use. The check runs before any parent directory or
+ * file is created, so a rejected write leaves no residue; the server maps it to 413.
+ */
+export const MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+export class WriteTooLargeError extends Schema.TaggedError<WriteTooLargeError>()("FileSystem.WriteTooLargeError", {
+  path: Schema.String,
+  size: Schema.Number,
+  max: Schema.Number,
+}) {}
+
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("FileSystem.NotFoundError", {
   path: RelativePath,
 }) {}
@@ -103,7 +116,7 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Entry[], NotFoundError>
   readonly find: (input: FindInput) => Effect.Effect<Entry[]>
   /** Writes a file at an absolute path or one relative to the location; not confined to it. */
-  readonly write: (input: WriteInput) => Effect.Effect<Write>
+  readonly write: (input: WriteInput) => Effect.Effect<Write, WriteTooLargeError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/FileSystem") {}
@@ -208,6 +221,12 @@ const baseLayer = Layer.effect(
       // Unlike read, write reaches outside the location so clients can stage files in the
       // server tmp directory, which the model is already told to prefer and permitted to access.
       write: Effect.fn("FileSystem.write")(function* (input) {
+        if (input.data.byteLength > MAX_WRITE_BYTES)
+          return yield* new WriteTooLargeError({
+            path: input.path,
+            size: input.data.byteLength,
+            max: MAX_WRITE_BYTES,
+          })
         const target = path.resolve(location.directory, input.path)
         yield* fs.writeWithDirs(target, input.data).pipe(Effect.orDie)
         return Write.make({ path: AbsolutePath.make(target) })

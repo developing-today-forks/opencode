@@ -145,6 +145,15 @@ export class FileNotFoundError extends Schema.TaggedError<FileNotFoundError>()(
   { httpApiStatus: 404 },
 ) {}
 
+export class FileTooLargeError extends Schema.TaggedError<FileTooLargeError>()(
+  "FileTooLargeError",
+  {
+    path: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 413 },
+) {}
+
 export class AgentNotFoundError extends Schema.TaggedError<AgentNotFoundError>()(
   "AgentNotFoundError",
   {

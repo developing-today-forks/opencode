@@ -9887,9 +9887,19 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "FileTooLargeError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileTooLargeErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
+        "description": "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Bodies over 10 MiB are rejected with 413 before any directory or file is created. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
         "summary": "Write file",
         "requestBody": {
           "content": {
@@ -18413,6 +18423,23 @@
           }
         },
         "required": ["path"],
+        "additionalProperties": false
+      },
+      "FileTooLargeErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["FileTooLargeError"]
+          },
+          "path": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "path", "message"],
         "additionalProperties": false
       },
       "ForbiddenErrorEncoded": {

@@ -244,3 +244,42 @@ describe("FileSystem", () => {
     ),
   )
 })
+
+describe("FileSystem.write size cap (#2502)", () => {
+  it.live("rejects a body over MAX_WRITE_BYTES and leaves no residue", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const service = yield* FileSystem.Service
+        const exit = yield* service
+          .write({ path: "nested/deep/big.bin", data: new Uint8Array(FileSystem.MAX_WRITE_BYTES + 1) })
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toBeInstanceOf(FileSystem.WriteTooLargeError)
+        }
+        const residue = yield* Effect.promise(() =>
+          fs.stat(path.join(directory, "nested")).then(
+            () => true,
+            () => false,
+          ),
+        )
+        expect(residue).toBe(false)
+      }).pipe(provide(directory)),
+    ),
+  )
+
+  it.live("writes a body at the cap", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const service = yield* FileSystem.Service
+        const written = yield* service.write({
+          path: "at-cap.bin",
+          data: new Uint8Array(FileSystem.MAX_WRITE_BYTES),
+        })
+        expect(written.path).toBe(AbsolutePath.make(path.join(directory, "at-cap.bin")))
+        const stat = yield* Effect.promise(() => fs.stat(path.join(directory, "at-cap.bin")))
+        expect(stat.size).toBe(FileSystem.MAX_WRITE_BYTES)
+      }).pipe(provide(directory)),
+    ),
+  )
+})
