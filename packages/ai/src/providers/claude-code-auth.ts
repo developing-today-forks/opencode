@@ -780,7 +780,10 @@ const emitRenewalEvent = (sources: CredentialSources, event: RenewalEvent): void
 const refreshAndPersist = async (
   sources: CredentialSources,
   refreshToken: string,
-  options: { readonly standing: boolean },
+  options: {
+    readonly standing: boolean
+    readonly onAdoptedToken?: (adopted: ClaudeCodeCredential) => Promise<ClaudeCodeCredential> | undefined
+  },
 ): Promise<ClaudeCodeCredential> => {
   const effective = sources
   const sleep = effective.sleep ?? defaultSleep
@@ -836,6 +839,13 @@ const refreshAndPersist = async (
       currentRefreshToken = stored.refreshToken
       adoptions += 1
       emitRenewalEvent(effective, { kind: "adopted", at: now() })
+      // The adopted token is a different single-flight key. Another load
+      // may already be renewing it, or may arrive as soon as this renewal
+      // yields; transfer ownership before presenting the token so both
+      // paths join one exchange rather than spend the single-use token
+      // twice (issue #2623).
+      const joined = options.onAdoptedToken?.(stored)
+      if (joined !== undefined) return joined
     }
     return undefined
   }
@@ -983,8 +993,10 @@ const scheduleStandingRenewal = (
   // behind a gate) sees the marker on every cadence call.
   const sleep = (ms: number) => (sources.sleep === undefined ? unrefSleep(ms) : sources.sleep(ms, true))
   const now = () => (sources.now ? sources.now() : Date.now())
+  const ownedKeys = new Set([key])
   emitRenewalEvent(sources, { kind: "standing-scheduled", at: now() })
-  const standing = (async (): Promise<ClaudeCodeCredential> => {
+  let standing: Promise<ClaudeCodeCredential>
+  standing = (async (): Promise<ClaudeCodeCredential> => {
     let backoff = RENEWAL_BACKOFF_BASE_MS
     let attempt = 0
     for (;;) {
@@ -1011,7 +1023,19 @@ const scheduleStandingRenewal = (
         const span = { sources: roundSources, key }
         standingRoundSpan.add(span)
         try {
-          return await refreshAndPersist(roundSources, refreshToken, { standing: true })
+          return await refreshAndPersist(roundSources, refreshToken, {
+            standing: true,
+            onAdoptedToken: (adopted) => {
+              const adoptedKey = `${sources.configDir ?? ""}\u0000${adopted.refreshToken}`
+              const inflight = inflightRefresh.get(adoptedKey)
+              if (inflight !== undefined) return inflight
+              const existingStanding = standingRenewals.get(adoptedKey)
+              if (existingStanding !== undefined && existingStanding !== standing) return existingStanding
+              standingRenewals.set(adoptedKey, standing)
+              ownedKeys.add(adoptedKey)
+              return undefined
+            },
+          })
         } finally {
           standingRoundSpan.delete(span)
         }
@@ -1037,7 +1061,8 @@ const scheduleStandingRenewal = (
   standing
     .catch(() => {})
     .finally(() => {
-      if (standingRenewals.get(key) === standing) standingRenewals.delete(key)
+      for (const ownedKey of ownedKeys)
+        if (standingRenewals.get(ownedKey) === standing) standingRenewals.delete(ownedKey)
     })
   return standing
 }
@@ -1064,7 +1089,21 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   // joins it instead of running a competing in-request renewal.
   const standing = standingRenewals.get(key)
   if (standing !== undefined) return joinStandingRenewal(sources, standing, credential)
-  const attempt = refreshAndPersist(sources, credential.refreshToken as string, { standing: false }).catch(
+  let attempt: Promise<ClaudeCodeCredential>
+  const ownedKeys = new Set([key])
+  attempt = refreshAndPersist(sources, credential.refreshToken as string, {
+    standing: false,
+    onAdoptedToken: (adopted) => {
+      const adoptedKey = `${sources.configDir ?? ""}\u0000${adopted.refreshToken}`
+      const existing = inflightRefresh.get(adoptedKey)
+      if (existing !== undefined && existing !== attempt) return existing
+      const standing = standingRenewals.get(adoptedKey)
+      if (standing !== undefined) return joinStandingRenewal(sources, standing, adopted)
+      inflightRefresh.set(adoptedKey, attempt)
+      ownedKeys.add(adoptedKey)
+      return undefined
+    },
+  }).catch(
     (cause: unknown) => {
       // Genuine rejections keep today's fail-loud floor and are never
       // retried standing. Everything else — a rate limit that outlasted
@@ -1091,7 +1130,8 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   attempt
     .catch(() => {})
     .finally(() => {
-      if (inflightRefresh.get(key) === attempt) inflightRefresh.delete(key)
+      for (const ownedKey of ownedKeys)
+        if (inflightRefresh.get(ownedKey) === attempt) inflightRefresh.delete(ownedKey)
     })
   return attempt
 }
