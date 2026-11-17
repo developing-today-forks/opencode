@@ -6,6 +6,8 @@ import { provider as clinePass } from "./providers/cline-pass.js"
 import { provider as openai } from "./providers/openai.js"
 import { provider as commandCode } from "./providers/command-code.js"
 import { provider as deepseek } from "./providers/deepseek.js"
+import { provider as exaone } from "./providers/exaone.js"
+import { provider as google } from "./providers/google.js"
 import { provider as groq } from "./providers/groq.js"
 import { provider as meta } from "./providers/meta.js"
 import { provider as mistral } from "./providers/mistral.js"
@@ -23,6 +25,7 @@ export { tursoWindows, resolveTursoLimits, TURSO_LIMITS, TURSO_PLAN_LIMITS, TURS
 export { parseCommandCodeCredits, MONTHLY_INCLUDED_CREDITS } from "./providers/command-code.js"
 export { parseCodingPlanWindows, normalizeOpenDesignCredential } from "./providers/opendesign.js"
 export { parseGroqResetSeconds, NO_QUOTA_SURFACE } from "./providers/groq.js"
+export { KEY_EXPIRES_AT as EXAONE_KEY_EXPIRES_AT } from "./providers/exaone.js"
 export { toClaudeUsage, findClaudeCredential } from "./providers/claude.js"
 
 /**
@@ -38,6 +41,8 @@ export const quotaProviders: QuotaProvider[] = [
   openai,
   commandCode,
   deepseek,
+  exaone,
+  google,
   groq,
   meta,
   mistral,
@@ -67,12 +72,26 @@ export const isProviderDisabled = (ctx: QuotaContext, provider: QuotaProvider): 
 const resolveInstanceProvider = (ctx: QuotaContext, instanceId: string) => {
   const instance = ctx.instances.get(instanceId)
   if (!instance) return null
-  for (const provider of quotaProviders) {
-    if ((provider.credentialAliases ?? [provider.providerId]).includes(instance.base)) {
-      return { provider, instance }
-    }
+  const claimants = quotaProviders.filter((provider) =>
+    (provider.credentialAliases ?? [provider.providerId]).includes(instance.base),
+  )
+  if (claimants.length === 0) return null
+  // One base can be claimed by two providers whose credentials differ
+  // in shape — base "google" is claimed by _antigravity (Google OAuth
+  // rows carrying a refresh token) and by google (AI Studio API-key
+  // project rows). The instance belongs to the first claimant whose
+  // credential-usability hook accepts one of its rows; a claimant
+  // without the hook defers to the per-credential fetch and accepts
+  // by default. When no claimant accepts a row, the first claimant
+  // keeps the instance (the pre-tie-break behavior).
+  if (claimants.length > 1) {
+    const rows = credentialRows(ctx, [instanceId])
+    const winner = claimants.find(
+      (provider) => !provider.isCredentialUsable || rows.some((row) => provider.isCredentialUsable!(ctx, row)),
+    )
+    if (winner) return { provider: winner, instance }
   }
-  return null
+  return { provider: claimants[0]!, instance }
 }
 
 /**
