@@ -655,8 +655,56 @@ const notifyAttemptsPersisted = (events: readonly Event[]) => {
   }
 }
 
-const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
-  Queue.takeAll(queue).pipe(
+/**
+ * Bounded telemetry backlog (#2335). Pending events live in a dropping queue
+ * capped at `maxPendingEvents`, so a slow or stalled database writer can no
+ * longer grow process memory with the event rate: while the writer is busy,
+ * at most `maxPendingEvents` events wait in memory. Overflow policy is
+ * DROP-NEWEST — `offer` never blocks and never fails, recording stays off the
+ * model-request path, and a full backlog drops the incoming event. Drops are
+ * counted on the backlog and the writer logs the running total whenever it
+ * advances, so the loss is observable, never silent (the same explicit-loss
+ * rule the batch retry in #2331 follows). Events already queued are never
+ * evicted: what fits drains in FIFO order once the writer catches up.
+ */
+export const maxPendingEvents = 1_024
+
+export interface WriterBacklog {
+  readonly queue: Queue.Queue<Event>
+  /** Offer one event without blocking; returns false when the backlog is full and the event was dropped. */
+  readonly offer: (event: Event) => boolean
+  /** Total events dropped since this backlog was created. */
+  readonly dropped: () => number
+}
+
+export const makeWriterBacklog = (capacity: number = maxPendingEvents): Effect.Effect<WriterBacklog> =>
+  Effect.gen(function* () {
+    const queue = yield* Queue.dropping<Event>(capacity)
+    let dropped = 0
+    return {
+      queue,
+      offer: (event: Event) => {
+        if (Queue.offerUnsafe(queue, event)) return true
+        dropped++
+        return false
+      },
+      dropped: () => dropped,
+    }
+  })
+
+const writerLoop = (db: Database.Interface["db"], backlog: WriterBacklog) => {
+  let reported = 0
+  const reportDrops = Effect.sync(() => backlog.dropped()).pipe(
+    Effect.flatMap((dropped) =>
+      dropped > reported
+        ? Effect.logWarning("model route telemetry backlog overflowed; newest events dropped", {
+            dropped_total: dropped,
+            capacity: maxPendingEvents,
+          }).pipe(Effect.tap(() => Effect.sync(() => (reported = dropped))))
+        : Effect.void,
+    ),
+  )
+  return Queue.takeAll(backlog.queue).pipe(
     Effect.flatMap((events) =>
       events.length
         ? persistWithRetry(db, events).pipe(
@@ -664,8 +712,10 @@ const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
           )
         : Effect.void,
     ),
+    Effect.tap(() => reportDrops),
     Effect.forever,
   )
+}
 
 export const withDb = <A, E>(use: (db: Database.Interface["db"]) => Effect.Effect<A, E>) =>
   activeDb ? Effect.asSome(use(activeDb)) : Effect.succeedNone
@@ -679,10 +729,10 @@ const layer = Layer.effectDiscard(
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db, QuotaCurrent.readSnapshot(Global.Path.state))
     yield* restoreDemotionFrom(db)
-    const queue = yield* Queue.unbounded<Event>()
-    setSink((event) => void Queue.offerUnsafe(queue, event))
+    const backlog = yield* makeWriterBacklog()
+    setSink((event) => void backlog.offer(event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
-    yield* writerLoop(db, queue).pipe(Effect.forkScoped)
+    yield* writerLoop(db, backlog).pipe(Effect.forkScoped)
   }),
 )
 
