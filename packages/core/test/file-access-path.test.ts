@@ -34,6 +34,35 @@ function provide(directory: string, projectDirectory = directory) {
   )
 }
 
+const invocation: FileAccess.Invocation = {
+  sessionID: "ses_file_access_test",
+  agent: "build",
+  messageID: "msg_file_access_test",
+  id: "call_file_access_test",
+} as FileAccess.Invocation
+
+function provideRecording(directory: string, assertions: Permission.AssertInput[]) {
+  return Effect.provide(
+    LayerNode.compile(FileAccess.node, {
+      replacements: [
+        Permission.node.replace(
+          permissionLayer({
+            assert: (input) => Effect.sync(() => assertions.push(input)),
+          }),
+        ),
+        Location.node.replace(
+          Layer.succeed(
+            Location.Service,
+            Location.Service.of(
+              location({ directory: AbsolutePath.make(directory) }, { projectDirectory: AbsolutePath.make(directory) }),
+            ),
+          ),
+        ),
+      ],
+    }),
+  )
+}
+
 describe("FileAccess.resolve", () => {
   it.live("resolves an active relative existing file target", () =>
     withTempDir(({ path: directory }) =>
@@ -110,7 +139,7 @@ describe("FileAccess.resolve", () => {
     ),
   )
 
-  it.live("resolves a prospective target below an external symlink lexically", () =>
+  it.live("classifies a prospective target below an external symlink by its canonical location", () =>
     withTempDir(({ path: directory }) =>
       Effect.gen(function* () {
         if (process.platform === "win32") return
@@ -118,13 +147,110 @@ describe("FileAccess.resolve", () => {
         yield* Effect.promise(() => fs.symlink(outside.path, path.join(directory, "escape")))
         const access = yield* FileAccess.Service
         const target = yield* access.resolve({ path: path.join("escape", "new.txt") })
+        // #2286: the not-yet-existing name cannot be a symlink, but its
+        // symlinked ancestor redirects it outside, so the canonical
+        // location decides: this is an external target.
         expect(target).toMatchObject({
-          absolute: path.join(directory, "escape", "new.txt"),
-          resource: "escape/new.txt",
+          absolute: path.join(outside.path, "new.txt"),
+          resource: path.join(outside.path, "new.txt").replaceAll("\\", "/"),
         })
+        expect(target.externalDirectory).toMatchObject({
+          directory: outside.path,
+          resource: path.join(outside.path, "*").replaceAll("\\", "/"),
+        })
+      }).pipe(provide(directory)),
+    ),
+  )
+
+  it.live("requires external-directory authorization for an existing file reached through an in-location symlink", () =>
+    withTempDir(({ path: directory }) =>
+      withTempDir(({ path: outside }) =>
+        Effect.gen(function* () {
+          if (process.platform === "win32") return
+          const secret = path.join(outside, "secret.txt")
+          yield* Effect.promise(async () => {
+            await fs.writeFile(secret, "secret")
+            await fs.symlink(secret, path.join(directory, "secret.txt"))
+          })
+          const access = yield* FileAccess.Service
+          const target = yield* access.resolve({ path: "secret.txt" })
+          // #2286: the lexical path is inside the location, but the file
+          // the filesystem opens is outside it, so the read needs
+          // external-directory approval and operates on the canonical
+          // (authorized) path.
+          expect(target).toMatchObject({ absolute: secret, resource: secret.replaceAll("\\", "/") })
+          expect(target.externalDirectory).toMatchObject({
+            directory: outside,
+            resource: path.join(outside, "*").replaceAll("\\", "/"),
+          })
+        }).pipe(provide(directory)),
+      ),
+    ),
+  )
+
+  it.live("preserves internal access for an existing file reached through an in-location symlink", () =>
+    withTempDir(({ path: directory }) =>
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        const real = path.join(directory, "real.txt")
+        yield* Effect.promise(async () => {
+          await fs.writeFile(real, "real")
+          await fs.symlink(real, path.join(directory, "link.txt"))
+        })
+        const access = yield* FileAccess.Service
+        const target = yield* access.resolve({ path: "link.txt" })
+        // Classification is internal (the canonical location is inside),
+        // and resolve() preserves the lexical path for its consumers.
+        expect(target).toMatchObject({ absolute: path.join(directory, "link.txt"), resource: "link.txt" })
         expect(target.externalDirectory).toBeUndefined()
       }).pipe(provide(directory)),
     ),
+  )
+
+  it.live("authorizeRead asks external-directory approval before reading through an external symlink", () =>
+    withTempDir(({ path: directory }) =>
+      withTempDir(({ path: outside }) => {
+        const assertions: Permission.AssertInput[] = []
+        return Effect.gen(function* () {
+          if (process.platform === "win32") return
+          const secret = path.join(outside, "secret.txt")
+          yield* Effect.promise(async () => {
+            await fs.writeFile(secret, "secret")
+            await fs.symlink(secret, path.join(directory, "secret.txt"))
+          })
+          const access = yield* FileAccess.Service
+          const target = yield* access.authorizeRead("secret.txt", invocation)
+          // Approval order: external_directory for the canonical
+          // location first, then the read itself; the returned target
+          // is the canonical path, so the authorized file is the file
+          // that gets read.
+          expect(assertions.map((input) => input.action)).toEqual(["external_directory", "read"])
+          expect(assertions[0]?.resources).toEqual([path.join(outside, "*").replaceAll("\\", "/")])
+          expect(assertions[1]?.resources).toEqual([secret.replaceAll("\\", "/")])
+          expect(target.absolute).toBe(AbsolutePath.make(secret))
+        }).pipe(provideRecording(directory, assertions))
+      }),
+    ),
+  )
+
+  it.live("authorizeRead reads an in-location symlink target by its canonical path without external approval", () =>
+    withTempDir(({ path: directory }) => {
+      const assertions: Permission.AssertInput[] = []
+      return Effect.gen(function* () {
+        if (process.platform === "win32") return
+        const real = path.join(directory, "real.txt")
+        yield* Effect.promise(async () => {
+          await fs.writeFile(real, "real")
+          await fs.symlink(real, path.join(directory, "link.txt"))
+        })
+        const access = yield* FileAccess.Service
+        const target = yield* access.authorizeRead("link.txt", invocation)
+        expect(assertions.map((input) => input.action)).toEqual(["read"])
+        expect(assertions[0]?.resources).toEqual(["real.txt"])
+        expect(target.absolute).toBe(AbsolutePath.make(real))
+        expect(target.externalDirectory).toBeUndefined()
+      }).pipe(provideRecording(directory, assertions))
+    }),
   )
 
   it.live("follows an in-location symlink using ordinary filesystem semantics", () =>

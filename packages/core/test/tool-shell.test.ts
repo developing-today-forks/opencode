@@ -444,10 +444,54 @@ describe("ShellTool scanner permissions", () => {
         }),
       ))
 
-    test(`${scanner}: a numeric symlink operand still reaches outside without an external-directory prompt`, () =>
+    test(`${scanner}: a numeric symlink operand at the external-directory boundary`, () =>
       withScanner(portable, (registry, fixture) =>
         Effect.gen(function* () {
           yield* Effect.promise(() => fs.symlink(fixture.outside, path.join(fixture.active, "123")))
+          const marker = path.join(fixture.active, "marker")
+          const command = `cd 123 && pwd -P && printf reached > '${marker}'`
+          if (portable) {
+            // #2286: the native scanner resolves the operand through
+            // FileAccess, whose classification is canonical, so the
+            // symlinked operand now asks for its external target, as
+            // an explicit external operand does.
+            const agents = yield* Agent.Service
+            yield* agents.transform((editor) =>
+              editor.update(toolIdentity.agent, (agent) => {
+                agent.permissions = [{ action: "shell", resource: "*", effect: "allow" }]
+              }),
+            )
+            for (const reply of ["reject", "once"] as const) {
+              const result = yield* runPermissionCommand(registry, command, marker, [reply])
+              expect(result.requests).toMatchObject([
+                { action: "external_directory", resources: [path.join(fixture.outside, "*")] },
+              ])
+              if (reply === "reject") {
+                expect(Exit.isFailure(result.exit)).toBe(true)
+                if (Exit.isFailure(result.exit))
+                  expect(
+                    result.exit.cause.reasons.some(
+                      (reason) => Cause.isDieReason(reason) && reason.defect instanceof Permission.DeclinedError,
+                    ),
+                  ).toBe(true)
+                expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+                continue
+              }
+              expect(result.exit).toMatchObject({
+                _tag: "Success",
+                value: {
+                  status: "completed",
+                  metadata: { exit: 0 },
+                  content: [{ type: "text", text: `${fixture.outside}\n` }],
+                },
+              })
+              expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
+            }
+            return
+          }
+          // The legacy scanner still documents the inherited
+          // limitation: the numeric operand reaches outside without a
+          // prompt.
           const agents = yield* Agent.Service
           yield* agents.transform((editor) =>
             editor.update(toolIdentity.agent, (agent) => {
@@ -457,13 +501,7 @@ describe("ShellTool scanner permissions", () => {
               ]
             }),
           )
-          const marker = path.join(fixture.active, "marker")
-          const result = yield* runPermissionCommand(
-            registry,
-            `cd 123 && pwd -P && printf reached > '${marker}'`,
-            marker,
-            [],
-          )
+          const result = yield* runPermissionCommand(registry, command, marker, [])
           expect(result.requests).toEqual([])
           expect(result.exit).toMatchObject({
             _tag: "Success",
