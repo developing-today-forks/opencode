@@ -8,11 +8,32 @@ import { Effect } from "effect"
 export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], directory: string) =>
   Effect.tryPromise({
     try: async () => {
-      const { open } = await import("node:fs/promises")
-      const { resolve, basename, extname } = await import("node:path")
+      const { open, realpath } = await import("node:fs/promises")
+      const { resolve, relative, isAbsolute, sep, basename, extname } = await import("node:path")
+      // Uploads are authorized by containment in the project directory
+      // (#2289): the plugin context exposes no FileAccess service, so
+      // the project directory is the authorization boundary. Both the
+      // lexical resolution (absolute paths, `..` traversal) and the
+      // realpath (an in-project symlink must not escape it) are
+      // checked before any bytes are read.
+      const root = await realpath(directory)
+      const contained = (candidate: string) => {
+        const rel = relative(root, candidate)
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+      }
       const files = await Promise.all(
         paths.map(async (input) => {
-          const file = await open(resolve(directory, input), "r")
+          const candidate = resolve(root, input)
+          if (!contained(candidate))
+            throw new Error(
+              `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
+            )
+          const real = await realpath(candidate)
+          if (!contained(real))
+            throw new Error(
+              `Upload path '${input}' resolves outside the project directory (symlink target). Uploads must name a file inside the project; move the file into the project first.`,
+            )
+          const file = await open(real, "r")
           try {
             const stat = await file.stat()
             if (!stat.isFile())
@@ -101,7 +122,7 @@ function failure(operation: "read" | "save", error: unknown) {
   const recovery =
     operation === "save"
       ? "The browser may have completed the capture, but no server-local export is confirmed. Check free space and write access on the server. Use browser.files.list({tabID}) and browser.files.get({tabID,fileID}) to retrieve an existing completed capture instead of repeating its browser action."
-      : "Upload paths are on the server, not the desktop. Check that each path exists, is a file, and is readable on the server; correct paths or select smaller files before retrying."
+      : "Upload paths are on the server, not the desktop, and must name files inside the project directory. Check that each path exists, is a file inside the project, and is readable on the server; correct paths or select smaller files before retrying."
   return new Tool.Error({
     message: `Cannot ${operation} browser files on the server. ${recovery} Details: ${code}${detail}`,
     error,
