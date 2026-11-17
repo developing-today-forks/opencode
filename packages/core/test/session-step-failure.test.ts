@@ -49,6 +49,48 @@ describe("SessionStep.failureHint", () => {
     ).toMatchObject({ auth: false })
   })
 
+  test("flags a permanent plan/tier refusal as a plan wall, apart from quota and plain auth", () => {
+    // Command Code, 2026-11-16 (code#10128): the free tier ended under a live door.
+    expect(
+      SessionStep.failureHint(
+        error(
+          new AuthenticationError({
+            message: "The free Beam 1.0 tier has ended. Run /model and pick another model to keep going.",
+          }),
+        ),
+      ),
+    ).toMatchObject({ auth: true, quota: false, planWall: true })
+    // The plan-gated model shape: the refusal as a code, and in plain words.
+    expect(
+      SessionStep.failureHint(
+        error(
+          new AuthenticationError({
+            message: "MODEL_NOT_IN_PLAN: GPT-6.1 Sol available in Max and above plans or extra on demand usage",
+          }),
+        ),
+      ),
+    ).toMatchObject({ auth: true, quota: false, planWall: true })
+    expect(
+      SessionStep.failureHint(
+        error(new ProviderInternalError({ message: "This model is not available in your current plan" })),
+      ),
+    ).toMatchObject({ planWall: true })
+    // A plain credential refusal carries no plan signature and stays plain auth.
+    expect(SessionStep.failureHint(error(new AuthenticationError({ message: "bad key" })))).not.toHaveProperty(
+      "planWall",
+    )
+    // A quota answer stays quota, never a plan wall.
+    expect(SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))).not.toHaveProperty(
+      "planWall",
+    )
+    // A transport failure never hard-benches, whatever text it happens to carry.
+    expect(
+      SessionStep.failureHint(
+        error(new TransportError({ message: "read failed: model not in plan", transport: "http", operation: "read" })),
+      ),
+    ).not.toHaveProperty("planWall")
+  })
+
   test("flags an exhausted quota, which carries no retry-after", () => {
     const hint = SessionStep.failureHint(error(new QuotaExceededError({ message: "out of quota" })))
     expect(hint).toEqual({

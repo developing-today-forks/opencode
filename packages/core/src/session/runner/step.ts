@@ -190,6 +190,14 @@ export const captureRateLimit = (target: ModelRoute.Target, credentialID?: strin
 const quotaText =
   /individual quota|quota (?:exhausted|reached|exceeded)|insufficient credits|insufficient balance|insufficient funds|out of credits|usage limit (?:exceeded|reached)|reached your (?:usage|quota|plan) limit/i
 
+/** Text that states a permanent plan/tier refusal (code#10128): the provider says the
+ * account's plan does not entitle this model — a model named as outside the plan, a
+ * tier stated to have ended, a model the plan does not include, a model gated behind
+ * a higher plan. Affirmative wording only, like quotaText: an unrecognized refusal
+ * stays a plain authentication failure and keeps the auth bench's terms. */
+const planWallText =
+  /model[_\s]?not[_\s]?in[_\s]?plan|tier has ended|not (?:included|available) in (?:your|the|this) (?:current )?plan|plan does not (?:yet )?include|not (?:a )?part of your (?:current )?plan|requires? (?:a |an )?(?:higher|upgraded|paid) (?:plan|tier)/i
+
 /** Transport OS codes that prove a request never reached a provider API: the name did not
  * resolve, or nothing listened at the far end (a dead local service or proxy). Those are
  * path failures — the fleet's DNS, a local proxy, the server itself — not provider health,
@@ -201,7 +209,9 @@ const INFRA_TRANSPORT_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AG
  * authentication refusal (the `Authentication` tag, an HTTP 401/403, or the org-disabled
  * refusal shape), which cannot heal by itself and so takes the long first bench. A quota
  * stated only in the error text classifies as quota too, with the stated reset bound to the
- * bench; a transport path failure classifies as infra. */
+ * bench; a transport path failure classifies as infra. A permanent plan/tier refusal stated
+ * in the text (a tier ended, a model outside the plan) classifies as a plan wall instead:
+ * the router benches the leaf as a wall, not as a credential failure. */
 export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
@@ -221,6 +231,14 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
   const tierLimit = reason.code === "tier_limit_exceeded" || TIER_LIMIT_TEXT.test(text)
+  // A permanent plan/tier refusal (code#10128) is neither quota nor plain auth: no
+  // window rolls and no balance refills, so the quota class — whose tag also earns
+  // the increase-only balance hold in quotaFailureClassification — would wall the
+  // leaf past the plan change that actually frees it; and the credential may be
+  // perfectly valid for the account's other models, so the auth class's per-effort
+  // bench understates it. Transport and timeout answers are excluded outright: a
+  // path failure never hard-benches, whatever text it happens to carry.
+  const planWall = reason._tag !== "Transport" && reason._tag !== "Timeout" && planWallText.test(text)
   // Extraction reads the same combined text classification reads, in the same
   // message-then-body order: a reset stated only in the raw body must bind to
   // the bench exactly as one stated in the message does (#2108). Reading
@@ -242,6 +260,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     // same convention the route policy follows.
     ...(quotaResetAtMs !== undefined ? { quotaResetAtMs } : {}),
     ...(tierLimit ? { tierLimit: true } : {}),
+    ...(planWall ? { planWall: true } : {}),
     ...(reason._tag === "Transport" &&
     reason.http === undefined &&
     !clientTimeoutMessage &&

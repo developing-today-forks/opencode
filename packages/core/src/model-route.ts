@@ -270,7 +270,7 @@ interface HealthState {
   probePending?: boolean
   /** The bench class that converted to probe-pending, kept after benchReason is
    * cleared by the conversion so diagnostics can still name the stop's class
-   * ("auth" or "retry-after"). */
+   * ("auth", "retry-after" or "plan-wall"). */
   probePendingReason?: string
   /** The bench this state carries was planted at window length (at or beyond the long
    * ladder's base, bench.longBenchMs) rather than at grace length. Only meaningful for
@@ -551,9 +551,14 @@ const recover = (
   // leg at once (the Go beam-free doors' midnight pile-up, 2026-11-14). A short
   // retry-after bench keeps the ordinary lapse: its grace was the whole point. The
   // failure count is what separates conversion from a settle: completed() zeroes it
-  // before endBench() lands here, so a probe success never re-converts.
+  // before endBench() lands here, so a probe success never re-converts. A plan-wall
+  // bench converts on the same terms: the wall states no reset to probe at, so its
+  // expiry is the probe moment, and only a served probe — the plan upgraded, the
+  // tier restored — reseats the leaf.
   const authProbe =
-    (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+    (state.benchReason === "auth" ||
+      state.benchReason === "plan-wall" ||
+      (state.benchReason === "retry-after" && state.benchLong === true)) &&
     state.consecutiveFailures > 0
   const converting = authProbe ? state.benchReason : undefined
   state.cooldownUntil = 0
@@ -680,6 +685,14 @@ export interface FailureHint {
   /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
    * so its first bench is the long quota-length one. */
   readonly auth?: boolean
+  /** A permanent plan/tier refusal (code#10128): the provider states the account's plan
+   * does not entitle this model — a tier that has ended, a model outside the plan — so
+   * the refusal is a property of the plan, not of the credential or of one effort's
+   * traffic. The leaf benches at pool scope as a wall: dead to last-resort dealing
+   * while the bench stands, and reopened only by the bench's own half-open probe at
+   * expiry (a served probe is the plan having changed). Deliberately not the quota
+   * class: no window reset bounds it and no balance increase may lift it. */
+  readonly planWall?: boolean
 }
 
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
@@ -705,7 +718,7 @@ const bench = (
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   if (hint?.rateLimit) state.consecutiveRateLimits = (state.consecutiveRateLimits ?? 0) + 1
-  const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
+  const base = hint?.quota || hint?.auth || hint?.planWall ? policy.quotaCooldownMs : policy.cooldownMs
   const ladder = currentConstants(location).bench
   const escalated = base * ladder.multiplier ** (state.consecutiveFailures - 1)
   // Drew's failover spec (2026-11-08, #2212): when a leg errors the route moves to the next
@@ -716,7 +729,7 @@ const bench = (
   // ran out of eligible candidates, and sessions died on the last error they saw. Quota and
   // auth keep the long ladder: the provider stated the window, or the refusal cannot heal
   // by itself. A stated retry-after is believed as-is, as before.
-  const graced = hint?.quota || hint?.auth ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
+  const graced = hint?.quota || hint?.auth || hint?.planWall ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
   // A rate limit with no stated retry-after starts on the ordinary ladder above — one
   // scattered 429 is a transient, and its grace stays short. But a provider that keeps
   // answering 429 has stated a throttle in the only language it used: at
@@ -746,11 +759,13 @@ const bench = (
     ? hint.retryAfterMs
       ? "quota retry-after"
       : "quota"
-    : hint?.retryAfterMs || hint?.rateLimit
-      ? "retry-after"
-      : hint?.auth
-        ? "auth"
-        : "failure"
+    : hint?.planWall
+      ? "plan-wall"
+      : hint?.retryAfterMs || hint?.rateLimit
+        ? "retry-after"
+        : hint?.auth
+          ? "auth"
+          : "failure"
   state.benchReason = reason
   state.benchLong = cooldown >= ladder.longBenchMs
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
@@ -845,7 +860,9 @@ const probeDueState = (state: HealthState | undefined, now: number) =>
     // yet — is due on the same terms recover() converts it by. A long retry-after
     // bench (benchLong) is due on the same terms, for the same reason.
     state.probePending === true ||
-    ((state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+    ((state.benchReason === "auth" ||
+      state.benchReason === "plan-wall" ||
+      (state.benchReason === "retry-after" && state.benchLong === true)) &&
       state.cooldownUntil > 0 &&
       state.cooldownUntil <= now &&
       state.consecutiveFailures > 0))
@@ -906,7 +923,7 @@ export const claimBenchProbe = (
     const was = state.benchReason
     if (
       state.probePending !== true &&
-      (was === "auth" || (was === "retry-after" && state.benchLong === true))
+      (was === "auth" || was === "plan-wall" || (was === "retry-after" && state.benchLong === true))
     ) {
       // Claiming the raw expired form: materialize the conversion recover() performs on
       // candidacy reads (code#9950), so the claimed state is the canonical probe-pending
@@ -924,7 +941,7 @@ export const claimBenchProbe = (
       target,
       "bench-probe",
       state.probePending
-        ? `probe after ${was === "retry-after" ? "rate-limit" : "auth"} bench${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`
+        ? `probe after ${was === "retry-after" ? "rate-limit" : was === "plan-wall" ? "plan-wall" : "auth"} bench${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`
         : `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`,
       state.benchQuotaResetAt,
       credentialID,
@@ -1059,13 +1076,17 @@ export const credentialQuotaCoolingDown = (target: Model.Ref, credentialID: stri
  * effort's bench says nothing about this leg. */
 const longBenched = (state: HealthState | undefined, now: number, location?: string) =>
   state !== undefined &&
-  state.benchReason === "retry-after" &&
+  state.cooldownUntil > now &&
+  !probeDueState(state, now) &&
   // Long is a property of the bench as planted (benchLong), not of the time left
   // on it: a nine-hour bench is still a window bench in its last hour, and it
-  // stays classified dead until it expires into its probe.
-  state.benchLong === true &&
-  state.cooldownUntil > now &&
-  !probeDueState(state, now)
+  // stays classified dead until it expires into its probe. A plan-wall bench is
+  // dead from its first plant, at any length (code#10128): the refusal is
+  // permanent on the current plan, so a last-resort attempt dealt into it can
+  // only fail and re-plant the bench — the cycle that dealt a tier-ended door
+  // ~1,500 attempts in a day while its day-long auth bench stood, because an
+  // auth bench never counted as dead here.
+  ((state.benchReason === "retry-after" && state.benchLong === true) || state.benchReason === "plan-wall")
 
 /** Whether this leg — the target at the named effort, and its named credential at
  * the same effort — is out under a long traffic bench right now: its own traffic
@@ -1096,8 +1117,10 @@ export const longTrafficBenched = (
 
 /** Whether last-resort selection must treat this leg as dead rather than merely
  * cooling: quota-dead at pool scope (quotaCoolingDown /
- * credentialQuotaCoolingDown — the pool that drained) or out under a long traffic
- * bench at the leg's own effort scope (longTrafficBenched — the leg that errored).
+ * credentialQuotaCoolingDown — the pool that drained), out under a plan-wall
+ * bench at pool scope (longTrafficBenched — the plan that refuses the model),
+ * or out under a long traffic bench at the leg's own effort scope
+ * (longTrafficBenched — the leg that errored).
  * The two scopes stay distinct: this read only ORs the verdicts, it never lets a
  * traffic bench speak for a pool or a pool verdict bench a leg. The 2026-11-07
  * no-hard-exclusion doctrine (code#8086) governs quota READS — a pool is never
@@ -1546,7 +1569,7 @@ export interface ActiveBench {
    * effort). Absent on pool-scope benches: quota holds the pool, not an effort. */
   readonly variant?: string
   readonly until: number
-  /** The bench class that planted it: quota, quota retry-after, retry-after, auth, failure, slow. */
+  /** The bench class that planted it: quota, quota retry-after, plan-wall, retry-after, auth, failure, slow. */
   readonly reason: string
   readonly consecutiveFailures: number
   /** The known quota window reset this bench is bounded by, when one is known. */
@@ -1626,13 +1649,15 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   const benchClass = (reason: string): { class: AvailabilityClass; resume: AvailabilityEntry["resume"] } =>
     reason === "quota" || reason === "quota retry-after"
       ? { class: "quota", resume: "reset" }
-      : reason === "retry-after"
-        ? { class: "rate-limit", resume: "retry-after" }
-        : reason === "auth"
-          ? { class: "auth", resume: "timer" }
-          : reason === "slow"
-            ? { class: "slow", resume: "timer" }
-            : { class: "unknown", resume: "timer" }
+      : reason === "plan-wall"
+        ? { class: "quota", resume: "timer" }
+        : reason === "retry-after"
+          ? { class: "rate-limit", resume: "retry-after" }
+          : reason === "auth"
+            ? { class: "auth", resume: "timer" }
+            : reason === "slow"
+              ? { class: "slow", resume: "timer" }
+              : { class: "unknown", resume: "timer" }
   for (const bench of activeBenches(now)) {
     const mapped = benchClass(bench.reason)
     put({
@@ -1704,7 +1729,9 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
     if (
       state.probePending !== true &&
       !(
-        (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+        (state.benchReason === "auth" ||
+          state.benchReason === "plan-wall" ||
+          (state.benchReason === "retry-after" && state.benchLong === true)) &&
         state.cooldownUntil > 0 &&
         state.cooldownUntil <= now &&
         state.consecutiveFailures > 0
@@ -1716,7 +1743,9 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
     const slash = base.indexOf("/")
     // A converted bench cleared its reason; the class it converted from is stamped
     // on probePendingReason. An unconverted one still carries it as benchReason.
-    const label = (state.probePendingReason ?? state.benchReason) === "retry-after" ? "rate-limit" : "auth"
+    const converted = state.probePendingReason ?? state.benchReason
+    const label = converted === "retry-after" ? "rate-limit" : converted === "plan-wall" ? "quota" : "auth"
+    const name = converted === "plan-wall" ? "plan-wall" : label
     put({
       providerID: base.slice(0, slash),
       modelID: base.slice(slash + 1),
@@ -1725,8 +1754,8 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
       class: label,
       reason:
         probeClaimLive(state, now)
-          ? `${label} bench expired; half-open probe in flight`
-          : `${label} bench expired; half-open probe pending`,
+          ? `${name} bench expired; half-open probe in flight`
+          : `${name} bench expired; half-open probe pending`,
       resume: "probe",
     })
   }
@@ -1865,6 +1894,11 @@ export const failed = (
   // bench's own key so the forgiveness sweep below clears the state that was
   // actually planted, in whichever scope's map holds it.
   const quotaScope = hint?.quota === true
+  // A plan wall benches at pool scope like a quota bench (the serving credential's
+  // own state when one served): the refusal names the account's plan for this
+  // model, so every effort of the leaf is refused alike — benching one effort at
+  // a time would re-deal the same wall at each sibling effort in turn.
+  const wallScope = quotaScope || hint?.planWall === true
   const benchKey = quotaScope
     ? credentialID
       ? credentialKey(target, credentialID)
@@ -1944,21 +1978,21 @@ export const failed = (
   if (credentialID) {
     bench(
       target,
-      quotaScope ? credentialEntry(target, credentialID) : trafficCredentialEntry(target, credentialID, variant),
+      wallScope ? credentialEntry(target, credentialID) : trafficCredentialEntry(target, credentialID, variant),
       policy,
       now,
       hint,
       credentialID,
       statedQuotaResetAt(target, credentialID, now, location, hint),
       location,
-      quotaScope ? undefined : variant,
+      wallScope ? undefined : variant,
     )
     // The outcome itself stays on the pool-scope ledger too: giveUps() judges a
     // target's recent answers there, and a traffic bench must not make the leg
     // look steady to the retry logic that reads it. Only the outcome is mirrored
     // — no counter, no bench: the pool scope records that the leg failed, the
     // traffic scope decides what that failure costs.
-    if (!quotaScope) {
+    if (!wallScope) {
       const pool = credentialEntry(target, credentialID)
       pool.outcomes = pushOutcome(pool.outcomes, false)
     }
@@ -1974,16 +2008,16 @@ export const failed = (
   }
   bench(
     target,
-    quotaScope ? entry(target) : trafficEntry(target, variant),
+    wallScope ? entry(target) : trafficEntry(target, variant),
     policy,
     now,
     hint,
     undefined,
     statedQuotaResetAt(target, undefined, now, location, hint),
     location,
-    quotaScope ? undefined : variant,
+    wallScope ? undefined : variant,
   )
-  if (!quotaScope) {
+  if (!wallScope) {
     const pool = entry(target)
     pool.outcomes = pushOutcome(pool.outcomes, false)
   }
