@@ -13,7 +13,7 @@ import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
-import { makePtyOutbox, runPtySocket } from "./pty-socket"
+import { makePtyOutbox, runPtySocket, withPtySocketTracked } from "./pty-socket"
 
 export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experimental", (handlers) =>
   Effect.gen(function* () {
@@ -178,30 +178,36 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
             attachment.activate()
           })
 
-          yield* runPtySocket({
-            socket,
-            outbox: outbox.queue,
-            onDequeued: outbox.release,
-            onOverflow: outbox.whenOverflowed,
-            onOpen,
-            onMessage: (message) => {
-              if (!attachment) return Effect.void
-              const data = typeof message === "string" ? Buffer.from(message) : message
-              if (!framedInput)
-                return pty
-                  .input(ctx.params.ptyID, attachmentID, attachment.info.size.cols, attachment.info.size.rows, data)
-                  .pipe(Effect.ignore)
-              if (data.byteLength < 5) return Effect.void
-              const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-              const type = data[0]
-              const cols = view.getUint16(1)
-              const rows = view.getUint16(3)
-              if ((type !== 0 && type !== 1) || cols === 0 || rows === 0) return Effect.void
-              if (type === 0) return pty.control(ctx.params.ptyID, attachmentID, cols, rows).pipe(Effect.ignore)
-              return pty.input(ctx.params.ptyID, attachmentID, cols, rows, data.subarray(5)).pipe(Effect.ignore)
+          yield* withPtySocketTracked(
+            {
+              close: () => void outbox.offer(new Socket.CloseEvent(1001, "server shutting down")),
+              terminate: outbox.shutdown,
             },
-            detach: () => attachment?.detach(),
-          })
+            runPtySocket({
+              socket,
+              outbox: outbox.queue,
+              onDequeued: outbox.release,
+              onOverflow: outbox.whenOverflowed,
+              onOpen,
+              onMessage: (message) => {
+                if (!attachment) return Effect.void
+                const data = typeof message === "string" ? Buffer.from(message) : message
+                if (!framedInput)
+                  return pty
+                    .input(ctx.params.ptyID, attachmentID, attachment.info.size.cols, attachment.info.size.rows, data)
+                    .pipe(Effect.ignore)
+                if (data.byteLength < 5) return Effect.void
+                const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+                const type = data[0]
+                const cols = view.getUint16(1)
+                const rows = view.getUint16(3)
+                if ((type !== 0 && type !== 1) || cols === 0 || rows === 0) return Effect.void
+                if (type === 0) return pty.control(ctx.params.ptyID, attachmentID, cols, rows).pipe(Effect.ignore)
+                return pty.input(ctx.params.ptyID, attachmentID, cols, rows, data.subarray(5)).pipe(Effect.ignore)
+              },
+              detach: () => attachment?.detach(),
+            }),
+          )
           return HttpServerResponse.empty()
         }),
       )
