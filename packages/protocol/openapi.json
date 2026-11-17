@@ -860,7 +860,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Maximum number of sessions to return. Defaults to the newest 50 sessions."
+              "description": "Maximum number of sessions to return, at most 200. Defaults to the newest 50 sessions."
             },
             "required": false
           },
@@ -9031,11 +9031,18 @@
             }
           },
           "404": {
-            "description": "LocationNotFoundError",
+            "description": "PermissionSavedNotFoundError | LocationNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PermissionSavedNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
                 }
               }
             }
@@ -12395,11 +12402,18 @@
             }
           },
           "404": {
-            "description": "LocationNotFoundError",
+            "description": "ShellNotFoundError | LocationNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ShellNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
                 }
               }
             }
@@ -22167,6 +22181,23 @@
           }
         },
         "required": ["id", "projectID", "action", "resource", "time"],
+        "additionalProperties": false
+      },
+      "PermissionSavedNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["PermissionSavedNotFoundError"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "id", "message"],
         "additionalProperties": false
       },
       "PersistentPty.AttachmentID": {
