@@ -26,10 +26,14 @@ export const AddInput = Schema.Struct({
 }).annotate({ identifier: "PermissionSaved.AddInput" })
 export type AddInput = typeof AddInput.Type
 
+export class NotFoundError extends Schema.TaggedError<NotFoundError>()("PermissionSaved.NotFoundError", {
+  id: ID,
+}) {}
+
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<Info>>
   readonly add: (input: AddInput) => Effect.Effect<void>
-  readonly remove: (id: ID) => Effect.Effect<void>
+  readonly remove: (id: ID) => Effect.Effect<void, NotFoundError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PermissionSaved") {}
@@ -78,7 +82,13 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("PermissionSaved.remove")(function* (id: ID) {
-      yield* db.delete(PermissionTable).where(eq(PermissionTable.id, id)).run().pipe(Effect.orDie)
+      const deleted = yield* db
+        .delete(PermissionTable)
+        .where(eq(PermissionTable.id, id))
+        .returning({ id: PermissionTable.id })
+        .get()
+        .pipe(Effect.orDie)
+      if (!deleted) return yield* new NotFoundError({ id })
     })
 
     return Service.of({ list, add, remove })

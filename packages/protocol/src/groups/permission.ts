@@ -6,7 +6,7 @@ import { Project } from "@opencode/schema/project"
 import { Session } from "@opencode/schema/session"
 import { Context, Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/http-api"
-import { LocationNotFoundError, PermissionNotFoundError, SessionNotFoundError } from "../errors.js"
+import { LocationNotFoundError, PermissionNotFoundError, PermissionSavedNotFoundError, SessionNotFoundError } from "../errors.js"
 import { LocationQuery, locationQueryOpenApi } from "./location.js"
 
 export const makePermissionGroup = <
@@ -49,6 +49,7 @@ export const makePermissionGroup = <
       HttpApiEndpoint.delete("permission.saved.remove", "/api/permission/saved/:id", {
         params: { id: PermissionSaved.ID },
         success: HttpApiSchema.NoContent,
+        error: PermissionSavedNotFoundError,
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "permission.saved.remove",

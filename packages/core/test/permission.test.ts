@@ -743,3 +743,40 @@ describe("shell scanner permission impact", () => {
     }
   }
 })
+
+describe("PermissionSaved.remove", () => {
+  it.effect("fails with NotFoundError for an unknown id", () =>
+    Effect.gen(function* () {
+      const saved = yield* PermissionSaved.Service
+      const exit = yield* saved.remove(PermissionSaved.ID.make("psv_unknown_2556")).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionSaved.NotFoundError)
+      }
+    }),
+  )
+
+  it.effect("removes an existing saved permission, then reports it missing", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .onConflictDoNothing()
+        .run()
+      const saved = yield* PermissionSaved.Service
+      yield* saved.add({ projectID: Project.ID.global, action: "bash", resources: ["ls-2556"] })
+      const rows = yield* saved.list({ projectID: Project.ID.global })
+      const row = rows.find((item) => item.action === "bash" && item.resource === "ls-2556")
+      expect(row).toBeDefined()
+      yield* saved.remove(row!.id)
+      const after = yield* saved.list({ projectID: Project.ID.global })
+      expect(after.some((item) => item.id === row!.id)).toBe(false)
+      const exit = yield* saved.remove(row!.id).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionSaved.NotFoundError)
+      }
+    }),
+  )
+})

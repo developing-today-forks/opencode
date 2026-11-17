@@ -6,7 +6,7 @@ import { Session } from "@opencode/core/session"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Api } from "../api"
-import { PermissionNotFoundError } from "@opencode/protocol/errors"
+import { PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
 import { locationErrors, response, sessionInfo } from "../location"
 import { missingSession } from "./session-error"
 
@@ -99,7 +99,16 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission", 
         "permission.saved.remove",
         Effect.fn(function* (ctx) {
           const saved = yield* PermissionSaved.Service
-          yield* saved.remove(ctx.params.id)
+          yield* saved.remove(ctx.params.id).pipe(
+            Effect.catchTag(
+              "PermissionSaved.NotFoundError",
+              (error) =>
+                new PermissionSavedNotFoundError({
+                  id: error.id,
+                  message: `Saved permission not found: ${error.id}`,
+                }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )
