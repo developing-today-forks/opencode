@@ -780,7 +780,7 @@ const emitRenewalEvent = (sources: CredentialSources, event: RenewalEvent): void
 const refreshAndPersist = async (
   sources: CredentialSources,
   refreshToken: string,
-  options: { readonly standing: boolean },
+  options: { readonly standing: boolean; readonly onAdopt?: (refreshToken: string) => void },
 ): Promise<ClaudeCodeCredential> => {
   const effective = sources
   const sleep = effective.sleep ?? defaultSleep
@@ -835,6 +835,7 @@ const refreshAndPersist = async (
       }
       currentRefreshToken = stored.refreshToken
       adoptions += 1
+      options.onAdopt?.(currentRefreshToken)
       emitRenewalEvent(effective, { kind: "adopted", at: now() })
     }
     return undefined
@@ -978,6 +979,11 @@ const scheduleStandingRenewal = (
 ): Promise<ClaudeCodeCredential> => {
   const existing = standingRenewals.get(key)
   if (existing !== undefined) return existing
+  // Keys this standing renewal becomes reachable under when one of its
+  // rounds adopts another writer's rotated token (#2623): a load that
+  // read the rotated file computes its key from the adopted token, and
+  // single-flight ownership must be findable under that key too.
+  const standingAliases = new Set<string>()
   // The ambient cadence marks its waits unref'd; a caller whose
   // sleep is ambient-aware (the test harness parks ambient waits
   // behind a gate) sees the marker on every cadence call.
@@ -1011,7 +1017,16 @@ const scheduleStandingRenewal = (
         const span = { sources: roundSources, key }
         standingRoundSpan.add(span)
         try {
-          return await refreshAndPersist(roundSources, refreshToken, { standing: true })
+          return await refreshAndPersist(roundSources, refreshToken, {
+            standing: true,
+            onAdopt: (token) => {
+              const aliasKey = `${sources.configDir ?? ""}\u0000${token}`
+              if (aliasKey !== key && !standingAliases.has(aliasKey)) {
+                standingAliases.add(aliasKey)
+                standingRenewals.set(aliasKey, standing)
+              }
+            },
+          })
         } finally {
           standingRoundSpan.delete(span)
         }
@@ -1033,11 +1048,14 @@ const scheduleStandingRenewal = (
   standingRenewals.set(key, standing)
   // A landed standing renewal has already persisted the rotated pair;
   // a rejected one must not be cached — either way the slot clears on
-  // settle so the next expiry starts fresh.
+  // settle so the next expiry starts fresh. Adoption aliases (#2623)
+  // clear on the same terms.
   standing
     .catch(() => {})
     .finally(() => {
       if (standingRenewals.get(key) === standing) standingRenewals.delete(key)
+      for (const aliasKey of standingAliases)
+        if (standingRenewals.get(aliasKey) === standing) standingRenewals.delete(aliasKey)
     })
   return standing
 }
@@ -1046,7 +1064,8 @@ const scheduleStandingRenewal = (
 const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
 
 const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
-  const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
+  const keyFor = (token: string) => `${sources.configDir ?? ""}\u0000${token}`
+  const key = keyFor(credential.refreshToken as string)
   // The standing loop's own rounds re-enter here through the join path
   // (its in-flight entry was just cleared as the previous attempt
   // settled), and the loop must not join standing code from inside
@@ -1064,34 +1083,61 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   // joins it instead of running a competing in-request renewal.
   const standing = standingRenewals.get(key)
   if (standing !== undefined) return joinStandingRenewal(sources, standing, credential)
-  const attempt = refreshAndPersist(sources, credential.refreshToken as string, { standing: false }).catch(
-    (cause: unknown) => {
-      // Genuine rejections keep today's fail-loud floor and are never
-      // retried standing. Everything else — a rate limit that outlasted
-      // the wait budget, a transient exchange failure — retires to the
-      // standing retry, and THIS request joins it: the request still
-      // surfaces the original failure (a 429 still surfaces as
-      // RateLimit, never Authentication), and later loads join the
-      // standing attempt until it lands.
-      if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
-        emitRenewalEvent(sources, {
-          kind: "rejected",
-          at: sources.now ? sources.now() : Date.now(),
-          message: cause.message,
-        })
-        throw cause
-      }
-      scheduleStandingRenewal(sources, key, credential.refreshToken as string)
+  // Single-flight ownership follows adoption (#2623): when the renewal
+  // adopts another writer's rotated refresh token, its exchange presents
+  // the adopted token while this attempt stays registered under the
+  // original key — a concurrent load that read the rotated file computes
+  // the adopted key, would find neither map, and would start a second
+  // exchange of the same single-use token. The attempt is therefore
+  // aliased under every token it adopts, and a retirement to the
+  // standing retry is scheduled under the last adopted token, whose key
+  // is the one later loads compute.
+  const aliases = new Set<string>()
+  let lastAdopted: string | undefined
+  const attemptRef: { promise?: Promise<ClaudeCodeCredential> } = {}
+  const onAdopt = (token: string) => {
+    lastAdopted = token
+    const aliasKey = keyFor(token)
+    if (aliasKey === key || aliases.has(aliasKey)) return
+    aliases.add(aliasKey)
+    if (attemptRef.promise !== undefined) inflightRefresh.set(aliasKey, attemptRef.promise)
+  }
+  const attempt = refreshAndPersist(sources, credential.refreshToken as string, {
+    standing: false,
+    onAdopt,
+  }).catch((cause: unknown) => {
+    // Genuine rejections keep today's fail-loud floor and are never
+    // retried standing. Everything else — a rate limit that outlasted
+    // the wait budget, a transient exchange failure — retires to the
+    // standing retry, and THIS request joins it: the request still
+    // surfaces the original failure (a 429 still surfaces as
+    // RateLimit, never Authentication), and later loads join the
+    // standing attempt until it lands.
+    if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
+      emitRenewalEvent(sources, {
+        kind: "rejected",
+        at: sources.now ? sources.now() : Date.now(),
+        message: cause.message,
+      })
       throw cause
-    },
-  )
+    }
+    scheduleStandingRenewal(
+      sources,
+      lastAdopted === undefined ? key : keyFor(lastAdopted),
+      lastAdopted ?? (credential.refreshToken as string),
+    )
+    throw cause
+  })
+  attemptRef.promise = attempt
+  for (const aliasKey of aliases) inflightRefresh.set(aliasKey, attempt)
   inflightRefresh.set(key, attempt)
   // Clear on settle so a later expiry refreshes again; a rejection must
-  // not be cached forever.
+  // not be cached forever. Adoption aliases clear on the same terms.
   attempt
     .catch(() => {})
     .finally(() => {
       if (inflightRefresh.get(key) === attempt) inflightRefresh.delete(key)
+      for (const aliasKey of aliases) if (inflightRefresh.get(aliasKey) === attempt) inflightRefresh.delete(aliasKey)
     })
   return attempt
 }
