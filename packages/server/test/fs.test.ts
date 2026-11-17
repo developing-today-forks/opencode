@@ -231,8 +231,10 @@ it.live(
       expect(mismatchIfNoneMatch.status).toBe(200)
       expect(yield* Effect.promise(() => mismatchIfNoneMatch.text())).toBe("0123456789")
 
-      // 7. If-Range matching -> 206; If-Range mismatch -> full 200
-      yield* Effect.forEach([etag, strongEtag, lastModified], (ifRange) =>
+      // 7. If-Range: only the date validator matches here -> 206. The emitted
+      // ETag is weak, so entity-tag If-Range (weak tag, or the strong-looking
+      // stripped tag) can never strong-match it -> full 200 (RFC 9110 13.1.5).
+      yield* Effect.forEach([lastModified], (ifRange) =>
         Effect.gen(function* () {
           const matchedRange = yield* request("clip.mp4", {
             headers: { Range: "bytes=1-4", "If-Range": ifRange },
@@ -243,7 +245,7 @@ it.live(
         }),
       )
 
-      yield* Effect.forEach(['W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"], (ifRange) =>
+      yield* Effect.forEach([etag, strongEtag, 'W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"], (ifRange) =>
         Effect.gen(function* () {
           const mismatchedRange = yield* request("clip.mp4", {
             headers: { Range: "bytes=1-4", "If-Range": ifRange },
