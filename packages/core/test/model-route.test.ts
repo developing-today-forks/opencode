@@ -3032,6 +3032,101 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
     expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
   })
 
+  test("below 1% remaining alone is a warning: no wall without quota-class failures (#2256)", () => {
+    const now = 840_000_000
+    // The Command Code shape from the issue: one provider entry, the
+    // monthly window binding at 99.5% used ($0.05 of $10 left), weekly lower.
+    const leaf = ModelRoute.ref({ providerID: "command-code", model: "deepseek-v4.1-flash" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 30 * 86_400_000
+    const reading = (monthly: number, at: number) =>
+      gathered({
+        providerID: "command-code",
+        at,
+        windows: [
+          { name: "weekly", usedPercent: 64.6, resetAt: now + 4 * 86_400_000 },
+          { name: "monthly", usedPercent: monthly, resetAt },
+        ],
+      })
+    // Oracle: the combined rule — low quota alone never walls.
+    expect(ModelRoute.gatheredNearEmptyWall(leaf, reading(99.5, now), now)).toBeUndefined()
+    expect(ModelRoute.plantGatheredNearEmptyWall(leaf, reading(99.5, now), now)).toBeUndefined()
+    expect(ModelRoute.skipped(leaf, now + 1)).toBe(false)
+    expect(
+      ModelRoute.availability(now + 1).some((entry) => entry.reason.includes("walled-below-1%")),
+    ).toBe(false)
+  })
+
+  test("below 1% remaining plus quota-class failures walls, distinctly, until the window resets (#2256)", () => {
+    const now = 850_000_000
+    const leaf = ModelRoute.ref({ providerID: "command-code", model: "deepseek-v4.1-flash" })
+    ModelRoute.resetHealth()
+    // A short quota bench: the failure is on record (quota event + bench)
+    // long after the bench itself has lapsed, so the skip judged below is
+    // the plant's, not the bench's.
+    const policy = ModelRoute.policy({ cooldownMs: 1_000, quotaCooldownMs: 1_000 })
+    ModelRoute.failed(leaf, policy, now, { quota: true })
+    const resetAt = now + 30 * 86_400_000
+    const reading = (monthly: number, at: number) =>
+      gathered({
+        providerID: "command-code",
+        at,
+        windows: [
+          { name: "weekly", usedPercent: 64.6, resetAt: now + 4 * 86_400_000 },
+          { name: "monthly", usedPercent: monthly, resetAt },
+        ],
+      })
+    const wall = ModelRoute.gatheredNearEmptyWall(leaf, reading(99.5, now), now)
+    expect(wall?.percent).toBe(99.5)
+    expect(wall?.until).toBe(resetAt)
+    expect(ModelRoute.plantGatheredNearEmptyWall(leaf, reading(99.5, now), now)).toBe(
+      "quota-model:command-code:deepseek-v4.1-flash",
+    )
+    // Zero new attempts: the leg is skipped well past its 1s bench, until
+    // the binding window's reset — and the surface names the distinct state.
+    expect(ModelRoute.skipped(leaf, now + 2_000)).toBe(true)
+    expect(ModelRoute.skipped(leaf, resetAt - 1)).toBe(true)
+    const entry = ModelRoute.availability(now + 2_000).find(
+      (candidate) => candidate.providerID === "command-code" && candidate.reason.includes("walled-below-1%"),
+    )
+    expect(entry?.class).toBe("quota")
+    expect(entry?.until).toBe(resetAt)
+    expect(entry?.resume).toBe("reset")
+    // A measured increase on the binding window re-admits it with no
+    // config change: the next feed at 90% used lifts the plant.
+    expect(ModelRoute.plantGatheredNearEmptyWall(leaf, reading(90, now + 15 * 60_000), now + 15 * 60_000)).toBe(
+      "quota-model:command-code:deepseek-v4.1-flash",
+    )
+    expect(ModelRoute.skipped(leaf, now + 15 * 60_000 + 1)).toBe(false)
+  })
+
+  test("exactly 1% remaining does not wall, and a generic failure is not the failure half (#2256)", () => {
+    const now = 860_000_000
+    const leaf = ModelRoute.ref({ providerID: "command-code", model: "deepseek-v4.1-flash" })
+    ModelRoute.resetHealth()
+    const policy = ModelRoute.policy({ cooldownMs: 1_000, quotaCooldownMs: 1_000 })
+    ModelRoute.failed(leaf, policy, now, { quota: true })
+    const resetAt = now + 30 * 86_400_000
+    const at99 = gathered({
+      providerID: "command-code",
+      at: now,
+      windows: [{ name: "monthly", usedPercent: 99, resetAt }],
+    })
+    // Oracle: the rule is strictly under 1% remaining.
+    expect(ModelRoute.gatheredNearEmptyWall(leaf, at99, now)).toBeUndefined()
+    // A generic (non-quota) failure records no quota signal: at 99.5% the
+    // combined rule still states no wall.
+    ModelRoute.resetHealth()
+    ModelRoute.failed(leaf, policy, now)
+    const at995 = gathered({
+      providerID: "command-code",
+      at: now,
+      windows: [{ name: "monthly", usedPercent: 99.5, resetAt }],
+    })
+    expect(ModelRoute.quotaFailureSignal(leaf, now)).toBe(false)
+    expect(ModelRoute.gatheredNearEmptyWall(leaf, at995, now)).toBeUndefined()
+  })
+
   test("a provider-wide gathered wall also gates the provider scope (fork #2479)", () => {
     const now = 870_000_000
     // The production shape: cline-pass and opendesign carry exactly one

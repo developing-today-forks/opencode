@@ -586,6 +586,7 @@ const refreshQuotaSkips = (targets: readonly Model.Ref[], now: number, location?
     for (const target of due) {
       ModelRoute.releaseQuotaSkipsForCurrent(target, readings, now, location)
       ModelRoute.plantGatheredQuotaWall(target, readings, now, location)
+      ModelRoute.plantGatheredNearEmptyWall(target, readings, now, location)
       ModelRoute.observeGatheredProviderWall(target, readings, now, location)
     }
   })
