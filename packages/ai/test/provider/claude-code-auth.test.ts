@@ -154,7 +154,7 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
     )
 
   test("a live credential becomes the Bearer header (never x-api-key)", async () => {
-    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} })
+    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} })
     expect(headers.authorization).toBe("Bearer " + "tok-live")
     expect(headers["x-api-key"]).toBeUndefined()
   })
@@ -223,7 +223,7 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
 
   test("the credentials-file path stamps the CLI UA over the session UA", async () => {
     const headers = await Effect.runPromise(
-      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} } }).apply({
+      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} } }).apply({
         request: {},
         method: "POST",
         url: "https://api.anthropic.com/v1/messages",
