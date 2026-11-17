@@ -470,6 +470,56 @@ describe("Mistral Chat", () => {
     }),
   )
 
+  it.effect("rejects scalar tool arguments explicitly at the protocol boundary (#2229)", () =>
+    Effect.gen(function* () {
+      // Oracle: the generate call fails with an InvalidProviderOutput naming
+      // the tool and the scalar kind, instead of completing with a tool call
+      // whose input is a scalar that fails downstream object expectations.
+      for (const [argumentsText, kind] of [
+        ["42", "number"],
+        ["true", "boolean"],
+        ['"abc"', "string"],
+        ["[1,2]", "array"],
+        ["null", "null"],
+      ] as const) {
+        const error = yield* LLMClient.generate(request).pipe(
+          Effect.provide(
+            fixedResponse(
+              sseEvents(
+                chunk({
+                  tool_calls: [{ index: 0, id: "Ab12Cd34E", function: { name: "lookup", arguments: argumentsText } }],
+                }),
+                chunk({}, "tool_calls"),
+              ),
+            ),
+          ),
+          Effect.flip,
+        )
+        expect(error).toMatchObject({ _tag: "AI.Error", reason: { _tag: "InvalidProviderOutput" } })
+        expect(error.message).toContain(`Mistral Chat tool call lookup arguments must be a JSON object, got ${kind}`)
+      }
+    }),
+  )
+
+  it.effect("rejects scalar arguments accumulated across fragments (#2229)", () =>
+    Effect.gen(function* () {
+      const error = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents(
+              chunk({ tool_calls: [{ index: 0, id: "Ab12Cd34E", function: { name: "lookup", arguments: "4" } }] }),
+              chunk({ tool_calls: [{ index: 0, function: { name: "", arguments: "2" } }] }),
+              chunk({}, "tool_calls"),
+            ),
+          ),
+        ),
+        Effect.flip,
+      )
+      expect(error).toMatchObject({ _tag: "AI.Error", reason: { _tag: "InvalidProviderOutput" } })
+      expect(error.message).toContain("Mistral Chat tool call lookup arguments must be a JSON object, got number")
+    }),
+  )
+
   it.effect("normalizes stop to tool calls when a hosted model emits indexed tool fragments", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(request).pipe(
