@@ -244,4 +244,42 @@ describe("FileSystemSearch", () => {
       }).pipe(Effect.provide(layer))
     }),
   )
+
+  it.live("caps a find page size instead of returning the whole index", () =>
+    Effect.gen(function* () {
+      const directory = AbsolutePath.make(path.join(os.tmpdir(), "opencode-search-cap"))
+      const layer = AppNodeBuilder.build(FileSystemSearch.node, [
+        Location.node.replace(Layer.succeed(Location.Service, Location.Service.of(location({ directory })))),
+        Ripgrep.node.replace(
+          Layer.succeed(
+            Ripgrep.Service,
+            Ripgrep.Service.of({
+              find: (input) =>
+                Effect.gen(function* () {
+                  for (let index = 0; index < 250; index++) {
+                    const entry = FileSystem.Entry.make({
+                      path: RelativePath.make(`file-${String(index).padStart(3, "0")}.ts`),
+                      type: "file",
+                    })
+                    if (input.onEntry) yield* input.onEntry(entry)
+                  }
+                  return []
+                }),
+              glob: () => Effect.succeed([]),
+              grep: () => Effect.succeed([]),
+            }),
+          ),
+        ),
+      ])
+
+      yield* Effect.gen(function* () {
+        const search = yield* FileSystemSearch.Service
+        // An oversized limit used to pass straight through to fuzzysort/fff.
+        expect(yield* search.find({ query: "file", type: "file", limit: 1_000_000 })).toHaveLength(200)
+        expect(yield* search.find({ query: "file", type: "file", limit: 5 })).toHaveLength(5)
+        // An omitted limit keeps the documented default page.
+        expect(yield* search.find({ query: "file", type: "file" })).toHaveLength(50)
+      }).pipe(Effect.provide(layer))
+    }),
+  )
 })

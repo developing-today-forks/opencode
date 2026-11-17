@@ -59,7 +59,7 @@ const ParentIDFilter = Schema.Union([
 
 const SessionsQueryFields = {
   limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional).annotate({
-    description: "Maximum number of sessions to return. Defaults to the newest 50 sessions.",
+    description: "Maximum number of sessions to return. Defaults to the newest 50 sessions and is capped at 200.",
   }),
   order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])).annotate({
     description: "Session order for the first page. Use desc for newest first or asc for oldest first.",

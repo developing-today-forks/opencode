@@ -3,6 +3,8 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginPromise } from "@opencode/core/plugin/promise"
 import { PluginServerUrl } from "@opencode/core/plugin/server-url"
+import { sessionListLimit } from "@opencode/core/plugin/session-list"
+import { Session } from "@opencode/schema/session"
 import { Effect } from "effect"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
@@ -89,6 +91,19 @@ it.live("Plugin session.list normalises an unusable limit before the store", () 
     // A non-finite limit falls back to the default page instead of defecting.
     const nan = yield* context.session.list({ parentID: null, limit: Number.NaN })
     expect(nan.data).toHaveLength(all.data.length)
+  }),
+)
+
+it.live("Plugin session.list caps an oversized limit at the store ceiling", () =>
+  Effect.gen(function* () {
+    expect(sessionListLimit(1_000_000)).toBe(Session.LIST_LIMIT_MAX)
+    expect(sessionListLimit(Session.LIST_LIMIT_MAX + 1)).toBe(Session.LIST_LIMIT_MAX)
+    expect(sessionListLimit(Session.LIST_LIMIT_MAX)).toBe(Session.LIST_LIMIT_MAX)
+    expect(sessionListLimit(Session.LIST_LIMIT_MAX - 1)).toBe(Session.LIST_LIMIT_MAX - 1)
+    // The default page and the unusable-value policies are unchanged by the cap.
+    expect(sessionListLimit()).toBe(50)
+    expect(sessionListLimit(Number.NaN)).toBe(50)
+    expect(sessionListLimit(0)).toBe(1)
   }),
 )
 

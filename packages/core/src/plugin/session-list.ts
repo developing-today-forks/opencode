@@ -36,11 +36,12 @@ export const DEFAULT_SESSION_LIMIT = 50
  * value becomes the default page, and zero, negative or fractional values are
  * clamped to a positive integer instead of widening the query to every session
  * (SQLite treats a negative LIMIT as unlimited) or failing it as an opaque
- * store defect. Unlike `branchListLimit` there is no upper bound — the HTTP
- * surface applies none, so a positive integer passes through unchanged.
+ * store defect. Oversized limits are capped at `Session.LIST_LIMIT_MAX`, the
+ * same ceiling the store applies, so one plugin call cannot page the whole
+ * sessions table.
  */
 export function sessionListLimit(limit?: number): number {
-  return pageLimit(limit, { default: DEFAULT_SESSION_LIMIT })
+  return pageLimit(limit, { default: DEFAULT_SESSION_LIMIT, max: Session.LIST_LIMIT_MAX })
 }
 
 export type SessionListOutput = Effect.Success<ReturnType<Plugin.Context["session"]["list"]>>

@@ -130,6 +130,29 @@ describe("SessionStore", () => {
     }),
   )
 
+  it.effect("caps a present list limit at the documented ceiling", () =>
+    Effect.gen(function* () {
+      const rows = Array.from({ length: 205 }, (_, index) => ({
+        id: `ses_cap_${String(index).padStart(3, "0")}`,
+        updated: index,
+      }))
+      yield* seedSessions(rows)
+      const store = yield* SessionStore.Service
+      const count = (limit?: number) =>
+        store
+          .list(limit === undefined ? {} : ({ limit } as unknown as SessionStore.ListInput))
+          .pipe(Effect.map((sessions) => sessions.length))
+
+      // An oversized limit returns a bounded page instead of the whole table.
+      expect(yield* count(1_000_000)).toBe(Session.LIST_LIMIT_MAX)
+      expect(yield* count(201)).toBe(Session.LIST_LIMIT_MAX)
+      expect(yield* count(200)).toBe(Session.LIST_LIMIT_MAX)
+      expect(yield* count(199)).toBe(199)
+      // An omitted limit still leaves internal callers unbounded.
+      expect(yield* count()).toBe(205)
+    }),
+  )
+
   it.effect("pages messages by durable sequence, not timestamp or ID, and scopes cursor lookup", () =>
     Effect.gen(function* () {
       const sessionID = Session.ID.make("ses_messages")
