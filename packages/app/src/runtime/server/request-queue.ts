@@ -95,7 +95,7 @@ export function createRequestQueue(input: {
     waiting.splice(index, 1)[0]?.start()
   }
 
-  const acquire = (entry: Entry) => {
+  const acquire = (entry: Entry, signal: AbortSignal) => {
     // A free slot must start fetch before the caller's synchronous UI work.
     // Awaiting an already-resolved promise postpones that dispatch until after it.
     if (canStart(entry)) {
@@ -104,14 +104,34 @@ export function createRequestQueue(input: {
       return
     }
 
-    return new Promise<void>((resolve) => {
-      const start = () => {
-        entry.at = now()
-        inflight.add(entry)
-        resolve()
+    return new Promise<void>((resolve, reject) => {
+      // Settle an aborted-while-queued request immediately instead of leaving
+      // its entry in waiting until an unrelated release pops it.
+      const onAbort = () => {
+        const index = waiting.indexOf(item)
+
+        if (index !== -1) waiting.splice(index, 1)
+        reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"))
       }
 
-      waiting.push({ entry, start })
+      const item = {
+        entry,
+        start: () => {
+          signal.removeEventListener("abort", onAbort)
+          entry.at = now()
+          inflight.add(entry)
+          resolve()
+        },
+      }
+
+      if (signal.aborted) {
+        onAbort()
+
+        return
+      }
+
+      waiting.push(item)
+      signal.addEventListener("abort", onAbort, { once: true })
       watcher ??= setTimeout(watch, stallMs)
     })
   }
@@ -124,7 +144,7 @@ export function createRequestQueue(input: {
       // The event stream is long-lived; never count it against the request budget.
       if (pathname === "/api/event") return base(request)
       const entry = { method: request.method, url: request.url, at: now(), slow: isSlowRequest(pathname) }
-      const queued = acquire(entry)
+      const queued = acquire(entry, init?.signal ?? request.signal)
 
       if (queued) await queued
 
