@@ -24,7 +24,7 @@ export type ResolveInput = typeof ResolveInput.Type
 
 export interface ExternalDirectoryAuthorization {
   readonly action: "external_directory"
-  /** Lexical directory used as the external approval boundary. */
+  /** Canonical directory used as the external approval boundary. */
   readonly directory: AbsolutePath
   readonly resource: string
   readonly save: string
@@ -45,7 +45,7 @@ export interface ReadOptions {
 }
 
 export interface Interface {
-  /** Resolve a lexical path and its permission resources, without requesting approval. */
+  /** Resolve a path and its permission resources, without requesting approval. Classification is by canonical (symlink-resolved) location, per the symlink policy in the layer. */
   readonly resolve: (input: ResolveInput) => Effect.Effect<Target, FSUtil.Error>
   /** Approve external directories in one batch, preserving first-seen resource order. */
   readonly authorizeExternal: (
@@ -90,18 +90,72 @@ const layer = Layer.effect(
     const location = yield* Location.Service
     const permission = yield* Permission.Service
 
-    const resolve = Effect.fn("FileAccess.resolve")(function* (input: ResolveInput) {
-      const absolute = AbsolutePath.make(resolvePath(location.directory, input.path))
-      const worktree = path.resolve(location.project.directory)
+    // Symlink policy (#2286): classification uses the canonical path —
+    // the path the filesystem will actually open — never the lexical
+    // spelling alone. An existing path is fully canonicalized
+    // (realpath, via fs.resolve). A path that does not exist yet
+    // canonicalizes its nearest existing ancestor and appends the
+    // remaining segments lexically: the missing name cannot itself be
+    // a symlink, but a symlinked ancestor directory can still redirect
+    // it across the boundary, and the ancestor decides classification.
+    // A dangling final symlink counts as not-yet-existing: it cannot
+    // be read, and creation through it is the mutation layer's own
+    // link walk. resolve() preserves the lexical absolute for internal
+    // targets (mutation consumers operate on the path as given, and
+    // their own link walks apply); external targets are reported by
+    // their canonical path, which is where their approval boundary
+    // sits. authorizeRead goes one step further: for an existing
+    // target it returns the canonical path, so the file that was
+    // authorized is the file that is read — swapping a symlink after
+    // authorization cannot redirect an already-authorized read to a
+    // different file. The location and worktree roots are
+    // canonicalized on the same basis, so the containment checks
+    // compare like with like.
+    const canonicalize = Effect.fn("FileAccess.canonicalize")(function* (absolute: string) {
+      let current = absolute
+      const tail: string[] = []
+      while (true) {
+        // Any stat failure (missing, ENOTDIR through a file component,
+        // ELOOP, EACCES) means this prefix is not a resolvable existing
+        // path; keep walking up. Classification only needs the nearest
+        // resolvable ancestor — the caller's own operation surfaces the
+        // real filesystem error if the path is genuinely unusable.
+        const info = yield* fs.stat(current).pipe(Effect.orElseSucceed(() => undefined))
+        if (info) {
+          const resolved = yield* fs.resolve(current)
+          return {
+            canonical: tail.length === 0 ? resolved : path.join(resolved, ...tail.reverse()),
+            exists: tail.length === 0,
+          }
+        }
+        const parent = path.dirname(current)
+        if (parent === current) return { canonical: absolute, exists: false }
+        tail.push(path.basename(current))
+        current = parent
+      }
+    })
+
+    const resolveTarget = Effect.fn("FileAccess.resolveTarget")(function* (input: ResolveInput) {
+      const lexical = resolvePath(location.directory, input.path)
+      const target = yield* canonicalize(lexical)
+      const locationRoot = yield* canonicalize(path.resolve(location.directory))
+      const worktree = yield* canonicalize(path.resolve(location.project.directory))
       const internal =
-        FSUtil.contains(location.directory, absolute) ||
-        (worktree !== path.parse(worktree).root && FSUtil.contains(worktree, absolute))
+        FSUtil.contains(locationRoot.canonical, target.canonical) ||
+        (worktree.canonical !== path.parse(worktree.canonical).root &&
+          FSUtil.contains(worktree.canonical, target.canonical))
       if (internal) {
         return {
-          absolute,
-          resource: slash(path.relative(location.directory, absolute) || "."),
-        } satisfies Target
+          target: {
+            absolute: AbsolutePath.make(lexical),
+            resource: slash(path.relative(location.directory, lexical) || "."),
+          } satisfies Target,
+          canonical: target.canonical,
+          exists: target.exists,
+          locationCanonical: locationRoot.canonical,
+        }
       }
+      const absolute = AbsolutePath.make(target.canonical)
       const type =
         input.kind === "directory"
           ? "Directory"
@@ -111,15 +165,24 @@ const layer = Layer.effect(
                 ?.type
       const directory = AbsolutePath.make(type === "Directory" ? absolute : path.dirname(absolute))
       return {
-        absolute,
-        resource: slash(absolute),
-        externalDirectory: {
-          action: "external_directory",
-          directory,
-          resource: slash(path.join(directory, "*")),
-          save: slash(path.join((yield* Project.root(fs, directory)) ?? directory, "*")),
-        },
-      } satisfies Target
+        target: {
+          absolute,
+          resource: slash(absolute),
+          externalDirectory: {
+            action: "external_directory",
+            directory,
+            resource: slash(path.join(directory, "*")),
+            save: slash(path.join((yield* Project.root(fs, directory)) ?? directory, "*")),
+          },
+        } satisfies Target,
+        canonical: target.canonical,
+        exists: target.exists,
+        locationCanonical: locationRoot.canonical,
+      }
+    })
+
+    const resolve = Effect.fn("FileAccess.resolve")(function* (input: ResolveInput) {
+      return (yield* resolveTarget(input)).target
     })
 
     const authorizeExternal = Effect.fn("FileAccess.authorizeExternal")(function* (
@@ -146,7 +209,18 @@ const layer = Layer.effect(
       context: Invocation,
       options?: ReadOptions,
     ) {
-      const target = yield* resolve({ path: file, kind: options ? "file" : undefined })
+      const resolved = yield* resolveTarget({ path: file, kind: options ? "file" : undefined })
+      // For an existing target the read operates on the canonical path:
+      // the file that was authorized is the file that is read (#2286).
+      const target: Target = resolved.exists
+        ? {
+            ...resolved.target,
+            absolute: AbsolutePath.make(resolved.canonical),
+            resource: resolved.target.externalDirectory
+              ? resolved.target.resource
+              : slash(path.relative(resolved.locationCanonical, resolved.canonical) || "."),
+          }
+        : resolved.target
       const sibling = options && path.dirname(target.absolute) === path.dirname(options.siblingOf.absolute)
 
       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.

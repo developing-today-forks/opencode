@@ -372,7 +372,7 @@ describeSearch("search tools", () => {
     ),
   )
 
-  it.live("globs through an in-location external symlink without external approval", () =>
+  it.live("globs through an in-location external symlink with external approval", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
@@ -392,10 +392,14 @@ describeSearch("search tools", () => {
           Effect.tap((result) =>
             Effect.sync(() => {
               expect(result.status).toBe("completed")
-              expect(assertions.map((input) => input.action)).toEqual(["glob"])
+              // #2286: the linked directory's canonical location is
+              // external, so external approval precedes the glob.
+              expect(assertions.map((input) => input.action)).toEqual(["external_directory", "glob"])
+              // The search runs at the canonical location, so results
+              // name the real outside path rather than the link spelling.
               expect(result).toMatchObject({
-                output: [{ path: path.join("linked", "outside.txt"), type: "file" }],
-                content: [{ type: "text", text: path.join(active.path, "linked", "outside.txt") }],
+                output: [{ path: path.relative(active.path, path.join(outside.path, "outside.txt")), type: "file" }],
+                content: [{ type: "text", text: path.join(outside.path, "outside.txt") }],
               })
             }),
           ),
