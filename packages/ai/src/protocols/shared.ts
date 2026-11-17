@@ -181,14 +181,84 @@ export const wrappedSystemUpdate = Effect.fnUntraced(function* (
   return { type: "text" as const, text: wrapSystemUpdate(content), cache: content.at(-1)?.cache }
 })
 
+/** Whether the bounded truncated-input repair in `parseToolInput` is on (#2227). Off by default. */
+export const toolInputRepairEnabled = () => process.env.OPENCODE_TOOL_INPUT_REPAIR === "1"
+
+const TOOL_INPUT_REPAIR_MAX_INPUT = 1_000_000
+const TOOL_INPUT_REPAIR_MAX_DEPTH = 1_000
+
+/**
+ * Bounded completion of a tool-input JSON document that was truncated
+ * mid-stream (#2227). The only repairs attempted: close an unterminated
+ * string, drop a trailing comma, and append the missing `}`/`]` closers for
+ * the containers still open. Anything else — a cut inside a literal or
+ * number, a dangling key or colon, mismatched closers, input past the size
+ * or depth bound — returns `undefined` and stays fatal; the caller accepts
+ * a candidate only when it parses to a JSON object, so a bad guess can
+ * never become tool input.
+ */
+export const repairTruncatedToolInput = (raw: string): string | undefined => {
+  if (raw.length === 0 || raw.length > TOOL_INPUT_REPAIR_MAX_INPUT) return undefined
+  const stack: Array<string> = []
+  let inString = false
+  let escaped = false
+  for (const char of raw) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === "\\") escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === "{") stack.push("}")
+    else if (char === "[") stack.push("]")
+    else if (char === "}" || char === "]") {
+      if (stack.pop() !== char) return undefined
+    }
+    if (stack.length > TOOL_INPUT_REPAIR_MAX_DEPTH) return undefined
+  }
+  let repaired = raw
+  if (inString) {
+    // A final lone backslash was left mid-escape; dropping it lets the
+    // closing quote terminate the string instead of being escaped by it.
+    if (escaped) repaired = repaired.slice(0, -1)
+    repaired += '"'
+  } else {
+    // A cut right after a comma (or in trailing whitespace) leaves a tail
+    // no closer can follow; drop it before completing the open containers.
+    repaired = repaired.replace(/[\s,]+$/, "")
+  }
+  for (let index = stack.length - 1; index >= 0; index--) repaired += stack[index]
+  return repaired === raw ? undefined : repaired
+}
+
 /**
  * Parse the streamed JSON input of a tool call. Treats an empty string as
  * `"{}"` — providers occasionally finish a tool call without ever emitting
  * input deltas (e.g. zero-arg tools). The error message is uniform across
  * routes: `Invalid JSON input for <route> tool call <name>`.
+ *
+ * With `OPENCODE_TOOL_INPUT_REPAIR=1`, a parse failure first tries the
+ * bounded completion in `repairTruncatedToolInput`; a candidate counts only
+ * when it parses to a JSON object. Every other failure — and every failure
+ * with the flag off — is the original error, whose body stays the raw
+ * input, so diagnostics never lose what the provider actually sent.
  */
-export const parseToolInput = (route: string, name: string, raw: string) =>
-  parseJson(route, raw || "{}", `Invalid JSON input for ${route} tool call ${name}`)
+export const parseToolInput = (route: string, name: string, raw: string) => {
+  const input = raw || "{}"
+  const message = `Invalid JSON input for ${route} tool call ${name}`
+  return parseJson(route, input, message).pipe(
+    Effect.catch((error) => {
+      if (!toolInputRepairEnabled()) return Effect.fail(error)
+      const repaired = repairTruncatedToolInput(input)
+      if (repaired === undefined) return Effect.fail(error)
+      return parseJson(route, repaired, message).pipe(
+        Effect.flatMap((value) => (isRecord(value) ? Effect.succeed(value) : Effect.fail(error))),
+        Effect.catch(() => Effect.fail(error)),
+      )
+    }),
+  )
+}
 
 /** Inline view or a typed `InvalidRequest` for routes that cannot fetch URLs or dereference provider refs. */
 export const requireInlineMedia = (route: string, asset: Media.Asset): Effect.Effect<Media.Inline, AIError> => {
