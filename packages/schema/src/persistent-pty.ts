@@ -41,9 +41,9 @@ export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
  * frames and retained as attachment state without size or charset abuse.
  * The connect handler rejects anything else with a 400 (#2465).
  */
-export const AttachmentID = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
-).annotate({ identifier: "PersistentPty.AttachmentID" })
+export const AttachmentID = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)).annotate({
+  identifier: "PersistentPty.AttachmentID",
+})
 export type AttachmentID = typeof AttachmentID.Type
 
 export const UpdateInput = Schema.Struct({

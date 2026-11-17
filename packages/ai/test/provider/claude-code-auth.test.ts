@@ -223,7 +223,9 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
 
   test("the credentials-file path stamps the CLI UA over the session UA", async () => {
     const headers = await Effect.runPromise(
-      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} } }).apply({
+      claudeCodeAuth({
+        sources: { readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} },
+      }).apply({
         request: {},
         method: "POST",
         url: "https://api.anthropic.com/v1/messages",
@@ -782,7 +784,12 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
 
   const rotated = () =>
     new Response(
-      JSON.stringify({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 28_800, scope: "user:inference" }),
+      JSON.stringify({
+        access_token: "tok-new",
+        refresh_token: "ref-new",
+        expires_in: 28_800,
+        scope: "user:inference",
+      }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     )
 
@@ -805,9 +812,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
 
   test("a 429 with Retry-After is waited out and the renewal then lands", async () => {
     const { sources, store, calls, sleeps } = harness((call) =>
-      call < 3
-        ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } })
-        : rotated(),
+      call < 3 ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } }) : rotated(),
     )
     const headers = await apply(sources)
     expect(headers.authorization).toBe("Bearer tok-new")
@@ -854,10 +859,9 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
   })
 
   test("a custom wait budget bounds the retries", async () => {
-    const { sources, calls } = harness(
-      () => new Response("rate limited", { status: 429 }),
-      { renewalWaitBudgetMs: 16_000 },
-    )
+    const { sources, calls } = harness(() => new Response("rate limited", { status: 429 }), {
+      renewalWaitBudgetMs: 16_000,
+    })
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(JSON.stringify(error)).toContain("RateLimit")
     expect(calls).toHaveLength(3)
@@ -1280,7 +1284,9 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         exchanges += 1
         // 429 through the request's wait AND the first two standing
         // rounds; the endpoint relents on the third.
-        return exchanges <= 3 ? new Response("rate limited", { status: 429 }) : rotated("tok-standing", "ref-standing-b")
+        return exchanges <= 3
+          ? new Response("rate limited", { status: 429 })
+          : rotated("tok-standing", "ref-standing-b")
       },
     }
     // The request itself surfaces the spent wait as RateLimit.
@@ -1422,9 +1428,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         // The first request's exchange is walled (its tiny budget
         // retires the renewal to the standing retry); the standing
         // round's exchange lands the rotation.
-        return exchanges === 1
-          ? new Response("rate limited", { status: 429 })
-          : rotated("tok-joined-a", "ref-join-b")
+        return exchanges === 1 ? new Response("rate limited", { status: 429 }) : rotated("tok-joined-a", "ref-join-b")
       },
     }
     // The first request spends its budget and surfaces the wait.
@@ -1557,9 +1561,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("the lifecycle is reconstructible from the default log lines alone", async () => {
-    const store = new Map<string, string>([
-      [CREDENTIALS_PATH, blobWith(NOW - 1_000, "ref-standing-h")],
-    ])
+    const store = new Map<string, string>([[CREDENTIALS_PATH, blobWith(NOW - 1_000, "ref-standing-h")]])
     const logged: Array<string> = []
     const original = { log: console.log, info: console.info, warn: console.warn, error: console.error }
     console.log = (...args: Array<unknown>) => logged.push(args.join(" "))
@@ -1585,7 +1587,9 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         renewalWaitBudgetMs: 1_000,
         fetchFn: async () => {
           exchanges += 1
-          return exchanges === 1 ? new Response("rate limited", { status: 429 }) : rotated("tok-logged", "ref-standing-i")
+          return exchanges === 1
+            ? new Response("rate limited", { status: 429 })
+            : rotated("tok-logged", "ref-standing-i")
         },
       }
       await apply(sources).catch(() => {})

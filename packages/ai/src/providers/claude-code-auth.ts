@@ -491,7 +491,10 @@ const storedCredentialServes = (stored: ClaudeCodeCredential, now: number): bool
  * in-memory-only credential exists (an unpersisted rotated token is a
  * burned login). Tokens are never logged.
  */
-const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
+const exchangeRefreshToken = async (
+  sources: CredentialSources,
+  refreshToken: string,
+): Promise<ClaudeCodeCredential> => {
   const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -538,7 +541,10 @@ const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: st
     throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned no access token; the tokens were discarded.",
     )
-  if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+  if (
+    "refresh_token" in tokens &&
+    (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0)
+  )
     throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned an empty refresh token; the tokens were discarded.",
     )
@@ -680,7 +686,10 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
     if (accessToken.length === 0)
       throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned no access token.")
-    if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+    if (
+      "refresh_token" in tokens &&
+      (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0)
+    )
       throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned an empty refresh token.")
     if (
       "expires_in" in tokens &&
@@ -1057,24 +1066,25 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   if (standing !== undefined) return joinStandingRenewal(sources, standing, credential)
   const attempt = refreshAndPersist(sources, credential.refreshToken as string, { standing: false }).catch(
     (cause: unknown) => {
-    // Genuine rejections keep today's fail-loud floor and are never
-    // retried standing. Everything else — a rate limit that outlasted
-    // the wait budget, a transient exchange failure — retires to the
-    // standing retry, and THIS request joins it: the request still
-    // surfaces the original failure (a 429 still surfaces as
-    // RateLimit, never Authentication), and later loads join the
-    // standing attempt until it lands.
-    if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
-      emitRenewalEvent(sources, {
-        kind: "rejected",
-        at: sources.now ? sources.now() : Date.now(),
-        message: cause.message,
-      })
+      // Genuine rejections keep today's fail-loud floor and are never
+      // retried standing. Everything else — a rate limit that outlasted
+      // the wait budget, a transient exchange failure — retires to the
+      // standing retry, and THIS request joins it: the request still
+      // surfaces the original failure (a 429 still surfaces as
+      // RateLimit, never Authentication), and later loads join the
+      // standing attempt until it lands.
+      if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
+        emitRenewalEvent(sources, {
+          kind: "rejected",
+          at: sources.now ? sources.now() : Date.now(),
+          message: cause.message,
+        })
+        throw cause
+      }
+      scheduleStandingRenewal(sources, key, credential.refreshToken as string)
       throw cause
-    }
-    scheduleStandingRenewal(sources, key, credential.refreshToken as string)
-    throw cause
-  })
+    },
+  )
   inflightRefresh.set(key, attempt)
   // Clear on settle so a later expiry refreshes again; a rejection must
   // not be cached forever.
@@ -1120,8 +1130,7 @@ const loadCredentialEffect = (sources: CredentialSources) =>
     // credentials-file credential with a refresh token renews while its
     // current token still serves, so a rate-limited renewal can be
     // waited out without the door ever presenting an expired token.
-    const renewalDue =
-      credential.expiresAt !== undefined && credential.expiresAt - now <= RENEWAL_LEAD_MS
+    const renewalDue = credential.expiresAt !== undefined && credential.expiresAt - now <= RENEWAL_LEAD_MS
     if (!renewalDue) return credential
     // The env tier (#1752) never renews; a file credential with no
     // refresh token serves until expiry and then keeps the fail-loud

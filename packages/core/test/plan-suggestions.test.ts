@@ -43,10 +43,7 @@ describe("PlanSuggestions.summarizeTurnChanges", () => {
 
 describe("PlanSuggestions.planNoticesForTurn — suggestion emitted on a matching turn", () => {
   test("emits a notice naming the matched step, and none for unmatched turns", () => {
-    const notices = PlanSuggestions.planNoticesForTurn(
-      [plan],
-      [diff("packages/web/server/routes.ts", "added")],
-    )
+    const notices = PlanSuggestions.planNoticesForTurn([plan], [diff("packages/web/server/routes.ts", "added")])
     expect(notices.length).toBe(1)
     expect(notices[0]).toContain("Plan step 1 suggested for check-off")
     expect(PlanSuggestions.planNoticesForTurn([plan], [diff("unrelated/file.ts", "modified")])).toEqual([])
@@ -54,10 +51,7 @@ describe("PlanSuggestions.planNoticesForTurn — suggestion emitted on a matchin
   })
 
   test("a deleted target file also completes an explicit step", () => {
-    const notices = PlanSuggestions.planNoticesForTurn(
-      [plan],
-      [diff("packages/core/src/flags.ts", "deleted")],
-    )
+    const notices = PlanSuggestions.planNoticesForTurn([plan], [diff("packages/core/src/flags.ts", "deleted")])
     expect(notices.length).toBe(1)
     expect(notices[0]).toContain("Plan step 4 suggested for check-off")
   })
@@ -78,9 +72,7 @@ describe("suggest-first (Q3) — no mutation pre-acceptance", () => {
 
 describe("accept / dismiss — the consumer surface", () => {
   test("accept flips exactly the accepted step and no other", () => {
-    const [suggestion] = PlanSuggestions.suggestionsForTurn(plan, [
-      diff("packages/web/server/routes.ts", "added"),
-    ])
+    const [suggestion] = PlanSuggestions.suggestionsForTurn(plan, [diff("packages/web/server/routes.ts", "added")])
     expect(suggestion).toBeDefined()
     const accepted = PlanSuggestions.acceptSuggestion(plan, suggestion!)
     const lines = accepted.split("\n")

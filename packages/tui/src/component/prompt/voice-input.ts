@@ -297,9 +297,14 @@ interface TranscriptionEnvelope {
   provider_metadata?: { provider?: string; model?: string }
 }
 
-function envelopeResult(envelope: TranscriptionEnvelope, registration: TranscriptionModelRegistration): VoiceTranscriptionResult {
+function envelopeResult(
+  envelope: TranscriptionEnvelope,
+  registration: TranscriptionModelRegistration,
+): VoiceTranscriptionResult {
   if (typeof envelope?.text !== "string")
-    throw new VoiceTranscriptionError("The façade answered without a transcript. Retry, or discard the audio and re-record.")
+    throw new VoiceTranscriptionError(
+      "The façade answered without a transcript. Retry, or discard the audio and re-record.",
+    )
   return {
     text: envelope.text,
     provenance: {
@@ -350,7 +355,11 @@ export async function submitVoiceTranscription(input: {
   const body: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
-    throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
+    throw actionableError(
+      response.status,
+      error?.code,
+      error?.message ?? `Transcription failed (HTTP ${response.status}).`,
+    )
   }
   return envelopeResult(body as TranscriptionEnvelope, input.registration)
 }
@@ -482,10 +491,16 @@ export async function submitVoiceTranscriptionStream(input: {
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => undefined)
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
-    throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
+    throw actionableError(
+      response.status,
+      error?.code,
+      error?.message ?? `Transcription failed (HTTP ${response.status}).`,
+    )
   }
   if (!response.body)
-    throw new VoiceTranscriptionError("The façade answered without a stream. Retry, or discard the audio and re-record.")
+    throw new VoiceTranscriptionError(
+      "The façade answered without a stream. Retry, or discard the audio and re-record.",
+    )
   const assembler = new TranscriptionStreamAssembler(input.registration)
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
@@ -544,7 +559,10 @@ export interface RecorderCandidate {
 export function recorderCandidates(platform: string): ReadonlyArray<RecorderCandidate> {
   if (platform === "darwin")
     return [
-      { command: "ffmpeg", args: (output) => ["-y", "-f", "avfoundation", "-i", ":0", "-ac", "1", "-ar", "16000", output] },
+      {
+        command: "ffmpeg",
+        args: (output) => ["-y", "-f", "avfoundation", "-i", ":0", "-ac", "1", "-ar", "16000", output],
+      },
       { command: "rec", args: (output) => ["-r", "16000", "-c", "1", output] },
     ]
   if (platform === "win32") return []
@@ -574,10 +592,6 @@ export interface RecorderHandle {
 
 export type RecorderSpawn = (command: string, args: ReadonlyArray<string>) => RecorderHandle
 
-export function startRecorder(
-  candidate: RecorderCandidate,
-  outputPath: string,
-  spawn: RecorderSpawn,
-): RecorderHandle {
+export function startRecorder(candidate: RecorderCandidate, outputPath: string, spawn: RecorderSpawn): RecorderHandle {
   return spawn(candidate.command, candidate.args(outputPath))
 }

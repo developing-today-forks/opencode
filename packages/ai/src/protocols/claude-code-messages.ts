@@ -93,10 +93,7 @@ const fromRequest = Effect.fn("ClaudeCodeMessages.fromRequest")(function* (reque
   // The identity block must be the first system block; a caller that
   // already leads with it (a façade replaying a captured Claude Code
   // request) is not double-stamped.
-  const system =
-    shaped[0]?.text === IDENTITY_SYSTEM_TEXT
-      ? shaped
-      : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
+  const system = shaped[0]?.text === IDENTITY_SYSTEM_TEXT ? shaped : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
   return yield* AnthropicMessages.protocol.body.from(LLMRequest.update(request, { system }))
 })
 

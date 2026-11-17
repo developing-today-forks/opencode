@@ -111,9 +111,7 @@ it.effect("tools lower through the Mistral Chat route; parallel_tool_calls follo
         inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
       }),
     ]
-    const compiled = yield* compileRequest(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
-    )
+    const compiled = yield* compileRequest(LLM.request({ model, messages: [Message.user("weather?")], tools }))
     const body = compiled.body as { tools?: Array<{ function?: { name?: string } }> }
     expect(body.tools?.[0]?.function?.name).toBe("get_weather")
 

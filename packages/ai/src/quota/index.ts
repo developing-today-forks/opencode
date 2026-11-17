@@ -21,7 +21,13 @@ export * from "./utils.js"
 export { cdpPageFetch, cdpBaseOf, isSessionExpiredStatus } from "./cdp.js"
 export { parseMistralBudget } from "./providers/mistral.js"
 export { parseSubscriptionQuota, parseBillingBanner } from "./providers/meta.js"
-export { tursoWindows, resolveTursoLimits, TURSO_LIMITS, TURSO_PLAN_LIMITS, TURSO_SECRET_NAME } from "./providers/turso.js"
+export {
+  tursoWindows,
+  resolveTursoLimits,
+  TURSO_LIMITS,
+  TURSO_PLAN_LIMITS,
+  TURSO_SECRET_NAME,
+} from "./providers/turso.js"
 export { parseCommandCodeCredits, MONTHLY_INCLUDED_CREDITS } from "./providers/command-code.js"
 export { parseCodingPlanWindows, normalizeOpenDesignCredential } from "./providers/opendesign.js"
 export { parseGroqResetSeconds, NO_QUOTA_SURFACE } from "./providers/groq.js"
@@ -374,10 +380,7 @@ const fetchFoldedInstanceResults = async (
  * with its credential row), or the single active-credential result for
  * providers without a per-credential fetch.
  */
-export const fetchQuotaForProviderInstances = async (
-  ctx: QuotaContext,
-  providerId: string,
-): Promise<QuotaResult[]> => {
+export const fetchQuotaForProviderInstances = async (ctx: QuotaContext, providerId: string): Promise<QuotaResult[]> => {
   const provider = registry.get(providerId)
   if (!provider) {
     return (

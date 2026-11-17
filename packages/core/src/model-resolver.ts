@@ -391,7 +391,10 @@ function prepareProviderURL(
   baseURL: string,
 ): Effect.Effect<string, UnresolvedProviderVariablesError> {
   if (!baseURL.includes("${")) return Effect.succeed(baseURL)
-  const prepared = baseURL.replace(/\$\{([^}]+)\}/g, (placeholder, name: string) => ownValue(process.env, name) ?? placeholder)
+  const prepared = baseURL.replace(
+    /\$\{([^}]+)\}/g,
+    (placeholder, name: string) => ownValue(process.env, name) ?? placeholder,
+  )
   const failure = unresolvedProviderVariables(model, prepared)
   return failure ? Effect.fail(failure) : Effect.succeed(prepared)
 }
@@ -759,8 +762,7 @@ export const layer = Layer.effect(
         for (const target of definition.targets) {
           if (credentialByProvider.has(target.providerID)) continue
           const provider = yield* providers.get(target.providerID)
-          if (provider?.canonical !== undefined)
-            canonicalByProvider.set(target.providerID, String(provider.canonical))
+          if (provider?.canonical !== undefined) canonicalByProvider.set(target.providerID, String(provider.canonical))
           const integrationID = provider?.integrationID ?? Integration.ID.make(target.providerID)
           const connection = yield* integrations.connection.active(integrationID)
           if (connection?.type === "credential") {
@@ -822,127 +824,138 @@ export const layer = Layer.effect(
             loadErrors: [...cascade.loadErrors],
           }
           return {
-          ...current,
-          // The membership caps the picked target's provider declares (#2253),
-          // resolved at pick time so the runner's gate needs nothing else. An
-          // uncapped provider carries none.
-          ...(ModelRoute.membershipLimits(current.ref.providerID, canonicalByProvider.get(current.ref.providerID), locationDirectory)
-            ? {
-                membership: {
-                  providerID: current.ref.providerID,
-                  ...(canonicalByProvider.get(current.ref.providerID)
-                    ? { canonical: canonicalByProvider.get(current.ref.providerID) }
-                    : {}),
-                },
-              }
-            : {}),
-          // The alias advertises the safest shared request shape. Pricing and provider metadata stay
-          // tied to the concrete target that answered.
-          capabilities: selected.capabilities,
-          limit: selected.limit,
-          // A native provider checkpoint is not portable across the route's targets.
-          compaction: undefined,
-          routing: {
-            routeID: definition.id,
-            target: current.ref,
-            ...(definition.system ? { system: definition.system } : {}),
-            policy: definition.health,
-            // Two requests by default: a single transient failure on a steady target is retried before the
-            // route moves on. Rate limits skip the retry (see the runner). Set 1 to fail over at once.
-            attempts: definition.attempts ?? 2,
-            ...(definition.hedgeAfterMs ? { hedgeAfterMs: definition.hedgeAfterMs } : {}),
-            autonomy: definition.autonomy,
-            ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
-            ...(probeClaim ? { probeClaim } : {}),
-            ...(recheckAt !== undefined ? { recheckAt } : {}),
-            fallback: () => {
-              // Branch-local cascade state (#1014 Codex P2): a fallback call is a
-              // speculative branch as often as it is the primary's next step — a
-              // hedge explores it before the primary settles. Each call starts
-              // from the state as of this resolution, so a hedge exploration
-              // cannot consume the parent route (visited marks, tried refs) the
-              // primary's own fallback still needs; progression continues
-              // through the Resolved each call returns and its own fallback.
-              const branchTried = new Set(branch.tried)
-              const branchState: CascadeState = {
-                kind: branch.kind,
-                triedRefs: new Set(branch.triedRefs),
-                visitedRoutes: new Set(branch.visitedRoutes),
-                chain: [...branch.chain],
-                loadErrors: [...branch.loadErrors],
-              }
-              return resolveRouteWithin(
-                selected,
-                definition,
-                requestedVariant,
-                branchTried,
-                false,
-                sessionID,
-                requestTokens,
-                branchState,
-              ).pipe(
-                // An exhausted-with-load-failures route is a cascade boundary,
-                // not a fatal error (#1014 Codex P2): record the typed failure
-                // and let the parents try; it re-surfaces below if nothing in
-                // the cascade resolves. Defects still propagate (Effect.catch
-                // only handles typed failures).
-                Effect.catch((error) => {
-                  branchState.loadErrors.push(error)
-                  return Effect.succeed(undefined)
-                }),
-                Effect.flatMap((next) =>
-                  next
-                    ? Effect.succeed(next)
-                    : cascadeToParent(definition, branchTried, requestedVariant, sessionID, requestTokens, branchState),
-                ),
-                // Last resort, last (#7073): when no ready candidate remains
-                // anywhere in the cascade — every untried target cooling or
-                // quota-walled — seat the least-bad remaining target of this
-                // route instead of refusing, exactly as initial resolution
-                // does (allowCooling). Case (b) died here: the 404's fallback
-                // found popesdrew credential-cooling and the luna credential
-                // ~57s from recovery, and the turn ended even though the
-                // cascade still had candidates. The pass runs only after the
-                // parents' ready candidates, so a healthy parent seat always
-                // wins over a cooling in-route one; the tried set keeps
-                // progression terminating through the usable set. The pass
-                // seats only targets that are not quota-dead in any scope:
-                // cooling targets (a credential bench minutes or hours
-                // deep, like the incident's) are seatable, quota-dead ones
-                // stay unseated so a quota-walled route still stops
-                // cleanly (#1806).
-                Effect.flatMap((resolved) =>
-                  resolved
-                    ? Effect.succeed(resolved)
-                    : resolveRouteWithin(
-                        selected,
-                        definition,
-                        requestedVariant,
-                        new Set(branchTried),
-                        true,
-                        sessionID,
-                        requestTokens,
-                        branchState,
-                        false,
-                      ).pipe(
-                        Effect.catch((error) => {
-                          branchState.loadErrors.push(error)
-                          return Effect.succeed(undefined)
-                        }),
-                      ),
-                ),
-                Effect.flatMap((resolved) =>
-                  resolved
-                    ? Effect.succeed(resolved)
-                    : branchState.loadErrors.length > 0
-                      ? Effect.fail(branchState.loadErrors[0])
-                      : Effect.succeed(undefined),
-                ),
-              )
+            ...current,
+            // The membership caps the picked target's provider declares (#2253),
+            // resolved at pick time so the runner's gate needs nothing else. An
+            // uncapped provider carries none.
+            ...(ModelRoute.membershipLimits(
+              current.ref.providerID,
+              canonicalByProvider.get(current.ref.providerID),
+              locationDirectory,
+            )
+              ? {
+                  membership: {
+                    providerID: current.ref.providerID,
+                    ...(canonicalByProvider.get(current.ref.providerID)
+                      ? { canonical: canonicalByProvider.get(current.ref.providerID) }
+                      : {}),
+                  },
+                }
+              : {}),
+            // The alias advertises the safest shared request shape. Pricing and provider metadata stay
+            // tied to the concrete target that answered.
+            capabilities: selected.capabilities,
+            limit: selected.limit,
+            // A native provider checkpoint is not portable across the route's targets.
+            compaction: undefined,
+            routing: {
+              routeID: definition.id,
+              target: current.ref,
+              ...(definition.system ? { system: definition.system } : {}),
+              policy: definition.health,
+              // Two requests by default: a single transient failure on a steady target is retried before the
+              // route moves on. Rate limits skip the retry (see the runner). Set 1 to fail over at once.
+              attempts: definition.attempts ?? 2,
+              ...(definition.hedgeAfterMs ? { hedgeAfterMs: definition.hedgeAfterMs } : {}),
+              autonomy: definition.autonomy,
+              ...(servingCredentialID ? { credentialID: servingCredentialID } : {}),
+              ...(probeClaim ? { probeClaim } : {}),
+              ...(recheckAt !== undefined ? { recheckAt } : {}),
+              fallback: () => {
+                // Branch-local cascade state (#1014 Codex P2): a fallback call is a
+                // speculative branch as often as it is the primary's next step — a
+                // hedge explores it before the primary settles. Each call starts
+                // from the state as of this resolution, so a hedge exploration
+                // cannot consume the parent route (visited marks, tried refs) the
+                // primary's own fallback still needs; progression continues
+                // through the Resolved each call returns and its own fallback.
+                const branchTried = new Set(branch.tried)
+                const branchState: CascadeState = {
+                  kind: branch.kind,
+                  triedRefs: new Set(branch.triedRefs),
+                  visitedRoutes: new Set(branch.visitedRoutes),
+                  chain: [...branch.chain],
+                  loadErrors: [...branch.loadErrors],
+                }
+                return resolveRouteWithin(
+                  selected,
+                  definition,
+                  requestedVariant,
+                  branchTried,
+                  false,
+                  sessionID,
+                  requestTokens,
+                  branchState,
+                ).pipe(
+                  // An exhausted-with-load-failures route is a cascade boundary,
+                  // not a fatal error (#1014 Codex P2): record the typed failure
+                  // and let the parents try; it re-surfaces below if nothing in
+                  // the cascade resolves. Defects still propagate (Effect.catch
+                  // only handles typed failures).
+                  Effect.catch((error) => {
+                    branchState.loadErrors.push(error)
+                    return Effect.succeed(undefined)
+                  }),
+                  Effect.flatMap((next) =>
+                    next
+                      ? Effect.succeed(next)
+                      : cascadeToParent(
+                          definition,
+                          branchTried,
+                          requestedVariant,
+                          sessionID,
+                          requestTokens,
+                          branchState,
+                        ),
+                  ),
+                  // Last resort, last (#7073): when no ready candidate remains
+                  // anywhere in the cascade — every untried target cooling or
+                  // quota-walled — seat the least-bad remaining target of this
+                  // route instead of refusing, exactly as initial resolution
+                  // does (allowCooling). Case (b) died here: the 404's fallback
+                  // found popesdrew credential-cooling and the luna credential
+                  // ~57s from recovery, and the turn ended even though the
+                  // cascade still had candidates. The pass runs only after the
+                  // parents' ready candidates, so a healthy parent seat always
+                  // wins over a cooling in-route one; the tried set keeps
+                  // progression terminating through the usable set. The pass
+                  // seats only targets that are not quota-dead in any scope:
+                  // cooling targets (a credential bench minutes or hours
+                  // deep, like the incident's) are seatable, quota-dead ones
+                  // stay unseated so a quota-walled route still stops
+                  // cleanly (#1806).
+                  Effect.flatMap((resolved) =>
+                    resolved
+                      ? Effect.succeed(resolved)
+                      : resolveRouteWithin(
+                          selected,
+                          definition,
+                          requestedVariant,
+                          new Set(branchTried),
+                          true,
+                          sessionID,
+                          requestTokens,
+                          branchState,
+                          false,
+                        ).pipe(
+                          Effect.catch((error) => {
+                            branchState.loadErrors.push(error)
+                            return Effect.succeed(undefined)
+                          }),
+                        ),
+                  ),
+                  Effect.flatMap((resolved) =>
+                    resolved
+                      ? Effect.succeed(resolved)
+                      : branchState.loadErrors.length > 0
+                        ? Effect.fail(branchState.loadErrors[0])
+                        : Effect.succeed(undefined),
+                  ),
+                )
+              },
+              ...(origin ? { origin } : {}),
+              ...(credentialFallback ? { credentialFallback } : {}),
             },
-            ...(origin ? { origin } : {}),
-            ...(credentialFallback ? { credentialFallback } : {}),
-          },
           }
         }
         // A target whose remap sits the requested level out is never used at it, not even as a last resort.
@@ -969,12 +982,7 @@ export const layer = Layer.effect(
             if (ModelRoute.sessionTarget(definition.id, sessionID) === index) return undefined
             if (ModelRoute.continuityOf(definition.id, sessionID)?.current === `${target.providerID}/${target.id}`)
               return undefined
-            return ModelRoute.rootStartBlocked(
-              target,
-              effectiveCredential(target, now)?.id,
-              now,
-              locationDirectory,
-            )
+            return ModelRoute.rootStartBlocked(target, effectiveCredential(target, now)?.id, now, locationDirectory)
           }
           const ready = indexes.filter((index) => {
             const target = definition.targets[index]
@@ -1007,11 +1015,14 @@ export const layer = Layer.effect(
             )
             // A burst hold steers new sessions away but leaves a session on the target it is already using.
             const kept =
-              limited > now && ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
+              limited > now &&
+              ModelRoute.keepsThrough(definition.id, sessionID, target, now, credentialID, locationDirectory)
             const credentialUntil = credentialID
               ? ModelRoute.credentialCooldownUntil(target, credentialID, now, servedVariantFor(index))
               : 0
-            const quotaBlock = credentialID ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory) : undefined
+            const quotaBlock = credentialID
+              ? ModelRoute.credentialQuotaBlocked(credentialID, now, locationDirectory)
+              : undefined
             const providerBlock = ModelRoute.providerQuotaBlocked(target, now, locationDirectory)
             const rootStartBlock = rootStartBlockFor(index)
             // Half-open probe (#1123): a bench whose known quota window reset has passed admits
@@ -1229,15 +1240,27 @@ export const layer = Layer.effect(
                   : source.variants.some((item) => item.id === requestedVariant)
                     ? requestedVariant
                     : undefined
-
               : targetVariants?.default
           const resolved = yield* Effect.result(
-            load(source, target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)), definition.targetCacheFormats?.[index]?.cacheFormat),
+            load(
+              source,
+              target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)),
+              definition.targetCacheFormats?.[index]?.cacheFormat,
+            ),
           )
           if (Result.isFailure(resolved)) {
             // The pick's probe claim settles here too (#1486): the target scope benches as
             // before, and a credential-scope claim from the same pick renews with it.
-            ModelRoute.failed(target, definition.health, now, undefined, undefined, locationDirectory, probeClaim, target.variant ?? mapped)
+            ModelRoute.failed(
+              target,
+              definition.health,
+              now,
+              undefined,
+              undefined,
+              locationDirectory,
+              probeClaim,
+              target.variant ?? mapped,
+            )
             lastError = resolved.failure
             // A request never went out, but the reason a configured target could not be used is
             // worth its own record: this is where a broken target shows up as resolution failures.
@@ -1315,9 +1338,7 @@ export const layer = Layer.effect(
                   // other providers' credentials can also expose an accountID metadata value
                   // (the OpenCode provider stores user.id there), and it must not leak into a
                   // chatgpt-account-id header on a non-ChatGPT catalog (#870).
-                  const hadAccountHeader = sourceEntries.some(
-                    ([name]) => name.toLowerCase() === "chatgpt-account-id",
-                  )
+                  const hadAccountHeader = sourceEntries.some(([name]) => name.toLowerCase() === "chatgpt-account-id")
                   const headers = Object.fromEntries(
                     sourceEntries.filter(([name]) => name.toLowerCase() !== "chatgpt-account-id"),
                   )
@@ -1326,7 +1347,11 @@ export const layer = Layer.effect(
                       ? { ...source, headers: { ...headers, "chatgpt-account-id": account } }
                       : { ...source, headers }
                   const retried = yield* Effect.result(
-                    load(refreshed, target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)), definition.targetCacheFormats?.[index]?.cacheFormat),
+                    load(
+                      refreshed,
+                      target.variant ?? (mapped === undefined ? undefined : VariantID.make(mapped)),
+                      definition.targetCacheFormats?.[index]?.cacheFormat,
+                    ),
                   )
                   if (Result.isFailure(retried)) continue
                   // Attribution follows the credential load() actually served on, which is
@@ -1346,7 +1371,8 @@ export const layer = Layer.effect(
                 return undefined
               })
           // A session that just moved off its origin races that origin rather than the next fallback.
-          const home = sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID, locationDirectory)
+          const home =
+            sessionID === undefined ? undefined : ModelRoute.hedgeHome(definition.id, sessionID, locationDirectory)
           const homeIndex =
             home === undefined ? -1 : definition.targets.findIndex((item) => `${item.providerID}/${item.id}` === home)
           const origin =
@@ -1405,7 +1431,13 @@ export const layer = Layer.effect(
         else if (!seen.has(node.routeID)) {
           const child = definitions.get(node.routeID)
           if (!child) continue
-          const below = nestingDepth(definitions, child, targetID, cache, new Set([...seen, String(from.id), node.routeID]))
+          const below = nestingDepth(
+            definitions,
+            child,
+            targetID,
+            cache,
+            new Set([...seen, String(from.id), node.routeID]),
+          )
           if (below !== undefined) depth = Math.max(depth ?? 0, below + 1)
         }
       }
@@ -1430,12 +1462,10 @@ export const layer = Layer.effect(
           cascade.chain.push({ definition: from, tried: fromTried })
         // Fallback discovery is execution, not picker discovery (#230): a hidden
         // parent route still cascades, so candidates are the enabled records.
-        const available = yield* models
-          .all()
-          .pipe(
-            Effect.map((list) => list.filter((model) => model.enabled)),
-            Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
-          )
+        const available = yield* models.all().pipe(
+          Effect.map((list) => list.filter((model) => model.enabled)),
+          Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+        )
         const definitions = new Map<string, ModelRoute.Definition>()
         for (const candidate of available) {
           if (candidate.providerID !== ModelRoute.PROVIDER_ID) continue
@@ -1463,9 +1493,7 @@ export const layer = Layer.effect(
             if (cascade.visitedRoutes.has(String(parent.id))) continue
             cascade.visitedRoutes.add(String(parent.id))
             const seed = new Set(
-              parent.targets.flatMap((target, index) =>
-                cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [],
-              ),
+              parent.targets.flatMap((target, index) => (cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [])),
             )
             // A parent whose remaining targets all fail to load is exhausted,
             // not fatal: the cascade continues upward instead of dying on the

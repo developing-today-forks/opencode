@@ -12,7 +12,21 @@ import {
   type ToolCall,
 } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Context, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Scope, Stream } from "effect"
+import {
+  Cause,
+  Clock,
+  Context,
+  Data,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  Option,
+  Result,
+  Scope,
+  Stream,
+} from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
@@ -166,10 +180,10 @@ const wasHedged = (messageID: string) => hedgedMessages.has(messageID)
  * successful request said about its quota is kept as well as what a failed one did. Each snapshot is
  * handed to the routing state immediately: a spent window holds the target back for the next turn.
  */
-''/** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
+;("") /** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
  * as the step's name for it so existing callers and tests keep working; the implementation is the
  * shared observer from `ModelRouteLog`, which handles both `onResponse` and `onRejected`. */
-''/** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
+;("") /** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
  * as the step's name for it so existing callers and tests keep working; the implementation is the
  * shared observer from `ModelRouteLog`, which handles both `onResponse` and `onRejected`. */
 export const captureRateLimit = (target: ModelRoute.Target, credentialID?: string) => {
@@ -225,9 +239,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   // The client's own timeout text says how long we waited, not when the provider said to retry:
   // it must not become a rate-limit hint (#1551). A provider-stated wait in any other shape survives.
   const clientTimeoutMessage =
-    reason._tag === "Transport" &&
-    reason.code === "Timeout" &&
-    reason.message?.startsWith("No response output within ")
+    reason._tag === "Transport" && reason.code === "Timeout" && reason.message?.startsWith("No response output within ")
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
   const tierLimit = reason.code === "tier_limit_exceeded" || TIER_LIMIT_TEXT.test(text)
@@ -249,9 +261,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
-      (clientTimeoutMessage
-        ? undefined
-        : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
+      (clientTimeoutMessage ? undefined : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
     // The rate-limit class itself, stated wait or not: bench() counts these, and
     // a run of them with no success between classifies the bench up (model-route).
@@ -313,9 +323,7 @@ const balanceExhaustionText =
  * keeps its timed recovery even when the pool's last snapshot was balance-shaped.
  * Returns undefined when the failure does not enter the quota-failure path at all.
  */
-export const quotaFailureClassification = (
-  failure: AIError,
-): "balance-exhaustion" | "rate-limit" | undefined => {
+export const quotaFailureClassification = (failure: AIError): "balance-exhaustion" | "rate-limit" | undefined => {
   // A content-policy rejection is not a quota event, however its text is worded: policy
   // wording must never gate a pool through the broad exhaustion heuristics (#1084).
   if (failure.reason._tag === "ContentPolicy") return undefined
@@ -324,7 +332,6 @@ export const quotaFailureClassification = (
   if (!isQuotaFailure(failure) && !exhaustionText.test(text) && !balanceExhaustionText.test(text)) return undefined
   return reason._tag === "QuotaExceeded" || balanceExhaustionText.test(text) ? "balance-exhaustion" : "rate-limit"
 }
-
 
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
@@ -356,10 +363,7 @@ export const make = Effect.gen(function* () {
    * (ruling Q3): this only ever reads plans — it never writes them — and any
    * failure (no plans directory, no FS service, diff unavailable) yields no
    * notices; suggestions must never fail a turn. */
-  const planNotices = Effect.fnUntraced(function* (input: {
-    readonly from?: Snapshot.ID
-    readonly to?: Snapshot.ID
-  }) {
+  const planNotices = Effect.fnUntraced(function* (input: { readonly from?: Snapshot.ID; readonly to?: Snapshot.ID }) {
     if (!locationDirectory || Option.isNone(fs) || !input.from || !input.to) return undefined
     const directory = join(locationDirectory, PlanSuggestions.PLANS_RELATIVE_DIRECTORY)
     const entries = yield* fs.value.readDirectoryEntries(directory)
@@ -415,7 +419,10 @@ export const make = Effect.gen(function* () {
     // parser already answers `none` for anything unrecognized, and store
     // failures are ignored here for the same reason.
     const renderToolPresent = SessionRunnerRenderCard.hasRenderTool(input.toolNames ?? [])
-    const applyRenderToolResult = (call: ToolCall, content: ReadonlyArray<{ readonly type: string; readonly text?: string }>) =>
+    const applyRenderToolResult = (
+      call: ToolCall,
+      content: ReadonlyArray<{ readonly type: string; readonly text?: string }>,
+    ) =>
       !renderToolPresent || call.name !== SessionRunnerRenderCard.RENDER_TOOL_NAME
         ? Effect.void
         : Effect.ignore(
@@ -432,27 +439,29 @@ export const make = Effect.gen(function* () {
     const executeTool = (call: ToolCall) => {
       if (input.prepared.request.toolChoice?.type === "none")
         return new Tool.Error({ message: "Tools are disabled after the maximum agent steps" })
-      return input.prepared.executeTool({
-        sessionID: input.sessionID,
-        agent: input.agent,
-        messageID: input.assistantMessageID,
-        call,
-        progress: (update) => publisher.progress(call.id, update),
-      }).pipe(
-        Effect.flatMap((result) =>
-          materializeToolResult(
-            result.content,
-            {
-              sessionID: input.sessionID,
-              agent: input.agent,
-              messageID: input.assistantMessageID,
-              id: Tool.CallID.make(call.id),
-            },
-            fileAccess.authorizeRead,
-          ).pipe(Effect.map((content) => ({ ...result, content }))),
-        ),
-        Effect.tap((result) => applyRenderToolResult(call, result.content)),
-      )
+      return input.prepared
+        .executeTool({
+          sessionID: input.sessionID,
+          agent: input.agent,
+          messageID: input.assistantMessageID,
+          call,
+          progress: (update) => publisher.progress(call.id, update),
+        })
+        .pipe(
+          Effect.flatMap((result) =>
+            materializeToolResult(
+              result.content,
+              {
+                sessionID: input.sessionID,
+                agent: input.agent,
+                messageID: input.assistantMessageID,
+                id: Tool.CallID.make(call.id),
+              },
+              fileAccess.authorizeRead,
+            ).pipe(Effect.map((content) => ({ ...result, content }))),
+          ),
+          Effect.tap((result) => applyRenderToolResult(call, result.content)),
+        )
     }
 
     // Provider and tool fibers retain per-source order without a shared writer queue.
@@ -787,7 +796,9 @@ export const make = Effect.gen(function* () {
                     ? "failure"
                     : "success",
               ...failureLog,
-              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : emptyTripped ? "EmptyCompletion" : undefined),
+              error_tag:
+                failureLog?.error_tag ??
+                (policyFinish ? "ContentPolicy" : emptyTripped ? "EmptyCompletion" : undefined),
               // A failed request's own details win; a successful one keeps what its response said.
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
@@ -895,7 +906,13 @@ export const make = Effect.gen(function* () {
         // to it. That case cascades through the Continue outcome below when a retry is
         // authorized -- a new assistant message whose re-selection sees the target marked
         // failed above; a hook that declines any further request ends the turn, as instructed.
-        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure || cascadeFailure) && !sameTargetRetry) {
+        if (
+          input.model.routing &&
+          llmFailure &&
+          failureError &&
+          (routeFailure || policyFailure || cascadeFailure) &&
+          !sameTargetRetry
+        ) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
@@ -1043,7 +1060,12 @@ export const make = Effect.gen(function* () {
             input.model.ref.variant,
           )
           if (input.sessionID)
-            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
+            ModelRoute.served(
+              input.model.routing.routeID,
+              input.sessionID,
+              input.model.routing.target,
+              locationDirectory,
+            )
         }
         if (record.finish || record.failure) {
           const startSnapshot = yield* Fiber.join(pendingStartSnapshot)
@@ -1061,9 +1083,7 @@ export const make = Effect.gen(function* () {
             : undefined
           const notices =
             record.finish && usage && !record.failure && files?.length
-              ? yield* planNotices({ from: startSnapshot, to: snapshot }).pipe(
-                  Effect.orElseSucceed(() => undefined),
-                )
+              ? yield* planNotices({ from: startSnapshot, to: snapshot }).pipe(Effect.orElseSucceed(() => undefined))
               : undefined
           if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
           if (record.finish && usage && !record.failure)
@@ -1169,7 +1189,10 @@ export const make = Effect.gen(function* () {
     // provider take their own slot against its account here, once, and release
     // when this attempt's outcome settles: a hedge leg on the same account as
     // the primary is a second concurrent request and meters separately.
-    const hedgeSlots: Array<{ membership: SessionMembershipGate.MembershipRef; result: SessionMembershipGate.GateResult }> = []
+    const hedgeSlots: Array<{
+      membership: SessionMembershipGate.MembershipRef
+      result: SessionMembershipGate.GateResult
+    }> = []
     const holdHedgeSlot = (model: SessionRunnerModel.Resolved) =>
       Effect.gen(function* () {
         if (!model.membership) return
@@ -1196,7 +1219,8 @@ export const make = Effect.gen(function* () {
       const raced = yield* SessionHedge.race({
         primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
         afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
-        deadlineMs: typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
+        deadlineMs:
+          typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
         // No next target, or one that cannot be prepared, simply means there is nothing to hedge with.
         // A session that just moved races its origin, where its cache is, rather than the next fallback.
         start: Effect.suspend(() => (routing.origin ? routing.origin() : routing.fallback())).pipe(
@@ -1216,7 +1240,12 @@ export const make = Effect.gen(function* () {
                           const claim = next.routing!.probeClaim!
                           ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
                           if (claim.credentialID)
-                            ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
+                            ModelRoute.releaseBenchProbe(
+                              next.routing!.target,
+                              claim.credentialID,
+                              claim.claimedAt,
+                              claim.token,
+                            )
                         }),
                   ),
                   Effect.tap(() => holdHedgeSlot(next)),

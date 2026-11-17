@@ -28,13 +28,13 @@ no push tier, whatever older text said (#1533).
 
 Highest class wins when a change spans classes.
 
-| class | trigger paths (examples) | basic tier |
-|---|---|---|
-| 0 — prose | `**.md`, `docs/`, comments-only changes | nothing, or markdown lint only |
-| 1 — config/data | `**.json/yaml/toml` non-build, `.github/**` (non-workflow) | syntax parse + lint of changed files |
-| 2 — package source (default) | one package's `src` + tests | lint/format + typecheck/syntax of affected packages + affected unit tests |
-| 3 — elevated | lockfiles, `go.mod`/`go.sum` roots, `flake.nix`/`flake.lock`, build definitions, `.github/workflows/**`, shared/core libraries | class 2 + compile check of affected packages |
-| 4 — nix expressions | `**.nix` | class 1 + parse/eval of the changed files only (never full flake check in the basic tier) |
+| class                        | trigger paths (examples)                                                                                                       | basic tier                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| 0 — prose                    | `**.md`, `docs/`, comments-only changes                                                                                        | nothing, or markdown lint only                                                            |
+| 1 — config/data              | `**.json/yaml/toml` non-build, `.github/**` (non-workflow)                                                                     | syntax parse + lint of changed files                                                      |
+| 2 — package source (default) | one package's `src` + tests                                                                                                    | lint/format + typecheck/syntax of affected packages + affected unit tests                 |
+| 3 — elevated                 | lockfiles, `go.mod`/`go.sum` roots, `flake.nix`/`flake.lock`, build definitions, `.github/workflows/**`, shared/core libraries | class 2 + compile check of affected packages                                              |
+| 4 — nix expressions          | `**.nix`                                                                                                                       | class 1 + parse/eval of the changed files only (never full flake check in the basic tier) |
 
 ## Merge requirement
 

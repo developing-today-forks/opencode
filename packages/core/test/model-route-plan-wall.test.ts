@@ -60,9 +60,7 @@ describe("plan-wall benches (code#10128)", () => {
     ModelRoute.failed(target, policy, now, {})
     expect(ModelRoute.cooldownUntil(target, now)).toBe(now + policy.cooldownMs)
     expect(ModelRoute.lastResortDead(target, undefined, now)).toBe(false)
-    expect(ModelRoute.activeBenches(now).find((item) => item.providerID === target.providerID)?.reason).toBe(
-      "failure",
-    )
+    expect(ModelRoute.activeBenches(now).find((item) => item.providerID === target.providerID)?.reason).toBe("failure")
   })
 
   test("the wall converts to a single-flight probe at expiry; a served probe reseats the leaf", () => {

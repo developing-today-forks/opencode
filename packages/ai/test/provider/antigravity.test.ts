@@ -91,7 +91,9 @@ it.effect("Antigravity envelope matches the door's buildV1Request shape", () =>
         ],
       },
     ])
-    expect(request.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] } })
+    expect(request.toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] },
+    })
     expect(request.generationConfig).toEqual({
       maxOutputTokens: 1024,
       temperature: 0.5,
@@ -342,8 +344,7 @@ it.effect("convertSchema synthesizes items for bare array schemas (#1548)", () =
       if (Array.isArray(node)) return node.forEach(assertArraysCarryItems)
       if (typeof node !== "object" || node === null) return
       const record = node as Record<string, unknown>
-      if (record.type === "ARRAY")
-        expect(record.items !== undefined || record.prefixItems !== undefined).toBe(true)
+      if (record.type === "ARRAY") expect(record.items !== undefined || record.prefixItems !== undefined).toBe(true)
       Object.values(record).forEach(assertArraysCarryItems)
     }
     const shapes = [
@@ -588,9 +589,10 @@ it.effect("convertSchema encodes boolean false as { not: {} } instead of inverti
   Effect.sync(() => {
     // Property, items/prefixItems, and branch positions: false is never,
     // true stays unconstrained {}.
-    expect(
-      convertSchema({ type: "object", properties: { never: false, any: true } } as never),
-    ).toEqual({ type: "OBJECT", properties: { never: { not: {} }, any: {} } })
+    expect(convertSchema({ type: "object", properties: { never: false, any: true } } as never)).toEqual({
+      type: "OBJECT",
+      properties: { never: { not: {} }, any: {} },
+    })
     expect(convertSchema({ type: "array", items: false } as never)).toEqual({ type: "ARRAY", items: { not: {} } })
     expect(convertSchema({ type: "array", items: true } as never)).toEqual({ type: "ARRAY", items: {} })
     expect(convertSchema({ type: "array", prefixItems: [false, { type: "string" }] } as never)).toEqual({
@@ -633,9 +635,9 @@ it.effect("convertSchema leaves allOf/not-only roots self-describing (#1667)", (
     expect(convertSchema({ allOf: [{ type: "string", minLength: 2 }] } as never, true)).toEqual({
       allOf: [{ type: "STRING", minLength: 2 }],
     })
-    expect(
-      convertSchema({ allOf: [{ type: "object", properties: { a: { type: "string" } } }] } as never),
-    ).toEqual({ allOf: [{ type: "OBJECT", properties: { a: { type: "STRING" } } }] })
+    expect(convertSchema({ allOf: [{ type: "object", properties: { a: { type: "string" } } }] } as never)).toEqual({
+      allOf: [{ type: "OBJECT", properties: { a: { type: "STRING" } } }],
+    })
     // A not-only root negates against every type: "not a string" must
     // not be narrowed to objects only by a forced OBJECT.
     expect(convertSchema({ not: { type: "string" } } as never)).toEqual({ not: { type: "STRING" } })
@@ -895,7 +897,12 @@ it.effect("Antigravity stream: wrapped SSE events become text, reasoning, tool c
             event([{ functionCall: { name: "get_weather", args: { city: "Oslo" } } }]),
             event([], {
               finishReason: "STOP",
-              usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7, thoughtsTokenCount: 3, totalTokenCount: 21 },
+              usageMetadata: {
+                promptTokenCount: 11,
+                candidatesTokenCount: 7,
+                thoughtsTokenCount: 3,
+                totalTokenCount: 21,
+              },
             }),
           ),
         ),
@@ -940,7 +947,11 @@ it.effect("Antigravity upstream 429 with quota body classifies as a quota failur
           Effect.succeed(
             input.respond(
               JSON.stringify({
-                error: { code: 429, message: "Quota exceeded for model gemini-3.8-flash", status: "RESOURCE_EXHAUSTED" },
+                error: {
+                  code: 429,
+                  message: "Quota exceeded for model gemini-3.8-flash",
+                  status: "RESOURCE_EXHAUSTED",
+                },
               }),
               { status: 429, headers: { "content-type": "application/json" } },
             ),
@@ -960,7 +971,11 @@ it.effect("Antigravity upstream 429 with quota body classifies as a quota failur
 it.effect("Antigravity in-stream error event fails with the upstream message", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
-      Effect.provide(fixedResponse(sseEvents({ error: { code: 403, message: "permission denied for project", status: "PERMISSION_DENIED" } }))),
+      Effect.provide(
+        fixedResponse(
+          sseEvents({ error: { code: 403, message: "permission denied for project", status: "PERMISSION_DENIED" } }),
+        ),
+      ),
       Effect.result,
     )
     expect(result._tag).toBe("Failure")
@@ -995,10 +1010,15 @@ it.effect("Antigravity retries exactly once on a 401 with a refreshed credential
   }),
 )
 
-
 it.effect("Antigravity tool_choice: string forms keep the door's bare modes", () =>
   Effect.gen(function* () {
-    const tools = [ToolDefinition.make({ name: "get_weather", description: "Get weather", inputSchema: { type: "object", properties: {} } })]
+    const tools = [
+      ToolDefinition.make({
+        name: "get_weather",
+        description: "Get weather",
+        inputSchema: { type: "object", properties: {} },
+      }),
+    ]
     for (const [choice, mode] of [
       ["none", "NONE"],
       ["auto", "AUTO"],
@@ -1010,16 +1030,20 @@ it.effect("Antigravity tool_choice: string forms keep the door's bare modes", ()
       const request = (compiled.body as Record<string, never>).request as Record<string, never>
       expect(request.toolConfig).toEqual({ functionCallingConfig: { mode } })
     }
-    const noChoice = yield* compileRequest(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
-    )
+    const noChoice = yield* compileRequest(LLM.request({ model, messages: [Message.user("weather?")], tools }))
     expect(((noChoice.body as Record<string, never>).request as Record<string, never>).toolConfig).toBeUndefined()
   }),
 )
 
 it.effect("Antigravity tool_choice naming an undeclared function fails closed before any request", () =>
   Effect.gen(function* () {
-    const tools = [ToolDefinition.make({ name: "get_weather", description: "Get weather", inputSchema: { type: "object", properties: {} } })]
+    const tools = [
+      ToolDefinition.make({
+        name: "get_weather",
+        description: "Get weather",
+        inputSchema: { type: "object", properties: {} },
+      }),
+    ]
     for (const withTools of [true, false]) {
       const result = yield* compileRequest(
         LLM.request({

@@ -324,11 +324,7 @@ const persist = (db: PersistDb, events: readonly Event[]) =>
  * is the attempt that actually answered — the one whose response hit the output token limit. */
 const persistAttempt = (db: PersistDb, event: Extract<Event, { kind: "attempt" }>) =>
   Effect.gen(function* () {
-    const inserted = yield* db
-      .insert(RouteAttemptTable)
-      .values(event.row)
-      .returning({ id: RouteAttemptTable.id })
-      .get()
+    const inserted = yield* db.insert(RouteAttemptTable).values(event.row).returning({ id: RouteAttemptTable.id }).get()
     if (event.continuationOfMessageID === undefined) return
     yield* db
       .update(RouteAttemptTable)
@@ -447,12 +443,7 @@ export const restoreCooldownsFrom = (
         credentialID: RouteAttemptTable.credential_id,
       })
       .from(RouteAttemptTable)
-      .where(
-        and(
-          gte(RouteAttemptTable.time_ended, now - 86_400_000),
-          sql`${RouteAttemptTable.quota} is not null`,
-        ),
-      )
+      .where(and(gte(RouteAttemptTable.time_ended, now - 86_400_000), sql`${RouteAttemptTable.quota} is not null`))
       .orderBy(asc(RouteAttemptTable.time_ended))
       .all()
       .pipe(Effect.orElseSucceed(() => []))
@@ -498,10 +489,11 @@ export const restoreCooldownsFrom = (
           : undefined
       if (resetAt !== undefined && resetAt < row.until) latest.set(id, { ...row, until: resetAt })
     }
-    restoreCooldowns?.([...latest.values()].filter((row) => row.until > now), readings)
-    restoreLimits?.(
-      [...windows.values()].filter((row) => row.until > now || row.snapshot !== undefined),
+    restoreCooldowns?.(
+      [...latest.values()].filter((row) => row.until > now),
+      readings,
     )
+    restoreLimits?.([...windows.values()].filter((row) => row.until > now || row.snapshot !== undefined))
   })
 
 /** Usage of the last day, so budgets survive a restart. */
@@ -616,12 +608,14 @@ const persistRetryDelayMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 
 const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]) =>
   Effect.gen(function* () {
     for (let attempt = 1; ; attempt++) {
-      const cause = yield* db.transaction((tx) => persist(tx, events)).pipe(
-        Effect.matchCause({
-          onSuccess: () => undefined,
-          onFailure: (failure) => failure,
-        }),
-      )
+      const cause = yield* db
+        .transaction((tx) => persist(tx, events))
+        .pipe(
+          Effect.matchCause({
+            onSuccess: () => undefined,
+            onFailure: (failure) => failure,
+          }),
+        )
       if (cause === undefined) return true
       if (attempt >= maxPersistAttempts) {
         yield* Effect.logError("dropping model route telemetry batch after repeated persistence failures", {
@@ -1060,9 +1054,7 @@ export const sessionTargetUsage = (db: Database.Interface["db"], since: number, 
           ...usageColumns,
         })
         .from(RouteAttemptTable)
-        .where(
-          and(gte(RouteAttemptTable.time_started, since), inArray(RouteAttemptTable.session_id, [...sessionIDs])),
-        )
+        .where(and(gte(RouteAttemptTable.time_started, since), inArray(RouteAttemptTable.session_id, [...sessionIDs])))
         .groupBy(
           RouteAttemptTable.session_id,
           RouteAttemptTable.route_id,

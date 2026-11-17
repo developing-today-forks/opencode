@@ -15,7 +15,9 @@ import {
 } from "../../src/component/prompt/voice-input"
 
 const registration = voiceRegistration()!
-const audio = (overrides?: Partial<{ name: string; mediaType: string; size: number; source: "file" | "recording" }>) => ({
+const audio = (
+  overrides?: Partial<{ name: string; mediaType: string; size: number; source: "file" | "recording" }>,
+) => ({
   name: overrides?.name ?? "clip.wav",
   mediaType: overrides?.mediaType ?? "audio/wav",
   bytes: new Uint8Array(overrides?.size ?? 4),
@@ -184,7 +186,16 @@ describe("façade client (§2.3 envelope, §2.4 errors)", () => {
     await expect(
       submitVoiceTranscription({
         url: "http://localhost:4096",
-        fetch: okFetch({ error: { message: "audio is 1 bytes; the cap is 2", type: "invalid_request_error", code: "audio_too_large" } }, 413),
+        fetch: okFetch(
+          {
+            error: {
+              message: "audio is 1 bytes; the cap is 2",
+              type: "invalid_request_error",
+              code: "audio_too_large",
+            },
+          },
+          413,
+        ),
         registration,
         audio: audio(),
       }),
@@ -266,7 +277,9 @@ describe("streaming partials (§6.4)", () => {
     expect(assembler.push(JSON.stringify({ type: "transcript.text.delta", delta: "release ship?" }))).toBe(false)
     expect(assembler.provisional).toBe("Did it release ship?")
     expect(
-      assembler.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "Yes, it shipped.", start: 1, end: 2 } })),
+      assembler.push(
+        JSON.stringify({ type: "transcript.text.segment", segment: { text: "Yes, it shipped.", start: 1, end: 2 } }),
+      ),
     ).toBe(false)
     expect(assembler.provisional).toBe("Did it release ship? Yes, it shipped.")
     expect(assembler.result).toBeUndefined()
@@ -303,16 +316,16 @@ describe("streaming partials (§6.4)", () => {
     expect(assembler.provisional).toBe("hello")
     const second = new TranscriptionStreamAssembler(streamRegistration)
     second.push(JSON.stringify({ type: "transcript.text.delta", delta: "hello" }))
-    second.push(
-      JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello world", start: 0, end: 1 } }),
-    )
+    second.push(JSON.stringify({ type: "transcript.text.segment", segment: { text: "hello world", start: 0, end: 1 } }))
     expect(second.provisional).toBe("hello world")
   })
 
   test("an error frame throws typed, carrying the façade code", () => {
     const assembler = new TranscriptionStreamAssembler(streamRegistration)
     expect(() =>
-      assembler.push(JSON.stringify({ error: { message: "quota exhausted", type: "rate_limit_error", code: "quota_exceeded" } })),
+      assembler.push(
+        JSON.stringify({ error: { message: "quota exhausted", type: "rate_limit_error", code: "quota_exceeded" } }),
+      ),
     ).toThrow(expect.objectContaining({ code: "quota_exceeded" }))
   })
 
@@ -371,7 +384,11 @@ describe("streaming partials (§6.4)", () => {
     const failing = (async () =>
       new Response(
         JSON.stringify({
-          error: { message: "openai/whisper-1 does not stream", type: "invalid_request_error", code: "stream_not_supported" },
+          error: {
+            message: "openai/whisper-1 does not stream",
+            type: "invalid_request_error",
+            code: "stream_not_supported",
+          },
         }),
         { status: 400, headers: { "content-type": "application/json" } },
       )) as unknown as typeof fetch

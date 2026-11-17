@@ -561,9 +561,7 @@ function isDirectRouteProvider(
   routeIDs: Iterable<string>,
   record: { readonly provider: { readonly id: Provider.ID }; readonly models: ReadonlyMap<string, Model.Info> },
 ) {
-  return (
-    new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
-  )
+  return new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
 }
 
 function configuredTuning(entries: readonly Entry[]) {
@@ -635,9 +633,7 @@ function configuredSettings(entries: readonly Entry[]) {
 /** The machinery settings in the core's shape: only the fields config actually set, group by
  * group — a decoded settings block carries every unset field as undefined, and passing those
  * through would erase the defaults they sit over. */
-function settingsConfig(
-  settings: ConfigModelRoutes.Settings | undefined,
-): ModelRoute.SettingsConfig | undefined {
+function settingsConfig(settings: ConfigModelRoutes.Settings | undefined): ModelRoute.SettingsConfig | undefined {
   if (!settings) return undefined
   const group = <T extends object>(value: T | undefined): Partial<T> | undefined => {
     if (!value) return undefined
@@ -1085,8 +1081,7 @@ function expandCollected(
           ? undefined
           : Object.entries(current.weights ?? {}).find(
               ([name]) =>
-                name.toLowerCase() === key.toLowerCase() ||
-                name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
+                name.toLowerCase() === key.toLowerCase() || name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
             )?.[1])
       node.weights.push(ModelRouteAutonomy.usesRules(current.autonomy) ? (weight ?? 1) : 1)
     }
@@ -1137,7 +1132,14 @@ function expandCollected(
         const off = Object.entries(spec.variants ?? {}).flatMap(([level, to]) => (to === false ? [level] : []))
         const leaveOut = (at: Pin) => {
           const brought = expandCollected(
-            poolID, routes, definitions, windows, providerRoutes, candidate, nextTrail, shared,
+            poolID,
+            routes,
+            definitions,
+            windows,
+            providerRoutes,
+            candidate,
+            nextTrail,
+            shared,
             ref.variant === undefined
               ? []
               : [{ level: ref.variant, rules: [], leftOut: { targets: new Set(), models: new Set() } }],
@@ -1287,126 +1289,126 @@ function expandCollected(
           : [[ref.providerID, definitions.get(ref.providerID)]]
       for (const [door, doorModels] of doors) {
         for (const [id, defined] of ModelRouteExpansion.matchingModels(ref.id, doorModels)) {
-        const cand = { providerID: door, id: Model.ID.make(id) }
-        const requested = ref.variant ?? pin?.level ?? inheritedVariant
-        const named = `${door}/${id}${ref.variant ? `#${ref.variant}` : ""}`
-        if (pin?.leftOut.targets.has(named)) continue
-        const seenKey = `${door}/${id}${requested ? `#${requested}` : ""}`
-        if (seen.has(seenKey)) {
-          const prior = leafByKey.get(seenKey)
-          if (prior !== undefined) {
+          const cand = { providerID: door, id: Model.ID.make(id) }
+          const requested = ref.variant ?? pin?.level ?? inheritedVariant
+          const named = `${door}/${id}${ref.variant ? `#${ref.variant}` : ""}`
+          if (pin?.leftOut.targets.has(named)) continue
+          const seenKey = `${door}/${id}${requested ? `#${requested}` : ""}`
+          if (seen.has(seenKey)) {
+            const prior = leafByKey.get(seenKey)
+            if (prior !== undefined) {
+              if (
+                ceiling !== undefined &&
+                (result[prior].contextLimit === undefined || ceiling < result[prior].contextLimit)
+              )
+                result[prior] = { ...result[prior], contextLimit: ceiling }
+              // The leaf itself is shared, but when the same parent names the pool again
+              // this node still references it, so a pool referenced twice by one parent
+              // keeps both group nodes over the same leaf indexes.
+              if (reattach && !attached.has(seenKey)) {
+                attached.add(seenKey)
+                const gate = gateFor(
+                  "window" in spec ? spec.window : undefined,
+                  windows,
+                  `route ${JSON.stringify(routeID)}`,
+                )
+                attach({ leaf: prior, ...(gate ? { gate } : {}) }, `${door}/${id}`)
+              }
+            }
+            continue
+          }
+          const model = candidate(door, Model.ID.make(id)) ?? defined
+          if (!model.enabled || excluded(cand)) continue
+          if (pin !== undefined && sitsOutPin(cand, model, spec.variants ?? {})) {
+            pin.leftOut.targets.add(named)
+            pin.leftOut.models.add(`${door}/${id}`)
+            continue
+          }
+          // A pinned variant is producible natively or through the target's remap table, matching
+          // routeVariants and the resolver: a remap the model can produce wins, else the native
+          // variant, else the leaf is pruned. A variant the door's catalog exposes as a
+          // suffixed model id ("<model>-<variant>") also counts as producible: proxy
+          // catalogs enumerate effort levels that way (Antigravity's gemini-4-argon-high,
+          // claude-sonnet-5-5-high), and their definition-stage model info carries no
+          // variant list, so the native check alone silently pruned every pinned leaf
+          // on those providers (#985).
+          const producible = (candidate: string) =>
+            model.variants.some((item) => item.id === candidate) || (doorModels?.has(`${id}-${candidate}`) ?? false)
+          const remapped = requested ? spec.variants?.[requested] : undefined
+          const variant =
+            requested === undefined
+              ? undefined
+              : remapped !== undefined && remapped !== false && producible(remapped)
+                ? Model.VariantID.make(remapped)
+                : producible(requested)
+                  ? requested
+                  : undefined
+          if (requested && !variant) continue
+          const resolved = Model.Ref.make({
+            providerID: door,
+            id: Model.ID.make(id),
+            ...(variant ? { variant } : {}),
+          })
+          const key = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`
+          if (attached.has(key)) {
+            // Already attached to this node, but a duplicate target can still tighten the leaf's
+            // ceiling: ceilings only ever tighten, whichever reach declares the smaller one.
+            const existing = leafByKey.get(key)
+            if (
+              existing !== undefined &&
+              ceiling !== undefined &&
+              (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
+            )
+              result[existing] = { ...result[existing], contextLimit: ceiling }
+            continue
+          }
+          attached.add(key)
+          const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
+          const leafKey = `${resolved.providerID}/${resolved.id}`
+          const existing = leafByKey.get(key)
+          if (existing !== undefined) {
+            // First reach wins for the leaf itself; a different node re-attaches it by index.
+            attach({ leaf: existing, ...(gate ? { gate } : {}) }, leafKey)
+            // Ceilings only ever tighten: a leaf reached through several references keeps the smallest
+            // per-target ceiling, so a cap cannot be bypassed through another path.
             if (
               ceiling !== undefined &&
-              (result[prior].contextLimit === undefined || ceiling < result[prior].contextLimit)
+              (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
             )
-              result[prior] = { ...result[prior], contextLimit: ceiling }
-            // The leaf itself is shared, but when the same parent names the pool again
-            // this node still references it, so a pool referenced twice by one parent
-            // keeps both group nodes over the same leaf indexes.
-            if (reattach && !attached.has(seenKey)) {
-              attached.add(seenKey)
-              const gate = gateFor(
-                "window" in spec ? spec.window : undefined,
-                windows,
-                `route ${JSON.stringify(routeID)}`,
-              )
-              attach({ leaf: prior, ...(gate ? { gate } : {}) }, `${door}/${id}`)
-            }
+              result[existing] = { ...result[existing], contextLimit: ceiling }
+            continue
           }
-          continue
-        }
-        const model = candidate(door, Model.ID.make(id)) ?? defined
-        if (!model.enabled || excluded(cand)) continue
-        if (pin !== undefined && sitsOutPin(cand, model, spec.variants ?? {})) {
-          pin.leftOut.targets.add(named)
-          pin.leftOut.models.add(`${door}/${id}`)
-          continue
-        }
-        // A pinned variant is producible natively or through the target's remap table, matching
-        // routeVariants and the resolver: a remap the model can produce wins, else the native
-        // variant, else the leaf is pruned. A variant the door's catalog exposes as a
-        // suffixed model id ("<model>-<variant>") also counts as producible: proxy
-        // catalogs enumerate effort levels that way (Antigravity's gemini-4-argon-high,
-        // claude-sonnet-5-5-high), and their definition-stage model info carries no
-        // variant list, so the native check alone silently pruned every pinned leaf
-        // on those providers (#985).
-        const producible = (candidate: string) =>
-          model.variants.some((item) => item.id === candidate) || (doorModels?.has(`${id}-${candidate}`) ?? false)
-        const remapped = requested ? spec.variants?.[requested] : undefined
-        const variant =
-          requested === undefined
-            ? undefined
-            : remapped !== undefined && remapped !== false && producible(remapped)
-              ? Model.VariantID.make(remapped)
-              : producible(requested)
-                ? requested
-                : undefined
-        if (requested && !variant) continue
-        const resolved = Model.Ref.make({
-          providerID: door,
-          id: Model.ID.make(id),
-          ...(variant ? { variant } : {}),
-        })
-        const key = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`
-        if (attached.has(key)) {
-          // Already attached to this node, but a duplicate target can still tighten the leaf's
-          // ceiling: ceilings only ever tighten, whichever reach declares the smaller one.
-          const existing = leafByKey.get(key)
-          if (
-            existing !== undefined &&
-            ceiling !== undefined &&
-            (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
+          const defaultVariant =
+            spec.defaultVariant && model.variants.some((item) => item.id === spec.defaultVariant)
+              ? Model.VariantID.make(spec.defaultVariant)
+              : undefined
+          const variantMap = levelMap({ providerID: door, id: Model.ID.make(id) }, model, spec.variants ?? {})
+          seen.add(key)
+          seen.add(seenKey)
+          placed.add(leafKey)
+          leafByKey.set(key, result.length)
+          attach({ leaf: result.length, ...(gate ? { gate } : {}) }, leafKey)
+          // A leaf's own cache_format wins, then the route that declared it, then an enclosing
+          // route's. The first route to reach a shared model fixes it for that leaf.
+          const cacheFormat = spec.cache_format ?? current.cache_format ?? inheritedCacheFormat
+          // Budgets belong to the target: the outermost route that declares one wins, wherever the
+          // target was first reached.
+          const budget = plainBudget(
+            [...nextTrail]
+              .filter((id) => ModelRouteAutonomy.usesRules(routes.get(id)?.autonomy))
+              .map((id) => routes.get(id)?.budgets?.[leafKey])
+              .find((value) => value !== undefined),
           )
-            result[existing] = { ...result[existing], contextLimit: ceiling }
-          continue
-        }
-        attached.add(key)
-        const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
-        const leafKey = `${resolved.providerID}/${resolved.id}`
-        const existing = leafByKey.get(key)
-        if (existing !== undefined) {
-          // First reach wins for the leaf itself; a different node re-attaches it by index.
-          attach({ leaf: existing, ...(gate ? { gate } : {}) }, leafKey)
-          // Ceilings only ever tighten: a leaf reached through several references keeps the smallest
-          // per-target ceiling, so a cap cannot be bypassed through another path.
-          if (
-            ceiling !== undefined &&
-            (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
-          )
-            result[existing] = { ...result[existing], contextLimit: ceiling }
-          continue
-        }
-        const defaultVariant =
-          spec.defaultVariant && model.variants.some((item) => item.id === spec.defaultVariant)
-            ? Model.VariantID.make(spec.defaultVariant)
-            : undefined
-        const variantMap = levelMap({ providerID: door, id: Model.ID.make(id) }, model, spec.variants ?? {})
-        seen.add(key)
-        seen.add(seenKey)
-        placed.add(leafKey)
-        leafByKey.set(key, result.length)
-        attach({ leaf: result.length, ...(gate ? { gate } : {}) }, leafKey)
-        // A leaf's own cache_format wins, then the route that declared it, then an enclosing
-        // route's. The first route to reach a shared model fixes it for that leaf.
-        const cacheFormat = spec.cache_format ?? current.cache_format ?? inheritedCacheFormat
-        // Budgets belong to the target: the outermost route that declares one wins, wherever the
-        // target was first reached.
-        const budget = plainBudget(
-          [...nextTrail]
-            .filter((id) => ModelRouteAutonomy.usesRules(routes.get(id)?.autonomy))
-            .map((id) => routes.get(id)?.budgets?.[leafKey])
-            .find((value) => value !== undefined),
-        )
-        result.push({
-          ...(budget ? { budget } : {}),
-          ref: resolved,
-          model,
-          fixedVariant: ref.variant !== undefined || inheritedVariant !== undefined,
-          ...(defaultVariant ? { defaultVariant } : {}),
-          ...(Object.keys(variantMap).length ? { variantMap } : {}),
-          ...(cacheFormat ? { cacheFormat } : {}),
-          ...(ceiling !== undefined ? { contextLimit: ceiling } : {}),
-        })
+          result.push({
+            ...(budget ? { budget } : {}),
+            ref: resolved,
+            model,
+            fixedVariant: ref.variant !== undefined || inheritedVariant !== undefined,
+            ...(defaultVariant ? { defaultVariant } : {}),
+            ...(Object.keys(variantMap).length ? { variantMap } : {}),
+            ...(cacheFormat ? { cacheFormat } : {}),
+            ...(ceiling !== undefined ? { contextLimit: ceiling } : {}),
+          })
         }
       }
     }
@@ -1429,8 +1431,7 @@ function expandCollected(
         const viaPinRules =
           pin !== undefined ? effort(model, [...applying(pins.at(-1)?.rules ?? [], entry)])[pin.level] : undefined
         const mapped = viaPinRules !== undefined ? viaPinRules : pin !== undefined ? levelMapped[pin.level] : undefined
-        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level))
-          continue
+        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level)) continue
         matched++
         if (placed.has(key)) continue
         const variantMap =
@@ -1462,8 +1463,7 @@ function expandCollected(
           ...(cacheFormat ? { cacheFormat } : {}),
         })
       }
-      if (matched === 0)
-        diagnostics.push(`pool ${routeID}'s matching keys select no models, so they add nothing`)
+      if (matched === 0) diagnostics.push(`pool ${routeID}'s matching keys select no models, so they add nothing`)
     }
     const declared = current.levels
     if (declared !== undefined && routeID !== id && pin === undefined)
@@ -1531,7 +1531,16 @@ export function expand(
         [...models.keys()].map((modelID) => ({ providerID, id: Model.ID.make(modelID) })),
       )),
   }
-  const collected = expandCollected(id, routes, definitions, windows, providerRoutes, shared.candidate, trailArg, shared)
+  const collected = expandCollected(
+    id,
+    routes,
+    definitions,
+    windows,
+    providerRoutes,
+    shared.candidate,
+    trailArg,
+    shared,
+  )
   const levels = routes.get(id)?.levels
   const asked = [
     ...new Set([
@@ -1544,7 +1553,12 @@ export function expand(
   ]
   const opened = collected.leaves.map((leaf, index) => {
     const allowedLevels = collected.allowed.get(index)
-    return allowedLevels === undefined ? leaf : sitOut(leaf, asked.filter((level) => !allowedLevels.has(level)))
+    return allowedLevels === undefined
+      ? leaf
+      : sitOut(
+          leaf,
+          asked.filter((level) => !allowedLevels.has(level)),
+        )
   })
   if (levels === undefined || opened.length === 0)
     return { leaves: opened, nodes: collected.nodes, diagnostics: collected.diagnostics }
@@ -1556,9 +1570,7 @@ export function expand(
       ...collected.diagnostics,
       ...[...new Set(levels)]
         .filter((level) => !leaves.some((leaf) => runs(leaf, level)))
-        .map(
-          (level) => `pool ${id} declares level ${level}, but none of its models can run it, so it is not offered`,
-        ),
+        .map((level) => `pool ${id} declares level ${level}, but none of its models can run it, so it is not offered`),
     ],
   }
 }

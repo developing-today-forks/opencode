@@ -72,7 +72,7 @@ describe("parseDotEnv", () => {
 
   test("double-quoted escapes expand while single-quoted values stay literal", () => {
     const parsed = parseDotEnv('D="a\\nb\\tc\\rd\\\\e\\"f"\nS=' + "'a\\nb'")
-    expect(parsed).toEqual({ D: "a\nb\tc\rd\\e\"f", S: "a\\nb" })
+    expect(parsed).toEqual({ D: 'a\nb\tc\rd\\e"f', S: "a\\nb" })
   })
 
   test("unquoted trailing comments strip after a tab as well as a space", () => {
@@ -310,7 +310,6 @@ describe("resolveApiKey — shadow diagnostic (#1809)", () => {
     expect(queried).toEqual([KEYRING_SERVICE])
     expect(seen).toEqual([])
   })
-
 })
 
 describe("vibeAuth - process cache and invalidate (#1900)", () => {

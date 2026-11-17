@@ -33,7 +33,14 @@ const attempt = (overrides: Partial<ModelRouteLog.Attempt>): ModelRouteLog.Attem
 describe("ModelRouteLog writer backlog (#2335)", () => {
   const decision = (time: number): ModelRouteLog.Event => ({
     kind: "decision",
-    row: { time, route_id: "luna", selection: "weighted", candidates: ["openai/gpt-6-luna"], chosen: "openai/gpt-6-luna", reason: "drawn" },
+    row: {
+      time,
+      route_id: "luna",
+      selection: "weighted",
+      candidates: ["openai/gpt-6-luna"],
+      chosen: "openai/gpt-6-luna",
+      reason: "drawn",
+    },
   })
 
   test("bounds pending events while the writer is stalled, drops newest, then drains in order", async () => {
@@ -321,7 +328,10 @@ describe("authoritative usage (#7)", () => {
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const seed = (overrides: Partial<ModelRouteLog.Attempt>) =>
-        ModelRouteLog.record({ kind: "attempt", row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }) })
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }),
+        })
       seed({
         time_started: 1_000,
         time_ended: 2_000,
@@ -1490,10 +1500,10 @@ describe("ModelRouteLog.observer", () => {
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const attemptFor = (routeID: string, failure: unknown) =>
-        ModelRouteLog.observer({ routeID, providerID: "openai", modelID: "m", startedAt: Date.now() }).done(
-          "failure",
-          { failure, outputStarted: false },
-        )
+        ModelRouteLog.observer({ routeID, providerID: "openai", modelID: "m", startedAt: Date.now() }).done("failure", {
+          failure,
+          outputStarted: false,
+        })
       attemptFor("auth", new AIError({ reason: new AuthenticationError({ message: "bad key" }) }))
       attemptFor("quota", new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
       attemptFor("rate", new AIError({ reason: new RateLimitError({ message: "slow down" }) }))
@@ -1723,7 +1733,8 @@ describe("demotion restore (#1151)", () => {
       const now = Date.now()
       // One failure inside the default retention, two far outside it: replaying
       // through the default four-hour retention would keep only the latest.
-      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000]) quotaAttempt("demote-late-window", at)
+      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000])
+        quotaAttempt("demote-late-window", at)
       yield* Effect.sleep("100 millis")
 
       ModelRoute.resetHealth()
@@ -1826,7 +1837,8 @@ describe("writer persistence failure (#2331)", () => {
         const lines = yield* TestConsole.logLines
         failureObserved = lines.some(
           (line) =>
-            typeof line === "string" && line.includes("failed to persist model route telemetry; batch retained for retry"),
+            typeof line === "string" &&
+            line.includes("failed to persist model route telemetry; batch retained for retry"),
         )
         if (!failureObserved) yield* Effect.sleep("50 millis")
       }

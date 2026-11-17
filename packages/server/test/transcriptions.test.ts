@@ -33,7 +33,9 @@ const setup = Effect.gen(function* () {
   const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-stt-door-")))
   const global = path.join(tmp.path, "global")
   yield* Effect.promise(() => fs.mkdir(global, { recursive: true }))
-  yield* Effect.promise(() => fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })))
+  yield* Effect.promise(() =>
+    fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })),
+  )
   return yield* ServerFetch.make(
     {
       database: { path: ":memory:" },
@@ -121,33 +123,32 @@ it.live("an over-cap multipart body is a typed 413 audio_too_large, rejected at 
   }),
 )
 
-it.live("a stalled stream that crosses the bound is answered 413 while reading, without waiting for the body to end (#2433)", () =>
-  Effect.gen(function* () {
-    const handler = yield* setup
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(TranscriptionFacade.maxTranscriptionBodyLimit() + 1024))
-        // The stream never closes: a bounded reader must answer from
-        // the bytes already delivered, not wait for the rest.
-      },
-    })
-    const request = new Request("http://localhost/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { "content-type": "multipart/form-data; boundary=----bound2433" },
-      body: stream,
-      duplex: "half",
-    } as RequestInit)
-    const response = yield* Effect.promise(() =>
-      Promise.race([
-        handler(request),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000)),
-      ]),
-    )
-    expect(response).not.toBeNull()
-    expect(response?.status).toBe(413)
-    const body = yield* Effect.promise(() => response!.json())
-    expect(body.error.code).toBe("audio_too_large")
-  }),
+it.live(
+  "a stalled stream that crosses the bound is answered 413 while reading, without waiting for the body to end (#2433)",
+  () =>
+    Effect.gen(function* () {
+      const handler = yield* setup
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(TranscriptionFacade.maxTranscriptionBodyLimit() + 1024))
+          // The stream never closes: a bounded reader must answer from
+          // the bytes already delivered, not wait for the rest.
+        },
+      })
+      const request = new Request("http://localhost/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=----bound2433" },
+        body: stream,
+        duplex: "half",
+      } as RequestInit)
+      const response = yield* Effect.promise(() =>
+        Promise.race([handler(request), new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000))]),
+      )
+      expect(response).not.toBeNull()
+      expect(response?.status).toBe(413)
+      const body = yield* Effect.promise(() => response!.json())
+      expect(body.error.code).toBe("audio_too_large")
+    }),
 )
 
 it.live("an under-cap body still reaches parsing: the bound does not swallow ordinary requests (#2433)", () =>

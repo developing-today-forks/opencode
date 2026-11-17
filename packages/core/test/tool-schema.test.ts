@@ -71,7 +71,6 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "write", input: WriteTool.Input },
 ]
 
-
 // Completeness guard for the hand-written inventory above (#1902). The set of
 // registered built-in tool names is derived mechanically from the registration
 // surfaces - the tool-plugin modules named by PluginInternal's imports, plus
@@ -122,9 +121,7 @@ const registeredBuiltinToolNames = (): Set<string> => {
   // the route tools via src/config/plugin/model-routes.ts).
   for (const rel of ["plugin/plan-info.ts", "config/plugin/model-routes.ts"]) {
     const source = readSrc(rel)
-    const imports = new Map(
-      [...source.matchAll(/import \{ (\w+) \} from "([^"]+)"/g)].map((m) => [m[1], m[2]]),
-    )
+    const imports = new Map([...source.matchAll(/import \{ (\w+) \} from "([^"]+)"/g)].map((m) => [m[1], m[2]]))
     for (const match of source.matchAll(/(\w+)\.add\(editor/g)) {
       const spec = imports.get(match[1])
       if (!spec || !spec.includes("/tool/plugin/")) continue

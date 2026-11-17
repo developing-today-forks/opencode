@@ -89,9 +89,9 @@ export const transcriptionRoute = (ctx: TranscriptionRequestContext) =>
           return bytes
         })()
     const form = body
-      ? yield* Effect.promise(() =>
-          new Response(body, { headers: { "content-type": contentType } }).formData(),
-        ).pipe(Effect.catchCause(() => Effect.succeed(null)))
+      ? yield* Effect.promise(() => new Response(body, { headers: { "content-type": contentType } }).formData()).pipe(
+          Effect.catchCause(() => Effect.succeed(null)),
+        )
       : null
     if (!form) return errorResponse(400, "request body must be multipart/form-data", "invalid_audio")
     const fields: Record<string, string | string[]> = {}

@@ -84,6 +84,4 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
         }),
       ),
   )
-  .annotateMerge(
-    OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }),
-  )
+  .annotateMerge(OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }))

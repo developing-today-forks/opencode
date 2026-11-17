@@ -271,7 +271,12 @@ it.live("gets a route model by its opencode-route id at /v1/models/{id}", () =>
     for (const form of ["opencode-route%2Fworkhorse", "opencode-route/workhorse"]) {
       const res = yield* getModel(handler, form)
       expect(res.status).toBe(200)
-      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      const body = (yield* Effect.promise(() => res.json())) as {
+        id: string
+        object: string
+        created: number
+        owned_by: string
+      }
       expect(body).toEqual({ id: "opencode-route/workhorse", object: "model", created: 0, owned_by: "opencode-route" })
     }
     // The bare id exactly as it appears in the models list works too.
@@ -324,7 +329,12 @@ it.live("gets a concrete catalog model by provider/model ref at /v1/models/{id}"
     for (const form of ["deepseek%2Fdeepseek-chat", "deepseek/deepseek-chat"]) {
       const res = yield* getModel(handler, form)
       expect(res.status).toBe(200)
-      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      const body = (yield* Effect.promise(() => res.json())) as {
+        id: string
+        object: string
+        created: number
+        owned_by: string
+      }
       expect(body).toEqual({ id: "deepseek/deepseek-chat", object: "model", created: 0, owned_by: "deepseek" })
     }
   }),
@@ -345,7 +355,6 @@ it.live("answers an OpenAI-shaped 404 for an unknown model id", () =>
     expect(body.error.message).toContain("opencode-route/no-such-route")
   }),
 )
-
 
 const postTo = (handler: (request: Request) => Promise<Response>, url: string, body: unknown) =>
   Effect.promise(() =>
@@ -401,7 +410,15 @@ it.live("streams typed Responses events with no [DONE] sentinel", () =>
     const parsed = text
       .split("\n\n")
       .filter(Boolean)
-      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>)
+      .map(
+        (chunk) =>
+          JSON.parse(
+            chunk
+              .split("\n")
+              .find((l) => l.startsWith("data: "))!
+              .slice(6),
+          ) as Record<string, unknown>,
+      )
     expect(parsed.map((data) => data.type)).toEqual([
       "response.created",
       "response.in_progress",
@@ -528,7 +545,10 @@ it.live("rejects an unsupported content block with a 400 naming the shape", () =
       model: "workhorse",
       max_tokens: 64,
       messages: [
-        { role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "x" } }] },
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "x" } }],
+        },
       ],
     })
     expect(res.status).toBe(400)
@@ -681,7 +701,11 @@ it.live("refuses to extend a chain already 64 links deep", () =>
       expect(current.status).toBe(200)
       id = (yield* responseJson(current)).id
     }
-    const refused = yield* postResponses(handler, { model: "workhorse", input: "one too many", previous_response_id: id })
+    const refused = yield* postResponses(handler, {
+      model: "workhorse",
+      input: "one too many",
+      previous_response_id: id,
+    })
     expect(refused.status).toBe(400)
     const body = yield* responseJson(refused)
     expect(body.error?.message).toContain("64")

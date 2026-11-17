@@ -98,7 +98,8 @@ export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: 
     if (!effort) effort = suffix[2]
   }
   if (effort === "xhigh" || effort === "max") effort = "high"
-  const resolved: Effort = effort !== undefined && (EFFORTS as ReadonlyArray<string>).includes(effort) ? (effort as Effort) : "medium"
+  const resolved: Effort =
+    effort !== undefined && (EFFORTS as ReadonlyArray<string>).includes(effort) ? (effort as Effort) : "medium"
   return { base: model, effort: resolved, fullName: WIRE_COMPLETE_MODELS.has(model) ? model : `${model}-${resolved}` }
 }
 
@@ -118,13 +119,42 @@ export const resolveModelAndEffort = (requestedModel: string, requestedEffort?: 
 // exactly-one is the faithful reading.
 // =============================================================================
 const SCHEMA_FIELDS = new Set([
-  "type", "format", "title", "description", "nullable", "default", "enum",
-  "example", "items", "prefixItems", "minItems", "maxItems", "minProperties",
-  "maxProperties", "properties", "propertyOrdering", "required", "minLength",
-  "maxLength", "pattern", "minimum", "maximum", "anyOf", "oneOf", "allOf", "not",
+  "type",
+  "format",
+  "title",
+  "description",
+  "nullable",
+  "default",
+  "enum",
+  "example",
+  "items",
+  "prefixItems",
+  "minItems",
+  "maxItems",
+  "minProperties",
+  "maxProperties",
+  "properties",
+  "propertyOrdering",
+  "required",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "minimum",
+  "maximum",
+  "anyOf",
+  "oneOf",
+  "allOf",
+  "not",
 ])
 const SCHEMA_VALUE_KEYS = new Set(["enum", "default", "example"])
-const SCHEMA_MAP_KEYS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"])
+const SCHEMA_MAP_KEYS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+  "dependencies",
+])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -136,7 +166,10 @@ const resolveSchemaRefs = (root: Record<string, unknown>): unknown => {
     let current: unknown = root
     for (const raw of ref.slice(2).split("/")) {
       const segment = raw.replace(/~1/g, "/").replace(/~0/g, "~")
-      if ((!isRecord(current) && !Array.isArray(current)) || (current as Record<string, unknown>)[segment] === undefined)
+      if (
+        (!isRecord(current) && !Array.isArray(current)) ||
+        (current as Record<string, unknown>)[segment] === undefined
+      )
         return undefined
       current = (current as Record<string, unknown>)[segment]
     }
@@ -149,7 +182,9 @@ const resolveSchemaRefs = (root: Record<string, unknown>): unknown => {
       const { $ref, ...siblings } = node
       const target = $ref.startsWith("#") ? lookup($ref) : undefined
       const merged: Record<string, unknown> =
-        target === undefined || chain.includes($ref) || chain.length >= 10 ? {} : { ...(walk(target, [...chain, $ref]) as Record<string, unknown>) }
+        target === undefined || chain.includes($ref) || chain.length >= 10
+          ? {}
+          : { ...(walk(target, [...chain, $ref]) as Record<string, unknown>) }
       for (const [key, value] of Object.entries(siblings)) merged[key] = walk(value, chain)
       return merged
     }
@@ -226,14 +261,24 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       if (value !== false) out.not = convertSchemaNode(value, anthropic)
       continue
     }
-    if (key === "type" || key === "required" || key === "minimum" || key === "maximum" || key === "items" || key === "prefixItems") continue
+    if (
+      key === "type" ||
+      key === "required" ||
+      key === "minimum" ||
+      key === "maximum" ||
+      key === "items" ||
+      key === "prefixItems"
+    )
+      continue
     out[key] = value
   }
   if (minimum !== undefined) out.minimum = minimum
   if (maximum !== undefined) out.maximum = maximum
   if (items !== undefined) out.items = convertSchemaNode(items, anthropic)
   if (prefixItems !== undefined)
-    out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map((sub) => convertSchemaNode(sub, anthropic))
+    out.prefixItems = (Array.isArray(prefixItems) ? prefixItems : [prefixItems]).map((sub) =>
+      convertSchemaNode(sub, anthropic),
+    )
   let nullable = node.nullable === true
   if (Array.isArray(node.type)) {
     const types = node.type.filter((entry): entry is string => typeof entry === "string")
@@ -291,7 +336,8 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
   // means any element.
   if (out.type === "ARRAY" && out.items === undefined && out.prefixItems === undefined) out.items = {}
   if (Array.isArray(node.required)) {
-    const declared = out.properties && isRecord(out.properties) ? new Set(Object.keys(out.properties)) : new Set<string>()
+    const declared =
+      out.properties && isRecord(out.properties) ? new Set(Object.keys(out.properties)) : new Set<string>()
     const required = node.required.filter((name): name is string => typeof name === "string" && declared.has(name))
     if (required.length) out.required = required
   }
@@ -322,7 +368,13 @@ const convertSchemaNode = (node: unknown, anthropic = false): Record<string, unk
       }
       if (out.type === undefined && out.anyOf === undefined && out.oneOf === undefined && out.allOf === undefined) {
         out.type =
-          typeof pinned === "string" ? "STRING" : typeof pinned === "boolean" ? "BOOLEAN" : Number.isInteger(pinned) ? "INTEGER" : "NUMBER"
+          typeof pinned === "string"
+            ? "STRING"
+            : typeof pinned === "boolean"
+              ? "BOOLEAN"
+              : Number.isInteger(pinned)
+                ? "INTEGER"
+                : "NUMBER"
       }
     }
   }
@@ -402,11 +454,19 @@ const PartFileData = Schema.Struct({
   fileData: Schema.Struct({ mimeType: Schema.String, fileUri: Schema.String }),
 })
 const PartFunctionCall = Schema.Struct({
-  functionCall: Schema.Struct({ name: Schema.String, args: Schema.optional(Schema.Unknown), id: Schema.optional(Schema.String) }),
+  functionCall: Schema.Struct({
+    name: Schema.String,
+    args: Schema.optional(Schema.Unknown),
+    id: Schema.optional(Schema.String),
+  }),
   thoughtSignature: optionalNull(Schema.String),
 })
 const PartFunctionResponse = Schema.Struct({
-  functionResponse: Schema.Struct({ name: Schema.String, response: Schema.Unknown, id: Schema.optional(Schema.String) }),
+  functionResponse: Schema.Struct({
+    name: Schema.String,
+    response: Schema.Unknown,
+    id: Schema.optional(Schema.String),
+  }),
 })
 const ContentPart = Schema.Union([PartText, PartInlineData, PartFileData, PartFunctionCall, PartFunctionResponse])
 const Content = Schema.Struct({
@@ -516,7 +576,8 @@ const providerMetadata = (key: string, metadata: Record<string, unknown>): Provi
 
 const thoughtSignature = (metadata: ProviderMetadata | undefined, key: string) => {
   const ownValue = metadata?.[key]
-  if (ProviderShared.isRecord(ownValue) && typeof ownValue.thoughtSignature === "string") return ownValue.thoughtSignature
+  if (ProviderShared.isRecord(ownValue) && typeof ownValue.thoughtSignature === "string")
+    return ownValue.thoughtSignature
 
   const values = Object.values(metadata ?? {})
   for (const value of values) {
@@ -557,149 +618,150 @@ const sessionId = () => {
 }
 
 const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLMRequest) {
-    const flattened = ProviderShared.flattenToolRequest(request)
-    const lowered = flattened.request
-    const options = yield* decodeOptions(request.providerOptions ?? {})
-    const { base, fullName } = resolveModelAndEffort(
-      String(request.model.id),
-      options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
-    )
-    const anthropic = base.startsWith("claude")
-    const providerMetadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
-    const systemParts: Array<{ text: string }> = request.system.map((part) => ({ text: part.text }))
-    const contents: Array<typeof Content.Type> = []
+  const flattened = ProviderShared.flattenToolRequest(request)
+  const lowered = flattened.request
+  const options = yield* decodeOptions(request.providerOptions ?? {})
+  const { base, fullName } = resolveModelAndEffort(
+    String(request.model.id),
+    options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
+  )
+  const anthropic = base.startsWith("claude")
+  const providerMetadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
+  const systemParts: Array<{ text: string }> = request.system.map((part) => ({ text: part.text }))
+  const contents: Array<typeof Content.Type> = []
 
-    for (const message of lowered.messages) {
-      if (message.role === "system") {
-        const part = yield* ProviderShared.wrappedSystemUpdate("Antigravity", message)
-        systemParts.push({ text: part.text })
-        continue
-      }
-      if (message.role === "user") {
-        const parts: Array<typeof ContentPart.Type> = []
-        for (const part of message.content) {
-          if (!ProviderShared.supportsContent(part, ["text", "media"]))
-            return yield* ProviderShared.unsupportedContent("Antigravity", "user", ["text", "media"])
-          if (part.type === "text") {
-            if (part.text) parts.push({ text: part.text })
-            continue
-          }
-          parts.push(yield* lowerMediaPart(part))
+  for (const message of lowered.messages) {
+    if (message.role === "system") {
+      const part = yield* ProviderShared.wrappedSystemUpdate("Antigravity", message)
+      systemParts.push({ text: part.text })
+      continue
+    }
+    if (message.role === "user") {
+      const parts: Array<typeof ContentPart.Type> = []
+      for (const part of message.content) {
+        if (!ProviderShared.supportsContent(part, ["text", "media"]))
+          return yield* ProviderShared.unsupportedContent("Antigravity", "user", ["text", "media"])
+        if (part.type === "text") {
+          if (part.text) parts.push({ text: part.text })
+          continue
         }
-        if (parts.length) contents.push({ role: "user", parts })
-        continue
+        parts.push(yield* lowerMediaPart(part))
       }
-      if (message.role === "assistant") {
-        const parts: Array<typeof ContentPart.Type> = []
-        for (const part of message.content) {
-          if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call", "media"]))
-            return yield* ProviderShared.unsupportedContent("Antigravity", "assistant", [
-              "text",
-              "reasoning",
-              "tool-call",
-              "media",
-            ])
-          if (part.type === "text") {
-            if (part.text)
-              parts.push({ text: part.text, thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey) })
-            continue
-          }
-          if (part.type === "reasoning") {
-            if (part.text)
-              parts.push({
-                text: part.text,
-                thought: true,
-                thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
-              })
-            continue
-          }
-          if (part.type === "media") {
+      if (parts.length) contents.push({ role: "user", parts })
+      continue
+    }
+    if (message.role === "assistant") {
+      const parts: Array<typeof ContentPart.Type> = []
+      for (const part of message.content) {
+        if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call", "media"]))
+          return yield* ProviderShared.unsupportedContent("Antigravity", "assistant", [
+            "text",
+            "reasoning",
+            "tool-call",
+            "media",
+          ])
+        if (part.type === "text") {
+          if (part.text)
             parts.push({
-              ...(yield* lowerMediaPart(part)),
+              text: part.text,
               thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
             })
-            continue
-          }
-          const signature = thoughtSignature(part.providerMetadata, providerMetadataKey)
-          const args =
-            ProviderShared.isRecord(part.input) && !Array.isArray(part.input) ? part.input : {}
+          continue
+        }
+        if (part.type === "reasoning") {
+          if (part.text)
+            parts.push({
+              text: part.text,
+              thought: true,
+              thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
+            })
+          continue
+        }
+        if (part.type === "media") {
           parts.push({
-            functionCall: { name: part.name, args, ...(anthropic && part.id ? { id: part.id } : {}) },
-            // The door stashes signatures server-side keyed by tool_call id;
-            // fork sessions carry them in providerMetadata instead. When no
-            // signature survives (stateless façade history), fall back to
-            // Google's documented skip validator rather than the door's 400.
-            thoughtSignature: signature ?? SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+            ...(yield* lowerMediaPart(part)),
+            thoughtSignature: thoughtSignature(part.providerMetadata, providerMetadataKey),
           })
+          continue
         }
-        if (parts.length) contents.push({ role: "model", parts })
-        continue
-      }
-      // Tool results: one user content per tool message, exactly the door's
-      // shape. functionResponse.response is a proto Struct — it must be a
-      // JSON object; array/scalar results are wrapped as { result }.
-      for (const part of message.content) {
-        if (!ProviderShared.supportsContent(part, ["tool-result"]))
-          return yield* ProviderShared.unsupportedContent("Antigravity", "tool", ["tool-result"])
-        let response: unknown
-        if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
-          response = part.result.value
-        } else {
-          const text = ProviderShared.toolResultText(part)
-          try {
-            const parsed: unknown = JSON.parse(text)
-            response = ProviderShared.isRecord(parsed) ? parsed : { result: parsed }
-          } catch {
-            response = { result: text }
-          }
-        }
-        contents.push({
-          role: "user",
-          parts: [{ functionResponse: { name: part.name, response, ...(anthropic && part.id ? { id: part.id } : {}) } }],
+        const signature = thoughtSignature(part.providerMetadata, providerMetadataKey)
+        const args = ProviderShared.isRecord(part.input) && !Array.isArray(part.input) ? part.input : {}
+        parts.push({
+          functionCall: { name: part.name, args, ...(anthropic && part.id ? { id: part.id } : {}) },
+          // The door stashes signatures server-side keyed by tool_call id;
+          // fork sessions carry them in providerMetadata instead. When no
+          // signature survives (stateless façade history), fall back to
+          // Google's documented skip validator rather than the door's 400.
+          thoughtSignature: signature ?? SKIP_THOUGHT_SIGNATURE_VALIDATOR,
         })
       }
+      if (parts.length) contents.push({ role: "model", parts })
+      continue
     }
+    // Tool results: one user content per tool message, exactly the door's
+    // shape. functionResponse.response is a proto Struct — it must be a
+    // JSON object; array/scalar results are wrapped as { result }.
+    for (const part of message.content) {
+      if (!ProviderShared.supportsContent(part, ["tool-result"]))
+        return yield* ProviderShared.unsupportedContent("Antigravity", "tool", ["tool-result"])
+      let response: unknown
+      if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
+        response = part.result.value
+      } else {
+        const text = ProviderShared.toolResultText(part)
+        try {
+          const parsed: unknown = JSON.parse(text)
+          response = ProviderShared.isRecord(parsed) ? parsed : { result: parsed }
+        } catch {
+          response = { result: text }
+        }
+      }
+      contents.push({
+        role: "user",
+        parts: [{ functionResponse: { name: part.name, response, ...(anthropic && part.id ? { id: part.id } : {}) } }],
+      })
+    }
+  }
 
-    // The door fails closed on a specific-function tool_choice naming an
-    // undeclared function (400, never widened to bare ANY — code#2822).
-    // The fork's toolChoice arrives already parsed, so the same check is:
-    // a named choice whose name is not among the declared tools is an
-    // invalid request, validated even when no tools were declared.
-    if (request.toolChoice?.name !== undefined && !flattened.tools.some((tool) => tool.name === request.toolChoice?.name))
-      return yield* ProviderShared.invalidRequest(
-        `tool_choice names function "${request.toolChoice.name}" which is not among the declared tools`,
-      )
-    const generation = request.generation
-    const inner: typeof InnerRequest.Type = {
-      contents,
-      systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,
-      tools: flattened.tools.length
-        ? [{ functionDeclarations: flattened.tools.map((tool) => lowerTool(tool, base.startsWith("claude"))) }]
-        : undefined,
-      toolConfig:
-        flattened.tools.length && request.toolChoice ? yield* lowerToolConfig(request.toolChoice) : undefined,
-      generationConfig: {
-        maxOutputTokens: generation?.maxTokens ?? 65536,
-        temperature: generation?.temperature,
-        topP: generation?.topP,
-        thinkingConfig: {
-          includeThoughts: options.thinkingConfig?.includeThoughts ?? true,
-          thinkingLevel: resolveModelAndEffort(
-            String(request.model.id),
-            options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
-          ).effort.toUpperCase(),
-        },
+  // The door fails closed on a specific-function tool_choice naming an
+  // undeclared function (400, never widened to bare ANY — code#2822).
+  // The fork's toolChoice arrives already parsed, so the same check is:
+  // a named choice whose name is not among the declared tools is an
+  // invalid request, validated even when no tools were declared.
+  if (request.toolChoice?.name !== undefined && !flattened.tools.some((tool) => tool.name === request.toolChoice?.name))
+    return yield* ProviderShared.invalidRequest(
+      `tool_choice names function "${request.toolChoice.name}" which is not among the declared tools`,
+    )
+  const generation = request.generation
+  const inner: typeof InnerRequest.Type = {
+    contents,
+    systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,
+    tools: flattened.tools.length
+      ? [{ functionDeclarations: flattened.tools.map((tool) => lowerTool(tool, base.startsWith("claude"))) }]
+      : undefined,
+    toolConfig: flattened.tools.length && request.toolChoice ? yield* lowerToolConfig(request.toolChoice) : undefined,
+    generationConfig: {
+      maxOutputTokens: generation?.maxTokens ?? 65536,
+      temperature: generation?.temperature,
+      topP: generation?.topP,
+      thinkingConfig: {
+        includeThoughts: options.thinkingConfig?.includeThoughts ?? true,
+        thinkingLevel: resolveModelAndEffort(
+          String(request.model.id),
+          options.reasoningEffort ?? options.reasoning_effort ?? options.thinkingConfig?.thinkingLevel,
+        ).effort.toUpperCase(),
       },
-      sessionId: sessionId(),
-    }
-    return {
-      project: PROJECT,
-      requestId: `agent/${globalThis.crypto.randomUUID()}/${Date.now()}/${globalThis.crypto.randomUUID()}/1`,
-      model: fullName,
-      userAgent: "antigravity",
-      requestType: "agent",
-      request: inner,
-    }
+    },
+    sessionId: sessionId(),
+  }
+  return {
+    project: PROJECT,
+    requestId: `agent/${globalThis.crypto.randomUUID()}/${Date.now()}/${globalThis.crypto.randomUUID()}/1`,
+    model: fullName,
+    userAgent: "antigravity",
+    requestType: "agent",
+    request: inner,
+  }
 })
 
 // =============================================================================
@@ -813,7 +875,8 @@ const step = (state: ParserState, event: Event) => {
 
   for (const rawPart of candidate.content.parts ?? []) {
     if (!ProviderShared.isRecord(rawPart)) continue
-    const signature = typeof rawPart.thoughtSignature === "string" && rawPart.thoughtSignature ? rawPart.thoughtSignature : undefined
+    const signature =
+      typeof rawPart.thoughtSignature === "string" && rawPart.thoughtSignature ? rawPart.thoughtSignature : undefined
     if (signature !== undefined) pendingSignature = signature
     if ("inlineData" in rawPart) {
       const inline = rawPart.inlineData
@@ -838,7 +901,9 @@ const step = (state: ParserState, event: Event) => {
             lifecycle,
             events,
             textId,
-            textSignature ? providerMetadata(state.providerMetadataKey, { thoughtSignature: textSignature }) : undefined,
+            textSignature
+              ? providerMetadata(state.providerMetadataKey, { thoughtSignature: textSignature })
+              : undefined,
           )
           textId = undefined
           textSignature = undefined
@@ -960,8 +1025,7 @@ export interface Prepared {
 const sse = HttpTransport.sseJson.with<AntigravityBody>()
 
 const isUnauthorized = (error: AIError) =>
-  error.reason._tag === "Authentication" &&
-  (error.reason as { http?: { status?: number } }).http?.status === 401
+  error.reason._tag === "Authentication" && (error.reason as { http?: { status?: number } }).http?.status === 401
 
 export const transport: Transport<AntigravityBody, Prepared, string> = {
   id: sse.id,

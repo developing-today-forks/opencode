@@ -149,7 +149,11 @@ describe("Antigravity blank-credential rule (#1765)", () => {
 
   test("padded keyring tokens are trimmed before use (control)", () => {
     const creds = parseKeyringCreds(
-      keyringJson({ refresh_token: "  refresh-fixture  ", access_token: "  tok  ", expiry: "2999-01-01T00:00:00.000Z" }),
+      keyringJson({
+        refresh_token: "  refresh-fixture  ",
+        access_token: "  tok  ",
+        expiry: "2999-01-01T00:00:00.000Z",
+      }),
     )
     expect(creds.refreshToken).toBe("refresh-fixture")
     expect(creds.accessToken).toBe("tok")

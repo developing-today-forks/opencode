@@ -365,36 +365,38 @@ const layer = Layer.effect(
           })
         }
         const prepared = yield* prepareFor(loaded.model)
-        const outcome = yield* Effect.scoped(steps.attempt({
-          isLocationClosed: lifecycle.isClosed,
-          sessionID,
-          assistantMessageID,
-          ...(continuationOf === undefined ? {} : { continuation: { of: continuationOf, index: continuationIndex } }),
-          agent: loaded.agent.id,
-          model: loaded.model,
-          toolNames: loaded.tools.definitions.map((tool) => tool.name),
-          ...(loaded.model.membership ? { membership: loaded.model.membership } : {}),
-          prepared,
-          estimatedInputTokens: SessionCompaction.estimateContext(loaded),
-          prepareFor,
-          retry: (cause, error, proposed) =>
-            retry.decide({
-              cause,
-              error,
-              agent: loaded.agent.id,
-              model: loaded.model.ref,
-              hook: prepared.retry,
-              retry: proposed,
-            }),
-          recoverContinuation,
-          recoverOverflow: Effect.suspend(() =>
-            recoverOverflow
-              ? compaction
-                  .compact({ reason: "overflow", context: loaded })
-                  .pipe(Effect.map((result) => result.status === "completed"))
-              : Effect.succeed(false),
-          ),
-        }))
+        const outcome = yield* Effect.scoped(
+          steps.attempt({
+            isLocationClosed: lifecycle.isClosed,
+            sessionID,
+            assistantMessageID,
+            ...(continuationOf === undefined ? {} : { continuation: { of: continuationOf, index: continuationIndex } }),
+            agent: loaded.agent.id,
+            model: loaded.model,
+            toolNames: loaded.tools.definitions.map((tool) => tool.name),
+            ...(loaded.model.membership ? { membership: loaded.model.membership } : {}),
+            prepared,
+            estimatedInputTokens: SessionCompaction.estimateContext(loaded),
+            prepareFor,
+            retry: (cause, error, proposed) =>
+              retry.decide({
+                cause,
+                error,
+                agent: loaded.agent.id,
+                model: loaded.model.ref,
+                hook: prepared.retry,
+                retry: proposed,
+              }),
+            recoverContinuation,
+            recoverOverflow: Effect.suspend(() =>
+              recoverOverflow
+                ? compaction
+                    .compact({ reason: "overflow", context: loaded })
+                    .pipe(Effect.map((result) => result.status === "completed"))
+                : Effect.succeed(false),
+            ),
+          }),
+        )
         const completed = yield* SessionStep.Outcome.$match(outcome, {
           Completed: (outcome) => Effect.succeed<StepResult>({ needsContinuation: outcome.needsContinuation }),
           Retry: (outcome) =>

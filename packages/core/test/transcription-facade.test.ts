@@ -10,7 +10,10 @@ const mp3 = { bytes: new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3]), mediaType: "au
 
 const parse = (fields: Record<string, string | string[]>, file: unknown = mp3, enabled?: ReadonlySet<string>) =>
   TranscriptionFacade.parseTranscriptionRequest(
-    { fields, ...(file !== undefined && file !== null ? { file: file as TranscriptionFacade.TranscriptionFormFile } : {}) },
+    {
+      fields,
+      ...(file !== undefined && file !== null ? { file: file as TranscriptionFacade.TranscriptionFormFile } : {}),
+    },
     enabled,
   )
 
@@ -54,7 +57,12 @@ describe("TranscriptionFacade registry", () => {
   })
 
   test("the §8.2 registrations declare diarization and segment+word timestamps", () => {
-    for (const ref of ["deepgram/nova-3", "google/gemini-3.5-transcribe", "assemblyai/universal-3-5-pro", "elevenlabs/scribe_v2"]) {
+    for (const ref of [
+      "deepgram/nova-3",
+      "google/gemini-3.5-transcribe",
+      "assemblyai/universal-3-5-pro",
+      "elevenlabs/scribe_v2",
+    ]) {
       const registration = TranscriptionFacade.resolveTranscriptionModel(ref)
       expect(typeof registration).not.toBe("string")
       if (typeof registration === "string") continue
@@ -81,7 +89,9 @@ describe("TranscriptionFacade registry", () => {
       TranscriptionFacade.transcriptionBodyLimit(registration),
     )
     // No enabled providers: the route safety bound falls back to all registrations.
-    expect(TranscriptionFacade.maxTranscriptionBodyLimit(new Set())).toBe(TranscriptionFacade.maxTranscriptionBodyLimit())
+    expect(TranscriptionFacade.maxTranscriptionBodyLimit(new Set())).toBe(
+      TranscriptionFacade.maxTranscriptionBodyLimit(),
+    )
   })
 
   test("a disabled provider's refs vanish from resolution", () => {
@@ -191,7 +201,7 @@ describe("TranscriptionFacade parse (§2.2/§2.4/§5)", () => {
     const bad = parse({ model: "openai/whisper-1", provider_options: "[1,2]" })
     expect(bad.ok).toBe(false)
     if (!bad.ok) expect(bad.error.code).toBe("invalid_request")
-    const good = parse({ model: "openai/whisper-1", provider_options: "{\"temperature\":0}" })
+    const good = parse({ model: "openai/whisper-1", provider_options: '{"temperature":0}' })
     expect(good.ok).toBe(true)
     if (good.ok) expect(good.value.providerOptions).toEqual({ temperature: 0 })
   })
@@ -265,13 +275,19 @@ describe("TranscriptionFacade stream frames (§7 phase 2)", () => {
 
 const fixtureBody = () =>
   Bun.file(
-    new URL("../../ai/test/fixtures/recordings/openai-transcription/returns-whisper-word-timestamps.json", import.meta.url)
-      .pathname,
+    new URL(
+      "../../ai/test/fixtures/recordings/openai-transcription/returns-whisper-word-timestamps.json",
+      import.meta.url,
+    ).pathname,
   )
     .json()
     .then((recording) => recording.interactions[0].response.body as string)
 
-const facadeWithStub = (respond: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<HttpClientResponse.HttpClientResponse, never>) => {
+const facadeWithStub = (
+  respond: (
+    request: HttpClientRequest.HttpClientRequest,
+  ) => Effect.Effect<HttpClientResponse.HttpClientResponse, never>,
+) => {
   const stub = HttpClient.make((request) => respond(request))
   const executor = RequestExecutor.layer.pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, stub)))
   return TranscriptionFacade.layer.pipe(Layer.provide(executor))
@@ -346,7 +362,11 @@ describe("TranscriptionFacade parity (§4)", () => {
                   request,
                   new Response(
                     JSON.stringify({
-                      error: { message: "You exceeded your current quota; resets at 12:00 UTC", type: "insufficient_quota", code: "insufficient_quota" },
+                      error: {
+                        message: "You exceeded your current quota; resets at 12:00 UTC",
+                        type: "insufficient_quota",
+                        code: "insufficient_quota",
+                      },
                     }),
                     { status: 429, headers: { "content-type": "application/json" } },
                   ),
@@ -382,11 +402,7 @@ describe("TranscriptionFacade parity (§4)", () => {
         Effect.gen(function* () {
           const facade = yield* TranscriptionFacade.Service
           return yield* Effect.result(facade.transcribe(parsed.value))
-        }).pipe(
-          Effect.provide(
-            facadeWithStub(() => Effect.die(new Error("HTTP must not be called without a key"))),
-          ),
-        ),
+        }).pipe(Effect.provide(facadeWithStub(() => Effect.die(new Error("HTTP must not be called without a key"))))),
       )
       expect(failure._tag).toBe("Failure")
       if (failure._tag === "Failure") {
@@ -473,11 +489,7 @@ describe("TranscriptionFacade streaming (§7/§8.5, §4 parity)", () => {
         Effect.gen(function* () {
           const facade = yield* TranscriptionFacade.Service
           return yield* Effect.result(facade.transcribeStream(parsed.value))
-        }).pipe(
-          Effect.provide(
-            facadeWithStub(() => Effect.die(new Error("HTTP must not be called without a key"))),
-          ),
-        ),
+        }).pipe(Effect.provide(facadeWithStub(() => Effect.die(new Error("HTTP must not be called without a key"))))),
       )
       expect(failure._tag).toBe("Failure")
       if (failure._tag === "Failure") {

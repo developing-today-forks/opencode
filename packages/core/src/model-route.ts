@@ -205,15 +205,18 @@ const DEFAULT_POLICY: Policy = {
   quotaCooldownMs: 900_000,
 }
 
-export const policy = (input?: {
-  readonly firstTokenTimeoutMs?: number | false
-  readonly maxResponseTimeMs?: number
-  readonly minOutputTokensPerSecond?: number
-  readonly sampleWindow?: number
-  readonly slowThreshold?: number
-  readonly cooldownMs?: number
-  readonly quotaCooldownMs?: number
-}, location?: string): Policy => {
+export const policy = (
+  input?: {
+    readonly firstTokenTimeoutMs?: number | false
+    readonly maxResponseTimeMs?: number
+    readonly minOutputTokensPerSecond?: number
+    readonly sampleWindow?: number
+    readonly slowThreshold?: number
+    readonly cooldownMs?: number
+    readonly quotaCooldownMs?: number
+  },
+  location?: string,
+): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
   const ladder = currentConstants(location).bench
   return {
@@ -369,7 +372,12 @@ const trafficEntry = (target: Model.Ref, variant?: string) => {
 
 const trafficCredentialEntry = (target: Model.Ref, credentialID: string, variant?: string) => {
   const id = trafficCredentialKey(target, credentialID, variant)
-  const current = trafficCredentialHealth.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0, consecutiveFailures: 0 }
+  const current = trafficCredentialHealth.get(id) ?? {
+    samples: [],
+    outcomes: [],
+    cooldownUntil: 0,
+    consecutiveFailures: 0,
+  }
   current.variant = variant ?? "default"
   trafficCredentialHealth.delete(id)
   trafficCredentialHealth.set(id, current)
@@ -405,7 +413,8 @@ const scopeStates = (
     // consumer that never attempted the model), and the token names the scope by
     // itself — enumerate the leg's traffic scopes across efforts.
     const prefix = `${key(target)}@`
-    for (const [id, state] of trafficHealth) if (id.startsWith(prefix)) out.push({ state, variant: id.slice(prefix.length) })
+    for (const [id, state] of trafficHealth)
+      if (id.startsWith(prefix)) out.push({ state, variant: id.slice(prefix.length) })
   }
   if (credentialID) {
     const credential = credentialHealth.get(credentialKey(target, credentialID))
@@ -425,7 +434,12 @@ const scopeStates = (
 /** Until when one credential of a target is benched; 0 when it is not. Reading an expired bench
  * clears it, exactly like `cooldownUntil` for targets. A named effort's traffic bench
  * on the credential counts too: the credential is held out at that effort while it stands. */
-export const credentialCooldownUntil = (target: Model.Ref, credentialID: string, now = Date.now(), variant?: string) => {
+export const credentialCooldownUntil = (
+  target: Model.Ref,
+  credentialID: string,
+  now = Date.now(),
+  variant?: string,
+) => {
   const state = credentialHealth.get(credentialKey(target, credentialID))
   if (state) recover(target, state, now, credentialID)
   // An unnamed effort reads as the default effort: attempts that served without
@@ -492,8 +506,7 @@ const retainedOutcomeWindow = () => {
   return window
 }
 
-const pushOutcome = (outcomes: boolean[], answered: boolean) =>
-  [...outcomes, answered].slice(-retainedOutcomeWindow())
+const pushOutcome = (outcomes: boolean[], answered: boolean) => [...outcomes, answered].slice(-retainedOutcomeWindow())
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -535,12 +548,7 @@ const logHealth = (
     },
   })
 
-const recover = (
-  target: Model.Ref,
-  state: HealthState,
-  now: number,
-  credentialID?: string,
-) => {
+const recover = (target: Model.Ref, state: HealthState, now: number, credentialID?: string) => {
   if (state.cooldownUntil === 0 || state.cooldownUntil > now) return
   // An expired auth bench converts to a half-open probe instead of lapsing outright
   // (code#9950): the refusal cannot heal by itself, so before the door is a candidate
@@ -730,7 +738,8 @@ const bench = (
   // ran out of eligible candidates, and sessions died on the last error they saw. Quota and
   // auth keep the long ladder: the provider stated the window, or the refusal cannot heal
   // by itself. A stated retry-after is believed as-is, as before.
-  const graced = hint?.quota || hint?.auth || hint?.planWall ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
+  const graced =
+    hint?.quota || hint?.auth || hint?.planWall ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
   // A rate limit with no stated retry-after starts on the ordinary ladder above — one
   // scattered 429 is a transient, and its grace stays short. But a provider that keeps
   // answering 429 has stated a throttle in the only language it used: at
@@ -845,16 +854,13 @@ const releaseQuotaBenches = (inScope: (id: string) => boolean, now: number) => {
     )
   }
   for (const [id, state] of health) if (inScope(id)) release(id, state)
-  for (const [id, state] of credentialHealth)
-    if (inScope(id)) release(id, state, id.slice(id.lastIndexOf("#") + 1))
+  for (const [id, state] of credentialHealth) if (inScope(id)) release(id, state, id.slice(id.lastIndexOf("#") + 1))
 }
 
 const probeDueState = (state: HealthState | undefined, now: number) =>
   state !== undefined &&
   !probeClaimLive(state, now) &&
-  ((state.cooldownUntil > now &&
-    state.benchQuotaResetAt !== undefined &&
-    state.benchQuotaResetAt <= now) ||
+  ((state.cooldownUntil > now && state.benchQuotaResetAt !== undefined && state.benchQuotaResetAt <= now) ||
     // An auth bench past its cooldown holds as probe-pending (code#9950): its probe is
     // due immediately and stays due until a claim settles it. The raw form — bench
     // still standing in the map, cooldown lapsed, no candidacy read has converted it
@@ -959,12 +965,15 @@ export const claimBenchProbe = (
  * benches (code#9950), whose cooldown has already lapsed, so candidacy must consult
  * the claim itself. A claim older than PROBE_CLAIM_MAX_AGE_MS no longer counts (#2455):
  * its owner is gone, so the scope reads as not in flight and the probe is due again. */
-export const probeInFlight = (target: Model.Ref, credentialID: string | undefined, now = Date.now(), variant?: string) =>
+export const probeInFlight = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  variant?: string,
+) =>
   probeStates(target, credentialID, variant).some(
     ({ state }) =>
-      state !== undefined &&
-      probeClaimLive(state, now) &&
-      (state.probePending === true || state.cooldownUntil > now),
+      state !== undefined && probeClaimLive(state, now) && (state.probePending === true || state.cooldownUntil > now),
   )
 
 /** Releases a probe claim whose owner resolved the target but never attempted a request on it
@@ -1260,12 +1269,14 @@ const modelWindowReading = (
   readings: readonly QuotaCurrent.ProviderReading[],
   providerID: string,
   modelID: string,
-): {
-  readonly percent: number
-  readonly resetAt: number | null
-  readonly observedAt: number
-  readonly complete: boolean
-} | undefined => {
+):
+  | {
+      readonly percent: number
+      readonly resetAt: number | null
+      readonly observedAt: number
+      readonly complete: boolean
+    }
+  | undefined => {
   const candidatesOf = (reading: QuotaCurrent.ProviderReading): QuotaCurrent.Window[] => [
     ...(ownValue(reading.models, modelID) ?? []),
     ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
@@ -1726,9 +1737,10 @@ export const releaseQuotaSkipsForCurrent = (
   // provider-wide headroom (below) re-admits anything. With no model-keyed reading at
   // all (the gatherer's provider-windows shape, e.g. `_claude`), there is no model
   // headroom to judge, and provider-wide headroom alone judges the provider record.
-  const released = !providerStanding && own
-    ? releaseQuotaSkipsForSnapshot(target, asSnapshot(own), now, location).filter((id) => id === modelSkipID)
-    : []
+  const released =
+    !providerStanding && own
+      ? releaseQuotaSkipsForSnapshot(target, asSnapshot(own), now, location).filter((id) => id === modelSkipID)
+      : []
   if (!providerStanding) return released
   // A provider-wide record stands: it lifts only on provider-wide headroom — the
   // freshest reading whose every provider window is below full.
@@ -1939,10 +1951,9 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
       ...(credentialID ? { credentialID } : {}),
       ...(variant !== undefined ? { variant } : {}),
       class: label,
-      reason:
-        probeClaimLive(state, now)
-          ? `${name} bench expired; half-open probe in flight`
-          : `${name} bench expired; half-open probe pending`,
+      reason: probeClaimLive(state, now)
+        ? `${name} bench expired; half-open probe in flight`
+        : `${name} bench expired; half-open probe pending`,
       resume: "probe",
     })
   }
@@ -2112,10 +2123,7 @@ export const failed = (
       target: benchKey,
       time: now,
     })
-  while (
-    recentFailures.length > 200 ||
-    (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs())
-  )
+  while (recentFailures.length > 200 || (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs()))
     recentFailures.shift()
   if (hint?.network && networkSuspect(now, location)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
@@ -2246,7 +2254,12 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now(), varian
     state.probeClaimToken = undefined
     state.probePending = undefined
     state.probePendingReason = undefined
-    logHealth(target, "cooldown-start", `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`, state.cooldownUntil)
+    logHealth(
+      target,
+      "cooldown-start",
+      `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
+      state.cooldownUntil,
+    )
   }
 }
 
@@ -2462,8 +2475,7 @@ export const recordTierLimit = (
   canonical?: string,
 ) => {
   const until = ModelRouteMembership.recordTierLimit(membershipAccount(target.providerID, canonical), message, now)
-  if (until > now)
-    observeRateLimit(target, ModelRouteLimits.snapshot({ retryAfterMs: until - now }, now), now)
+  if (until > now) observeRateLimit(target, ModelRouteLimits.snapshot({ retryAfterMs: until - now }, now), now)
   return until
 }
 
@@ -2783,8 +2795,7 @@ const observeCredentialQuotaState = (
         })
         if (refreshedHold.judgedBalance !== hold.judgedBalance || refreshedHold.expired !== hold.expired)
           persistCredentialBalanceHold(credentialID, refreshedHold, target.providerID)
-      }
-      else if (
+      } else if (
         snapshot.balance !== true &&
         QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
       ) {
@@ -2795,12 +2806,9 @@ const observeCredentialQuotaState = (
         credentialQuota.set(credentialID, {
           ...previous,
           gated: true,
-          ...(snapshot.resetAt !== null && snapshot.resetAt !== undefined
-            ? { timedGateUntil: snapshot.resetAt }
-            : {}),
+          ...(snapshot.resetAt !== null && snapshot.resetAt !== undefined ? { timedGateUntil: snapshot.resetAt } : {}),
         })
-      }
-      else if (
+      } else if (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
@@ -2846,7 +2854,7 @@ const observeCredentialQuotaState = (
         }
       : undefined
   const actualResetAt = resetAtTrusted
-    ? snapshot.resetAt ?? undefined
+    ? (snapshot.resetAt ?? undefined)
     : previous?.actualResetAt !== undefined && previous.actualResetAt > now
       ? previous.actualResetAt
       : undefined
@@ -2875,7 +2883,8 @@ const observeCredentialQuotaState = (
       snapshot.resetAt ?? undefined,
       credentialID,
     )
-  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  if (!full && previous?.gated)
+    logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
   // A fresh, known, not-full reading is a measured increase for the scope: quota-class
   // benches planted by earlier exhaustion release on it, not only at their reset (#1828).
   if (!full && QuotaSnapshot.known(snapshot) && now - snapshot.observedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS)
@@ -2930,17 +2939,13 @@ export const observeProviderQuota = (
   // cannot clear the skip when the balance never actually increased.
   const restoredItem = previous
     ? undefined
-    : adjustments.find(
-        (item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined,
-      )
+    : adjustments.find((item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined)
   const hold: BalanceHold | undefined =
     previous?.balanceHold ??
     (restoredItem
       ? {
           benchedBalance: restoredItem.balanceBaseline ?? null,
-          ...(restoredItem.balanceHoldBalance !== undefined
-            ? { judgedBalance: restoredItem.balanceHoldBalance }
-            : {}),
+          ...(restoredItem.balanceHoldBalance !== undefined ? { judgedBalance: restoredItem.balanceHoldBalance } : {}),
           ...(restoredItem.balanceGrant !== undefined ? { grant: restoredItem.balanceGrant } : {}),
           ...(restoredItem.balanceHoldOrigin !== undefined ? { origin: restoredItem.balanceHoldOrigin } : {}),
           ...(restoredItem.balanceHoldExpired !== undefined ? { expired: restoredItem.balanceHoldExpired } : {}),
@@ -2970,16 +2975,13 @@ export const observeProviderQuota = (
             match: `${target.providerID}/`,
             action: "skip",
             balanceBaseline: refreshedHold.benchedBalance,
-            ...(refreshedHold.judgedBalance !== undefined
-              ? { balanceHoldBalance: refreshedHold.judgedBalance }
-              : {}),
+            ...(refreshedHold.judgedBalance !== undefined ? { balanceHoldBalance: refreshedHold.judgedBalance } : {}),
             ...(refreshedHold.grant !== undefined ? { balanceGrant: refreshedHold.grant } : {}),
             ...(refreshedHold.origin !== undefined ? { balanceHoldOrigin: refreshedHold.origin } : {}),
             ...(refreshedHold.expired !== undefined ? { balanceHoldExpired: refreshedHold.expired } : {}),
             note: "quota exhausted (proactive snapshot); held until the stated reset",
           })
-      }
-      else if (
+      } else if (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
@@ -2998,9 +3000,7 @@ export const observeProviderQuota = (
             match: `${target.providerID}/`,
             action: "skip",
             balanceBaseline: refreshedHold.benchedBalance,
-            ...(refreshedHold.judgedBalance !== undefined
-              ? { balanceHoldBalance: refreshedHold.judgedBalance }
-              : {}),
+            ...(refreshedHold.judgedBalance !== undefined ? { balanceHoldBalance: refreshedHold.judgedBalance } : {}),
             ...(refreshedHold.grant !== undefined ? { balanceGrant: refreshedHold.grant } : {}),
             ...(refreshedHold.origin !== undefined ? { balanceHoldOrigin: refreshedHold.origin } : {}),
             ...(refreshedHold.expired !== undefined ? { balanceHoldExpired: refreshedHold.expired } : {}),
@@ -3538,7 +3538,11 @@ export const completed = (
     credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
     credentialState.consecutiveRateLimits = 0
-    if (!probeClaim || credentialState.probeClaimedAt === undefined || credentialState.probeClaimToken === probeClaim.token)
+    if (
+      !probeClaim ||
+      credentialState.probeClaimedAt === undefined ||
+      credentialState.probeClaimToken === probeClaim.token
+    )
       endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
@@ -4337,7 +4341,9 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
+    demotion:
+      weight *
+      (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
     gate: null,
   }
 }
@@ -4456,9 +4462,7 @@ export const nextTarget = (
       : eligible.reduce(
           (sum, index) =>
             sum +
-            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[
-              layer
-            ],
+            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[layer],
           0,
         ) / eligible.length
   }
@@ -4467,7 +4471,8 @@ export const nextTarget = (
   const allDemoted = (nodeIndex: number) => {
     const eligible = openLeaves(nodeIndex)
     return (
-      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
+      eligible.length > 0 &&
+      eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
     )
   }
   const label = (child: Node["children"][number]) => {
@@ -4665,9 +4670,7 @@ export const nextTarget = (
       if (chosen !== undefined)
         ordered = [
           chosen,
-          ...(node.selection === "round-robin" ? byTier : rank)(
-            positions.filter((position) => position !== chosen),
-          ),
+          ...(node.selection === "round-robin" ? byTier : rank)(positions.filter((position) => position !== chosen)),
         ]
       decisionReason =
         priorSticky !== undefined && pool.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
@@ -4801,8 +4804,7 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref, lo
  * settled on the new target. */
 export const hedgeHome = (routeID: string, sessionID: string, location?: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests)
-    return undefined
+  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests) return undefined
   return state.origin
 }
 

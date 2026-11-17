@@ -102,12 +102,8 @@ describe("AISDKNative", () => {
     expect(map("@ai-sdk/openai", { baseURL: "https://api.meta.ai/v1" }, "test-model", "meta")?.package).toBe(
       "@opencode/ai/providers/meta/responses",
     )
-    expect(map("@ai-sdk/openai-compatible", {}, "test-model", "meta")?.package).toBe(
-      "@opencode/ai/providers/meta/chat",
-    )
-    expect(map("@ai-sdk/anthropic", {}, "test-model", "meta")?.package).toBe(
-      "@opencode/ai/providers/meta/messages",
-    )
+    expect(map("@ai-sdk/openai-compatible", {}, "test-model", "meta")?.package).toBe("@opencode/ai/providers/meta/chat")
+    expect(map("@ai-sdk/anthropic", {}, "test-model", "meta")?.package).toBe("@opencode/ai/providers/meta/messages")
   })
 
   test("maps Anthropic settings and request options to the native provider", () => {

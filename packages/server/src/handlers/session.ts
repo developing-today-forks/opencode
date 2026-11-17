@@ -319,30 +319,26 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.switchAgent",
         Effect.fn(function* (ctx) {
-          yield* session
-            .switchAgent({ sessionID: ctx.params.sessionID, agent: ctx.payload.agent })
-            .pipe(
-              Effect.catchTag("Session.NotFoundError", missingSession),
-              Effect.catchTag(
-                "ModelGovernance.DeniedError",
-                (error) => new InvalidRequestError({ message: error.message }),
-              ),
-            )
+          yield* session.switchAgent({ sessionID: ctx.params.sessionID, agent: ctx.payload.agent }).pipe(
+            Effect.catchTag("Session.NotFoundError", missingSession),
+            Effect.catchTag(
+              "ModelGovernance.DeniedError",
+              (error) => new InvalidRequestError({ message: error.message }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )
       .handle(
         "session.switchModel",
         Effect.fn(function* (ctx) {
-          yield* session
-            .switchModel({ sessionID: ctx.params.sessionID, model: ctx.payload.model })
-            .pipe(
-              Effect.catchTag("Session.NotFoundError", missingSession),
-              Effect.catchTag(
-                "ModelGovernance.DeniedError",
-                (error) => new InvalidRequestError({ message: error.message }),
-              ),
-            )
+          yield* session.switchModel({ sessionID: ctx.params.sessionID, model: ctx.payload.model }).pipe(
+            Effect.catchTag("Session.NotFoundError", missingSession),
+            Effect.catchTag(
+              "ModelGovernance.DeniedError",
+              (error) => new InvalidRequestError({ message: error.message }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )

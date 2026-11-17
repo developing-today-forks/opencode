@@ -941,7 +941,8 @@ it.effect("benches a routed target after repeated non-retryable timeout failures
           options: {},
           executeTool: () => Effect.die("not used"),
         },
-        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
         recoverContinuation: true,
         recoverOverflow: Effect.succeed(false),
       })
@@ -1030,15 +1031,14 @@ it.effect("benches a routed target after repeated non-retryable 402 billing fail
           options: {},
           executeTool: () => Effect.die("not used"),
         },
-        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
         recoverContinuation: true,
         recoverOverflow: Effect.succeed(false),
       })
 
     const fail = () =>
-      TestLLM.failAfter(
-        new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }),
-      )
+      TestLLM.failAfter(new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }))
     yield* llm.push(fail())
     yield* attempt().pipe(Effect.exit)
     const first = ModelRoute.cooldownUntil(primary.ref)
@@ -3031,7 +3031,10 @@ describe("SessionStep failover classes (#1806)", () => {
     Effect.gen(function* () {
       const { result, fallbackCalls, fallback } = yield* attemptWith(
         new AIError({
-          reason: new UnsupportedOperationError({ message: "operation not supported by this route", operation: "request" }),
+          reason: new UnsupportedOperationError({
+            message: "operation not supported by this route",
+            operation: "request",
+          }),
         }),
         true,
       )
@@ -3255,7 +3258,6 @@ describe("SessionStep dead and walled legs (code#9549)", () => {
   )
 })
 
-
 // #1903: a provider that keeps completing with a few tokens and no message
 // (no text, no reasoning, no tool call) recorded every attempt as a success
 // and looped the session forever. Three in a row now count as a failed
@@ -3295,7 +3297,13 @@ describe("empty-completion streak (#1903)", () => {
         .run()
     })
 
-  const runAttempt = (steps: Effect.Success<typeof SessionStep.make>, llm: TestLLM.TestInterface, sessionID: Session.ID, model: any, scripted: any) =>
+  const runAttempt = (
+    steps: Effect.Success<typeof SessionStep.make>,
+    llm: TestLLM.TestInterface,
+    sessionID: Session.ID,
+    model: any,
+    scripted: any,
+  ) =>
     Effect.gen(function* () {
       yield* llm.push(scripted)
       return yield* steps
@@ -3366,7 +3374,8 @@ describe("empty-completion streak (#1903)", () => {
       const second = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
       expect(Exit.isSuccess(first)).toBe(true)
       expect(Exit.isSuccess(second)).toBe(true)
-      if (Exit.isSuccess(first)) expect(first.value).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
+      if (Exit.isSuccess(first))
+        expect(first.value).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
       expect(fallbackCalls).toBe(0)
 
       const third = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))

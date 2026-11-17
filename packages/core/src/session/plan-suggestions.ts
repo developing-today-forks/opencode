@@ -51,20 +51,15 @@ export const summarizeTurnChanges = (diffs: readonly FileDiff.Info[]): Execution
 }
 
 /** Suggestions for one plan from one turn's diffs. Pure; never mutates `markdown`. */
-export const suggestionsForTurn = (
-  markdown: string,
-  diffs: readonly FileDiff.Info[],
-): ExecutionPlan.Suggestion[] => ExecutionPlan.suggest(markdown, summarizeTurnChanges(diffs))
+export const suggestionsForTurn = (markdown: string, diffs: readonly FileDiff.Info[]): ExecutionPlan.Suggestion[] =>
+  ExecutionPlan.suggest(markdown, summarizeTurnChanges(diffs))
 
 /**
  * Timeline notice lines for a finished turn, across every active
  * plan: one `ExecutionPlan.notice` line per suggestion, in plan
  * order. An empty result means the turn suggested nothing.
  */
-export const planNoticesForTurn = (
-  plans: readonly string[],
-  diffs: readonly FileDiff.Info[],
-): string[] => {
+export const planNoticesForTurn = (plans: readonly string[], diffs: readonly FileDiff.Info[]): string[] => {
   if (diffs.length === 0) return []
   const changes = summarizeTurnChanges(diffs)
   return plans.flatMap((markdown) => ExecutionPlan.suggest(markdown, changes).map(ExecutionPlan.notice))
@@ -75,10 +70,8 @@ export const planNoticesForTurn = (
  * suggestion's step checked. The caller persists the returned
  * markdown to the plan file; nothing is written here.
  */
-export const acceptSuggestion = (
-  markdown: string,
-  suggestion: Pick<ExecutionPlan.Suggestion, "stepIndex">,
-): string => ExecutionPlan.applyCheck(markdown, suggestion)
+export const acceptSuggestion = (markdown: string, suggestion: Pick<ExecutionPlan.Suggestion, "stepIndex">): string =>
+  ExecutionPlan.applyCheck(markdown, suggestion)
 
 /** Dismiss a suggestion: the plan, unchanged. Dismissing is the uncheck path (Q3). */
 export const dismissSuggestion = (markdown: string): string => markdown

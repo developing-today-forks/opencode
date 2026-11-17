@@ -62,15 +62,16 @@ export interface Suggestion {
 const stepPattern = /^(\s*)[-*] \[( |x|X)\]\s+(.*)$/
 
 const normalizePath = (value: string) =>
-  value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/[.,;:]+$/, "")
+  value
+    .replaceAll("\\", "/")
+    .replace(/^\.\//, "")
+    .replace(/[.,;:]+$/, "")
 
 const isDirectoryRef = (value: string) => value.endsWith("/")
 
-const looksLikeFile = (value: string) =>
-  value.includes("/") && /\.[a-z0-9]+$/i.test(value) && !value.includes(" ")
+const looksLikeFile = (value: string) => value.includes("/") && /\.[a-z0-9]+$/i.test(value) && !value.includes(" ")
 
-const looksLikeDirectory = (value: string) =>
-  isDirectoryRef(value) && value.includes("/") && !value.includes(" ")
+const looksLikeDirectory = (value: string) => isDirectoryRef(value) && value.includes("/") && !value.includes(" ")
 
 /** Explicit targets named in a step's text: backticked paths first, then bare path tokens. */
 export const extractTargets = (text: string): StepTargets => {
@@ -110,9 +111,31 @@ export const parse = (markdown: string): Step[] => {
 }
 
 const stopwords = new Set([
-  "the", "and", "for", "with", "into", "from", "that", "this", "then",
-  "step", "add", "update", "create", "implement", "write", "make", "use",
-  "using", "all", "new", "file", "files", "code", "test", "tests",
+  "the",
+  "and",
+  "for",
+  "with",
+  "into",
+  "from",
+  "that",
+  "this",
+  "then",
+  "step",
+  "add",
+  "update",
+  "create",
+  "implement",
+  "write",
+  "make",
+  "use",
+  "using",
+  "all",
+  "new",
+  "file",
+  "files",
+  "code",
+  "test",
+  "tests",
 ])
 
 /** Scope tokens inferred from a step's prose: distinctive words that could name a file or directory. */

@@ -118,7 +118,8 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
     const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
     const declaredSize =
       parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
-    if (declaredSize !== undefined && declaredSize > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return yield* Effect.fail(tooLarge())
+    if (declaredSize !== undefined && declaredSize > TOKEN_REFRESH_MAX_RESPONSE_BYTES)
+      return yield* Effect.fail(tooLarge())
 
     let body = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, declaredSize || 64 * 1024))
     let size = 0
@@ -126,7 +127,9 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
       if (chunk.byteLength === 0) return Effect.void
       if (size + chunk.byteLength > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return Effect.fail(tooLarge())
       if (size + chunk.byteLength > body.byteLength) {
-        const grown = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)))
+        const grown = Buffer.allocUnsafe(
+          Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)),
+        )
         body.copy(grown, 0, 0, size)
         body = grown
       }

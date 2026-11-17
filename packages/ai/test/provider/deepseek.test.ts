@@ -63,12 +63,10 @@ describe("DeepSeek provider", () => {
               // chunk that opens the tool call.
               deltaChunk({
                 reasoning_content: "",
-                tool_calls: [
-                  { index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "" } },
-                ],
+                tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "" } }],
               }),
-              deltaChunk({ tool_calls: [{ index: 0, function: { arguments: "{\"query\":" } }] }),
-              deltaChunk({ tool_calls: [{ index: 0, function: { arguments: "\"weather\"}" } }] }),
+              deltaChunk({ tool_calls: [{ index: 0, function: { arguments: '{"query":' } }] }),
+              deltaChunk({ tool_calls: [{ index: 0, function: { arguments: '"weather"}' } }] }),
               deltaChunk({}, "tool_calls"),
               usageChunk({ prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 }),
             ),
@@ -149,7 +147,7 @@ describe("DeepSeek provider", () => {
           {
             id: "call_1",
             type: "function",
-            function: { name: "lookup", arguments: "{\"query\":\"weather\"}" },
+            function: { name: "lookup", arguments: '{"query":"weather"}' },
           },
         ],
       })

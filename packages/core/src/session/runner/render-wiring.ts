@@ -167,7 +167,9 @@ export const fallbackActionsFor = (
     ...store.plans.map((plan) => plan.providerID),
     ...Object.keys(store.models).map((key) => key.split("/")[0]),
   ]
-  const switchProvider = providers.find((provider) => provider !== undefined && provider !== "" && provider !== wall.providerID)
+  const switchProvider = providers.find(
+    (provider) => provider !== undefined && provider !== "" && provider !== wall.providerID,
+  )
   if (switchProvider === undefined) return undefined
   return [
     { kind: "switch-provider", provider: switchProvider, tier },
@@ -272,7 +274,9 @@ export const applyToolResult = (input: {
   const wall = offeredWall(input.sessionID)
   const store = ModelPlan.readStore(input.dataDir)
   const currentTier =
-    wall === undefined ? undefined : (cardTiers.get(input.sessionID) ?? tierOfModel(store, wall.providerID, wall.modelID))
+    wall === undefined
+      ? undefined
+      : (cardTiers.get(input.sessionID) ?? tierOfModel(store, wall.providerID, wall.modelID))
   const answer = SessionRunnerRenderCard.parseRenderAnswer(input.result, {
     ...(wall?.providerID !== undefined ? { currentProvider: wall.providerID } : {}),
     ...(currentTier !== undefined ? { currentTier } : {}),

@@ -35,14 +35,13 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
       payload: Schema.Struct({ label: Schema.String }),
       success: HttpApiSchema.NoContent,
       error: CredentialNotFoundError,
-    })
-      .annotateMerge(
-        OpenApi.annotations({
-          identifier: "credential.update",
-          summary: "Update credential",
-          description: "Update a stored credential label.",
-        }),
-      ),
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "credential.update",
+        summary: "Update credential",
+        description: "Update a stored credential label.",
+      }),
+    ),
   )
   .annotateMerge(OpenApi.annotations({ title: "credential" }))
   .add(
@@ -50,26 +49,24 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
       params: { credentialID: Credential.ID },
       success: HttpApiSchema.NoContent,
       error: CredentialNotFoundError,
-    })
-      .annotateMerge(
-        OpenApi.annotations({
-          identifier: "credential.activate",
-          summary: "Activate credential",
-          description: "Activate a stored integration credential.",
-        }),
-      ),
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "credential.activate",
+        summary: "Activate credential",
+        description: "Activate a stored integration credential.",
+      }),
+    ),
   )
   .add(
     HttpApiEndpoint.delete("credential.remove", "/api/credential/:credentialID", {
       params: { credentialID: Credential.ID },
       success: HttpApiSchema.NoContent,
       error: CredentialNotFoundError,
-    })
-      .annotateMerge(
-        OpenApi.annotations({
-          identifier: "credential.remove",
-          summary: "Remove credential",
-          description: "Remove a stored integration credential.",
-        }),
-      ),
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "credential.remove",
+        summary: "Remove credential",
+        description: "Remove a stored integration credential.",
+      }),
+    ),
   )

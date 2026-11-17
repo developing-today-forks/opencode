@@ -88,15 +88,11 @@ describe("card inputs from the plan store", () => {
     let store = ModelPlan.emptyStore()
     store = ModelPlan.setModel(store, "deepseek/deepseek-chat", { tier: "cheap" }, now)
     // The walled model is already cheap: no downgrade exists, so no card.
-    expect(
-      Wiring.fallbackActionsFor(store, { providerID: "deepseek", modelID: "deepseek-chat" }),
-    ).toBeUndefined()
+    expect(Wiring.fallbackActionsFor(store, { providerID: "deepseek", modelID: "deepseek-chat" })).toBeUndefined()
     // No second provider anywhere: no switch exists, so no card.
     store = ModelPlan.setModel(store, "anthropic/claude-sonnet-5", { tier: "standard" }, now)
     const only = ModelPlan.setModel(ModelPlan.emptyStore(), "anthropic/claude-sonnet-5", { tier: "standard" }, now)
-    expect(
-      Wiring.fallbackActionsFor(only, { providerID: "anthropic", modelID: "claude-sonnet-5" }),
-    ).toBeUndefined()
+    expect(Wiring.fallbackActionsFor(only, { providerID: "anthropic", modelID: "claude-sonnet-5" })).toBeUndefined()
   })
 })
 
@@ -148,9 +144,7 @@ describe("chooser directive", () => {
     seedStore(dataDir)
     const sessionID = "ses_render_wiring_chooser_gates"
     Wiring.clearSession(sessionID)
-    expect(
-      Wiring.chooserDirective({ sessionID, toolNames: ["bash"], routeBare: true, dataDir }),
-    ).toBeUndefined()
+    expect(Wiring.chooserDirective({ sessionID, toolNames: ["bash"], routeBare: true, dataDir })).toBeUndefined()
     expect(
       Wiring.chooserDirective({ sessionID, toolNames: [RenderCard.RENDER_TOOL_NAME], routeBare: false, dataDir }),
     ).toBeUndefined()
@@ -365,62 +359,64 @@ const insertSession = (sessionID: Session.ID, slug: string) =>
   })
 
 describe("live step wiring", () => {
-  it.effect("a quota failure with exhausted failover ends in the quota-wall state when the render tool is present", () =>
-    Effect.gen(function* () {
-      ModelRoute.resetHealth()
-      const llm = yield* TestLLM.Test
-      const steps = yield* setupStep
-      const sessionID = Session.ID.create()
-      const assistantMessageID = SessionMessage.ID.create()
-      yield* insertSession(sessionID, "render-wall")
-      const primary = SessionRunnerModel.resolved(
-        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
-        { capabilities, cost, limit },
-      )
-      const model = SessionRunnerModel.resolved(primary.model, {
-        capabilities,
-        cost,
-        limit,
-        routing: {
-          routeID: Model.ID.make("render-wall-route"),
-          target: primary.ref,
-          attempts: 1,
-          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
-          fallback: () => Effect.succeed(undefined),
-        },
-      })
-      yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
-      const result = yield* steps
-        .attempt({
-          isLocationClosed: () => false,
-          sessionID,
-          assistantMessageID,
-          agent: Agent.defaultID,
-          model,
-          toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
-          prepared: {
-            retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
-            options: {},
-            executeTool: () => Effect.die("not used"),
+  it.effect(
+    "a quota failure with exhausted failover ends in the quota-wall state when the render tool is present",
+    () =>
+      Effect.gen(function* () {
+        ModelRoute.resetHealth()
+        const llm = yield* TestLLM.Test
+        const steps = yield* setupStep
+        const sessionID = Session.ID.create()
+        const assistantMessageID = SessionMessage.ID.create()
+        yield* insertSession(sessionID, "render-wall")
+        const primary = SessionRunnerModel.resolved(
+          LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+          { capabilities, cost, limit },
+        )
+        const model = SessionRunnerModel.resolved(primary.model, {
+          capabilities,
+          cost,
+          limit,
+          routing: {
+            routeID: Model.ID.make("render-wall-route"),
+            target: primary.ref,
+            attempts: 1,
+            policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+            fallback: () => Effect.succeed(undefined),
           },
-          retry: () => Effect.succeed({ retry: false as const }),
-          recoverContinuation: true,
-          recoverOverflow: Effect.succeed(false),
         })
-        .pipe(Effect.exit)
-      expect(Exit.isSuccess(result)).toBe(true)
-      if (Exit.isSuccess(result)) {
-        expect(result.value._tag).toBe("QuotaWall")
-        if (result.value._tag === "QuotaWall") {
-          expect(result.value.wall.providerID).toBe("openai")
-          expect(result.value.wall.modelID).toBe("primary")
+        yield* llm.push(TestLLM.failAfter(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) })))
+        const result = yield* steps
+          .attempt({
+            isLocationClosed: () => false,
+            sessionID,
+            assistantMessageID,
+            agent: Agent.defaultID,
+            model,
+            toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
+            prepared: {
+              retry: () => Effect.void,
+              request: LLM.request({ model: model.model, prompt: "Check the service" }),
+              options: {},
+              executeTool: () => Effect.die("not used"),
+            },
+            retry: () => Effect.succeed({ retry: false as const }),
+            recoverContinuation: true,
+            recoverOverflow: Effect.succeed(false),
+          })
+          .pipe(Effect.exit)
+        expect(Exit.isSuccess(result)).toBe(true)
+        if (Exit.isSuccess(result)) {
+          expect(result.value._tag).toBe("QuotaWall")
+          if (result.value._tag === "QuotaWall") {
+            expect(result.value.wall.providerID).toBe("openai")
+            expect(result.value.wall.modelID).toBe("primary")
+          }
         }
-      }
-      // The wall is offered exactly once: a second identical failure falls through as before.
-      expect(Wiring.offeredWall(sessionID)).toBeDefined()
-      Wiring.clearSession(sessionID)
-    }),
+        // The wall is offered exactly once: a second identical failure falls through as before.
+        expect(Wiring.offeredWall(sessionID)).toBeDefined()
+        Wiring.clearSession(sessionID)
+      }),
   )
 
   it.effect("the same quota failure without the render tool keeps the bare-error ending", () =>

@@ -24,8 +24,9 @@ const enableRepair = () => {
 
 describe("repairTruncatedToolInput", () => {
   test("closes an unterminated string and the open containers", () => {
-    expect(repairTruncatedToolInput('{"path":"src/a.ts","content":"line one'))
-      .toBe('{"path":"src/a.ts","content":"line one"}')
+    expect(repairTruncatedToolInput('{"path":"src/a.ts","content":"line one')).toBe(
+      '{"path":"src/a.ts","content":"line one"}',
+    )
     expect(repairTruncatedToolInput('{"a":{"b":[1,2')).toBe('{"a":{"b":[1,2]}}')
   })
 

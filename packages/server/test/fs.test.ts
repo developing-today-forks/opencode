@@ -245,16 +245,18 @@ it.live(
         }),
       )
 
-      yield* Effect.forEach([etag, strongEtag, 'W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"], (ifRange) =>
-        Effect.gen(function* () {
-          const mismatchedRange = yield* request("clip.mp4", {
-            headers: { Range: "bytes=1-4", "If-Range": ifRange },
-          })
-          expect(mismatchedRange.status).toBe(200)
-          expect(mismatchedRange.headers.get("content-range")).toBeNull()
-          expect(mismatchedRange.headers.get("content-length")).toBe("10")
-          expect(yield* Effect.promise(() => mismatchedRange.text())).toBe("0123456789")
-        }),
+      yield* Effect.forEach(
+        [etag, strongEtag, 'W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"],
+        (ifRange) =>
+          Effect.gen(function* () {
+            const mismatchedRange = yield* request("clip.mp4", {
+              headers: { Range: "bytes=1-4", "If-Range": ifRange },
+            })
+            expect(mismatchedRange.status).toBe(200)
+            expect(mismatchedRange.headers.get("content-range")).toBeNull()
+            expect(mismatchedRange.headers.get("content-length")).toBe("10")
+            expect(yield* Effect.promise(() => mismatchedRange.text())).toBe("0123456789")
+          }),
       )
 
       // 8. Confinement enforced (404 FileNotFoundError instead of 500)

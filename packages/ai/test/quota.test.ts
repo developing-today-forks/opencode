@@ -15,7 +15,12 @@ import {
   toUsageWindow,
 } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
-import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import {
+  parseConsoleBillingBalance,
+  parseConsoleGoUsage,
+  parseOpenCodeGoUsage,
+  fetchOpenCodeGoUsage,
+} from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/openai.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
@@ -28,7 +33,13 @@ import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider, teamIdOf } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
-import { fetchAllQuota, fetchQuotaForProviderInstances, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
+import {
+  fetchAllQuota,
+  fetchQuotaForProviderInstances,
+  listConfiguredQuotaProviders,
+  listConfiguredQuotaProvidersDetailed,
+  quotaProbeFailureResult,
+} from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -134,18 +145,16 @@ describe("mistral budget label currency (#1805)", () => {
   // are the ones pool rotation actually reads.
   const fetchWith = (budget: Record<string, unknown>) =>
     mistralProvider.fetchQuota({
-      credentials: [
-        { id: "row-1", integrationID: "mistral", active: true, value: { type: "key", key: "sk-fixture" } },
-      ],
+      credentials: [{ id: "row-1", integrationID: "mistral", active: true, value: { type: "key", key: "sk-fixture" } }],
       disabledProviders: new Set<string>(),
       instances: new Map(),
       providerConfig: {},
       env: { MISTRAL_ADMIN_COOKIE: "fixture-cookie" },
       fetchImpl: async () =>
-        new Response(
-          JSON.stringify({ result: { data: { json: { api_budget: budget, vibe_budget: budget } } } }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+        new Response(JSON.stringify({ result: { data: { json: { api_budget: budget, vibe_budget: budget } } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     } as never)
 
   test("a non-USD budget denominates both windows in the payload currency", async () => {
@@ -177,9 +186,7 @@ describe("meta key-endpoint subs_usage windows (#1907)", () => {
   // used_percent publishes no window.
   const fetchWith = (subsUsage: Record<string, unknown> | undefined, active?: boolean) =>
     metaProvider.fetchQuota({
-      credentials: [
-        { id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } },
-      ],
+      credentials: [{ id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } }],
       disabledProviders: new Set<string>(),
       instances: new Map(),
       providerConfig: {},
@@ -532,8 +539,26 @@ describe("turso org usage mapping", () => {
     // source of truth; matching is by plan name, case-insensitively.
     const plans = {
       plans: [
-        { name: "starter", quotas: { rowsRead: 500_000_000, rowsWritten: 10_000_000, databases: 100, storage: 5_000_000_000, bytesSynced: 3_000_000_000 } },
-        { name: "Scaler", quotas: { rowsRead: 100_000_000_000, rowsWritten: 100_000_000, databases: 1_000_000_000, storage: 24_000_000_000, bytesSynced: 24_000_000_000 } },
+        {
+          name: "starter",
+          quotas: {
+            rowsRead: 500_000_000,
+            rowsWritten: 10_000_000,
+            databases: 100,
+            storage: 5_000_000_000,
+            bytesSynced: 3_000_000_000,
+          },
+        },
+        {
+          name: "Scaler",
+          quotas: {
+            rowsRead: 100_000_000_000,
+            rowsWritten: 100_000_000,
+            databases: 1_000_000_000,
+            storage: 24_000_000_000,
+            bytesSynced: 24_000_000_000,
+          },
+        },
       ],
     }
     const usage = {
@@ -547,7 +572,11 @@ describe("turso org usage mapping", () => {
         },
       },
     }
-    const sub = { plan: "scaler", current_billing_period_start: "2026-11-01T00:00:00Z", current_billing_period_end: "2026-12-01T00:00:00Z" }
+    const sub = {
+      plan: "scaler",
+      current_billing_period_start: "2026-11-01T00:00:00Z",
+      current_billing_period_end: "2026-12-01T00:00:00Z",
+    }
     const mapped = tursoWindows(usage, sub, plans)
     expect(mapped?.planLabel).toBe("scaler")
     expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
@@ -567,7 +596,11 @@ describe("turso org usage mapping", () => {
     expect(mapped?.windows.storage?.usedPercent).toBe(45)
     expect(mapped?.windows.storage?.valueLabel).toBe("10.8 GB / 24 GB")
     // Plans doc present but not matching the plan name: same fallback.
-    const unmatched = tursoWindows(usage, { plan: "scaler" }, { plans: [{ name: "starter", quotas: { rowsRead: 500_000_000 } }] })
+    const unmatched = tursoWindows(
+      usage,
+      { plan: "scaler" },
+      { plans: [{ name: "starter", quotas: { rowsRead: 500_000_000 } }] },
+    )
     expect(unmatched?.windows["rows-read"]?.usedPercent).toBe(1.18)
   })
 
@@ -745,7 +778,17 @@ describe("toTimestamp non-positive handling (#1845)", () => {
 
   test("turso: non-positive period bounds derive neither a reset nor a windowSeconds", () => {
     const mapped = tursoWindows(
-      { organization: { usage: { rows_read: 250_000_000, rows_written: 1_000_000, storage_bytes: 2_500_000_000, bytes_synced: 0, databases: 44 } } },
+      {
+        organization: {
+          usage: {
+            rows_read: 250_000_000,
+            rows_written: 1_000_000,
+            storage_bytes: 2_500_000_000,
+            bytes_synced: 0,
+            databases: 44,
+          },
+        },
+      },
       { plan: "scaler", current_period_start: -10000, current_period_end: -5000 },
     )
     const window = Object.values(mapped?.windows ?? {})[0]
@@ -807,7 +850,6 @@ describe("toNumber blank-string handling (#1741)", () => {
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: " " } })).toEqual({})
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
   })
-
 
   test("an empty percent field mints no 0%-used opencode-go window", () => {
     // Rule 4: an entry with no usable percent publishes no window (a
@@ -1171,7 +1213,9 @@ describe("opendesign coding-plan windows (#1750)", () => {
   })
 
   test("a zero-limit entry publishes no window", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] }),
+    ).toBeNull()
     const windows = parseCodingPlanWindows({
       windows: [
         { durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 },
@@ -1190,7 +1234,9 @@ describe("opendesign coding-plan windows (#1750)", () => {
       ],
     })
     expect(windows?.["5h"]?.usedPercent).toBe(75)
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] }),
+    ).toBeNull()
     expect(parseCodingPlanWindows({})).toBeNull()
     expect(parseCodingPlanWindows({ windows: "nope" })).toBeNull()
     expect(parseCodingPlanWindows(null)).toBeNull()
@@ -1978,7 +2024,9 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   })
 
   test("rule 4 (no figure, no window): opendesign zero-limit entry and command-code balance-only payload publish nothing", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] }),
+    ).toBeNull()
     expect(parseCommandCodeCredits({ credits: { purchasedCredits: 40, freeCredits: 15 } })).toEqual({})
   })
 
@@ -2056,7 +2104,9 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   })
 
   test("rule 6 (unknown kinds skipped, not renamed): opendesign unknown duration publishes no familiar label", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] }),
+    ).toBeNull()
   })
 
   test("rule 6 (unknown kinds skipped, not renamed): cline-pass unknown limit type publishes no window", async () => {
@@ -2116,7 +2166,13 @@ describe("quota figure contract — shared figure probe matrix (#1943, design #1
   test("rule 1 (negative figure reads as absent): meta, opencode-go, turso, codex and deepseek negative figures publish nothing", async () => {
     expect(parseBillingBanner({ remaining_minor_units: -5, currency: "USD" })).toBeNull()
     expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
-    expect(parseConsoleGoUsage({ access: { meters: { fiveHour: { limitMicroCents: 100, usedMicroCents: -1, resetsAt: "2027-01-01T00:00:00Z" } } } })).toEqual({})
+    expect(
+      parseConsoleGoUsage({
+        access: {
+          meters: { fiveHour: { limitMicroCents: 100, usedMicroCents: -1, resetsAt: "2027-01-01T00:00:00Z" } },
+        },
+      }),
+    ).toEqual({})
     expect(tursoWindows({ usage: { databases: -1 } }, {})?.windows.databases).toBeUndefined()
     const codex = await codexFetchWith({ credits: { balance: -5, unlimited: false } })
     expect(codex.usage?.windows.credits_balance).toBeUndefined()
@@ -2144,10 +2200,14 @@ describe("quota figure contract — shared figure probe matrix (#1943, design #1
     const ccUnder = parseCommandCodeCredits({ windowLimits: { fiveHour: { used: -5, cap: 10 } } })
     expect(ccUnder["5h"]?.usedPercent).toBe(0)
     expect(ccUnder["5h"]?.valueLabel).toBe("0 / 10")
-    const odOver = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }] })
+    const odOver = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
+    })
     expect(odOver?.["5h"]?.usedPercent).toBe(0)
     expect(odOver?.["5h"]?.valueLabel).toBe("100 / 100 credits")
-    const odUnder = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }] })
+    const odUnder = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }],
+    })
     expect(odUnder?.["5h"]?.usedPercent).toBe(100)
     expect(odUnder?.["5h"]?.valueLabel).toBe("0 / 100 credits")
     const codex = await codexFetchWith({ spend_control: { individual_limit: { used: 15, limit: 10 } } })
@@ -2389,25 +2449,19 @@ describe("antigravity quota summary figure check (#1917)", () => {
   })
 
   test("a summary group built only from figure-less buckets carries no windows", () => {
-    const groups = transformSummary(
-      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
-    )
+    const groups = transformSummary(summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never)
     expect(groups[0].windows).toEqual({})
     expect(groups[0].bucket5h).toBeNull()
   })
 
   test("a matched model inherits no window from a figure-less group", () => {
-    const groups = transformSummary(
-      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
-    )
+    const groups = transformSummary(summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never)
     const models = transformModels({ models: { "gemini-x": {} } } as never, groups)
     expect(models["gemini-x"]?.windows ?? {}).toEqual({})
   })
 
   test("a present remainingFraction still publishes its window (control)", () => {
-    const parsed = parseBucket(
-      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
-    )
+    const parsed = parseBucket({ window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never)
     expect(parsed?.window.usedPercent).toBe(50)
     expect(parsed?.window.remainingPercent).toBe(50)
   })
@@ -2428,10 +2482,7 @@ describe("antigravity quota transformModels fallback figure check (#1912)", () =
 
   test("a reset-only quotaInfo publishes no entry — no label is derived from a reset alone", () => {
     expect(
-      transformModels(
-        { models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never,
-        [],
-      ),
+      transformModels({ models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never, []),
     ).toEqual({})
   })
 
@@ -2505,18 +2556,18 @@ describe("antigravity quota float percents (#1941)", () => {
       [0.504, 49.6],
     ]
     for (const [fraction, used] of cases) {
-      const parsed = parseBucket(
-        { window: "5h", remainingFraction: fraction, resetTime: "2026-12-01T00:00:00Z" } as never,
-      )
+      const parsed = parseBucket({
+        window: "5h",
+        remainingFraction: fraction,
+        resetTime: "2026-12-01T00:00:00Z",
+      } as never)
       expect(parsed?.window.usedPercent).toBeCloseTo(used, 10)
       expect(parsed?.window.remainingPercent).toBeCloseTo(100 - used, 10)
       // The raw fraction retention (weekly-constrained ordering) is unchanged.
       expect(parsed?.remainingFraction).toBe(fraction)
     }
     // Round-fraction control stays exact.
-    const control = parseBucket(
-      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
-    )
+    const control = parseBucket({ window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never)
     expect(control?.window.usedPercent).toBe(50)
     expect(control?.window.remainingPercent).toBe(50)
   })
@@ -2878,7 +2929,6 @@ describe("getAuthEntry reads own properties only (#2189)", () => {
   })
 })
 
-
 describe("opencode-go instance fold (popesdrew labelled row)", () => {
   // The popesdrew account's credential is a Console sign-in stored under its
   // OWN instance integration (opencode-go.popesdrew), not under the shared
@@ -3024,7 +3074,14 @@ describe("exaone quota leg — no-quota-surface validity probe (R33)", () => {
     expect(result.ok).toBe(false)
     expect(result.configured).toBe(false)
     expect(result.error).toBe("Not configured")
-    expect(exaoneProvider.isConfigured({ credentials: [], disabledProviders: new Set(), instances: new Map(), providerConfig: {} })).toBe(false)
+    expect(
+      exaoneProvider.isConfigured({
+        credentials: [],
+        disabledProviders: new Set(),
+        instances: new Map(),
+        providerConfig: {},
+      }),
+    ).toBe(false)
   })
 
   test("a valid key publishes no-quota-surface with the key expiry, never a window", async () => {
@@ -3070,7 +3127,12 @@ describe("google quota leg — per-project no-quota-surface probe (R33)", () => 
   // the Cloud console / Cloud Quotas API (OAuth-gated); an API key
   // reads project liveness only. Each google-free project instance
   // reports individually under its own id — no combined figure.
-  const drewRow = { id: "row-drew", integrationID: "google.drew", active: true, value: { type: "key", key: "fixture-key" } }
+  const drewRow = {
+    id: "row-drew",
+    integrationID: "google.drew",
+    active: true,
+    value: { type: "key", key: "fixture-key" },
+  }
   const baseCtx = (fetchImpl: typeof fetch) => ({
     credentials: [drewRow],
     disabledProviders: new Set<string>(["google"]),
@@ -3146,7 +3208,12 @@ describe("google quota leg — per-project no-quota-surface probe (R33)", () => 
       id: "row-oauth",
       integrationID: "google.muse",
       active: true,
-      value: { type: "oauth", access: "fixture-access", refresh: "fixture-refresh|fixture-project|fixture-managed", expires: 0 },
+      value: {
+        type: "oauth",
+        access: "fixture-access",
+        refresh: "fixture-refresh|fixture-project|fixture-managed",
+        expires: 0,
+      },
     }
     const ctx = {
       credentials: [oauthRow],

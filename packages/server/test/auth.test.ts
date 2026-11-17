@@ -58,9 +58,7 @@ test("session cookies require a same-scheme same-authority Origin", async () => 
   expect(await authorized("/api/info", "http://localhost:3000")).toBe(true)
   expect(await authorized("/api/info", "https://localhost:3000")).toBe(false)
   expect(await authorized("https://localhost:3000/api/info", "http://localhost:3000")).toBe(false)
-  expect(
-    await authorized("/api/info", "https://localhost:3000", { "x-forwarded-proto": "https" }),
-  ).toBe(false)
+  expect(await authorized("/api/info", "https://localhost:3000", { "x-forwarded-proto": "https" })).toBe(false)
   expect(await authorized("/api/info")).toBe(true)
   expect(await authorized("/api/info", "not an origin")).toBe(false)
 })

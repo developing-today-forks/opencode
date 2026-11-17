@@ -185,7 +185,9 @@ describe("pool targets", () => {
     // never fired. The ownValue guard must yield the fallback instead.
     expect(expand("r", routesWithWeights({ "openai/gpt-6-luna": 2 }), definitions).nodes[0].weights).toEqual([1, 2])
     // An own key named "constructor" still resolves to its configured weight.
-    expect(expand("r", routesWithWeights({ constructor: 4, "openai/gpt-6-luna": 2 }), definitions).nodes[0].weights).toEqual([4, 2])
+    expect(
+      expand("r", routesWithWeights({ constructor: 4, "openai/gpt-6-luna": 2 }), definitions).nodes[0].weights,
+    ).toEqual([4, 2])
   })
 
   test("a glob that matches nothing contributes nothing and does not fail the route", () => {
@@ -533,13 +535,14 @@ describe("named windows", () => {
         type: "document",
         info: {
           experimental: {
-            routes: { windows: {
-              bad: { start: "25:99", end: "17:00" },
-              peak: { daysOfWeek: [1, 5], start: "09:00", end: "17:00" },
+            routes: {
+              windows: {
+                bad: { start: "25:99", end: "17:00" },
+                peak: { daysOfWeek: [1, 5], start: "09:00", end: "17:00" },
+              },
             },
           },
         },
-      },
       },
     ] as unknown as Entry[]
     let parsed: ReturnType<typeof configuredWindows> | undefined
@@ -559,21 +562,22 @@ describe("named windows", () => {
         type: "document",
         info: {
           experimental: {
-            routes: { windows: {
-              "cn-holidays": { dates: ["2026-10-01"], timezone: "Asia/Shanghai" },
-              peak: {
-                daysOfWeek: [1, 2, 3, 4, 5],
-                start: "09:00",
-                end: "17:00",
-                timezone: "Asia/Shanghai",
-                excludeWindows: ["cn-holidays"],
+            routes: {
+              windows: {
+                "cn-holidays": { dates: ["2026-10-01"], timezone: "Asia/Shanghai" },
+                peak: {
+                  daysOfWeek: [1, 2, 3, 4, 5],
+                  start: "09:00",
+                  end: "17:00",
+                  timezone: "Asia/Shanghai",
+                  excludeWindows: ["cn-holidays"],
+                },
+                broken: { excludeWindows: ["nope"] },
+                selfish: { excludeWindows: ["selfish"] },
               },
-              broken: { excludeWindows: ["nope"] },
-              selfish: { excludeWindows: ["selfish"] },
             },
           },
         },
-      },
       },
     ] as unknown as Entry[]
     let parsed: ReturnType<typeof configuredWindows> | undefined
@@ -715,8 +719,14 @@ describe("per-target context limits", () => {
   test("a leaf reached through several references keeps the smallest ceiling", () => {
     const both = (first: object, second: object) =>
       new Map<string, ConfigModelRoutes.Route>([
-        ["a", { targets: [{ model: { providerID: "anthropic", model: "opus" } }] } as unknown as ConfigModelRoutes.Route],
-        ["b", { targets: [{ model: { providerID: "anthropic", model: "opus" } }] } as unknown as ConfigModelRoutes.Route],
+        [
+          "a",
+          { targets: [{ model: { providerID: "anthropic", model: "opus" } }] } as unknown as ConfigModelRoutes.Route,
+        ],
+        [
+          "b",
+          { targets: [{ model: { providerID: "anthropic", model: "opus" } }] } as unknown as ConfigModelRoutes.Route,
+        ],
         [
           "r",
           {
@@ -777,10 +787,9 @@ describe("cache formats", () => {
   test("a target-level cache_format overrides the route-level one", () => {
     const { leaves } = expand(
       "r",
-      route(
-        [{ model: "anthropic/claude-opus-4-1", cache_format: "alibaba" }, "openai/gpt-6-luna"],
-        { cache_format: "anthropic" },
-      ),
+      route([{ model: "anthropic/claude-opus-4-1", cache_format: "alibaba" }, "openai/gpt-6-luna"], {
+        cache_format: "anthropic",
+      }),
       definitions,
     )
     expect(leaves.map((leaf) => leaf.cacheFormat)).toEqual(["alibaba", "anthropic"])
@@ -849,9 +858,9 @@ describe("door-set targets (#637)", () => {
   })
 
   test("a door that does not list the model contributes nothing, and a model no door lists contributes nothing", () => {
-    expect(refs(expand("r", doorRoute([{ model: { providerID: "*", model: "claude-sonnet-4-5" } }]), doors).leaves)).toEqual([
-      "anthropic/claude-sonnet-4-5",
-    ])
+    expect(
+      refs(expand("r", doorRoute([{ model: { providerID: "*", model: "claude-sonnet-4-5" } }]), doors).leaves),
+    ).toEqual(["anthropic/claude-sonnet-4-5"])
     expect(expand("r", doorRoute([{ model: { providerID: "*", model: "no-such-model" } }]), doors).leaves).toEqual([])
   })
 
@@ -877,7 +886,11 @@ describe("door-set targets (#637)", () => {
         ]),
       ],
     ])
-    const { leaves } = expand("r", doorRoute([{ model: { providerID: "*", model: "deepseek-v4-flash" } }]), withDisabled)
+    const { leaves } = expand(
+      "r",
+      doorRoute([{ model: { providerID: "*", model: "deepseek-v4-flash" } }]),
+      withDisabled,
+    )
     expect(refs(leaves)).toEqual(["anthropic/deepseek-v4-flash"])
   })
 
@@ -944,7 +957,6 @@ describe("door-set targets (#637)", () => {
   })
 })
 
-
 describe("pinned variants on suffixed-catalog providers (#985)", () => {
   const proxy = Provider.ID.make("proxy")
   // Definition-stage shape for proxy providers (Antigravity, Open Design): the
@@ -959,17 +971,12 @@ describe("pinned variants on suffixed-catalog providers (#985)", () => {
       ]),
     ],
   ])
-  const raw = (entries: [string, unknown][]) =>
-    new Map(entries as [string, ConfigModelRoutes.Route][])
+  const raw = (entries: [string, unknown][]) => new Map(entries as [string, ConfigModelRoutes.Route][])
 
   test("a pinned variant the catalog exposes as a suffixed model does not prune the leaf", () => {
-    const routes = raw([
-      ["r", { targets: [{ model: { providerID: "proxy", model: "m", variant: "high" } }] }],
-    ])
+    const routes = raw([["r", { targets: [{ model: { providerID: "proxy", model: "m", variant: "high" } }] }]])
     const { leaves } = expand("r", routes, defs)
-    expect(leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}#${leaf.ref.variant}`)).toEqual([
-      "proxy/m#high",
-    ])
+    expect(leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}#${leaf.ref.variant}`)).toEqual(["proxy/m#high"])
   })
 
   test("a variant inherited through a nested route does not prune the leaf either", () => {
@@ -978,15 +985,11 @@ describe("pinned variants on suffixed-catalog providers (#985)", () => {
       ["r", { targets: [{ model: { providerID: "opencode-route", model: "pool", variant: "high" } }] }],
     ])
     const { leaves } = expand("r", routes, defs)
-    expect(leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}#${leaf.ref.variant}`)).toEqual([
-      "proxy/m#high",
-    ])
+    expect(leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}#${leaf.ref.variant}`)).toEqual(["proxy/m#high"])
   })
 
   test("a pinned variant with no native, remapped, or suffixed evidence still prunes", () => {
-    const routes = raw([
-      ["r", { targets: [{ model: { providerID: "proxy", model: "m", variant: "ultra" } }] }],
-    ])
+    const routes = raw([["r", { targets: [{ model: { providerID: "proxy", model: "m", variant: "ultra" } }] }]])
     const { leaves } = expand("r", routes, defs)
     expect(leaves).toEqual([])
   })
@@ -1010,9 +1013,7 @@ describe("provider routes", () => {
     id: string,
     extra: Partial<ModelRoute.ProviderRoute> = {},
   ): ReadonlyMap<string, ModelRoute.ProviderRoute> =>
-    new Map([
-      [id, { providers: ["openai.alternate", "openai"], selection: "ordered" as const, weights: {}, ...extra }],
-    ])
+    new Map([[id, { providers: ["openai.alternate", "openai"], selection: "ordered" as const, weights: {}, ...extra }]])
   const definitionOf = (expanded: ReturnType<typeof expand>): ModelRoute.Definition =>
     ({
       id: "r",
@@ -1025,7 +1026,13 @@ describe("provider routes", () => {
     expanded.leaves.map((leaf) => `${leaf.ref.providerID}/${leaf.ref.id}`)
 
   test("a provider route target expands to a marked group of the members' leaves for the model, in member order", () => {
-    const { leaves, nodes } = expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan"))
+    const { leaves, nodes } = expand(
+      "r",
+      route(["openai-plan/gpt-6.1-terra"]),
+      both,
+      new Map(),
+      providerRoutes("openai-plan"),
+    )
     expect(refs({ leaves, nodes, diagnostics: [] })).toEqual(["openai.alternate/gpt-6.1-terra", "openai/gpt-6.1-terra"])
     expect(nodes).toHaveLength(2)
     expect(nodes[0].children).toEqual([{ node: 1 }])
@@ -1137,7 +1144,9 @@ describe("provider routes", () => {
   })
 
   test("ordered provider route: the first ready member serves, and failover falls through to the next", () => {
-    const definition = definitionOf(expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan")))
+    const definition = definitionOf(
+      expand("r", route(["openai-plan/gpt-6.1-terra"]), both, new Map(), providerRoutes("openai-plan")),
+    )
     const all = new Set([0, 1])
     expect(ModelRoute.nextTarget(definition, all, new Set(), "s1", true)).toBe(0)
     expect(ModelRoute.nextTarget(definition, new Set([1]), new Set(), "s2", true)).toBe(1)
@@ -1146,10 +1155,18 @@ describe("provider routes", () => {
 
   test("round-robin provider route rotates evenly across sessions", () => {
     const definition = definitionOf(
-      expand("r", route(["plan-rr/gpt-6.1-terra"]), both, new Map(), providerRoutes("plan-rr", { selection: "round-robin" })),
+      expand(
+        "r",
+        route(["plan-rr/gpt-6.1-terra"]),
+        both,
+        new Map(),
+        providerRoutes("plan-rr", { selection: "round-robin" }),
+      ),
     )
     const all = new Set([0, 1])
-    const heads = ["s1", "s2", "s3", "s4"].map((session) => ModelRoute.nextTarget(definition, all, new Set(), session, true))
+    const heads = ["s1", "s2", "s3", "s4"].map((session) =>
+      ModelRoute.nextTarget(definition, all, new Set(), session, true),
+    )
     expect(heads).toEqual([0, 1, 0, 1])
   })
 
@@ -1207,9 +1224,7 @@ describe("configuredProviderRoutes", () => {
   })
 
   test("an id naming a concrete provider, the routes provider, or a route is dropped with a warning", () => {
-    const routes = new Map<string, ConfigModelRoutes.Route>([
-      ["terra-plan", {} as unknown as ConfigModelRoutes.Route],
-    ])
+    const routes = new Map<string, ConfigModelRoutes.Route>([["terra-plan", {} as unknown as ConfigModelRoutes.Route]])
     let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
     const messages = warnings(() => {
       parsed = configuredProviderRoutes(
@@ -1238,11 +1253,7 @@ describe("configuredProviderRoutes", () => {
   test("a '*' member is dropped with a warning and never expands beyond the declared members (#1420)", () => {
     let parsed: ReturnType<typeof configuredProviderRoutes> | undefined
     const messages = warnings(() => {
-      parsed = configuredProviderRoutes(
-        entriesWith({ "openai-plan": { providers: ["openai", "*"] } }),
-        known,
-        noRoutes,
-      )
+      parsed = configuredProviderRoutes(entriesWith({ "openai-plan": { providers: ["openai", "*"] } }), known, noRoutes)
     })
     expect(parsed?.get("openai-plan")?.providers).toEqual(["openai"])
     expect(messages).toHaveLength(1)
@@ -1288,7 +1299,7 @@ describe("configuredProviderRoutes", () => {
     expect(messages).toHaveLength(2)
     expect(messages[0]).toContain('"openai-plan"')
     expect(messages[1]).toContain('"openai-plan"')
-    expect(messages[1]).toContain('the member is dropped')
+    expect(messages[1]).toContain("the member is dropped")
   })
 
   test("a member naming another provider route or the routes provider drops, duplicates drop, an unknown member stays with a warning", () => {

@@ -70,7 +70,8 @@ const ESCAPE_MAP: Record<string, string> = {
   "'": "&#39;",
 }
 
-const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (char) => ownValue(ESCAPE_MAP, char) ?? char)
+const escapeHtml = (value: unknown): string =>
+  String(value ?? "").replace(/[&<>"']/g, (char) => ownValue(ESCAPE_MAP, char) ?? char)
 
 const capitalizeTier = (tier: string): string => (tier ? tier.charAt(0).toUpperCase() + tier.slice(1) : tier)
 
@@ -98,7 +99,7 @@ const answerScript = () =>
     'var payload;try{payload=JSON.parse(btn.getAttribute("data-payload"));}catch(e){return;}',
     'var summary=btn.getAttribute("data-summary")||(btn.textContent||"").trim();',
     "btn.disabled=true;",
-    "window.openchamber.submit(payload,summary).then(function(){btn.setAttribute(\"aria-pressed\",\"true\");})",
+    'window.openchamber.submit(payload,summary).then(function(){btn.setAttribute("aria-pressed","true");})',
     ".catch(function(){btn.disabled=false;});",
     "});});})();</script>",
   ].join("")
@@ -220,7 +221,8 @@ export const quotaFallbackCard = (input: {
   const tiles = input.actions
     .map((action) => {
       const payload = JSON.stringify({ action: "fallback", provider: action.provider, tier: action.tier })
-      const summary = action.summary ?? action.label ?? `${FALLBACK_LABELS[action.kind]}: ${action.provider}/${action.tier}`
+      const summary =
+        action.summary ?? action.label ?? `${FALLBACK_LABELS[action.kind]}: ${action.provider}/${action.tier}`
       const heading = action.label ?? FALLBACK_LABELS[action.kind]
       return [
         `<button type="button" class="oc-option" data-kind="${escapeHtml(action.kind)}"`,
@@ -269,7 +271,8 @@ export type RenderAnswer =
   | { readonly type: "chat"; readonly note: string }
   | { readonly type: "none" }
 
-const isTier = (value: unknown): value is ModelPlan.Tier => value === "cheap" || value === "standard" || value === "frontier"
+const isTier = (value: unknown): value is ModelPlan.Tier =>
+  value === "cheap" || value === "standard" || value === "frontier"
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined
@@ -430,7 +433,12 @@ export const applyTierChoice = (
 export const applyQuotaFallback = (
   choice: QuotaFallbackChoice,
   wall: QuotaWall,
-): { readonly instruction: { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier } | { readonly kind: "wait"; readonly until?: number }; readonly note: ModelPlan.NoteInput } =>
+): {
+  readonly instruction:
+    | { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier }
+    | { readonly kind: "wait"; readonly until?: number }
+  readonly note: ModelPlan.NoteInput
+} =>
   choice.kind === "wait"
     ? {
         instruction: { kind: "wait", until: wall.resetAt },

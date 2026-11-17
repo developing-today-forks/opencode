@@ -223,9 +223,9 @@ describe("SessionStep.failureHint", () => {
 
 describe("SessionStep.quotaFailureClassification", () => {
   test("a QuotaExceeded tag is balance exhaustion", () => {
-    expect(
-      SessionStep.quotaFailureClassification(error(new QuotaExceededError({ message: "out of quota" }))),
-    ).toBe("balance-exhaustion")
+    expect(SessionStep.quotaFailureClassification(error(new QuotaExceededError({ message: "out of quota" })))).toBe(
+      "balance-exhaustion",
+    )
   })
 
   test("explicitly credit/balance-specific text is balance exhaustion", () => {

@@ -146,7 +146,9 @@ describe("retargetDefinition (#236)", () => {
     const definitions = new Map<Provider.ID, ReadonlyMap<string, Model.Info>>([[azure, catalog]])
     const { leaves, nodes } = expand("r", routeMap, definitions)
     const limits = (items: typeof leaves) =>
-      items.map((leaf) => ({ context: Math.min(leaf.model.limit.context, leaf.contextLimit ?? Number.POSITIVE_INFINITY) }))
+      items.map((leaf) => ({
+        context: Math.min(leaf.model.limit.context, leaf.contextLimit ?? Number.POSITIVE_INFINITY),
+      }))
     const before = {
       id: Model.ID.make("r"),
       targets: leaves.map((leaf) => leaf.ref),
@@ -211,9 +213,7 @@ describe("retargetDefinition (#236)", () => {
     // The target refs are identical, but the stored mapping was stale: without a
     // replacement definition the resolver would run the model bare under #max
     // instead of at the remapped #high.
-    expect(next?.definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual([
-      "azure/gpt-5-base",
-    ])
+    expect(next?.definition?.targets.map((target) => `${target.providerID}/${target.id}`)).toEqual(["azure/gpt-5-base"])
     expect(next?.definition?.targetVariants).toEqual([{ map: { max: Model.VariantID.make("high") } }])
   })
 })
@@ -354,7 +354,6 @@ it.effect("Model.Editor.ids lists current ids without drafting, including transf
   }),
 )
 
-
 describe("retargetDefinition editor refresh (#985)", () => {
   test("a definition-stage model the editor completes later retargets with its variants", () => {
     // The definition-stage catalog holds the base model with no variants, so
@@ -373,8 +372,7 @@ describe("retargetDefinition editor refresh (#985)", () => {
         get: () => undefined,
       },
       ids: () => [],
-      get: (providerID: Provider.ID, modelID: Model.ID) =>
-        String(modelID) === "base" ? completed : undefined,
+      get: (providerID: Provider.ID, modelID: Model.ID) => (String(modelID) === "base" ? completed : undefined),
     } as unknown as Parameters<typeof retargetDefinition>[2]
     const routeMap = new Map<string, ConfigModelRoutes.Route>([
       [

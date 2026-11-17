@@ -1016,7 +1016,8 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     expect(row?.issue).toBeUndefined()
   })
 
-  test("known-lossy rows cannot link a closed issue", () => {    // #1574 closed completed on 2026-11-05 via PR #1647 while its Moonshot row
+  test("known-lossy rows cannot link a closed issue", () => {
+    // #1574 closed completed on 2026-11-05 via PR #1647 while its Moonshot row
     // still pointed at it as a live known-lossy link; the row was reclassified
     // to approximated/widening under #1933. When a known-lossy row's issue
     // closes, reclassify the row (or re-link it to a live tracking issue) in

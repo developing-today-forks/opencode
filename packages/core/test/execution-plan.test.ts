@@ -71,9 +71,7 @@ describe("ExecutionPlan.suggest — explicit matching (Q2)", () => {
   test("a partial explicit match is not suggested", () => {
     const two = "- [ ] Wire `src/a.ts` and `src/b.ts` together"
     expect(ExecutionPlan.suggest(two, { added: ["src/a.ts"], modified: [], deleted: [] })).toEqual([])
-    expect(
-      ExecutionPlan.suggest(two, { added: ["src/a.ts"], modified: ["src/b.ts"], deleted: [] }).length,
-    ).toBe(1)
+    expect(ExecutionPlan.suggest(two, { added: ["src/a.ts"], modified: ["src/b.ts"], deleted: [] }).length).toBe(1)
   })
 
   test("a directory target is satisfied by any change under it", () => {

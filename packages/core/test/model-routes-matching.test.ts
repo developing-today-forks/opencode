@@ -252,7 +252,7 @@ describe("pool matching keys", () => {
     const routes = pools({
       "dead-include": { include: ["*no-such-model*"] },
       "dead-match": { match: "*no-such-model* and not *luna*" },
-      "emptied": { include: ["*luna*"], exclude: ["*luna*"] },
+      emptied: { include: ["*luna*"], exclude: ["*luna*"] },
       "targets-plus-dead-key": { targets: ["openai/luna-6"], include: ["*no-such-model*"] },
       alive: { include: ["*luna*"] },
     })
