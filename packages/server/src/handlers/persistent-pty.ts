@@ -1,5 +1,5 @@
 import { PersistentPty } from "@opencode/core/persistent-pty"
-import { PersistentPty as PersistentPtySchema } from "@opencode/schema/persistent-pty"
+import { AttachmentID } from "@opencode/schema/persistent-pty"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import { ForbiddenError, PtyNotFoundError, ServiceUnavailableError } from "@opencode/protocol/errors"
 import {
@@ -122,7 +122,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
           const framedInput = url.searchParams.get("input_protocol") === "1"
           const attachmentID = url.searchParams.get("attachment_id") ?? crypto.randomUUID()
           if (!Number.isSafeInteger(cursor) || cursor < 0) return HttpServerResponse.empty({ status: 400 })
-          if (!Schema.is(PersistentPtySchema.AttachmentID)(attachmentID))
+          if (!Schema.is(AttachmentID)(attachmentID))
             return HttpServerResponse.empty({ status: 400 })
 
           const socket = yield* Effect.orDie(ctx.request.upgrade)

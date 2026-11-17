@@ -12,10 +12,11 @@ export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], di
       const { resolve, relative, isAbsolute, sep, basename, extname } = await import("node:path")
       // Uploads are authorized by containment in the project directory
       // (#2289): the plugin context exposes no FileAccess service, so
-      // the project directory is the authorization boundary. Both the
-      // lexical resolution (absolute paths, `..` traversal) and the
-      // realpath (an in-project symlink must not escape it) are
-      // checked before any bytes are read.
+      // the project directory is the authorization boundary. The
+      // candidate is compared only after realpath so both sides are
+      // canonical: the root's own realpath and a caller's absolute path
+      // can otherwise disagree on Windows short names such as RUNNER~1,
+      // and an in-project symlink must not escape the directory.
       const root = await realpath(directory)
       const contained = (candidate: string) => {
         const rel = relative(root, candidate)
@@ -24,14 +25,10 @@ export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], di
       const files = await Promise.all(
         paths.map(async (input) => {
           const candidate = resolve(root, input)
-          if (!contained(candidate))
-            throw new Error(
-              `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
-            )
           const real = await realpath(candidate)
           if (!contained(real))
             throw new Error(
-              `Upload path '${input}' resolves outside the project directory (symlink target). Uploads must name a file inside the project; move the file into the project first.`,
+              `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
             )
           const file = await open(real, "r")
           try {
