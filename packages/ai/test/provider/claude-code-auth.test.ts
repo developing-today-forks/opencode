@@ -1121,6 +1121,45 @@ describe("claudeCodeAuth — renewal adopts another writer's rotation (code#9549
     expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken).toBe("tok-other")
   })
 
+  test("a concurrent load joins an adopting renewal instead of exchanging the adopted token a second time (#2623)", async () => {
+    // The renewal's first exchange is rate-limited; during the wait
+    // another writer rotates the file to a pair that still needs
+    // renewal, so the renewal adopts the new token and exchanges IT.
+    // A load that starts while that exchange is in flight reads the
+    // rotated file and computes its coordination key from the adopted
+    // token: single-flight ownership must be findable under that key,
+    // or the load starts a second exchange of the same single-use
+    // token.
+    let release: ((response: Response) => void) | undefined
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    const { sources, calls } = harness((call, store) => {
+      if (call === 1) {
+        store.set(CREDENTIALS_PATH, blob("tok-other", "ref-adopted-2623", 1_500))
+        return rateLimited()
+      }
+      return gate
+    })
+    const first = apply(sources)
+    // Let the first load reach its gated second exchange (the one
+    // presenting the adopted token).
+    for (let i = 0; i < 200 && calls.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.body).toContain("ref-adopted-2623")
+    const second = apply(sources)
+    // Give a competing exchange every chance to start; it must not.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(calls).toHaveLength(2)
+    release!(rotated())
+    const [firstHeaders, secondHeaders] = await Promise.all([first, second])
+    // Both loads were served by the single exchange of the adopted
+    // token: identical authorization, and still exactly two calls.
+    expect(firstHeaders.authorization).toContain("Bearer ")
+    expect(secondHeaders.authorization).toBe(firstHeaders.authorization)
+    expect(calls).toHaveLength(2)
+  })
+
   test("a grant rejection for a token another writer already replaced is adopted, not declared a dead login", async () => {
     const { sources, store, calls } = harness((_call, store) => {
       store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-2", NOW + 8 * 3_600_000))
