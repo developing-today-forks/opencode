@@ -334,13 +334,18 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
 
 // Renewal timing (#6120). The access token this door spends lives ~8
 // hours; renewal starts when less than RENEWAL_LEAD_MS of it remains —
-// a quarter of the lifetime, two hours — instead of at expiry. The
+// half of the lifetime, four hours — instead of at expiry. The
 // incident this fixes: on 2026-11-10 the first refresh attempt ran 22
 // seconds AFTER the token expired, met the token endpoint's rate limit
 // from the first try, and the failure was misreported as a dead login.
-// Renewing inside a two-hour lead leaves room to wait a rate limit out
-// while the current token still serves.
-export const RENEWAL_LEAD_MS = 2 * 60 * 60 * 1000
+// Renewing inside a lead leaves room to wait a rate limit out while
+// the current token still serves. The lead was two hours until
+// 2026-11-16, when the token endpoint's rate limit outlasted it: the
+// renewal landed ~51 minutes AFTER the token died, with this door the
+// fleet's sole drawable absorber (code#9549). A half-lifetime lead
+// starts attempts mid-life, so a multi-hour rate limit can still be
+// waited out on a live token.
+export const RENEWAL_LEAD_MS = 4 * 60 * 60 * 1000
 /** One request's renewal waits out rate limiting for at most this long
  * before the request surfaces the wait as a rate-limit failure. The
  * wait itself does NOT end there: exhausting the budget against a
