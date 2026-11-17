@@ -8,11 +8,19 @@ import { Effect } from "effect"
 export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], directory: string) =>
   Effect.tryPromise({
     try: async () => {
-      const { open } = await import("node:fs/promises")
-      const { resolve, basename, extname } = await import("node:path")
+      const { open, realpath } = await import("node:fs/promises")
+      const { resolve, relative, isAbsolute, sep, basename, extname } = await import("node:path")
+      const root = await realpath(directory)
       const files = await Promise.all(
         paths.map(async (input) => {
-          const file = await open(resolve(directory, input), "r")
+          // realpath follows symlinks, so a link inside the project cannot name a file outside it.
+          const path = await realpath(resolve(directory, input))
+          const relation = relative(root, path)
+          if (relation === "" || isAbsolute(relation) || relation === ".." || relation.startsWith(`..${sep}`))
+            throw new Error(
+              "Upload paths must name files inside the project directory. Select a file in the project; paths outside it, '..' traversal and symlinks to outside files are refused.",
+            )
+          const file = await open(path, "r")
           try {
             const stat = await file.stat()
             if (!stat.isFile())
