@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { sql } from "drizzle-orm"
-import { Effect, Exit } from "effect"
+import { Effect, Exit, Queue } from "effect"
 import { TestConsole } from "effect/testing"
 import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -28,6 +28,41 @@ const attempt = (overrides: Partial<ModelRouteLog.Attempt>): ModelRouteLog.Attem
   outcome: "success",
   output_started: true,
   ...overrides,
+})
+
+describe("ModelRouteLog writer backlog (#2335)", () => {
+  const decision = (time: number): ModelRouteLog.Event => ({
+    kind: "decision",
+    row: { time, route_id: "luna", selection: "weighted", candidates: ["openai/gpt-6-luna"], chosen: "openai/gpt-6-luna", reason: "drawn" },
+  })
+
+  test("bounds pending events while the writer is stalled, drops newest, then drains in order", async () => {
+    const backlog = await Effect.runPromise(ModelRouteLog.makeWriterBacklog(4))
+    // Writer gated: nobody takes from the queue while 6 events are offered.
+    const offered = [1, 2, 3, 4, 5, 6].map((time) => backlog.offer(decision(time)))
+    expect(offered).toEqual([true, true, true, true, false, false])
+    expect(backlog.dropped()).toBe(2)
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(4)
+    // Gate opens: the events that fit drain in FIFO order; the dropped newest never appear.
+    const times: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const event = await Effect.runPromise(Queue.take(backlog.queue))
+      times.push(event.kind === "decision" ? event.row.time : -1)
+    }
+    expect(times).toEqual([1, 2, 3, 4])
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(0)
+    // And the backlog accepts again after draining.
+    expect(backlog.offer(decision(7))).toBe(true)
+    expect(backlog.dropped()).toBe(2)
+  })
+
+  test("default backlog capacity is the documented bound", async () => {
+    const backlog = await Effect.runPromise(ModelRouteLog.makeWriterBacklog())
+    for (let time = 0; time < ModelRouteLog.maxPendingEvents; time++) backlog.offer(decision(time))
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(ModelRouteLog.maxPendingEvents)
+    expect(backlog.offer(decision(ModelRouteLog.maxPendingEvents))).toBe(false)
+    expect(backlog.dropped()).toBe(1)
+  })
 })
 
 describe("ModelRouteLog", () => {
