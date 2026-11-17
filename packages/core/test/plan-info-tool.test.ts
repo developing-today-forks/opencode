@@ -59,6 +59,48 @@ describe("plan_info", () => {
     expect(PlanInfoTool.apply({ action: "list" }, { dataDir, now }).content).toContain("openai/gpt-6-astra: frontier")
   })
 
+  test("non-positive quota window durations are rejected and never persisted; omitted and positive durations stay valid", () => {
+    const dataDir = dir()
+    for (const windowHours of [0, -1]) {
+      expect(() =>
+        PlanInfoTool.apply(
+          {
+            action: "upsert",
+            providerID: "anthropic",
+            plan: "Max 20x",
+            coverage: "subscription",
+            quotas: [{ name: "bad-window", unit: "messages", windowHours, resetRule: "rolling" }],
+          },
+          { dataDir, now },
+        ),
+      ).toThrow(/windowHours/)
+    }
+    expect(PlanInfoTool.apply({ action: "list" }, { dataDir, now }).content).toContain("No plans recorded yet.")
+    const noWindow = PlanInfoTool.apply(
+      {
+        action: "upsert",
+        providerID: "anthropic",
+        plan: "Max 20x",
+        coverage: "subscription",
+        quotas: [{ name: "monthly", unit: "messages", resetRule: "monthly" }],
+      },
+      { dataDir, now },
+    )
+    expect(noWindow.content).toContain("Saved plan anthropic-max")
+    const positive = PlanInfoTool.apply(
+      {
+        action: "upsert",
+        providerID: "openai",
+        plan: "Plus",
+        coverage: "subscription",
+        quotas: [{ name: "5-hour", unit: "messages", windowHours: 5, resetRule: "rolling" }],
+      },
+      { dataDir, now },
+    )
+    expect(positive.content).toContain("Saved plan openai-plus")
+    expect(PlanInfoTool.apply({ action: "list" }, { dataDir, now }).content).toContain("per 5h")
+  })
+
   test("a damaged plan file stops writes, with a message that says what to fix", () => {
     const dataDir = dir()
     fs.writeFileSync(path.join(dataDir, "plans.json"), "{")
