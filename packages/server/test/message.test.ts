@@ -100,3 +100,48 @@ it.live("rejects unknown message type filters at the HTTP boundary", () =>
     })
   }),
 )
+
+it.live("binds the type filter into the cursor so a follow-up cannot retarget or drop it", () =>
+  Effect.gen(function* () {
+    const fixture = yield* setup
+    yield* Effect.promise(async () => {
+      // Page 1 of the user-filtered sequence (desc): the cursor is minted under type=user.
+      const first = await fixture.api.message.list({
+        sessionID: fixture.sessionID,
+        type: "user",
+        limit: 2,
+        order: "desc",
+      })
+      expect(first.data.map((message) => message.id)).toEqual(["msg_a", "msg_x"])
+      if (!first.cursor.next) throw new Error("Expected a next cursor")
+      // Following with the type omitted continues the original filtered sequence.
+      const continued = await fixture.api.message.list({ sessionID: fixture.sessionID, cursor: first.cursor.next })
+      expect(continued.data.map((message) => message.id)).toEqual(["msg_b", "msg_z"])
+      // Following with the same type is accepted and returns the same page.
+      const same = await fixture.api.message.list({
+        sessionID: fixture.sessionID,
+        type: "user",
+        cursor: first.cursor.next,
+      })
+      expect(same.data.map((message) => message.id)).toEqual(["msg_b", "msg_z"])
+      // Following with a different type is rejected instead of mixing sequences.
+      const retargeted = await fixture.handler(
+        new Request(
+          `http://opencode.local/api/session/${fixture.sessionID}/message?cursor=${first.cursor.next}&type=assistant`,
+        ),
+      )
+      expect(retargeted.status).toBe(400)
+      expect(await retargeted.json()).toMatchObject({ _tag: "InvalidCursorError" })
+      // An unfiltered cursor cannot be retargeted to a filter either.
+      const unfiltered = await fixture.api.message.list({ sessionID: fixture.sessionID, limit: 2, order: "desc" })
+      if (!unfiltered.cursor.next) throw new Error("Expected a next cursor")
+      const adopted = await fixture.handler(
+        new Request(
+          `http://opencode.local/api/session/${fixture.sessionID}/message?cursor=${unfiltered.cursor.next}&type=user`,
+        ),
+      )
+      expect(adopted.status).toBe(400)
+      expect(await adopted.json()).toMatchObject({ _tag: "InvalidCursorError" })
+    })
+  }),
+)
