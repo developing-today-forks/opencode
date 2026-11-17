@@ -634,12 +634,12 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
       HttpApiEndpoint.delete("session.inbox.cancel", "/api/session/:sessionID/inbox/:inboxID", {
         params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
         success: HttpApiSchema.NoContent,
-        error: SessionNotFoundError,
+        error: [ConflictError, SessionNotFoundError],
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "session.inbox.cancel",
           summary: "Cancel inbox input",
-          description: "Cancel an inbox item that has not yet been delivered. Unavailable items are a no-op.",
+          description: "Cancel an inbox item that has not yet been delivered. Unknown or already-settled items conflict (409), matching steer/queue.",
         }),
       ),
     )
