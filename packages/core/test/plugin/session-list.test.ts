@@ -1,4 +1,5 @@
-import { expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { MAX_SESSION_LIMIT, sessionListLimit } from "@opencode/core/plugin/session-list"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginPromise } from "@opencode/core/plugin/promise"
@@ -121,3 +122,21 @@ it.live("Plugin session list defaults to the newest 50 and the cursor reaches th
     expect(small.data).toHaveLength(2)
   }),
 )
+
+describe("plugin sessionListLimit (#2483)", () => {
+  test("clamps an oversized limit to the cap", () => {
+    expect(sessionListLimit(1_000_000)).toBe(MAX_SESSION_LIMIT)
+    expect(sessionListLimit(201)).toBe(200)
+    expect(sessionListLimit(200)).toBe(200)
+    expect(sessionListLimit(50)).toBe(50)
+  })
+
+  test("keeps the existing normalisation for missing and poisoned values", () => {
+    expect(sessionListLimit(undefined)).toBe(50)
+    expect(sessionListLimit(Number.NaN)).toBe(50)
+    expect(sessionListLimit(Number.POSITIVE_INFINITY)).toBe(50)
+    expect(sessionListLimit(0)).toBe(1)
+    expect(sessionListLimit(-5)).toBe(1)
+    expect(sessionListLimit(1.9)).toBe(1)
+  })
+})

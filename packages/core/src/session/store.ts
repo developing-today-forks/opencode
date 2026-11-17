@@ -64,18 +64,21 @@ const messagesLimit = (limit: number) => {
   return Math.min(MessageLimit.max, Math.max(MessageLimit.min, Math.floor(limit)))
 }
 
+/** Ceiling for a present session list limit; mirrors the protocol's cap of 200, itself mirroring messages. */
+const MaxListLimit = 200
+
 /**
- * Normalise a present list limit at the store boundary. Unlike messages there
- * is no ceiling (the HTTP surface applies none), so a finite limit is only
- * truncated to an integer and floored to 1: SQLite treats a negative LIMIT as
- * unlimited, so a raw negative would silently widen the query to every
- * session, and a fractional or non-finite value defects the read. A present
+ * Normalise a present list limit at the store boundary. A finite limit is
+ * truncated to an integer, floored to 1, and capped at MaxListLimit: SQLite
+ * treats a negative LIMIT as unlimited, so a raw negative would silently
+ * widen the query to every session, and an unbounded positive would
+ * materialise the whole table plus its usage rollup in one page. A present
  * non-finite limit is treated as absent (unbounded), matching the behaviour
  * an omitted limit has for internal callers.
  */
 const listLimit = (limit: number): number | undefined => {
   if (!Number.isFinite(limit)) return undefined
-  return Math.max(Math.trunc(limit), 1)
+  return Math.min(Math.max(Math.trunc(limit), 1), MaxListLimit)
 }
 
 export interface Interface {

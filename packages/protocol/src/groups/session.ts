@@ -57,9 +57,13 @@ const ParentIDFilter = Schema.Union([
   description: "Filter by parent session. Use null to return only root sessions.",
 })
 
+// The page ceiling for session lists, mirroring the messages cap of 200:
+// one request must not be able to materialise the whole sessions table.
+const SessionListLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(200))
+
 const SessionsQueryFields = {
-  limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional).annotate({
-    description: "Maximum number of sessions to return. Defaults to the newest 50 sessions.",
+  limit: Schema.NumberFromString.pipe(Schema.decodeTo(SessionListLimit), Schema.optional).annotate({
+    description: "Maximum number of sessions to return, at most 200. Defaults to the newest 50 sessions.",
   }),
   order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])).annotate({
     description: "Session order for the first page. Use desc for newest first or asc for oldest first.",
