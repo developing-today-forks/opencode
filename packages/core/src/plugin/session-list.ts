@@ -31,16 +31,23 @@ export interface DecodedSessionListCursor extends SessionListFilter {
 export const DEFAULT_SESSION_LIMIT = 50
 
 /**
+ * Largest page the plugin `session.list` surface will pass through. Mirrors
+ * the HTTP `session.list` cap of 200 (the protocol bounds the query there),
+ * itself mirroring the messages cap.
+ */
+export const MAX_SESSION_LIMIT = 200
+
+/**
  * `Session.list` reaches the store's `limit` through `PositiveInt`, so a plugin
  * supplied limit is normalised before it gets there: a missing or non-finite
  * value becomes the default page, and zero, negative or fractional values are
  * clamped to a positive integer instead of widening the query to every session
  * (SQLite treats a negative LIMIT as unlimited) or failing it as an opaque
- * store defect. Unlike `branchListLimit` there is no upper bound — the HTTP
- * surface applies none, so a positive integer passes through unchanged.
+ * store defect. Like `branchListLimit` the page is also capped: an oversized
+ * integer clamps to MAX_SESSION_LIMIT instead of loading the whole table.
  */
 export function sessionListLimit(limit?: number): number {
-  return pageLimit(limit, { default: DEFAULT_SESSION_LIMIT })
+  return pageLimit(limit, { default: DEFAULT_SESSION_LIMIT, max: MAX_SESSION_LIMIT })
 }
 
 export type SessionListOutput = Effect.Success<ReturnType<Plugin.Context["session"]["list"]>>

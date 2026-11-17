@@ -27,6 +27,9 @@ import { locationErrors } from "../location"
 import { failedMessageDecode, failedSnapshot, missingMessage, missingSession } from "./session-error"
 
 const DefaultSessionsLimit = 50
+// Mirrors the protocol cap of 200 on the session list page; the store and
+// plugin layers clamp to the same ceiling.
+const MaxSessionsLimit = 200
 
 function missingForm(id: Form.ID) {
   return new FormNotFoundError({ id, message: `Form not found: ${id}` })
@@ -108,7 +111,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               : ctx.query
           const page = yield* session.list({
             ...query,
-            limit: ctx.query.limit ?? DefaultSessionsLimit,
+            limit: Math.min(ctx.query.limit ?? DefaultSessionsLimit, MaxSessionsLimit),
           })
           const sessions = page.data
           const first = sessions[0]

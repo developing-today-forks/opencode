@@ -17,7 +17,7 @@ import {
  * here, per class.
  */
 describe("util/number conformance (#993)", () => {
-  test("pageLimit without a ceiling (the sessionListLimit shape)", () => {
+  test("pageLimit without a ceiling (the unbounded shape)", () => {
     const cases: [number | undefined, number][] = [
       [undefined, 50],
       [Number.NaN, 50],
@@ -29,7 +29,8 @@ describe("util/number conformance (#993)", () => {
       [2.9, 2],
       [100, 100],
       [101, 101],
-      // Unit-confused oversized passes through: this surface has no ceiling.
+      // Unit-confused oversized passes through: pageLimit imposes no ceiling
+      // of its own; a surface caps only by passing `max`.
       [86_400_000, 86_400_000],
     ]
     for (const [input, expected] of cases) expect(pageLimit(input, { default: 50 })).toBe(expected)
