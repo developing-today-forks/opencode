@@ -158,6 +158,36 @@ describe("pool targets", () => {
     expect(nodes[0].weights).toEqual([3, 2])
   })
 
+  test("a child id that names a prototype member falls back to weight 1, not the inherited member (#2472)", () => {
+    const routesWithWeights = (weights: Record<string, number>) =>
+      new Map<string, ConfigModelRoutes.Route>([
+        [
+          "constructor",
+          {
+            targets: [{ model: { providerID: "anthropic", model: "claude-opus-4-1" } }],
+          } as unknown as ConfigModelRoutes.Route,
+        ],
+        [
+          "r",
+          {
+            targets: [
+              { model: { providerID: "opencode-route", model: "constructor" } },
+              { model: { providerID: "openai", model: "gpt-6-luna" } },
+            ],
+            selection: "round-robin",
+            autonomy: "rules",
+            weights,
+          } as unknown as ConfigModelRoutes.Route,
+        ],
+      ])
+    // No own "constructor" key: the unguarded weights?.[key] read resolved
+    // to Object's inherited constructor function and the ?? fallback to 1
+    // never fired. The ownValue guard must yield the fallback instead.
+    expect(expand("r", routesWithWeights({ "openai/gpt-6-luna": 2 }), definitions).nodes[0].weights).toEqual([1, 2])
+    // An own key named "constructor" still resolves to its configured weight.
+    expect(expand("r", routesWithWeights({ constructor: 4, "openai/gpt-6-luna": 2 }), definitions).nodes[0].weights).toEqual([4, 2])
+  })
+
   test("a glob that matches nothing contributes nothing and does not fail the route", () => {
     const { leaves } = expand("r", route(["anthropic/*mistral*", "openai/gpt-6-luna"]), definitions)
     expect(leaves.map((leaf) => String(leaf.ref.id))).toEqual(["gpt-6-luna"])
