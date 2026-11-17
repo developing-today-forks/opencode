@@ -1182,103 +1182,109 @@ export const make = Effect.gen(function* () {
         })
         if (gated) hedgeSlots.push({ membership: model.membership, result: gated })
       })
-    const raced = yield* SessionHedge.race({
-      primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
-      afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
-      deadlineMs: typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
-      // No next target, or one that cannot be prepared, simply means there is nothing to hedge with.
-      // A session that just moved races its origin, where its cache is, rather than the next fallback.
-      start: Effect.suspend(() => (routing.origin ? routing.origin() : routing.fallback())).pipe(
-        Effect.flatMap((next) =>
-          next === undefined
-            ? Effect.succeed(Option.none())
-            : prepareFor(next).pipe(
-                // A preparation that fails or is interrupted never starts the hedge, so
-                // the claim the fallback resolution spent is handed back here instead of
-                // stranding until the bench expires (#1486, review follow-up). A hedge
-                // that does start keeps its claim: the race settles it (the winner via
-                // run(), the loser via ModelRoute.slow).
-                Effect.onExit((exit) =>
-                  exit._tag === "Success" || !next.routing?.probeClaim
-                    ? Effect.void
-                    : Effect.sync(() => {
-                        const claim = next.routing!.probeClaim!
-                        ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
-                        if (claim.credentialID)
-                          ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
-                      }),
-                ),
-                Effect.tap(() => holdHedgeSlot(next)),
-                Effect.map((prepared) => {
-                  const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
-                  // A hedge has begun: both targets are named before either answers, so the race
-                  // itself is visible even if the loser never produces an event.
-                  ModelRouteLog.record({
-                    kind: "decision",
-                    row: {
-                      time: Date.now(),
-                      session_id: input.sessionID,
-                      route_id: routing.routeID,
-                      selection: "hedge-race",
-                      candidates: [
-                        `${input.model.ref.providerID}/${input.model.ref.id}`,
-                        `${next.ref.providerID}/${next.ref.id}`,
-                      ],
-                      reason: "hedge-started" as const,
-                    },
-                  })
-                  return Option.some({
-                    value: { model: next, prepared, rateLimit },
-                    stream: llm.stream(prepared.request, rateLimit.options(prepared.options)),
-                  })
-                }),
-              ),
-        ),
-        Effect.orElseSucceed(() => Option.none()),
-      ),
-    })
-    if (raced.hedgeStarted) {
-      // The target that lost: the primary when the hedge answered first, otherwise the hedge.
-      const loser = raced.winner === "hedge" ? input.model : raced.hedgeValue?.model
-      if (loser) {
-        ModelRoute.slow(loser.ref, routing.policy, Date.now(), loser.ref.variant)
-        ModelRoute.recordUsage(loser.ref, input.estimatedInputTokens ?? 0)
-      }
-      ModelRouteLog.record({
-        kind: "attempt",
-        row: {
-          time_started: Date.now() - raced.loserElapsedMs,
-          time_ended: Date.now(),
-          session_id: input.sessionID,
-          assistant_message_id: input.assistantMessageID,
-          route_id: routing.routeID,
-          provider_id: loser?.ref.providerID ?? input.model.ref.providerID,
-          model_id: loser?.ref.id ?? input.model.ref.id,
-          credential_id: loser?.servingCredentialID ?? loser?.routing?.credentialID,
-          outcome: "hedged-out",
-          hedged: true,
-          output_started: false,
-          response_ms: raced.loserElapsedMs,
-          tokens_input: input.estimatedInputTokens,
-          tokens_estimated: true,
-          continuation_index: input.continuation?.index,
-        },
-        continuationOfMessageID: input.continuation?.of,
-      })
+    // Releases every hedge slot taken so far, draining the list so a
+    // second call releases nothing (membership release is not
+    // idempotent). The ensuring below covers the WHOLE composed body —
+    // race and run together (#2417): previously the only release lived
+    // on run(...), so an interruption or failure inside
+    // SessionHedge.race, before run was ever entered, leaked every
+    // acquired slot for the process lifetime.
+    const releaseHedgeSlots = () => {
+      for (const slot of hedgeSlots.splice(0)) SessionMembershipGate.release(slot.membership, slot.result)
     }
-    const winner = raced.winner === "hedge" ? raced.value : undefined
-    return yield* run(winner ? { ...input, model: winner.model, prepared: winner.prepared } : input, {
-      rateLimit: winner ? winner.rateLimit : primaryLimit,
-      stream: raced.stream,
-      startedAt: raced.startedAt,
-      ...(raced.outputAt !== undefined ? { outputAt: raced.outputAt } : {}),
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          for (const slot of hedgeSlots) SessionMembershipGate.release(slot.membership, slot.result)
-        }),
-      ),
-    )
+    return yield* Effect.gen(function* () {
+      const raced = yield* SessionHedge.race({
+        primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
+        afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
+        deadlineMs: typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
+        // No next target, or one that cannot be prepared, simply means there is nothing to hedge with.
+        // A session that just moved races its origin, where its cache is, rather than the next fallback.
+        start: Effect.suspend(() => (routing.origin ? routing.origin() : routing.fallback())).pipe(
+          Effect.flatMap((next) =>
+            next === undefined
+              ? Effect.succeed(Option.none())
+              : prepareFor(next).pipe(
+                  // A preparation that fails or is interrupted never starts the hedge, so
+                  // the claim the fallback resolution spent is handed back here instead of
+                  // stranding until the bench expires (#1486, review follow-up). A hedge
+                  // that does start keeps its claim: the race settles it (the winner via
+                  // run(), the loser via ModelRoute.slow).
+                  Effect.onExit((exit) =>
+                    exit._tag === "Success" || !next.routing?.probeClaim
+                      ? Effect.void
+                      : Effect.sync(() => {
+                          const claim = next.routing!.probeClaim!
+                          ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
+                          if (claim.credentialID)
+                            ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
+                        }),
+                  ),
+                  Effect.tap(() => holdHedgeSlot(next)),
+                  Effect.map((prepared) => {
+                    const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
+                    // A hedge has begun: both targets are named before either answers, so the race
+                    // itself is visible even if the loser never produces an event.
+                    ModelRouteLog.record({
+                      kind: "decision",
+                      row: {
+                        time: Date.now(),
+                        session_id: input.sessionID,
+                        route_id: routing.routeID,
+                        selection: "hedge-race",
+                        candidates: [
+                          `${input.model.ref.providerID}/${input.model.ref.id}`,
+                          `${next.ref.providerID}/${next.ref.id}`,
+                        ],
+                        reason: "hedge-started" as const,
+                      },
+                    })
+                    return Option.some({
+                      value: { model: next, prepared, rateLimit },
+                      stream: llm.stream(prepared.request, rateLimit.options(prepared.options)),
+                    })
+                  }),
+                ),
+          ),
+          Effect.orElseSucceed(() => Option.none()),
+        ),
+      })
+      if (raced.hedgeStarted) {
+        // The target that lost: the primary when the hedge answered first, otherwise the hedge.
+        const loser = raced.winner === "hedge" ? input.model : raced.hedgeValue?.model
+        if (loser) {
+          ModelRoute.slow(loser.ref, routing.policy, Date.now(), loser.ref.variant)
+          ModelRoute.recordUsage(loser.ref, input.estimatedInputTokens ?? 0)
+        }
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: {
+            time_started: Date.now() - raced.loserElapsedMs,
+            time_ended: Date.now(),
+            session_id: input.sessionID,
+            assistant_message_id: input.assistantMessageID,
+            route_id: routing.routeID,
+            provider_id: loser?.ref.providerID ?? input.model.ref.providerID,
+            model_id: loser?.ref.id ?? input.model.ref.id,
+            credential_id: loser?.servingCredentialID ?? loser?.routing?.credentialID,
+            outcome: "hedged-out",
+            hedged: true,
+            output_started: false,
+            response_ms: raced.loserElapsedMs,
+            tokens_input: input.estimatedInputTokens,
+            tokens_estimated: true,
+            continuation_index: input.continuation?.index,
+          },
+          continuationOfMessageID: input.continuation?.of,
+        })
+      }
+      const winner = raced.winner === "hedge" ? raced.value : undefined
+      return yield* run(winner ? { ...input, model: winner.model, prepared: winner.prepared } : input, {
+        rateLimit: winner ? winner.rateLimit : primaryLimit,
+        stream: raced.stream,
+        startedAt: raced.startedAt,
+        ...(raced.outputAt !== undefined ? { outputAt: raced.outputAt } : {}),
+      })
+    }).pipe(Effect.ensuring(Effect.sync(releaseHedgeSlots)))
   })
 
   /** One request, or two when the route hedges: see SessionHedge.race. */

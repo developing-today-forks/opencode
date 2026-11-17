@@ -46,7 +46,7 @@ import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
-import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -549,6 +549,130 @@ it.live("a capped primary hedges to the next target when it stays silent, and ga
     // gate slot and the hedge leg's own slot (#2383).
     expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(0)
     expect(ModelRoute.membershipSnapshot("anthropic").inFlight).toBe(0)
+  }),
+)
+
+it.live("releases the hedge slot when the attempt is interrupted while the race is pending (#2417)", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const offMembershipLimits = ModelRoute.onMembershipLimits(
+      () => ({ concurrent: 10, requestsPerMinute: 100 }),
+      "/project",
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(() => offMembershipLimits()))
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = {
+      ...SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      ),
+      membership: { providerID: "anthropic" },
+    }
+    const model = {
+      ...SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("smart-slow-capped"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          hedgeAfterMs: 60,
+          fallback: () => Effect.succeed(fallback),
+        },
+      }),
+      membership: { providerID: "openai" },
+    }
+    // Neither leg ever answers: the race stays pending, holding the hedge
+    // leg's slot, until the attempt is interrupted.
+    yield* llm.push(TestLLM.hangAfter())
+    yield* llm.push(TestLLM.hangAfter())
+
+    const fiber = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        estimatedInputTokens: 1_234,
+        prepareFor: (next) =>
+          Effect.succeed({
+            retry: () => Effect.void,
+            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit, Effect.forkScoped)
+
+    // Wait until the hedge has actually started and taken its slot: the
+    // leak under test is precisely that slot, acquired inside the race.
+    let held = false
+    for (let waited = 0; waited < 5_000 && !held; waited += 25) {
+      held = ModelRoute.membershipSnapshot("anthropic").inFlight === 1
+      if (!held) yield* Effect.sleep("25 millis")
+    }
+    expect(held).toBe(true)
+    expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(1)
+
+    yield* Fiber.interrupt(fiber)
+
+    // Oracle (#2417): interruption during SessionHedge.race releases every
+    // hedge slot — the account returns to zero in flight instead of
+    // leaking the slot for the process lifetime.
+    expect(ModelRoute.membershipSnapshot("anthropic").inFlight).toBe(0)
+    expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(0)
   }),
 )
 
