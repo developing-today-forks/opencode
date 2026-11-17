@@ -86,7 +86,11 @@ export class SyncServer extends DurableObject<Env> {
   }
 
   public async assertSecret(secret: string) {
-    if (secret !== (await this.getSecret())) throw new Error("Invalid secret")
+    const stored = await this.getSecret()
+    // A missing stored secret (never shared, or deleted by clear()) must
+    // reject every caller: undefined !== undefined used to pass when the
+    // request also omitted its secret (#2563).
+    if (!stored || secret !== stored) throw new Error("Invalid secret")
   }
 
   private async getSecret() {
@@ -133,6 +137,7 @@ export default new Hono<{ Bindings: Env }>()
     const body = await c.req.json<{ sessionID: string; secret: string }>()
     const sessionID = body.sessionID
     const secret = body.secret
+    if (typeof secret !== "string" || !secret) throw new Error("Invalid secret")
     const id = c.env.SYNC_SERVER.idFromName(SyncServer.shortName(sessionID))
     const stub = c.env.SYNC_SERVER.get(id)
     await stub.assertSecret(secret)
@@ -156,6 +161,7 @@ export default new Hono<{ Bindings: Env }>()
       key: string
       content: any
     }>()
+    if (typeof body.secret !== "string" || !body.secret) throw new Error("Invalid secret")
     const name = SyncServer.shortName(body.sessionID)
     const id = c.env.SYNC_SERVER.idFromName(name)
     const stub = c.env.SYNC_SERVER.get(id)
