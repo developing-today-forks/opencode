@@ -97,7 +97,7 @@
  * contract forbids unstated and split dispositions, not stated
  * ones.
  *
- * PARSER INVENTORY — all 13 providers in the `quotaProviders` registry
+ * PARSER INVENTORY — all 15 providers in the `quotaProviders` registry
  * (src/quota/index.ts), in registry order. "Fetch-only" means the wire
  * parsing lives inline in the fetch path, so the parser is driven in
  * tests through `provider.fetchQuota` with a stubbed fetch, not
@@ -147,6 +147,18 @@
  *     Disposition: a positive balance wins, zero publishes, and a
  *     negative-only response is no result — the no-data contract,
  *     with no unfiltered fallback (#1928).
+ *   exaone — no figures: the platform publishes no usage/quota
+ *     figure an API key can read (docs.exaone.ai names no free-tier
+ *     quota or rate limit). Disposition: the no-quota-surface
+ *     disposition (groq's rule-6 shape at result level); the only
+ *     published datum is the enrolled key's expiry, carried as
+ *     credential metadata (credentialExpiresAt), never a window.
+ *   google — no figures: AI Studio free-tier limits are published
+ *     only through the Cloud console / Cloud Quotas API
+ *     (OAuth-gated), never to an API key. Disposition: the
+ *     no-quota-surface disposition per project instance; project
+ *     liveness is the only signal, and no combined google figure
+ *     is published — the projects' quotas are separate.
  *   groq — request / token count pairs (remaining / limit in the
  *     valueLabel) with their percents. Disposition: a remaining
  *     above its limit is an impossible pair — the remaining is
@@ -212,6 +224,15 @@
  *     provider.fetchQuota; no exported pure parser. Conforming
  *     (a negative-only balance response is the no-data contract,
  *     #1928).
+ *   exaone — fetch-only: the models-list validity read is inline
+ *     in provider.fetchQuota; no exported pure parser (there is no
+ *     payload figure to parse). Conforming (no-quota-surface
+ *     disposition, groq's #6125 shape; the key expiry rides as
+ *     credentialExpiresAt).
+ *   google — fetch-only: the per-project models-list validity
+ *     read is inline in provider.fetchQuotaForCredential; no
+ *     exported pure parser. Conforming (no-quota-surface
+ *     disposition per project instance).
  *   groq — parseGroqResetSeconds (exported scalar duration parser);
  *     header window construction is inline and clamps over-limit
  *     remaining whole-window (#1897/#1921; rule 5).

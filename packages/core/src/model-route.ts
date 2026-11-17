@@ -1088,6 +1088,17 @@ const longBenched = (state: HealthState | undefined, now: number, location?: str
   // auth bench never counted as dead here.
   ((state.benchReason === "retry-after" && state.benchLong === true) || state.benchReason === "plan-wall")
 
+/** Whether a health state is an auth bench still in force. An entitlement refusal
+ * cannot heal by itself — the leg is dead until a credential or plan change, not
+ * cooling — so while the bench stands the leg is out in the same sense a long
+ * traffic bench is out: never dealt as a last resort (#2555). Re-admission is the
+ * bench's own expiry conversion to a single probe (code#9950), never continuous
+ * dealing during the bench. Any standing auth bench counts, whatever its rung on
+ * the escalation ladder: the ladder's duration is a re-probe schedule, not a
+ * recovery horizon, and the failure it records is a death, not a wait. */
+const authBenchedState = (state: HealthState | undefined, now: number) =>
+  state !== undefined && state.benchReason === "auth" && state.cooldownUntil > now && !probeDueState(state, now)
+
 /** Whether this leg — the target at the named effort, and its named credential at
  * the same effort — is out under a long traffic bench right now: its own traffic
  * scope, its credential's traffic scope, or (for benches planted before traffic
@@ -1115,12 +1126,40 @@ export const longTrafficBenched = (
   return longBenched(credentialTraffic, now, location)
 }
 
+/** Whether this leg — the target at the named effort, and its named credential at
+ * the same effort — is out under an auth bench right now: its own traffic scope,
+ * its credential's traffic scope, or (for benches planted before traffic scopes
+ * existed, which live at target/credential scope) those scopes themselves.
+ * Judged at the leg's own keys only, exactly like longTrafficBenched. */
+export const authBenched = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+  variant?: string,
+) => {
+  const own = health.get(key(target))
+  if (own) recover(target, own, now)
+  if (authBenchedState(own, now)) return true
+  const traffic = trafficHealth.get(trafficKey(target, variant))
+  if (traffic) recover(target, traffic, now)
+  if (authBenchedState(traffic, now)) return true
+  if (!credentialID) return false
+  const credential = credentialHealth.get(credentialKey(target, credentialID))
+  if (credential) recover(target, credential, now, credentialID)
+  if (authBenchedState(credential, now)) return true
+  const credentialTraffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+  if (credentialTraffic) recover(target, credentialTraffic, now, credentialID)
+  return authBenchedState(credentialTraffic, now)
+}
+
 /** Whether last-resort selection must treat this leg as dead rather than merely
  * cooling: quota-dead at pool scope (quotaCoolingDown /
  * credentialQuotaCoolingDown — the pool that drained), out under a plan-wall
  * bench at pool scope (longTrafficBenched — the plan that refuses the model),
- * or out under a long traffic bench at the leg's own effort scope
- * (longTrafficBenched — the leg that errored).
+ * out under a long traffic bench at the leg's own effort scope
+ * (longTrafficBenched — the leg that errored), or out under an auth bench at
+ * the leg's own scopes (authBenched — the leg whose entitlement died, #2555).
  * The two scopes stay distinct: this read only ORs the verdicts, it never lets a
  * traffic bench speak for a pool or a pool verdict bench a leg. The 2026-11-07
  * no-hard-exclusion doctrine (code#8086) governs quota READS — a pool is never
@@ -1136,7 +1175,8 @@ export const lastResortDead = (
 ) =>
   quotaCoolingDown(target, now, location) ||
   (credentialID !== undefined && credentialQuotaCoolingDown(target, credentialID, now)) ||
-  longTrafficBenched(target, credentialID, now, location, variant)
+  longTrafficBenched(target, credentialID, now, location, variant) ||
+  authBenched(target, credentialID, now, location, variant)
 
 /** The durable record id for one model target's reactive quota skip (#1976): keyed to the
  * answering target, so one model family's exhaustion record names only that family. */

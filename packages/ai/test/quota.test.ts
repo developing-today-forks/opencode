@@ -20,13 +20,15 @@ import { parseBucket, transformModels, transformSummary } from "../src/quota/pro
 import { provider as codexProvider } from "../src/quota/providers/openai.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
+import { provider as exaoneProvider, KEY_EXPIRES_AT as EXAONE_KEY_EXPIRES_AT } from "../src/quota/providers/exaone.js"
+import { provider as googleProvider } from "../src/quota/providers/google.js"
 import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider, teamIdOf } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
-import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
+import { fetchAllQuota, fetchQuotaForProviderInstances, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -1845,7 +1847,7 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       env: {},
     })
 
-  test("rule 7: the registry still holds exactly the 13 inventoried providers, in inventory order", () => {
+  test("rule 7: the registry still holds exactly the 15 inventoried providers, in inventory order", () => {
     // Read the registry source instead of importing index.js: the
     // index pulls every provider's runtime dependencies, which this
     // parser suite deliberately does not need. The variable-to-id
@@ -1859,6 +1861,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       openai: "_openai",
       commandCode: "_commandcode",
       deepseek: "deepseek",
+      exaone: "exaone",
+      google: "google",
       groq: "groq",
       meta: "meta",
       mistral: "mistral",
@@ -1879,6 +1883,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       "_openai",
       "_commandcode",
       "deepseek",
+      "exaone",
+      "google",
       "groq",
       "meta",
       "mistral",
@@ -2975,5 +2981,194 @@ describe("opencode-go instance fold (popesdrew labelled row)", () => {
     const listing = await listConfiguredQuotaProviders(goCtx())
     expect(listing).toContain("opencode-go.popesdrew")
     expect(listing).toContain("opencode-go.developing-today-0")
+  })
+})
+
+describe("exaone quota leg — no-quota-surface validity probe (R33)", () => {
+  // ORACLE: the EXAONE API Platform publishes no usage/quota figure
+  // an API key can read (docs.exaone.ai names no free-tier quota or
+  // rate limit), so the leg follows groq's #6125 disposition: the
+  // models-list read is a key-validity probe, a valid key publishes
+  // the explicit no-quota-surface class (never an invented figure),
+  // and the enrolled key's expiry rides as credentialExpiresAt.
+  const ctxWith = (fetchImpl: typeof fetch, key?: string) => ({
+    credentials: [
+      {
+        id: "row-1",
+        integrationID: "exaone",
+        active: true,
+        value: key === undefined ? { type: "key" } : { type: "key", key },
+      },
+    ],
+    disabledProviders: new Set<string>(),
+    instances: new Map(),
+    providerConfig: {},
+    fetchImpl,
+    env: {},
+  })
+  const okFetch = (async () =>
+    new Response(JSON.stringify({ object: "list", data: [{ id: "k-exaone_v2.5" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch
+
+  test("no credential is the not-configured contract", async () => {
+    const result = await exaoneProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: okFetch,
+      env: {},
+    })
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toBe("Not configured")
+    expect(exaoneProvider.isConfigured({ credentials: [], disabledProviders: new Set(), instances: new Map(), providerConfig: {} })).toBe(false)
+  })
+
+  test("a valid key publishes no-quota-surface with the key expiry, never a window", async () => {
+    const result = await exaoneProvider.fetchQuota(ctxWith(okFetch, "fixture-key"))
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBe("no-quota-surface")
+    expect(result.failureClass).toBe("no-quota-surface")
+    expect(result.usage).toBeNull()
+    expect(result.credentialExpiresAt).toBe(EXAONE_KEY_EXPIRES_AT)
+    expect(EXAONE_KEY_EXPIRES_AT).toBe("2026-12-16T09:34:42.000Z")
+    expect(result.error).toContain("no usage/quota endpoint")
+  })
+
+  test("a rejected key reads as invalid/expired and still carries the expiry", async () => {
+    const result = await exaoneProvider.fetchQuota(
+      ctxWith((async () => new Response("{}", { status: 401 })) as typeof fetch, "fixture-key"),
+    )
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBeUndefined()
+    expect(result.error).toContain("Invalid or expired API key")
+    expect(result.error).toContain("2026-12-16")
+    expect(result.credentialExpiresAt).toBe(EXAONE_KEY_EXPIRES_AT)
+  })
+
+  test("a timeout reads as a timeout, not as data", async () => {
+    const result = await exaoneProvider.fetchQuota(
+      ctxWith(
+        (async () => {
+          throw new DOMException("timed out", "TimeoutError")
+        }) as typeof fetch,
+        "fixture-key",
+      ),
+    )
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("Request timed out")
+  })
+})
+
+describe("google quota leg — per-project no-quota-surface probe (R33)", () => {
+  // ORACLE: AI Studio free-tier limits are published only through
+  // the Cloud console / Cloud Quotas API (OAuth-gated); an API key
+  // reads project liveness only. Each google-free project instance
+  // reports individually under its own id — no combined figure.
+  const drewRow = { id: "row-drew", integrationID: "google.drew", active: true, value: { type: "key", key: "fixture-key" } }
+  const baseCtx = (fetchImpl: typeof fetch) => ({
+    credentials: [drewRow],
+    disabledProviders: new Set<string>(["google"]),
+    instances: new Map([["google.drew", { base: "google", name: "Google AI Studio (Gemini Free - Drew project)" }]]),
+    providerConfig: {},
+    fetchImpl,
+    env: {},
+  })
+  const okFetch = (async () =>
+    new Response(JSON.stringify({ models: [{ name: "models/gemini-3.5-flash" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch
+
+  test("a valid project key publishes no-quota-surface, never a window", async () => {
+    const result = await googleProvider.fetchQuotaForCredential!(baseCtx(okFetch), drewRow)
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBe("no-quota-surface")
+    expect(result.failureClass).toBe("no-quota-surface")
+    expect(result.usage).toBeNull()
+    expect(result.error).toContain("an API key cannot read them")
+  })
+
+  test("a rejected project key names the project instance", async () => {
+    const result = await googleProvider.fetchQuotaForCredential!(
+      baseCtx((async () => new Response("{}", { status: 403 })) as typeof fetch),
+      drewRow,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toContain("Invalid or revoked API key")
+    expect(result.error).toContain("google.drew")
+  })
+
+  test("the base provider has no combined reading of its own", async () => {
+    const result = await googleProvider.fetchQuota(baseCtx(okFetch))
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toContain("per project")
+  })
+
+  test("isConfigured judges project rows, not unrelated or inactive rows", () => {
+    const base = { disabledProviders: new Set<string>(), instances: new Map(), providerConfig: {} }
+    expect(googleProvider.isConfigured({ ...base, credentials: [drewRow] })).toBe(true)
+    expect(googleProvider.isConfigured({ ...base, credentials: [{ ...drewRow, active: false }] })).toBe(false)
+    expect(
+      googleProvider.isConfigured({
+        ...base,
+        credentials: [{ id: "row-x", integrationID: "groq", active: true, value: { type: "key", key: "fixture-key" } }],
+      }),
+    ).toBe(false)
+    expect(
+      googleProvider.isConfigured({
+        ...base,
+        credentials: [{ id: "row-y", integrationID: "google.muse", active: true, value: { type: "key", key: "  " } }],
+      }),
+    ).toBe(false)
+  })
+
+  test("dispatch labels the instance result with the project id and credential", async () => {
+    const results = await fetchQuotaForProviderInstances(baseCtx(okFetch), "google.drew")
+    expect(results).toHaveLength(1)
+    expect(results[0]?.providerId).toBe("google.drew")
+    expect(results[0]?.credentialId).toBe("row-drew")
+    expect(results[0]?.errorKind).toBe("no-quota-surface")
+  })
+
+  test("an OAuth refresh-token row on a google instance still belongs to antigravity", async () => {
+    // Base "google" is claimed by _antigravity (OAuth rows) and by
+    // google (API-key rows); resolution breaks the tie by row shape.
+    const oauthRow = {
+      id: "row-oauth",
+      integrationID: "google.muse",
+      active: true,
+      value: { type: "oauth", access: "fixture-access", refresh: "fixture-refresh|fixture-project|fixture-managed", expires: 0 },
+    }
+    const ctx = {
+      credentials: [oauthRow],
+      disabledProviders: new Set<string>(["google"]),
+      instances: new Map([["google.muse", { base: "google", name: "Google AI Studio (Gemini Free - Muse project)" }]]),
+      providerConfig: {},
+      fetchImpl: okFetch,
+      env: {},
+    }
+    const results = await fetchQuotaForProviderInstances(ctx, "google.muse")
+    expect(results).toHaveLength(1)
+    expect(results[0]?.providerId).toBe("google.muse")
+    expect(results[0]?.credentialId).toBe("row-oauth")
+    // Antigravity's leg answered (its refresh attempt against the
+    // stubbed endpoint), not the google leg's no-quota-surface.
+    expect(results[0]?.errorKind).toBeUndefined()
+    expect(results[0]?.error ?? "").not.toContain("an API key cannot read them")
+  })
+
+  test("the listing carries the project instance even though bare google is disabled", async () => {
+    const ids = await listConfiguredQuotaProviders(baseCtx(okFetch))
+    expect(ids).toContain("google.drew")
+    expect(ids).not.toContain("google")
   })
 })
