@@ -513,6 +513,7 @@ const logHealth = (
     | "rate-limit-window"
     | "quota-gated"
     | "quota-readmitted"
+    | "quota-walled-below-1pct"
     | "bench-probe"
     | "bench-probe-release"
     | "infra-hold"
@@ -1460,6 +1461,152 @@ export const plantGatheredQuotaWall = (
   return undefined
 }
 
+/** The binding-window level at which a gathered reading counts as nearly
+ * gone (#2256, Drew 2026-11-10): strictly above this percent used, less
+ * than 1% remains on the window that gates calls — the concrete case is
+ * $0.05 of $10 left, 99.5% used. At or below it the reading is a warning
+ * state only: low quota alone never walls. */
+export const NEAR_EMPTY_USED_PERCENT = 99
+
+/** The note marker every walled-below-1% plant carries: the route/quota
+ * surfaces (activeAdjustments, availability) key the distinct state off
+ * it, so a dead-below-1% pool stops reading as "ok / not walled" or as a
+ * generic bench (#2256 acceptance). */
+export const WALLED_BELOW_1_NOTE = "walled-below-1%"
+
+/** Whether quota-class (plan-limit) failure evidence for this target is
+ * on record (#2256): a quota event inside the demotion policy's window —
+ * recorded by the failure path itself (`failed` with a quota hint, or
+ * replayed by `seedDemotion`) — or a quota-class bench in force. Generic
+ * failures never count: the signal is errors that imply plan limits. */
+export const quotaFailureSignal = (target: Model.Ref, now = Date.now(), location?: string): boolean => {
+  const windowMs = demotionPolicy(location).windowMs
+  const base = key(target)
+  for (const [id, events] of quotaEvents) {
+    if (id !== base && !id.startsWith(`${base}#`)) continue
+    if (events.some((at) => now - at <= windowMs)) return true
+  }
+  const state = health.get(base)
+  return (
+    state !== undefined &&
+    state.cooldownUntil > now &&
+    (state.benchReason === "quota" || state.benchReason === "quota retry-after" || state.benchReason === "plan-wall")
+  )
+}
+
+/** The target's binding gathered reading (#2256): the fullest window the
+ * snapshot prices for it — its own model windows when it carries any, or
+ * the provider's single-entry windows (the same two shapes
+ * `gatheredQuotaWall` judges; several provider entries are per-account
+ * readings and state no binding window). */
+const bindingGatheredReading = (
+  entries: readonly QuotaCurrent.ProviderReading[],
+  target: Model.Ref,
+): { percent: number; resetAt: number | null; observedAt: number; complete: boolean } | undefined => {
+  const own = modelWindowReading(entries, target.providerID, target.id as string)
+  if (own) return own
+  if (entries.length !== 1) return undefined
+  const entry = entries[0]
+  let percent: number | undefined
+  let resetAt: number | null = null
+  let complete = entry.windows.length > 0
+  for (const window of entry.windows) {
+    if (window.usedPercent === null) {
+      complete = false
+      continue
+    }
+    if (percent === undefined || window.usedPercent >= percent) {
+      percent = window.usedPercent
+      resetAt = window.resetAt
+    }
+  }
+  if (percent === undefined) return undefined
+  return { percent, resetAt, observedAt: entry.measuredAt, complete }
+}
+
+/** The combined-signal wall (#2256, Drew 2026-11-10 + refinement): the
+ * target is walled-below-1% while a FRESH gathered reading shows its
+ * binding window above NEAR_EMPTY_USED_PERCENT used (less than 1%
+ * remaining) AND quota-class failures are on record for it. Either half
+ * alone states no wall: low quota alone is a warning, and a failure
+ * alone earns only its ordinary bench — and this wall is never the
+ * permanent bench a lone failure must not plant: it holds until the
+ * binding window's reset (or the gate's bounded fallback) and lifts on
+ * the first fresh reading that shows room again. A full window whose
+ * stated reset has already passed has rolled, whatever the percent
+ * still says — not a wall. Returns the wall and the reading that
+ * stated it. */
+export const gatheredNearEmptyWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): { readonly until: number; readonly observedAt: number; readonly percent: number } | undefined => {
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  if (entries.length === 0) return undefined
+  const binding = bindingGatheredReading(entries, target)
+  if (!binding) return undefined
+  if (now - binding.observedAt > GATHERED_WALL_MAX_AGE_MS) return undefined
+  if (binding.percent <= NEAR_EMPTY_USED_PERCENT) return undefined
+  if (binding.resetAt !== null && binding.resetAt <= now) return undefined
+  if (!quotaFailureSignal(target, now, location)) return undefined
+  const gate = currentConstants(location).quotaGate
+  return {
+    until: Math.min(binding.resetAt ?? now + gate.fallbackMs, now + gate.maxMs),
+    observedAt: binding.observedAt,
+    percent: binding.percent,
+  }
+}
+
+/** Plants — or, on a later reading's word, lifts — the walled-below-1%
+ * record for one target (#2256): the same model-scoped skip record the
+ * gathered full wall plants, carrying the distinct WALLED_BELOW_1_NOTE
+ * so the surfaces name the state. Re-planted at every feed while the
+ * combined signal stands, so `until` tracks the freshest reading. The
+ * lift is the measured-increase path the issue names: a fresh, complete
+ * binding reading at or below the near-empty line removes a standing
+ * record OF THIS PLANT'S OWN NOTE — the full wall's record and
+ * attempt-reported records are other paths' business, exactly as in
+ * `plantGatheredQuotaWall`. A stale, missing, or incomplete reading
+ * judges nothing: the record lapses at its own `until`. Returns the
+ * record id when one was planted or lifted. */
+export const plantGatheredNearEmptyWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): string | undefined => {
+  const id = quotaModelSkipID(target)
+  const wall = gatheredNearEmptyWall(target, readings, now, location)
+  if (wall) {
+    const standing = adjustments.find((item) => item.id === id)
+    if (standing && standing.quotaSkipOrigin !== "proactive") return undefined
+    if (standing && !(standing.note ?? "").includes(WALLED_BELOW_1_NOTE)) return undefined
+    addAdjustment({
+      id,
+      match: `${target.providerID}/${target.id}`,
+      action: "skip",
+      until: wall.until,
+      quotaSkipOrigin: "proactive",
+      note: `${WALLED_BELOW_1_NOTE}: binding window at ${wall.percent}% used (under 1% remaining) with quota-class failures on record; held until the gathered window resets`,
+    })
+    logHealth(target, "quota-walled-below-1pct", `binding window ${wall.percent}% used with quota failures on record`)
+    return id
+  }
+  const standing = adjustments.find((item) => item.id === id)
+  if (!standing || !(standing.note ?? "").includes(WALLED_BELOW_1_NOTE)) return undefined
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  const binding = bindingGatheredReading(entries, target)
+  if (!binding || !binding.complete) return undefined
+  if (now - binding.observedAt > GATHERED_WALL_MAX_AGE_MS) return undefined
+  if (binding.percent > NEAR_EMPTY_USED_PERCENT) return undefined
+  if (removeAdjustment(id)) {
+    logHealth(target, "quota-readmitted", "gathered quota reading re-admitted the walled-below-1% plant")
+    return id
+  }
+  return undefined
+}
+
 /** Provider gate state stated by the fleet gatherer's snapshot alone (fork
  * #2479): the wall for providers whose gathered shape is a single provider-wide
  * entry — no per-model windows, and no plan-derived feed to arm the provider
@@ -1805,6 +1952,19 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   for (const [id, state] of trafficCredentialHealth) {
     const base = id.slice(0, id.lastIndexOf("@"))
     probePendingEntry(id, state, base.slice(base.lastIndexOf("#") + 1), id.slice(id.lastIndexOf("@") + 1))
+  }
+  for (const item of activeAdjustments(now)) {
+    if (!(item.note ?? "").includes(WALLED_BELOW_1_NOTE)) continue
+    const slash = item.match.indexOf("/")
+    if (slash === -1) continue
+    put({
+      providerID: item.match.slice(0, slash),
+      modelID: item.match.slice(slash + 1),
+      class: "quota",
+      reason: "walled-below-1%: binding window under 1% remaining with quota-class failures on record",
+      ...(item.until !== undefined ? { until: item.until } : {}),
+      resume: "reset",
+    })
   }
   for (const [id, hold] of infraHolds) {
     if (hold.until <= now) continue
