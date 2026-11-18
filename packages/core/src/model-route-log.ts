@@ -1,6 +1,6 @@
 export * as ModelRouteLog from "./model-route-log.js"
 
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm"
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
@@ -813,7 +813,7 @@ export interface ErrorBreakdown {
 }
 
 /** Failures grouped by exact tag, code and HTTP status, with the latest message of each group. */
-export const errorBreakdown = (db: Database.Interface["db"], since: number) =>
+export const errorBreakdown = (db: Database.Interface["db"], since: number, until?: number) =>
   db
     .select({
       providerID: RouteAttemptTable.provider_id,
@@ -828,7 +828,13 @@ export const errorBreakdown = (db: Database.Interface["db"], since: number) =>
       >`(select e.error_message from route_attempt e where e.provider_id = ${RouteAttemptTable.provider_id} and e.model_id = ${RouteAttemptTable.model_id} and e.error_tag is ${RouteAttemptTable.error_tag} and e.error_code is ${RouteAttemptTable.error_code} and e.error_status is ${RouteAttemptTable.error_status} order by e.time_started desc limit 1)`,
     })
     .from(RouteAttemptTable)
-    .where(and(gte(RouteAttemptTable.time_started, since), sql`${RouteAttemptTable.outcome} != 'success'`))
+    .where(
+      and(
+        gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
+        sql`${RouteAttemptTable.outcome} != 'success'`,
+      ),
+    )
     .groupBy(
       RouteAttemptTable.provider_id,
       RouteAttemptTable.model_id,
@@ -837,6 +843,188 @@ export const errorBreakdown = (db: Database.Interface["db"], since: number) =>
       RouteAttemptTable.error_status,
     )
     .orderBy(desc(count()))
+    .all()
+
+/** Filters for the read API over the ledger (#2497): a time window plus the dimensions both
+ * direct readers filter by. `until` is exclusive-by-convention of the caller: rows with
+ * time_started <= until are served, matching the readers' window queries. */
+export interface AttemptFilter {
+  readonly since: number
+  readonly until?: number
+  readonly providerID?: string
+  readonly modelID?: string
+  readonly sessionID?: string
+  readonly routeID?: string
+  readonly limit?: number
+}
+
+const attemptWindow = (filter: AttemptFilter) =>
+  and(
+    gte(RouteAttemptTable.time_started, filter.since),
+    filter.until === undefined ? undefined : lte(RouteAttemptTable.time_started, filter.until),
+    filter.providerID === undefined ? undefined : eq(RouteAttemptTable.provider_id, filter.providerID),
+    filter.modelID === undefined ? undefined : eq(RouteAttemptTable.model_id, filter.modelID),
+    filter.sessionID === undefined ? undefined : eq(RouteAttemptTable.session_id, filter.sessionID),
+    filter.routeID === undefined ? undefined : eq(RouteAttemptTable.route_id, filter.routeID),
+  )
+
+/** Most rows the read API serves in one response. */
+export const ATTEMPT_API_LIMIT = 1_000
+
+/** Recent attempts for the read API (#2497), newest first. The select list is the API's
+ * contract: credential_id, error_body and the quota snapshot are never selected, so no code
+ * path through this surface can serve a credential or a provider response body. */
+export const filteredAttempts = (db: Database.Interface["db"], filter: AttemptFilter) =>
+  db
+    .select({
+      id: RouteAttemptTable.id,
+      timeStarted: RouteAttemptTable.time_started,
+      timeEnded: RouteAttemptTable.time_ended,
+      sessionID: RouteAttemptTable.session_id,
+      routeID: RouteAttemptTable.route_id,
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      variant: RouteAttemptTable.variant,
+      outcome: RouteAttemptTable.outcome,
+      errorTag: RouteAttemptTable.error_tag,
+      errorCode: RouteAttemptTable.error_code,
+      errorStatus: RouteAttemptTable.error_status,
+      errorMessage: RouteAttemptTable.error_message,
+      retryable: RouteAttemptTable.retryable,
+      outputStarted: RouteAttemptTable.output_started,
+      hedged: RouteAttemptTable.hedged,
+      firstTokenMs: RouteAttemptTable.first_token_ms,
+      responseMs: RouteAttemptTable.response_ms,
+      tokensPerSecond: RouteAttemptTable.tokens_per_second,
+      tokensInput: RouteAttemptTable.tokens_input,
+      tokensOutput: RouteAttemptTable.tokens_output,
+      tokensReasoning: RouteAttemptTable.tokens_reasoning,
+      tokensCacheRead: RouteAttemptTable.tokens_cache_read,
+      tokensCacheWrite: RouteAttemptTable.tokens_cache_write,
+      costUsd: RouteAttemptTable.cost_usd,
+      cacheSavingsUsd: RouteAttemptTable.cache_savings_usd,
+    })
+    .from(RouteAttemptTable)
+    .where(attemptWindow(filter))
+    .orderBy(desc(RouteAttemptTable.time_started))
+    .limit(Math.min(Math.max(filter.limit ?? 100, 1), ATTEMPT_API_LIMIT))
+    .all()
+
+export interface TargetTotal {
+  readonly providerID: string
+  readonly modelID: string
+  readonly attempts: number
+  readonly successes: number
+  readonly failures: number
+  readonly policyRejections: number
+  readonly timeouts: number
+  readonly tokensInput: number
+  readonly tokensOutput: number
+  readonly tokensReasoning: number
+  readonly tokensCacheRead: number
+  readonly tokensCacheWrite: number
+  readonly costUsd: number
+  readonly cacheSavingsUsd: number
+  readonly sessions: number
+  readonly first: number | null
+  readonly last: number | null
+}
+
+/** Per provider/model attempt + token totals over a window (#2497): the aggregate shape both
+ * direct readers compute today, in the ledger's own failure semantics (content-policy
+ * rejections counted separately, never as failures, #1084). Distinct sessions per target are
+ * computed here, not summed from credential-split rows (#1106). */
+export const targetTotals = (db: Database.Interface["db"], since: number, until?: number) =>
+  db
+    .select({
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      attempts: count(),
+      successes: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} = 'success' then 1 else 0 end), 0)`,
+      failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
+      policyRejections: sql<number>`coalesce(sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end), 0)`,
+      timeouts: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} = 'timeout' then 1 else 0 end), 0)`,
+      tokensInput: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_input}), 0)`,
+      tokensOutput: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_output}), 0)`,
+      tokensReasoning: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0)`,
+      tokensCacheRead: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_read}), 0)`,
+      tokensCacheWrite: sql<number>`coalesce(sum(${RouteAttemptTable.tokens_cache_write}), 0)`,
+      costUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cost_usd}), 0)`,
+      cacheSavingsUsd: sql<number>`coalesce(sum(${RouteAttemptTable.cache_savings_usd}), 0)`,
+      sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
+      first: sql<number | null>`min(${RouteAttemptTable.time_started})`,
+      last: sql<number | null>`max(${RouteAttemptTable.time_ended})`,
+    })
+    .from(RouteAttemptTable)
+    .where(
+      and(
+        gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
+      ),
+    )
+    .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .all()
+
+export interface LedgerCoverage {
+  readonly attempts: number
+  readonly providers: number
+  readonly models: number
+  readonly sessions: number
+  readonly routes: number
+  readonly first: number | null
+  readonly last: number | null
+}
+
+/** What part of the ledger a window covers (#2497): totals and distinct dimensions over the
+ * same window the totals and attempts endpoints serve. */
+export const ledgerCoverage = (db: Database.Interface["db"], since: number, until?: number) =>
+  db
+    .select({
+      attempts: count(),
+      providers: sql<number>`count(distinct ${RouteAttemptTable.provider_id})`,
+      models: sql<number>`count(distinct ${RouteAttemptTable.model_id})`,
+      sessions: sql<number>`count(distinct ${RouteAttemptTable.session_id})`,
+      routes: sql<number>`count(distinct ${RouteAttemptTable.route_id})`,
+      first: sql<number | null>`min(${RouteAttemptTable.time_started})`,
+      last: sql<number | null>`max(${RouteAttemptTable.time_ended})`,
+    })
+    .from(RouteAttemptTable)
+    .where(
+      and(
+        gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
+      ),
+    )
+    .get()
+
+/** Route decisions in a window for the read API (#2497), newest first: the route_decision
+ * companion to filteredAttempts, with the same window/route filters. */
+export const filteredDecisions = (
+  db: Database.Interface["db"],
+  filter: { readonly since: number; readonly until?: number; readonly routeID?: string; readonly limit?: number },
+) =>
+  db
+    .select({
+      id: RouteDecisionTable.id,
+      time: RouteDecisionTable.time,
+      sessionID: RouteDecisionTable.session_id,
+      routeID: RouteDecisionTable.route_id,
+      selection: RouteDecisionTable.selection,
+      candidates: RouteDecisionTable.candidates,
+      chosen: RouteDecisionTable.chosen,
+      reason: RouteDecisionTable.reason,
+      detail: RouteDecisionTable.detail,
+    })
+    .from(RouteDecisionTable)
+    .where(
+      and(
+        gte(RouteDecisionTable.time, filter.since),
+        filter.until === undefined ? undefined : lte(RouteDecisionTable.time, filter.until),
+        filter.routeID === undefined ? undefined : eq(RouteDecisionTable.route_id, filter.routeID),
+      ),
+    )
+    .orderBy(desc(RouteDecisionTable.time))
+    .limit(Math.min(Math.max(filter.limit ?? 100, 1), ATTEMPT_API_LIMIT))
     .all()
 
 /** Most rows a per-pool read takes. The newest rows are the ones a review needs, so older ones are dropped. */
