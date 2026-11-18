@@ -7,6 +7,7 @@ import { Octokit } from "@octokit/rest"
 import { Resource } from "sst"
 import { githubActionsJWKSet, parseRepositoryClaim } from "./github"
 import { postDiscordSupportMessage } from "./discord"
+import { extractFeishuMessageText, verifyFeishuRequest } from "./feishu"
 
 type Env = {
   SYNC_SERVER: DurableObjectNamespace<SyncServer>
@@ -204,30 +205,25 @@ export default new Hono<{ Bindings: Env }>()
     return c.json({ info, messages })
   })
   .post("/feishu", async (c) => {
-    const body = (await c.req.json()) as {
-      challenge?: string
-      event?: {
-        message?: {
-          message_id?: string
-          root_id?: string
-          parent_id?: string
-          chat_id?: string
-          content?: string
-        }
-      }
-    }
-    console.log(JSON.stringify(body, null, 2))
+    // Verify before any side effect (#2564): the relay spends the Discord
+    // bot token on the caller's text, so an unverified request must never
+    // reach it. The full payload is no longer logged either.
+    const verification = verifyFeishuRequest({
+      rawBody: await c.req.text(),
+      signature: c.req.header("x-lark-signature"),
+      timestamp: c.req.header("x-lark-request-timestamp"),
+      nonce: c.req.header("x-lark-request-nonce"),
+      verificationToken: Resource.FEISHU_VERIFICATION_TOKEN.value,
+      encryptKey: Resource.FEISHU_ENCRYPT_KEY.value,
+    })
+    if (!verification.ok) return c.json({ error: verification.error }, { status: verification.status })
+    const body = verification.body
     const challenge = body.challenge
     if (challenge) return c.json({ challenge })
 
-    const content = body.event?.message?.content
-    const parsed =
-      typeof content === "string" && content.trim().startsWith("{")
-        ? (JSON.parse(content) as {
-            text?: string
-          })
-        : undefined
-    const text = typeof parsed?.text === "string" ? parsed.text : typeof content === "string" ? content : ""
+    const extracted = extractFeishuMessageText(body.event?.message?.content)
+    if (!extracted.ok) return c.json({ error: "invalid message content" }, { status: 400 })
+    const text = extracted.text
 
     let message = text.trim().replace(/^@_user_\d+\s*/, "")
     message = message.replace(/^aiden,?\s*/i, "<@759257817772851260> ")
