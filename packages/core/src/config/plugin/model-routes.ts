@@ -235,6 +235,17 @@ export const Plugin = define({
             ctx.location.directory,
           )
           if (!created) {
+            if (!(globalThis as { __diag?: boolean }).__diag) {
+              ;(globalThis as { __diag?: boolean }).__diag = true
+              const pids = models.provider.list().map((r) => String(r.provider.id))
+              const anthropic = models.provider.list().find((r) => String(r.provider.id) === "anthropic")
+              const m = anthropic ? Array.from(anthropic.models.values()) : []
+              console.error("DIAG providers:", pids.join(","))
+              console.error(
+                "DIAG anthropic ids:",
+                JSON.stringify(m.map((x) => [String(x.id), x.enabled]).slice(0, 25)),
+              )
+            }
             console.warn(
               `model route ${JSON.stringify(id)} names targets that resolve to no models after model transforms (experimental.routes.models); the route is not built`,
             )
