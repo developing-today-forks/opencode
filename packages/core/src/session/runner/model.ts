@@ -106,7 +106,10 @@ export const layer = Layer.effect(
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session, available, requestTokens) {
         // Location plugins populate and filter the catalog asynchronously during layer startup.
         if (!session.model) {
-          const resolved = yield* resolver.resolve(undefined, requestTokens)
+          // The session context travels with the default-model resolution so the
+          // #566 root-start gate judges this start (#2622); the explicit-model
+          // path below passes the same context through resolveModel.
+          const resolved = yield* resolver.resolve(undefined, requestTokens, session.id, session.parentID)
           if (resolved) return resolved
           return yield* new ModelNotSelectedError({ sessionID: session.id })
         }

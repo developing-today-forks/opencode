@@ -217,7 +217,16 @@ export interface Interface {
   /** `requestTokens` has the same meaning as on `resolveModel`: it also sizes the
    * default selection, so a session with no explicit model still filters route
    * targets by their per-target ceilings (#891). */
-  readonly resolve: (requested?: Ref, requestTokens?: number) => Effect.Effect<Resolved | undefined, Error>
+  readonly resolve: (
+    requested?: Ref,
+    requestTokens?: number,
+    /** The session asking, when this resolution serves a session (#2622): without it
+     * `cascade.kind` is undefined and the #566 root-start gate cannot judge a
+     * default-model start. Session-less callers (e.g. generate) omit it. */
+    sessionID?: string,
+    /** The session's parent session id, when it is a subsession (#566). */
+    parentID?: string,
+  ) => Effect.Effect<Resolved | undefined, Error>
   /** `sessionID` enables per-session target stickiness for routes with a non-ordered selection mode.
    * `requestTokens` is the request's context size in tokens, when known: a route target whose ceiling
    * the request does not fit is skipped like any other ineligible target. */
@@ -1710,7 +1719,7 @@ export const layer = Layer.effect(
     }
 
     return Service.of({
-      resolve: Effect.fn("ModelResolver.resolve")(function* (requested, requestTokens) {
+      resolve: Effect.fn("ModelResolver.resolve")(function* (requested, requestTokens, sessionID, parentID) {
         let target = requested
         if (target && Option.isSome(config)) {
           const cfg = config.value
@@ -1747,7 +1756,7 @@ export const layer = Layer.effect(
                 ),
               )
         if (!selected) return undefined
-        return yield* resolveSelected(selected, target?.variant, undefined, requestTokens)
+        return yield* resolveSelected(selected, target?.variant, sessionID, requestTokens, parentID)
       }),
       resolveModel: (selected, variant, sessionID, requestTokens, parentID) =>
         resolveSelected(selected, variant, sessionID, requestTokens, parentID),
