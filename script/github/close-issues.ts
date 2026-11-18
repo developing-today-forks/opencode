@@ -20,6 +20,7 @@ type Issue = {
   updated_at: string
   author_association: string
   user: { login: string } | null
+  pull_request?: { url: string; html_url: string; diff_url: string; patch_url: string }
 }
 
 const headers = {
@@ -85,6 +86,31 @@ export async function closeIssue(num: number, input: RequestOptions) {
   console.log(`Closed https://github.com/${input.repo}/issues/${num}`)
 }
 
+export async function processIssuePage(all: Issue[], input: RequestOptions, cutoff: Date) {
+  const stale: number[] = []
+  let foundFresh = false
+  for (const i of all) {
+    if (i.pull_request) {
+      console.log(`Skipping pull request #${i.number}`)
+      continue
+    }
+    const updated = new Date(i.updated_at)
+    if (updated < cutoff) {
+      if (shouldSkip(i)) {
+        console.log(`Skipping stale issue #${i.number}; author ${i.user?.login ?? "unknown"} is exempt`)
+        continue
+      }
+      stale.push(i.number)
+      continue
+    }
+    console.log(`\nFound fresh issue #${i.number}, stopping`)
+    foundFresh = true
+    break
+  }
+  for (const num of stale) await closeIssue(num, input)
+  return { closed: stale.length, foundFresh }
+}
+
 async function main() {
   // One shared convention (#1972): the sweeper supplies GH_TOKEN.
   // A missing token is a hard failure by design - the step (and job)
@@ -102,33 +128,11 @@ async function main() {
     if (all.length === 0) break
     console.log(`Fetched page ${page} ${all.length} issues`)
 
-    const stale: number[] = []
-    for (const i of all) {
-      const updated = new Date(i.updated_at)
-      if (updated < cutoff) {
-        if (shouldSkip(i)) {
-          console.log(`Skipping stale issue #${i.number}; author ${i.user?.login ?? "unknown"} is exempt`)
-          continue
-        }
-        stale.push(i.number)
-      } else {
-        console.log(`\nFound fresh issue #${i.number}, stopping`)
-        if (stale.length > 0) {
-          for (const num of stale) {
-            await closeIssue(num, requestOptions)
-            closed++
-          }
-        }
-        console.log(`Closed ${closed} issues total`)
-        return
-      }
-    }
-
-    if (stale.length > 0) {
-      for (const num of stale) {
-        await closeIssue(num, requestOptions)
-        closed++
-      }
+    const result = await processIssuePage(all, requestOptions, cutoff)
+    closed += result.closed
+    if (result.foundFresh) {
+      console.log(`Closed ${closed} issues total`)
+      return
     }
 
     page++

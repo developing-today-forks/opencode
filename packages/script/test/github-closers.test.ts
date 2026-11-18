@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import {
   CLOSE_ISSUES_RESPONSE_MAX_BYTES,
   closeIssue,
   fetchIssuePage,
+  processIssuePage,
 } from "../../../script/github/close-issues"
 import {
   CLOSE_PRS_ERROR_BODY_MAX_BYTES,
@@ -95,6 +96,62 @@ describe("GitHub closer request deadlines and bounded reads (#1344)", () => {
     await closeIssue(42, { ...issueRequest, fetchImpl })
     expect(calls.map((call) => call.init?.method)).toEqual(["POST", "PATCH"])
     expect(calls.every((call) => call.init?.signal instanceof AbortSignal)).toBe(true)
+  })
+
+  test("a stale issue page skips pull requests and keeps author exemptions", async () => {
+    const calls: Array<{ url: string; method: string | undefined }> = []
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: input.toString(), method: init?.method })
+      return new Response(null, { status: 200 })
+    }
+    const log = spyOn(console, "log").mockImplementation(() => {})
+    try {
+      const result = await processIssuePage(
+        [
+          {
+            number: 41,
+            updated_at: "2026-09-01T00:00:00Z",
+            author_association: "NONE",
+            user: { login: "contributor" },
+            pull_request: {
+              url: "https://api.github.com/repos/owner/repo/pulls/41",
+              html_url: "https://github.com/owner/repo/pull/41",
+              diff_url: "https://github.com/owner/repo/pull/41.diff",
+              patch_url: "https://github.com/owner/repo/pull/41.patch",
+            },
+          },
+          {
+            number: 42,
+            updated_at: "2026-09-01T00:00:00Z",
+            author_association: "NONE",
+            user: { login: "contributor" },
+          },
+          {
+            number: 43,
+            updated_at: "2026-09-01T00:00:00Z",
+            author_association: "MEMBER",
+            user: { login: "member" },
+          },
+        ],
+        { ...issueRequest, fetchImpl },
+        new Date("2026-11-01T00:00:00Z"),
+      )
+
+      expect(result).toEqual({ closed: 1, foundFresh: false })
+      expect(
+        calls.map((call) => ({
+          url: call.url.replace("https://api.github.com/repos/owner/repo", ""),
+          method: call.method,
+        })),
+      ).toEqual([
+        { url: "/issues/42/comments", method: "POST" },
+        { url: "/issues/42", method: "PATCH" },
+      ])
+      expect(log.mock.calls).toContainEqual(["Skipping pull request #41"])
+      expect(log.mock.calls).toContainEqual(["Skipping stale issue #43; author member is exempt"])
+    } finally {
+      log.mockRestore()
+    }
   })
 
   test("the PR GraphQL fetch settles when its request signal times out", async () => {
