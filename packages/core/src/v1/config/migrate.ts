@@ -262,7 +262,26 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, npm: string | un
       info.variants &&
       Object.entries(info.variants).map(([id, options]) => {
         const { options: bag, ...rest } = options
-        const value = typeof bag === "object" && bag !== null && !Array.isArray(bag) ? { ...rest, ...bag } : options
+        const restRecord = rest as Record<string, unknown>
+        let value: typeof options
+        if (typeof bag === "object" && bag !== null && !Array.isArray(bag)) {
+          const nested = bag as Record<string, unknown>
+          // Keep nativeSettings' effort precedence (top-level camel, top-level
+          // snake, nested camel, nested snake) instead of letting the flattened
+          // bag override a top-level spelling.
+          const effort = [
+            restRecord.reasoningEffort,
+            restRecord.reasoning_effort,
+            nested.reasoningEffort,
+            nested.reasoning_effort,
+          ].find((candidate): candidate is string => typeof candidate === "string" && candidate !== "")
+          value =
+            effort === undefined
+              ? ({ ...rest, ...bag } as typeof options)
+              : ({ ...rest, ...bag, reasoningEffort: effort } as typeof options)
+        } else {
+          value = options
+        }
         return { id, ...split(value) }
       }),
     cost: costs,
