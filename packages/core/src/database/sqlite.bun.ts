@@ -1,25 +1,19 @@
-import { Database, type SQLQueryBindings } from "bun:sqlite"
-import { Context, Effect, Layer } from "effect"
-import { Reactivity } from "effect/reactivity"
-import { SqlClient } from "effect/sql"
-import { classifySqliteError, SqlError } from "effect/sql/SqlError"
-import { Sqlite } from "./sqlite.js"
-
-const TypeId = "~@opencode/core/database/SqliteBun" as const
+import { SQLiteError } from "bun:sqlite"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { Layer } from "effect"
+import type { SqlClient } from "effect/sql"
 
 export const supportsTuningPragmas = true
 
 // Foreign keys default OFF and can be toggled per connection.
 export const supportsForeignKeyToggle = true
 
-interface Config extends Sqlite.ClientConfig {
-  readonly filename: string
-  readonly readonly?: boolean
-  readonly create?: boolean
-  readonly readwrite?: boolean
-  readonly disableWAL?: boolean
-}
+// Opening the database can only fail on a broken file or a lock held past
+// busyTimeout; Database.layer treats both as fatal.
+export const sqliteLayer = (config: SqliteClient.SqliteClientConfig): Layer.Layer<SqlClient.SqlClient> =>
+  Layer.orDie(SqliteClient.layer(config))
 
+<<<<<<< HEAD
 const make = (options: Config) =>
   Effect.gen(function* () {
     const native = (yield* Sqlite.Native) as Database
@@ -108,3 +102,7 @@ export const sqliteLayer = (config: Config) => {
   const native = nativeLayer(config)
   return Layer.merge(native, clientLayer(config).pipe(Layer.provide(native))).pipe(Layer.provide(Reactivity.layer))
 }
+=======
+// bun:sqlite throws SQLiteError, whose errno is SQLite's extended result code.
+export const resultCode = (cause: unknown) => (cause instanceof SQLiteError ? cause.errno : undefined)
+>>>>>>> upstream-anomalyco/dev

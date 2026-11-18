@@ -2,19 +2,24 @@ import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect
 import { define } from "@opencode/plugin/effect/plugin"
 import { expiresInSeconds } from "./expires.js"
 import type { SessionRequest } from "@opencode/plugin/effect/session"
-import { Deferred, Effect, Option, Schema, Semaphore, Stream } from "effect"
+import { Deferred, Effect, Option, Schema, Semaphore } from "effect"
 import type { Server } from "node:http"
 import { App } from "../../app.js"
 import { Credential } from "../../credential.js"
-import { Bus } from "../../bus.js"
 import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
+import { OauthRedirect } from "../../oauth/redirect.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
 import { readBoundedResponseText } from "../../tool/http-body.js"
 import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
+<<<<<<< HEAD
 import { eachInstance } from "./instance.js"
+=======
+import { activeCredential } from "./credential-settings.js"
+import { ProviderRefresh } from "./refresh.js"
+>>>>>>> upstream-anomalyco/dev
 
 const clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const issuer = "https://auth.openai.com"
@@ -24,9 +29,10 @@ const pollingSafetyMargin = 3000
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const browserMethodID = Integration.MethodID.make("chatgpt-browser")
 const headlessMethodID = Integration.MethodID.make("chatgpt-headless")
-// ChatGPT accounts lost gpt-5.4 and gpt-5.4-mini in Codex on 2026-08-31 (replacements: gpt-5.6-terra, gpt-5.6-luna).
-const codexAllowed = new Set(["gpt-5.5", "gpt-5.3-codex-spark"])
-const codexDisallowed = new Set(["gpt-5.5-pro", "gpt-5.6"])
+// Codex rejects gpt-5.5 and older models, including gpt-5.3-codex-spark, for ChatGPT accounts.
+const codexDisallowed = new Set(["gpt-5.6"])
+// The image models the Codex client generates and edits with on the Codex login.
+const codexImageModels = new Set(["gpt-image-2"])
 
 type Pkce = {
   verifier: string
@@ -105,6 +111,7 @@ const browser = (app: App.Info, integrationID: Integration.ID) =>
             Effect.flatMap((value) => exchange(value, redirect, pkce, app)),
             Effect.map((tokens) => credential(browserMethodID, tokens)),
           ),
+          submit: OauthRedirect.submit({ state, callback: code, received: (value) => value }),
         }
       }),
     refresh: (value) => refresh(browserMethodID, value, app),
@@ -262,6 +269,7 @@ const headless = (app: App.Info, integrationID: Integration.ID) =>
 export const OpenAIPlugin = define({
   id: "opencode.provider.openai",
   effect: Effect.fn(function* (ctx) {
+<<<<<<< HEAD
     const bus = yield* Bus.Service
     yield* eachInstance(
       ctx.event,
@@ -282,6 +290,24 @@ export const OpenAIPlugin = define({
               ? credential
               : undefined
         })
+=======
+    const loading = Semaphore.makeUnsafe(1)
+    let chatgpt: Credential.OAuth | undefined
+
+    const load = Effect.fn("OpenAIPlugin.load")(function* () {
+      const { credential } = yield* activeCredential(ctx, "openai")
+      const previous = chatgpt
+      chatgpt =
+        credential?.type === "oauth" &&
+        (credential.methodID === browserMethodID || credential.methodID === headlessMethodID)
+          ? credential
+          : undefined
+      return (
+        (previous === undefined) !== (chatgpt === undefined) ||
+        previous?.metadata?.accountID !== chatgpt?.metadata?.accountID
+      )
+    })
+>>>>>>> upstream-anomalyco/dev
 
         yield* ctx.integration.transform((editor) => {
           editor.method.update(browser(ctx.app, ids.integrationID))
@@ -340,6 +366,7 @@ export const OpenAIPlugin = define({
                   : { ...draft.limit, context: 400_000, input: 272_000 }
             })
           }
+<<<<<<< HEAD
         })
         yield* ctx.session.hook(
           "model.request",
@@ -375,6 +402,51 @@ export const OpenAIPlugin = define({
           Effect.forkScoped({ startImmediately: true }),
         )
       }),
+=======
+          const apiID = draft.modelID ?? draft.id
+          if (draft.type === "image") {
+            if (codexImageModels.has(apiID)) draft.cost = []
+            else draft.enabled = false
+            return
+          }
+          const match = apiID.match(/^gpt-(\d+)(?:\.(\d+))?/)
+          const major = Number(match?.[1])
+          const minor = Number(match?.[2] ?? 0)
+          if (codexDisallowed.has(apiID) || !match || !(major > 5 || (major === 5 && minor > 5))) {
+            draft.enabled = false
+            return
+          }
+          draft.cost = []
+        })
+      }
+    })
+    yield* ctx.session.hook(
+      "model.request",
+      (evt) =>
+        Effect.gen(function* () {
+          if (!chatgpt) return
+          if (evt.baseURL && URL.canParse(evt.baseURL) && new URL(evt.baseURL).origin === "https://api.openai.com")
+            evt.baseURL = codexBaseURL
+          const session = yield* ctx.session
+            .get({ sessionID: evt.sessionID })
+            .pipe(Effect.orElseSucceed(() => undefined))
+          evt.headers.originator = "opencode"
+          // ChatGPT routes its prompt cache on this header, so children share the parent's.
+          evt.headers["session-id"] = session ? SessionAffinity.get(session) : evt.sessionID
+        }),
+      { providerID: Provider.ID.openai },
+    )
+    // The ChatGPT backend rejects a requested output limit, and OpenAI counts one against rate limits.
+    const omitOutputLimit = (evt: SessionRequest) =>
+      Effect.sync(() => {
+        delete evt.options.maxTokens
+      })
+    for (const name of ["context", "compaction"] as const)
+      yield* ctx.session.hook(name, omitOutputLimit, { providerID: Provider.ID.openai })
+    yield* ProviderRefresh.onSwitch(
+      "openai",
+      loading.withPermit(ProviderRefresh.reloadIfChanged(load(), ctx.provider.reload())),
+>>>>>>> upstream-anomalyco/dev
     )
   }),
 } satisfies PluginInternal.InternalPlugin)

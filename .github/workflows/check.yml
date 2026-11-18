@@ -6,6 +6,14 @@ name: check
 # or gate individual steps with if: on the runner.
 
 on:
+<<<<<<< HEAD
+=======
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, beta]
+    types: [opened, synchronize, reopened, ready_for_review]
+>>>>>>> upstream-anomalyco/dev
   workflow_dispatch:
 
 concurrency:
@@ -17,10 +25,16 @@ permissions:
 
 jobs:
   check:
+<<<<<<< HEAD
     timeout-minutes: 15
     name: basic typecheck
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04
+=======
+    name: typecheck
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+>>>>>>> upstream-anomalyco/dev
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -31,10 +45,14 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
-      - name: Run checks
-        run: bun run check
+      - name: Lint
+        run: bun run lint
 
-      # Every GUI package file (app, desktop, gui-extensions, ui, session-ui) a pull request adds or edits must be free of
+      # Local `bun run check` uses `bun check`; CI keeps the official TypeScript compiler as the source of truth.
+      - name: Typecheck (TypeScript 7.1)
+        run: bun run typecheck:tsc
+
+      # Every GUI package file (app, desktop, gui-plugins, the plugin package's GUI SDK, ui, session-ui) a pull request adds or edits must be free of
       # oxlint problems, warn-level rules (anti-slop) included. Other packages are not affected.
       - name: Lint changed files
         # Against the merge's first parent, so base-branch commits the pull request has not merged are not counted as its

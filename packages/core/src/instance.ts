@@ -1,24 +1,33 @@
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "./agent.js"
+import { App } from "./app.js"
+import { Artifact } from "./artifact.js"
 import { AISDK } from "./aisdk.js"
 import { Model } from "./model.js"
 import { Provider } from "./provider.js"
 import { Command } from "./command.js"
 import { Config } from "./config.js"
+import { Flag } from "./flag.js"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { filesystem } from "@opencode/util/effect/app-node-platform"
 import { Node } from "@opencode/util/effect/app-node"
 import { FileMutation } from "./file-mutation.js"
+import { FileWrite } from "./file-write.js"
 import { Environment } from "./environment/index.js"
 import { Formatter } from "./formatter.js"
 import { FileSystem } from "./filesystem.js"
 import { FileSystemSearch } from "./filesystem/search.js"
 import { Generate } from "./generate.js"
+<<<<<<< HEAD
 import { Embeddings } from "./embeddings.js"
 import { TranscriptionFacade } from "./transcription-facade.js"
 import { SystemOne } from "./systemone.js"
 import { OpenAIFacadeResponse } from "./openai-facade-response.js"
+=======
+import { Voice } from "./voice.js"
+import { UsageLimits } from "./usage-limits.js"
+>>>>>>> upstream-anomalyco/dev
 import { Form } from "./form.js"
 import { Image } from "./image.js"
 import { LocationWatcher } from "./filesystem/location-watcher.js"
@@ -51,7 +60,6 @@ import { SkillInstructions } from "./skill/instructions.js"
 import { Snapshot } from "./snapshot.js"
 import { InstructionDiscovery } from "./instruction-discovery.js"
 import { InstructionBuiltIns } from "./instructions/builtins.js"
-import { InstructionEntry } from "./session/instruction-entry.js"
 import { SessionInstructions } from "./session/instructions.js"
 import { McpTool } from "./tool/mcp.js"
 import { ReadToolFileSystem } from "./tool/read-filesystem.js"
@@ -74,11 +82,14 @@ const fsUtilNode = Node.makeLocationNode({
 })
 
 const nodes = [
+  App.node,
   Location.node,
   LocationLifecycle.node,
   Environment.node,
   Config.node,
+  Flag.node,
   Agent.node,
+  Artifact.node,
   Command.node,
   Reference.node,
   Rpc.node,
@@ -104,6 +115,7 @@ const nodes = [
   InstructionDiscovery.node,
   FileAccess.node,
   FileMutation.node,
+  FileWrite.node,
   Formatter.node,
   Mcp.node,
   Permission.node,
@@ -112,13 +124,17 @@ const nodes = [
   Image.node,
   SkillInstructions.node,
   ReferenceInstructions.node,
-  InstructionEntry.node,
   Form.node,
   Generate.node,
+<<<<<<< HEAD
   Embeddings.node,
   TranscriptionFacade.node,
   SystemOne.node,
   OpenAIFacadeResponse.node,
+=======
+  Voice.node,
+  UsageLimits.node,
+>>>>>>> upstream-anomalyco/dev
   ReadToolFileSystem.node,
   McpTool.node,
   SessionInstructions.node,

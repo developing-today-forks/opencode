@@ -10,17 +10,32 @@ import {
 } from "effect/http"
 import { HttpContext, HttpRateLimitDetails, AIError, TransportError } from "../schema/index.js"
 import { classifyProviderFailure, providerErrorMessage } from "../provider-error.js"
-import { Service, type HttpMiddleware, type Interface } from "./executor-service.js"
+import {
+  composeMiddleware,
+  CurrentMiddleware,
+  CurrentTls,
+  headerDetails,
+  responseHttp,
+  Service,
+  type HttpMiddleware,
+  type Interface,
+} from "./executor-service.js"
+import type { ClientTls } from "../schema/options.js"
 
-export { Service } from "./executor-service.js"
-export type { HttpHandler, HttpMiddleware, Interface } from "./executor-service.js"
-
-const headerDetails = (headers: Headers.Headers) =>
-  Object.fromEntries(Object.entries(headers).map(([name, value]) => [name, String(value)]))
+export {
+  composeMiddleware,
+  CurrentMiddleware,
+  CurrentTls,
+  responseHttp,
+  Service,
+  withMiddleware,
+} from "./executor-service.js"
+export type { HttpHandler, HttpMiddleware, Interface, RequestExecutorService } from "./executor-service.js"
 
 const normalizedHeaders = (headers: Headers.Headers) =>
   Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]))
 
+<<<<<<< HEAD
 // retry-after is RFC 9110 delay-seconds, `1*DIGIT`. retry-after-ms is the
 // de-facto millisecond variant and takes an unsigned decimal: digits with an
 // optional fraction. Both reject the other spellings Number() accepts (hex,
@@ -28,6 +43,13 @@ const normalizedHeaders = (headers: Headers.Headers) =>
 // invented wait.
 const DELAY_SECONDS = /^\d+$/
 const MILLISECONDS = /^\d+(?:\.\d+)?$/
+=======
+const clampRetryAfterMs = (millis: number) => Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.ceil(millis)))
+
+const retryAfterMs = (headers: Record<string, string>) => {
+  const millis = Number(headers["retry-after-ms"])
+  if (Number.isFinite(millis)) return clampRetryAfterMs(millis)
+>>>>>>> upstream-anomalyco/dev
 
 // Date.parse with a calendar check, the local equivalent of core's
 // ModelRouteLimits.parseAbsoluteTime (#713; ai does not depend on core, and
@@ -86,6 +108,7 @@ const retryAfterMs = (headers: Record<string, string>) => {
   const value = headers["retry-after"]?.trim()
   if (!value) return undefined
 
+<<<<<<< HEAD
   if (DELAY_SECONDS.test(value)) {
     const seconds = Number(value)
     if (Number.isFinite(seconds)) return seconds * 1000
@@ -93,6 +116,13 @@ const retryAfterMs = (headers: Record<string, string>) => {
 
   const date = parseHttpDate(value)
   if (date !== undefined) return Math.max(0, date - Date.now())
+=======
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return clampRetryAfterMs(seconds * 1000)
+
+  const date = Date.parse(value)
+  if (!Number.isNaN(date)) return clampRetryAfterMs(date - Date.now())
+>>>>>>> upstream-anomalyco/dev
   return undefined
 }
 
@@ -139,6 +169,7 @@ const rateLimitDetails = (headers: Record<string, string>, retryAfter: number | 
   })
 }
 
+<<<<<<< HEAD
 /** Rate-limit details a response advertises, on success as well as failure. Undefined when it
  * carries none. Header names are expected lower-cased, as `Headers` holds them. */
 export const responseRateLimit = (headers: Record<string, string>) =>
@@ -154,6 +185,8 @@ export const responseHttp = (response: HttpClientResponse.HttpClientResponse) =>
     headers: headerDetails(response.headers),
   })
 
+=======
+>>>>>>> upstream-anomalyco/dev
 const MAX_BODY_CHARS = 2000
 const MAX_ERROR_BODY_BYTES = 64 * 1024
 
@@ -338,25 +371,62 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
         return yield* statusError(response)
       })
     return Service.of({
-      execute: executeOnce,
+      // Scoped middleware runs outside per-call middleware. It is cleared while the request runs, so a request a
+      // middleware makes itself isn't wrapped again.
+      execute: (request, next) =>
+        Effect.gen(function* () {
+          const middleware = composeMiddleware(yield* CurrentMiddleware, next)
+          return yield* executeOnce(request, middleware).pipe(Effect.provideService(CurrentMiddleware, undefined))
+        }),
     })
   }),
 )
 
 export const fetchLayer = layer.pipe(Layer.provide(FetchHttpClient.layer))
 
-/** Run `fn` on every request: it sees the raw response before status classification, inside middleware already on `executor`, and outside per-call middleware. */
+/**
+ * Sends through `execute`, presenting `tls` on each request. Apply it only where a provider request is sent, so
+ * downloads made through the plain executor never carry the certificate. The executor's HTTP client reads `CurrentTls`.
+ */
+export const withTls = (execute: Interface["execute"], tls: ClientTls | undefined): Interface["execute"] =>
+  tls ? (request, middleware) => execute(request, middleware).pipe(Effect.provideService(CurrentTls, tls)) : execute
+
+/**
+ * Per-call middleware that sends through `fetch` instead of the executor's HTTP client. Executor middleware and
+ * `middleware` still wrap the call, and status classification still applies.
+ */
+export const withFetch = (
+  fetch: typeof globalThis.fetch | undefined,
+  middleware?: HttpMiddleware,
+): HttpMiddleware | undefined => {
+  if (fetch === undefined) return middleware
+  const send = (request: HttpClientRequest.HttpClientRequest) =>
+    HttpClient.execute(request).pipe(
+      Effect.provide(FetchHttpClient.layer),
+      Effect.provideService(FetchHttpClient.Fetch, fetch),
+    )
+  return middleware === undefined ? send : (request) => middleware(request, send)
+}
+
+/**
+ * Run `fn` on every request: it sees the raw response before status classification, inside middleware already on
+ * `executor`, and outside per-call and scoped ({@link withMiddleware}) middleware.
+ */
 export const middleware = (fn: HttpMiddleware, executor: Layer.Layer<Service> = fetchLayer): Layer.Layer<Service> =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
       const inner = yield* Service
       return Service.of({
+        // Scoped middleware sits where per-call middleware does, inside `fn`; it is read here and cleared so the
+        // executors below don't apply it again.
         execute: (request, next) =>
-          inner.execute(
-            request,
-            next === undefined ? fn : (input, handler) => fn(input, (forwarded) => next(forwarded, handler)),
-          ),
+          Effect.gen(function* () {
+            const scoped = composeMiddleware(yield* CurrentMiddleware, next)
+            return yield* inner
+              .execute(request, composeMiddleware(fn, scoped))
+              .pipe(Effect.provideService(CurrentMiddleware, undefined))
+          }),
       })
     }),
   ).pipe(Layer.provide(executor))

@@ -1,3 +1,5 @@
+import { once } from "node:events"
+import { fstatSync } from "node:fs"
 import { text } from "node:stream/consumers"
 
 export function readStdin(beforeRead?: () => void) {
@@ -151,4 +153,19 @@ export async function readBoundedResponseBody(
   // TextDecoder (like response.text()) strips a leading UTF-8 BOM;
   // Buffer.toString("utf8") would preserve it and break JSON parsing.
   return new TextDecoder().decode(Buffer.concat(chunks, size))
+/**
+ * Reads a shell pipe or redirected file in full, however slow its producer. Any other stdin (the socket
+ * that spawn's default stdio gives a child) is read only if it has data or ends within `grace`
+ * milliseconds; otherwise it is closed unread.
+ */
+export async function readStdinIfReady(grace: number) {
+  const stat = fstatSync(0)
+  if (stat.isFIFO() || stat.isFile()) return readStdin()
+  const ready = await once(process.stdin, "readable", { signal: AbortSignal.timeout(grace) }).then(
+    () => true,
+    () => false,
+  )
+  if (ready) return readStdin()
+  process.stdin.destroy()
+  return undefined
 }

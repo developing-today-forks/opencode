@@ -34,7 +34,7 @@ try {
     const pkg = JSON.parse(original) as {
       name: string
       dependencies?: Record<string, string>
-      exports?: Record<string, string | { import: string; types: string }>
+      exports?: Record<string, string | { types: string; import: string }>
       imports?: Record<string, Record<string, string>>
     }
     const archive = join(temporary, `${name}.tgz`)
@@ -56,7 +56,7 @@ try {
       pkg.exports = Object.fromEntries(
         Object.entries(pkg.exports).map(([key, value]) => {
           if (typeof value !== "string") return [key, value]
-          return [key, { import: output(name, value), types: output(name, value, true) }]
+          return [key, { types: output(name, value, true), import: output(name, value) }]
         }),
       )
     }

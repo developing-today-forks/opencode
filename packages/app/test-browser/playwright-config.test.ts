@@ -42,12 +42,16 @@ test.each([
   20_000,
 )
 
+<<<<<<< HEAD
 test.each([
   "./playwright.config.ts",
   "./e2e/performance/playwright.config.ts",
   "./e2e/performance/playwright.uncapped.config.ts",
   "./e2e/performance/timeline-stability/playwright.config.ts",
 ])(
+=======
+test.each(["./playwright.config.ts", "./e2e/stability/playwright.config.ts"])(
+>>>>>>> upstream-anomalyco/dev
   "%s leaves an explicit external app unmanaged",
   (file) => {
     const result = Bun.spawnSync({
@@ -67,7 +71,10 @@ test.each([
     expect(config.fixtureHost).toBe("127.0.0.1")
     expect(config.fixturePort).toBe("4444")
   },
+<<<<<<< HEAD
   20_000,
+=======
+>>>>>>> upstream-anomalyco/dev
 )
 
 test(

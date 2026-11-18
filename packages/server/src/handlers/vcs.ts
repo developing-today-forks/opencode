@@ -2,8 +2,6 @@ import { Vcs } from "@opencode/core/vcs"
 import { Project } from "@opencode/core/project"
 import { Worktree } from "@opencode/core/worktree"
 import { Bus } from "@opencode/core/bus"
-import { Plugin } from "@opencode/core/plugin"
-import { PluginVcsBranchList } from "@opencode/core/plugin/vcs/branch-list"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { ConflictError, InvalidRequestError, ServiceUnavailableError } from "@opencode/protocol/errors"
@@ -24,7 +22,6 @@ export const VcsHandler = HttpApiBuilder.group(Api, "server.vcs", (handlers) =>
           const location = yield* Location.Service
           const directory = location.project.directory
           const providerID = ctx.query.provider ?? "git"
-          yield* Plugin.awaitActivation
           const vcs = yield* Vcs.Service
           yield* vcs.initialize(providerID).pipe(
             Effect.mapError((error) => {
@@ -94,7 +91,11 @@ export const VcsHandler = HttpApiBuilder.group(Api, "server.vcs", (handlers) =>
           Effect.gen(function* () {
             const vcs = yield* Vcs.Service
             return yield* vcs
-              .diff(ctx.query.mode, { context: ctx.query.context, base: ctx.query.base })
+              .diff(ctx.query.mode, {
+                context: ctx.query.context,
+                base: ctx.query.base,
+                untracked: ctx.query.untracked,
+              })
               .pipe(Effect.mapError((error) => new ServiceUnavailableError({ service: "vcs", message: error.message })))
           }),
         ),

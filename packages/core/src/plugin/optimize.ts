@@ -1,6 +1,6 @@
 export * as OptimizePlugin from "./optimize.js"
 
-import { define } from "@opencode/plugin/effect/plugin"
+import { define, type Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { Effect } from "effect"
@@ -88,6 +88,20 @@ export const FallbackPlugin = make(
 
 export const Plugins = [OpenAIPlugin, AnthropicPlugin, KimiPlugin, ArceePlugin, MetaPlugin, DeepSeekPlugin, FallbackPlugin] as const
 
+const models = new WeakMap<SessionHooks["context"], Model.Info>()
+
+export const resolveModel = (ctx: Context, event: SessionHooks["context"]) =>
+  Effect.gen(function* () {
+    const cached = models.get(event)
+    if (cached?.providerID === event.model.providerID && cached.id === event.model.id) return cached
+    const model: Model.Info =
+      (yield* ctx.model.list()).data.find(
+        (model) => model.providerID === event.model.providerID && model.id === event.model.id,
+      ) ?? Model.Info.default(event.model.providerID, event.model.id)
+    models.set(event, model)
+    return model
+  })
+
 function make(
   id: string,
   optimize: (model: Model.Info, tools: SessionHooks["context"]["tools"]) => string | undefined,
@@ -98,10 +112,7 @@ function make(
     effect: Effect.fn(`OptimizePlugin.${id}`)(function* (ctx) {
       const hook = (event: SessionHooks["context"]) =>
         Effect.gen(function* () {
-          const model =
-            (yield* ctx.model.list()).data.find(
-              (model) => model.providerID === event.model.providerID && model.id === event.model.id,
-            ) ?? Model.Info.default(event.model.providerID, event.model.id)
+          const model = yield* resolveModel(ctx, event)
           // Curate tools before rendering their guidance, including for agents with a custom system prompt.
           const template = optimize(model, event.tools)
           if (!template) return

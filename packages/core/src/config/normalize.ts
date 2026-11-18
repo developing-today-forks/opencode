@@ -1,8 +1,13 @@
 export * as ConfigNormalize from "./normalize.js"
 
 import { isDeepStrictEqual } from "node:util"
+<<<<<<< HEAD
 import { isRecord } from "@opencode/ai/utils/record"
 import { Option, Result, Schema } from "effect"
+=======
+import { isRecord } from "@opencode/util/record"
+import { Option, Schema } from "effect"
+>>>>>>> upstream-anomalyco/dev
 import { Info } from "@opencode/schema/config"
 import { ConfigAgent } from "@opencode/schema/config/agent"
 import { ConfigCommand } from "@opencode/schema/config/command"
@@ -223,6 +228,7 @@ export function normalize(input: unknown): Result {
     share: Info.fields.share,
     enterprise: Info.fields.enterprise,
     username: Info.fields.username,
+    timezone: Info.fields.timezone,
     snapshots: Info.fields.snapshots,
     media: Info.fields.media,
     tool_output: Info.fields.tool_output,
@@ -476,6 +482,7 @@ function normalizeExperimental(
       unsupportedExperimental.forEach((key) =>
         unsupportedIfPresent(experimental, key, ["experimental", key], diagnostics),
       )
+<<<<<<< HEAD
       if (own(experimental, "portable_shell_scanner")) {
         const value = decodeEncoded(
           ConfigExperimental.Info.fields.portable_shell_scanner,
@@ -602,6 +609,14 @@ function normalizeExperimental(
         }
       }
       if (Object.keys(routes).length || routesInput !== undefined) result.routes = routes
+=======
+      // `policies` merges into top-level `policies` in normalizePolicies.
+      Object.entries(ConfigExperimental.Info.fields).forEach(([key, schema]) => {
+        if (key === "policies" || !own(experimental, key)) return
+        const value = decodeEncoded(schema, experimental[key], ["experimental", key], diagnostics)
+        if (value !== undefined) result[key] = value
+      })
+>>>>>>> upstream-anomalyco/dev
     }
   }
   if (Object.keys(result).length || (isRecord(input.experimental) && !Object.keys(input.experimental).length))
@@ -839,6 +854,7 @@ function diagnoseSelectionMap(
   })
 }
 
+<<<<<<< HEAD
 function diagnoseSelection(
   value: Record<string, unknown>,
   path: string[],
@@ -852,6 +868,10 @@ function diagnoseSelection(
     } catch {}
   }
   const modelValid = typeof modelStr === "string" && /^[^/#]+\/[^#]+$/.test(modelStr)
+=======
+function diagnoseSelection(value: Record<string, unknown>, path: string[], diagnostics: Diagnostic[]) {
+  const modelValid = typeof value.model === "string" && ConfigMigrateV1.modelSelection(value.model) !== undefined
+>>>>>>> upstream-anomalyco/dev
   if (own(value, "model") && typeof value.model === "string" && !modelValid)
     diagnostics.push({
       kind: "unsupported",

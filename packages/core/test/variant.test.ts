@@ -519,8 +519,11 @@ test("resolves no variants for prototype-named packages (#862)", () => {
 
 test("spells reasoning variants for every bundled native package", () => {
   const supports: Variant.Support[] = [{ type: "toggle" }, { type: "effort" }, { type: "budget_tokens" }]
+  // Image and decision APIs have no reasoning setting, except Gemini's, which has a spelling.
   const missing = Array.from(Provider.builtinPackages).filter(
-    (packageName) => Variant.resolve(model(packageName, "test-model", 32_000), supports).length === 0,
+    (packageName) =>
+      !/\/(images|videos|decisions|embeddings)$/.test(packageName) &&
+      Variant.resolve(model(packageName, "test-model", 32_000), supports).length === 0,
   )
   expect(missing).toEqual([])
 })

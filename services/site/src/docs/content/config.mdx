@@ -1,0 +1,1365 @@
+---
+title: "Config"
+---
+
+Create `opencode.jsonc` in your project to configure OpenCode. Add the schema for editor validation, then set only the options you need.
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-5-5",
+}
+```
+
+You can also ask OpenCode to update this file for you.
+
+## Format
+
+OpenCode supports JSON and JSONC. Use JSONC when you want comments or trailing commas.
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Use this model by default.
+  "model": "anthropic/claude-sonnet-5-5",
+}
+```
+
+## Locations
+
+Put managed, machine-wide settings in the system configuration directory:
+
+| Platform | Directory                               |
+| -------- | --------------------------------------- |
+| macOS    | `/Library/Application Support/opencode` |
+| Linux    | `/etc/opencode`                         |
+| Windows  | `%ProgramData%\opencode`                |
+
+The system directory works like the global directory. Besides
+`opencode.json(c)`, it loads `agents/`, `commands/`, `skills/`, and `plugins/`
+for every user on the machine:
+
+```text
+/etc/opencode/
+├── opencode.json
+├── agents/review.md
+├── commands/release.md
+└── skills/deploy/SKILL.md
+```
+
+On macOS, OpenCode also reads managed preferences that MDM tools deploy for the
+`ai.opencode.managed` domain. A user-specific profile replaces the
+machine-wide one:
+
+```text
+/Library/Managed Preferences/<user>/ai.opencode.managed.plist
+/Library/Managed Preferences/ai.opencode.managed.plist
+```
+
+Managed settings have the highest precedence, so users and projects cannot
+override the values they set, and managed preferences override the system
+directory. Settings alone cannot stop users from adding providers, MCP servers,
+agents, or plugins; use [policies](/policies#precedence) in managed
+configuration to enforce restrictions.
+
+Put user settings for every project in the global configuration:
+
+```text
+~/.config/opencode/opencode.json(c)
+```
+
+Put project settings in either of these files:
+
+```text
+/home/user/projects/my-app/opencode.json(c)
+/home/user/projects/my-app/.opencode/opencode.json(c)
+```
+
+OpenCode searches from the current directory to the filesystem root. It first
+merges direct `opencode.json(c)` files from the farthest directory to the
+closest, then merges files inside `.opencode` directories in the same order.
+This means every discovered `.opencode` config overrides every direct config.
+Use one form throughout a directory tree unless you need that behavior.
+
+For example, start OpenCode from `/home/user/projects/acme/packages/web`:
+
+```text
+/etc/opencode/opencode.json
+~/.config/opencode/opencode.json
+
+/home/user/projects/acme/
+├── opencode.json
+└── packages/
+    └── web/
+        ├── opencode.json
+        └── src/
+```
+
+OpenCode applies these files from lowest to highest precedence:
+
+1. `~/.config/opencode/opencode.json`
+2. `/home/user/projects/acme/opencode.json`
+3. `/home/user/projects/acme/packages/web/opencode.json`
+4. `/etc/opencode/opencode.json`
+
+The package config overrides matching settings from the repository config,
+which overrides the global config. The system config overrides all of them.
+Settings that do not conflict are preserved. [Policies](/policies#precedence)
+from global and project files evaluate in the reverse order, and system
+policies outrank all of them.
+
+## Schema
+
+The complete OpenCode configuration schema is available at
+[opencode.ai/config.json](https://opencode.ai/config.json).
+
+Add the `$schema` field to your configuration file to enable validation and
+autocomplete in editors that support JSON Schema:
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json"
+}
+```
+
+Use the schema as the source of truth for available fields, accepted values,
+and nested configuration shapes.
+
+### Shell
+
+Set the shell used by the terminal and shell tools.
+
+```jsonc
+{
+  "shell": "/bin/zsh",
+}
+```
+
+### Model
+
+Set the default model in `provider/model` format. The root default currently
+does not retain a `#variant`; agent and command model references can select one.
+
+```jsonc
+{
+  "model": "anthropic/claude-sonnet-5-5",
+}
+```
+
+See the [models guide](/models) for model selection and local models.
+
+### Agent
+
+Choose the primary agent used when a session does not select one explicitly.
+
+```jsonc
+{
+  "default_agent": "build",
+}
+```
+
+See the [agents guide](/agents) for built-in and custom
+agents.
+
+### Updates
+
+Control update checks from the global config. Set `update` to `"disable"` to
+skip them, `"notify"` to show available updates before installing them, or
+`"auto"` to install updates automatically. When omitted, `update` defaults to `"notify"`.
+
+Automatic installation does not restart a running server. Restart it manually to activate the installed update.
+Project-level values are ignored.
+
+```jsonc
+{
+  "update": "notify",
+}
+```
+
+### Username
+
+Set a username. OpenCode accepts this field but does not display it in
+conversations.
+
+```jsonc
+{
+  "username": "alice",
+}
+```
+
+### Permissions
+
+Define ordered rules that allow, deny, or ask before an agent uses a tool on a
+matching resource.
+
+```jsonc
+{
+  "permissions": [
+    {
+      "action": "shell",
+      "resource": "git push *",
+      "effect": "ask",
+    },
+  ],
+}
+```
+
+See the [permissions guide](/permissions) for rule matching and available actions.
+
+### Policies
+
+Allow or deny use of a provider, hard-deny a permission check, or block an MCP
+server, skill, or plugin, with ordered statements that broader configuration can
+override.
+
+```jsonc
+{
+  "policies": [
+    { "action": "provider.use", "resource": "*", "effect": "deny" },
+    { "action": "provider.use", "resource": "anthropic", "effect": "allow" },
+    { "action": "tool.use", "resource": "shell:git push *", "effect": "deny" },
+  ],
+}
+```
+
+See the [policies guide](/policies) for matching, precedence across configuration
+files, and Console-managed policy.
+
+### Model routes
+
+Define ordered provider/model pools under `experimental.routes.models`. Select
+a route like any other model using `opencode-route/<route-id>`. If a target
+fails before producing output, OpenCode tries the next healthy target. It never
+replays a turn after answer or tool output has started.
+
+The canonical shape is `experimental.routes`, which has seven keys:
+
+- `routes.models` - the model routes.
+- `routes.providers` - named selections over concrete providers.
+- `routes.windows` - named, reusable time windows.
+- `routes.schedules` - time-bound weight changes.
+- `routes.tuning` - scheduled review of routing history.
+- `routes.log` - what the routing history records.
+- `routes.settings` - global defaults for the route machinery.
+
+```jsonc
+{
+  "experimental": {
+    "routes": {
+      "models": {
+        "cheap-fast": {
+          "targets": ["openai/gpt-6-luna", "github-copilot/gpt-6-luna"],
+        },
+      },
+      "providers": {
+        "openai-plan": {
+          "providers": ["openai", "openai.alternate"],
+          "selection": "ordered",
+        },
+      },
+      "windows": {
+        "weekday-peak": {
+          "daysOfWeek": ["mon", "tue", "wed", "thu", "fri"],
+          "start": "09:00",
+          "end": "17:00",
+          "timezone": "America/Chicago",
+        },
+      },
+      "schedules": [
+        { "id": "peak-lighten", "targets": ["openai/gpt-6-luna"], "when": "weekday-peak", "factor": 0.5 },
+      ],
+      "tuning": { "enabled": true, "intervalMinutes": 15, "windowHours": 24 },
+      "log": { "captureErrorBodies": false },
+      "settings": { "demotion": { "after": 3 } },
+    },
+  },
+}
+```
+
+Each `routes` key also has a deprecated flat spelling directly under
+`experimental`, kept so existing config files keep working:
+
+- `model_routes` maps to `routes.models`.
+- `provider_routes` maps to `routes.providers`.
+- `model_route_schedules` maps to `routes.schedules`.
+- `model_route_windows` maps to `routes.windows`.
+- `model_route_tuning` maps to `routes.tuning`.
+- `model_route_log` maps to `routes.log`.
+- `model_route_settings` maps to `routes.settings`.
+
+The flat spellings normalize into the nested shape when the config loads. When
+both spellings name the same key, the nested value wins and the conflict is
+diagnosed. Prefer the nested shape in new config. The detailed flat-key
+examples below are complete, independent configurations: normalization selects
+each nested field as a whole rather than merging its entries, so combining an
+example with the nested config above can omit routes or schedules and produce
+conflict diagnostics.
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "cheap-fast": {
+        "name": "Cheap / fast",
+        "targets": ["openai/gpt-6-luna", "github-copilot/gpt-6-luna"],
+        "health": {
+          "firstTokenTimeoutMs": 10000,
+          "maxResponseTimeMs": 45000,
+          "sampleWindow": 5,
+          "slowThreshold": 3,
+          "cooldownMs": 60000,
+        },
+      },
+      "smart-slow": {
+        "targets": ["anthropic/claude-opus-5", "openrouter/claude-opus-5"],
+      },
+      "frontier-heavy": {
+        "targets": ["openai/gpt-6-astra", "anthropic/claude-opus-5"],
+      },
+      "luna-stack": {
+        "name": "GPT-6 Luna",
+        "selection": "weighted",
+        "weights": { "openai/gpt-6-luna": 3, "github-copilot/gpt-6-luna": 1 },
+        "targets": [
+          {
+            "model": "openai/gpt-6-luna",
+            "defaultVariant": "max",
+            "variants": { "low": "high", "medium": "high" },
+          },
+          {
+            "model": "github-copilot/gpt-6-luna",
+            "defaultVariant": "medium",
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+Targets are tried in order. Each route defaults to a 10-second first-output
+deadline, degradation after 3 slow completions in a rolling window of 5, and a
+60-second in-memory cooldown. Set `firstTokenTimeoutMs` to `false` to disable
+that deadline. Optional `maxResponseTimeMs` and `minOutputTokensPerSecond`
+thresholds define a slow completed response; omitting both leaves the first
+output deadline as the only performance signal. Both are measured to the end of
+the model's response, so tools that a step runs afterwards do not count against
+the model. Cooldowns are shared by every
+session in the OpenCode process and are restored from the health history after a
+restart. A route can reference another route. Which variants a route offers is
+covered under "Effort levels in a pool".
+Provider-use policies still apply to the concrete targets; a route only exposes
+models that remain available after those policies run.
+
+A target can also be an object. `defaultVariant` runs that target at a chosen
+variant when the route is selected without one, and `variants` remaps a
+route-level variant per target, so `opencode-route/luna-stack#low` can run one
+provider at `high` and another at `low`. A remap to `false` makes the target sit
+that level out.
+
+A route or a target object can declare `cache_format` to say which prompt-cache
+marker syntax that endpoint accepts. It takes the same values as
+`compatibility.cacheFormat`, `"anthropic"` or `"alibaba"`. A target's own value
+overrides the route's, a nested route inherits the enclosing route's value, and
+unset leaves every target's own compatibility unchanged. Give a pool whose
+members accept the same syntax one value so a session keeps its cache when
+failover moves it to another target.
+
+A target's model can contain `*` to match every model of its provider whose id
+fits, such as `"openai/gpt-6-*"`; matches follow the provider's order, and a model
+reached twice is used once, at its first place. This glob stays inside one
+provider and is case-sensitive. To pick models across providers, use the matching
+keys under "Choosing pool members by pattern". `until` is an epoch time in
+milliseconds after which the target leaves the route, for time-limited pool
+membership. It takes effect when the configuration reloads.
+
+By default (`"selection": "ordered"`) every session starts at the first healthy
+target. `"round-robin"` gives each new session the next target in rotation and
+`"weighted"` draws one by `weights`, roughly `weights[a] : weights[b]` across
+new sessions. The drawn choice is sticky for the session, so prompt caches stay
+warm; only failure, cooldown expiry, or a re-draw when the sticky target is
+cooling moves a session to another target.
+
+Weights order every selection mode: at each decision the targets are ranked by
+their effective weight, and equal weights keep their configured relative order.
+With no other configuration every weight is 1, so `ordered` routes keep their
+order exactly. Failover is another such decision, among the targets not yet
+tried: an `ordered` route moves to the heaviest of them, and `round-robin` and
+`weighted` routes rotate or draw again by weight.
+
+### Choosing pool members by pattern
+
+A pool can pick its models by pattern instead of listing each one. `include`,
+`contains` and `match` add models; `exclude` and `notContains` remove them.
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "small": { "include": ["*luna*", "*haiku*"], "exclude": ["*-5", "*-6"] },
+      "claude": { "contains": ["haiku", "sonnet", "opus", "mythos"] },
+      "frontier-direct": { "include": ["anthropic/*opus*", "anthropic/*mythos*"] },
+      "claude-agg": { "include": ["claude"], "exclude": ["frontier-direct"] },
+      "small-all": { "include": ["small", "small-old"] },
+    },
+  },
+}
+```
+
+`small` takes every Luna and Haiku model from every connected provider, then drops
+the ids that end in `-5` or `-6`, so `luna-5.5` and `luna-6.1` stay. `claude-agg` is
+the `claude` pool without the models of `frontier-direct`.
+
+| Entry                             | What it matches                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `*luna*`                          | Model ids that contain `luna`, in every provider. `*` stands for any run of characters.           |
+| `anthropic/*opus*`                | A pattern with `/` is tested against `provider/model`, so this is only Anthropic's Opus models.   |
+| `re:luna-(5\|6)$`                 | `re:` starts a regular expression. It matches anywhere in the id unless anchored with `^` or `$`. |
+| `claude`, `opencode-route/claude` | Another pool's id, in any case: that pool's models.                                               |
+
+- Case never matters, in globs, regular expressions or text.
+- A glob covers the whole id: `*-5` matches `luna-5` and not `luna-5.5`.
+- `contains` and `notContains` take plain text, found anywhere in `provider/model`,
+  so a provider id matches too: `"contains": ["copilot"]` takes every GitHub
+  Copilot model. Patterns keep their own rule.
+- Patterns only add models the model picker offers: enabled models of providers
+  that are connected or configured, switched on, and allowed by provider-use
+  policies. Connecting a provider adds its matching models to the pool.
+  `targets` can still name a provider that is not connected, as before.
+
+A pool's members are built in this order:
+
+1. `targets`, in their order.
+2. Models from `include`, `contains` and `match`, in provider order. A model that is
+   already in the pool is not added again.
+3. Whatever `exclude` and `notContains` match is removed, including targets and the
+   members of nested pools.
+
+`targets` can be left out when a pool has `include`, `contains` or `match`.
+
+#### Pools by name
+
+A pool's name brings in that pool's models, without its order, weights or effort
+settings. To nest a whole pool with its own selection, list it in `targets` as
+`opencode-route/<id>`.
+
+```jsonc
+"claude-agg": { "include": ["opencode-route/claude"], "exclude": ["frontier-direct"] }
+```
+
+A pool's name matches in any case wherever a pool is named: in `targets`, matching
+keys, `variantRules`, `weights` keys, schedule `routes`, route overrides and the
+routing tools, so `Claude` and `opencode-route/CLAUDE` both name the pool `claude`.
+An exact spelling wins. When several pools match only ignoring case, the first in
+the config is used, with a warning in the log.
+
+A pool that names itself, directly or through other pools, gets nothing from that
+name and no warning, so `small-all` may name a pool that names `small-all` back. A
+name that starts with `opencode-route/` and is not a pool is logged as a warning;
+any other name that is not a pool is read as a pattern.
+
+#### Expressions
+
+`match` takes one expression of patterns and pool names, joined by `and`, `or` and
+`not`, with parentheses.
+
+```jsonc
+"small": { "match": "(*luna* or *haiku*) and not 're:-(5|6)$' and not *mini*" }
+```
+
+`not` binds tightest and `or` loosest. Quote a term that has spaces or parentheses
+with single or double quotes, as the regular expression above is. There is no
+`xor`: a pool rarely needs it, it is easy to misread, and
+`(a or b) and not (a and b)` says the same thing.
+
+#### Malformed pools
+
+A pool with a malformed pattern, regular expression or expression is skipped
+whole, and the config warning names the key and what is wrong. Skipping only the
+bad entry could make the pool larger than written, for example when an `exclude`
+stops applying. A pool with none of `targets`, `include`, `contains` and `match`
+is skipped the same way.
+
+```jsonc
+"small": { "include": ["*luna*"], "exclude": ["re:luna-(5"] }
+```
+
+This pool is skipped with the warning `skipped pool: Invalid regular expression:
+missing )` at `experimental.model_routes.small.exclude.0`.
+
+#### Pools for a subagent with model restrictions
+
+A subagent whose allowed or excluded models are restricted may run a pool only
+when every target of the pool is allowed, each judged at the variant it would run.
+A pool that picks models by `include`, `contains` or `match`, or remaps levels by
+`variantRules`, can run models its targets do not list, so it is refused there,
+and so is a pool that nests one.
+
+```jsonc
+"small": { "include": ["*luna*"] }
+```
+
+A restricted subagent cannot run `opencode-route/small`; listing its models in
+`targets` makes it usable there.
+
+### Effort levels in a pool
+
+A pool offers effort levels, its variants, as `opencode-route/<id>#<level>`. When a
+pool is selected at a level, each target runs it through the first of these that
+applies:
+
+1. The target's own `variants` remap for that level.
+2. The last `variantRules` entry that matches the model and maps that level.
+3. The model's own variant of the same name.
+
+A remap to `false` makes the target sit that level out. A target that sits out
+the requested level is never used at it, not even as a last resort when every
+other target is cooling down. A nested pool written as a target object, such as
+`{ "model": "opencode-route/<id>", "variants": { "max": false } }`, sits that level
+out as a whole. Only `false` applies to a nested pool: a string remap,
+`defaultVariant` or `until` on it is ignored, with a config warning.
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "big": {
+        "targets": [
+          { "model": "openai/argon", "variants": { "xhigh": "high", "max": false } },
+          "anthropic/claude-opus-5",
+        ],
+      },
+      "smart-fast": {
+        "include": ["*argon*", "*luna*"],
+        "variantRules": [
+          { "match": "*argon*", "map": { "medium": "high", "high": "high", "xhigh": "high", "max": "high" } },
+        ],
+      },
+      "small": { "include": ["*haiku*", "*luna-mini*"], "levels": ["low", "medium", "high"] },
+    },
+  },
+}
+```
+
+In `big`, Argon runs `xhigh` at its `high` and sits out `max`, which goes to
+Opus. In `smart-fast`, Argon runs every level from `medium` up at its `high`.
+`small` offers exactly `low`, `medium` and `high`, and each model runs them at its
+own variants of those names.
+
+Which levels a pool offers:
+
+- Without `levels`, a level is offered when every target can run it or sits it
+  out, and at least one target runs it. A target that cannot run a level and does
+  not sit it out still keeps that level from the whole pool.
+- With `levels`, the pool offers exactly those levels. A target that cannot run
+  one of them sits it out. A declared level that no target can run is left out,
+  with a warning in the log. Nested in another pool, the pool keeps its `levels`:
+  its members sit out every other level, so the outer pool offers a level through
+  them only where the nested pool does.
+- A pool with a target pinned as `provider/model#variant`, or a nested pool pinned
+  as `opencode-route/<id>#<level>`, offers no levels unless it declares `levels`.
+  With `levels`, the pinned target runs each of them at its pin, except a level the
+  pool sits it out of.
+- A nested pool pinned as `opencode-route/<id>#<level>` runs only at that level, and
+  brings each member that has that variant, at that variant. A pool pinned at a
+  level it does not declare adds nothing, with a warning in the log. Reached inside a
+  pinned pool without a pin of its own, its members still count as left out, as they
+  would sit that level out when the pool above is selected at it.
+
+A remap or a rule applies to the levels of the pool that declares it. A pinned pool
+runs only at its pin, so its remaps and rules, and those of the pools nested in it,
+decide only whether a member sits the pin out. Such a member is left out. Otherwise
+the pinned pool is built as it would be when selected at its pin: a later target or
+matching key that repeats a member left out adds nothing, and a target with its own
+`#variant` is a separate member. Every other member runs at the pin at each level of
+the pools above, unless one of them sits it out of that level.
+
+```jsonc
+"inner": {
+  "targets": [
+    { "model": "openai/luna-6", "variants": { "low": false } },
+    { "model": "anthropic/claude-opus-5", "variants": { "max": false } },
+  ],
+},
+"outer": { "targets": ["opencode-route/inner#max", "openai/argon"], "levels": ["low", "high"] },
+```
+
+`inner#max` leaves Opus out, because Opus sits `max` out. Luna runs at `max` at both
+of `outer`'s levels: `inner` never runs at `low`, so its `low: false` does not apply.
+To keep Luna out of `outer` at `low`, put the remap on `outer`'s target:
+`{ "model": "opencode-route/inner#max", "variants": { "low": false } }`.
+
+`variantRules` apply in order, and a later rule overrides an earlier one level by
+level. A target's own `variants` override every rule, and a remap to a variant the
+model does not have is ignored for that model. Rules reach the members of nested
+pools too; the nested pool's own rules come later, so they win. In a pinned pool
+they decide only whether a member sits the pin out, as above.
+
+```jsonc
+"variantRules": [
+  { "match": "*", "map": { "max": "high" } },
+  { "match": "claude and not *haiku*", "map": { "max": false } },
+]
+```
+
+A rule's `match` takes a pattern, a pool name or an expression, as `match` on the
+pool does.
+
+### Schedules: peak hours and recurring priorities
+
+A schedule shifts a target's weight by the clock. It names provider/model
+patterns, a local-time window, and either a `factor` that scales the target's
+configured weight or a `weight` that replaces it:
+
+```jsonc
+{
+  "experimental": {
+    "model_routes": {
+      "coding": {
+        "targets": ["deepseek/deepseek-chat", "anthropic/claude-opus-5"],
+        "selection": "weighted",
+        "weights": { "deepseek/deepseek-chat": 2 },
+        "schedules": [
+          {
+            "id": "deepseek-peak",
+            "targets": ["deepseek/*"],
+            "when": {
+              "daysOfWeek": ["mon", "tue", "wed", "thu", "fri"],
+              "start": "09:00",
+              "end": "17:00",
+              "timezone": "America/Chicago",
+            },
+            "factor": 0.4,
+          },
+        ],
+      },
+    },
+    "model_route_schedules": [
+      {
+        "id": "weekend-burst",
+        "providers": ["openai"],
+        "models": ["*luna*"],
+        "when": { "daysOfWeek": ["sat", "sun"] },
+        "weight": 4,
+      },
+    ],
+  },
+}
+```
+
+During peak hours the `deepseek/*` target in `coding` carries 2 x 0.4 = 0.8
+while the Claude target carries its 1, so new weighted sessions prefer Claude;
+outside the window the 2:1 split returns. A schedule on a route reaches that
+route's targets, including ones nested below it; `routes.schedules`
+applies to every route unless `routes` names some, and its
+`targets`, `providers` and `models` matchers combine. Two schedules can overlap:
+every active `factor` multiplies in order, and an active `weight` replaces what
+came before it, so put the more specific rule later. A session that is already
+being answered by a target stays on it while it is healthy no matter what the
+schedule says; the schedule steers new sessions and the fallback order.
+
+`when` fields:
+
+| Field         | Meaning                                                                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `daysOfWeek`  | Day names (`mon`, `tuesday`) or 0 (Sunday) to 6 (Saturday). Empty or unset means every day.                                     |
+| `daysOfMonth` | 1 to 31, or -1 for the last day of the month. Empty or unset means every day.                                                   |
+| `start`, `end` | Local `HH:mm` bounds; `end` is exclusive. Unset bounds mean from/to the edge of the day. A start later than the end runs past midnight into the following morning. |
+| `timezone`    | IANA name such as `America/Chicago`. Unset means the host's local timezone.                                                     |
+| `from`, `until` | Optional epoch-millisecond bounds for the whole schedule, e.g. a promotion that ends.                                          |
+
+When both day fields are set the date has to match both, so `daysOfMonth:
+[1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month, and an
+empty `when` means all the time. The same window shape is understood by
+`route_adjust` (the agent tool), so "weekdays 9 to 5 downweight deepseek" can be
+recorded as one adjustment instead of a config edit.
+
+A schedule OpenCode cannot apply still loads, the router skips it, and a config
+warning names the pool, the schedule and the field. That happens for:
+
+- a `start` or `end` that is not `HH:mm`
+- a `timezone` the runtime does not know
+- a `from` that is not before `until`
+- a schedule with neither `factor` nor `weight`
+
+A key OpenCode does not know, anywhere in a pool, its targets or its schedules,
+is reported the same way and then ignored.
+
+```jsonc
+"schedules": [
+  { "id": "monday", "when": { "dayOfWeek": ["mon"] }, "factor": 0.5 },
+  { "id": "peak", "when": { "start": "9am", "end": "17:00" }, "factor": 0.5 },
+]
+```
+
+In a pool named `coding`, this logs `omitted unknown setting` at
+`experimental.model_routes.coding.schedules.0.when.dayOfWeek`. The key is
+`daysOfWeek`, so until it is fixed `monday` applies every day. It also logs
+`skipped schedule peak: start "9am" is not HH:mm` at
+`experimental.model_routes.coding.schedules.1.when.start`.
+
+Routes nest. Every route is a group with its own `selection` and `weights`: a
+parent picks a nested route as one unit (key it as `"opencode-route/<id>"` in
+`weights`), and the nested route then picks among its own members. A weighted
+3:1 split between `luna` and `claude`, where `luna` is round-robin over three
+providers, sends 75% of new sessions to `luna` and about 25% to each Luna
+provider. A group with nothing healthy drops out and its weight goes to its
+siblings.
+
+Set `autonomy` on a route to choose how much it decides for itself. Each level
+includes the ones before it:
+
+| Level        | The route may                                                                              |
+| ------------ | ------------------------------------------------------------------------------------------ |
+| `fixed`      | Fail over on errors. Configured weights, selection modes, budgets and holds are ignored.   |
+| `rules`      | Also use selection modes, weights, budgets and provider rate-limit holds.                  |
+| `adaptive`   | Also be reviewed on a schedule: failing or slow targets are skipped or down-weighted.      |
+| `predictive` | Also learn hours of the day when a target is unreliable, and read reset times from errors. |
+| `agent`      | Also give every session `route_stats` and `route_adjust`, which cover all routes.          |
+
+A route with no `autonomy` keeps every rule on, as before levels existed. Each route
+takes only what its own level reaches, except the agent tools: once any route is
+`agent` or has no `autonomy`, every session is offered `route_stats` and
+`route_adjust`. `route_stats` then reports on every route, and an adjustment made
+with `route_adjust` applies to every route that is not `fixed`. The scheduled
+review's skips and down-weights apply to `adaptive` and higher routes, and to `rules`
+routes when `routes.tuning.enabled` is true (flat spelling: `model_route_tuning`). Time-of-day and error-text
+prediction apply to `predictive` and higher routes. A route with no `autonomy` takes
+all of it. The review runs when tuning is enabled or any route is `adaptive` or
+higher. Real failures always cool a target down, at every level, so a `fixed` route
+still fails over.
+
+A `fixed` route starts from its configured order, and these still change it:
+
+- Schedules, the route's own and `model_route_schedules`.
+- The user's prefer and avoid rules in `route-overrides.json`, which OpenChamber
+  writes. An avoided target is used only when nothing else is available.
+- Quota demotion: a target with repeated quota errors drops to the end.
+
+Set `attempts` to the total number of requests made to a target before the route
+moves on. The default is 2, so one transient failure is retried on the same target
+before the route moves on; set 1 to fail over at once. Retries only happen before
+any output, so a tool call never runs twice. A rate limit or quota error never
+retries the same target: the turn moves on at once. A target that fails is not
+penalized until its attempts are used up.
+
+When a target has two give-ups among its last five requests, the route stops
+retrying it and starts its next target at once, as a hedge would: the first to
+answer wins and the other is cancelled. `hedgeAfterMs` does not control this, and
+nothing waits for it. It applies to routes whose `autonomy` is `adaptive`,
+`predictive` or `agent`, and to routes with no `autonomy`. A `fixed` or `rules`
+route never races; it retries and fails over.
+
+Sessions keep their cache. On an `ordered` route, a session stays on the target
+that last answered it while that target is ready, so a recovered primary does not
+pull it back mid-conversation. When a session has just failed over, the first two
+requests on the new target are hedged against the target it came from, if
+`hedgeAfterMs` is set; the origin is raced only while it is ready, and a session
+that settles on the new target stops hedging back. These rules are on by default
+and need no configuration.
+
+Set `hedgeAfterMs` to guard against a target that is slow rather than down. If the
+current target has produced no output after that long, the same request is sent to
+the next target and the first to answer wins; the other is cancelled. Both run
+unseen, so nothing is shown and no tool runs until a winner is known. It costs a
+duplicate request whenever the first target is slow, and a target that keeps
+losing counts as slow and cools down. It is off by default. The start of the race
+is recorded as a `hedge-started` decision naming both targets, so the attempt is
+visible even if the loser never produces an event.
+
+OpenCode also reads the rate-limit headers of every response, successful ones
+included (OpenAI-style `x-ratelimit-*` and Anthropic-style `anthropic-ratelimit-*`
+windows, and `retry-after`). A window that is empty, or down to 5% of its
+allowance with a stated reset time, holds the target back until it resets, so
+traffic moves before the provider starts refusing it. This is the provider's own
+forecast, not a failure: nothing is cooled or counted against the target. If every
+target in a route is held back, the first still answers rather than the turn
+failing. Windows survive a restart until they reset, and the latest report for each
+target is stored with its attempt and shown by `route_stats`. The latest snapshot
+for each target is restored after a restart, so a target the new process has not
+used yet still carries the provider's last word. Rejected requests expose the
+same hook as successful ones (`onRejected` mirrors `onResponse`), so a mid-stream
+429 moves traffic just like a slow success does.
+
+A provider's own timing is believed: a rate limit's `retry-after` sets the
+cooldown (up to a day), and a target that reports an exhausted quota is skipped
+for `quotaCooldownMs` (default 15 minutes) instead of being probed every minute.
+
+`budgets` give a target request and token allowances (`requestsPerMinute`,
+`requestsPerDay`, `tokensPerMinute`, `tokensPerDay`). A target that reaches
+`softLimit` of any allowance (default 0.9) is passed over until the window frees
+up, so traffic moves before the provider starts refusing it. Lower `softLimit` to
+move earlier. When a target appears in nested routes, the outermost route's budget
+applies. Usage is counted from every request OpenCode sends the target, including
+ones made outside a route, and is rebuilt from the database after a restart.
+
+Failures are also correlated. When two or more models of one provider are
+cooling, the whole provider is demoted to last resort until they recover. When
+three or more unrelated providers fail within 30 seconds, the cause is more
+likely your network than any one target, so no target is cooled.
+
+While routes are configured, the `route_stats` tool lets the agent read how targets
+have performed: attempts, failures, first-output latency, speed, current cooldowns
+and usage, and failures grouped by exact error code and HTTP status with the latest
+provider message. For each pool it also sets the configuration beside what happened:
+how often each member was offered and chosen, how often its new-session draws matched
+the share its weight promised, why it was left out (cooldown, provider limit, budget,
+user skip, context limit), and its request sizes. Pass `route` to narrow that to one pool. It
+suggests adjustments from that history (a high failure rate, repeated quota errors,
+unusually slow first output); with `apply` they are put in force for 30 minutes, only
+ever lowering a target's share or skipping it.
+
+To review pools, weights and plan use together, run `/routing-review`. It loads the
+`routing-review` skill, which explains what each signal means and the thresholds for
+acting on it, and recommends changes without making any until you approve one.
+
+The review also looks at _when_ each target tends to fail. A target that has been
+unreliable at the current hour is down-weighted for a while, while one that only
+failed at 3am is left alone at noon. Notes are how the tuner learns what history
+cannot say, one per line as `match: text`:
+
+```jsonc
+{
+  "experimental": {
+    "model_route_tuning": {
+      "enabled": true,
+      "notes": [
+        "anthropic/claude-opus-5: promo credits, reset at 2026-01-04T00:00:00Z",
+        "openai/gpt-6-luna: out of quota, back in 3 hours",
+      ],
+    },
+  },
+}
+```
+
+A note that states when a limit returns (`reset at`, `back in 3 hours`) skips
+matching targets until then. The rest is left for the agent to read: `route_stats`
+returns the notes with the history it covers. The tuner also reads a stated reset
+time out of a provider's own error message when the headers say nothing. Each note
+is one line with a non-empty match before the first colon and non-empty text after
+it. A malformed note is reported and skipped on its own; the other notes and the rest
+of the block are kept. An unknown key in the block is reported and ignored.
+
+To have that review happen on its own, enable scheduled tuning:
+
+```jsonc
+{
+  "experimental": {
+    "model_route_tuning": { "enabled": true, "intervalMinutes": 15, "windowHours": 24 },
+  },
+}
+```
+
+Every interval OpenCode reads the last `windowHours` of history and puts the same
+suggestions in force without asking. They only lower a target's share or skip it,
+last two intervals, and are replaced by the next review, so a target that recovers
+returns to full share by itself. Off by default.
+
+The `route_adjust` tool lets you tell the agent
+things like "my Anthropic promo credits expire in 3 days, favor Claude" or "skip
+glm today". Changing adjustments asks for permission like any other tool. It
+records an expiring adjustment: `weight` with a factor (or a `weight` that
+replaces the target's share outright), or `skip`, matched by a case-insensitive
+substring of `provider/model`. Ordered groups try favored targets first,
+weighted groups scale their share, and a skipped target is only used when
+nothing else is available. A sentence that names recurring hours ("weekdays 9
+to 5, downweight deepseek") becomes a `schedule` window instead, which stays in
+force until removed rather than expiring after a duration. Adjustments survive
+restarts until they expire.
+
+Every request is recorded, including background ones such as title generation and
+compaction, so nothing is invisible. A request that never went out, because the
+chosen target could not be resolved, is recorded as `resolution-failure`. Both
+legs of a hedged attempt are marked `hedged`, which is how `route_stats` reports
+hedge accuracy: how often a target won the race it was drawn into. Provider error
+bodies are not kept unless `experimental.routes.log.captureErrorBodies` is
+`true`. When it is, the first 2 KB of each failed request's body is stored with
+bearer tokens, key-like fields and `sk-` style keys redacted, since a body can echo
+the request.
+
+OpenCode records routing history in its database for analysis and tuning:
+`route_decision` (what was eligible, what was drawn and why), `route_attempt`
+(per request: exact error tag, code, HTTP status and message, whitelisted rate-limit
+headers, first-token latency, response time, tokens per second, and input, output,
+reasoning and cache token counts), `route_health` (cooldown
+starts, ends and network-suspect events) and `route_note` (adjustments).
+An attempt's response time and tokens per second stop at the end of the model's
+response, while its start and end times span the whole step, including any tools
+it ran.
+Rows carry the session and assistant message IDs so they join to the session
+tables, which already hold per-step usage and cost. Prompts and responses are
+never stored, and nothing is pruned automatically.
+
+Use `opencode-route/cheap-fast`, `opencode-route/smart-slow`, or
+`opencode-route/frontier-heavy` as a category model in OpenChamber's Auto
+routing settings to compose `Auto → Jev category/agent → provider pool`.
+
+### Agents
+
+Override built-in agents or define specialized agents with their own model,
+instructions, mode, and permissions.
+
+```jsonc
+{
+  "agents": {
+    "reviewer": {
+      "description": "Review changes without editing files",
+      "mode": "subagent",
+      "system": "Focus on correctness, security, and missing tests.",
+      "permissions": [{ "action": "edit", "resource": "*", "effect": "deny" }],
+    },
+  },
+}
+```
+
+See the [agents guide](/agents) for all agent options and file-based agents.
+
+### Snapshots
+
+Enable or disable filesystem snapshots used by undo and revert behavior.
+
+```jsonc
+{
+  "snapshots": false,
+}
+```
+
+See the [snapshots guide](/snapshots) for undo and redo behavior.
+
+### Watcher
+
+Ignore files and directories that should not trigger filesystem updates.
+
+```jsonc
+{
+  "watcher": {
+    "ignore": ["dist/**", "coverage/**"],
+  },
+}
+```
+
+### Formatter
+
+Format files after the `write`, `edit`, or `patch` tools change them. Set
+`formatter` to `true` to enable available built-in formatters.
+
+```jsonc
+{
+  "formatter": true,
+}
+```
+
+See the [formatters guide](/formatters) for built-ins and custom formatters.
+
+### Media
+
+Control how oversized images loaded by the `read` tool are resized or rejected
+before they are sent to a model.
+
+```jsonc
+{
+  "media": {
+    "image": {
+      "auto_resize": true,
+      "max_width": 2000,
+      "max_height": 2000,
+      "max_base64_bytes": 5242880,
+    },
+  },
+}
+```
+
+See the [attachments guide](/attachments) for image processing and limits.
+
+### Output
+
+Set the maximum number of lines and bytes retained from a tool result.
+
+```jsonc
+{
+  "tool_output": {
+    "max_lines": 2000,
+    "max_bytes": 51200,
+  },
+}
+```
+
+### Search
+
+Choose how OpenCode searches the web. Use `"random"` to select an available
+provider automatically.
+
+```jsonc
+{
+  "websearch": {
+    "provider": "random",
+  },
+}
+```
+
+See the [web search guide](/websearch) for providers, credentials, selection,
+rate limits, and disabling search.
+
+### MCP
+
+Configure local and remote Model Context Protocol servers. Global
+`mcp.timeout` values apply to servers defined in configuration files; each
+server's `timeout` overrides them.
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "playwright": {
+        "type": "local",
+        "command": ["bunx", "@playwright/mcp"],
+      },
+    },
+  },
+}
+```
+
+See the [MCP guide](/mcp-servers) for remote servers, OAuth, environment variables, and timeouts.
+
+### Compaction
+
+Control automatic context compaction and how much recent context it preserves.
+
+```jsonc
+{
+  "compaction": {
+    "auto": true,
+    "keep": {
+      "tokens": 15000,
+    },
+    "buffer": "15%",
+  },
+}
+```
+
+`buffer` is the share of the model's context window kept free before automatic compaction starts.
+
+Local summaries remain the default. Opt into native provider compaction for both
+automatic and manual requests with a provider or model policy:
+
+```jsonc
+{
+  "providers": {
+    "openai": {
+      "settings": { "compaction": { "type": "native" } },
+      "models": {
+        "gpt-6.1-sol": { "settings": { "compaction": { "type": "summary" } } },
+      },
+    },
+  },
+}
+```
+
+A model setting overrides the provider setting. Automatic compaction uses the
+selected model's usable input budget. Provider checkpoints keep recent user messages within the same
+`compaction.keep.tokens` budget that local summaries use for their retained tail.
+Top-level `compaction.auto: false` disables new automatic compaction without
+discarding installed checkpoints. See the [compaction guide](/compaction) for
+budgeting and overflow recovery.
+
+### Warming
+
+Keep recently active model sessions warm with periodic transient requests.
+Warming is disabled by default; set it to `true` to warm just before each
+model's cache expires, for up to 30 minutes.
+
+```jsonc
+{
+  "warming": {
+    "prompt": "Do not perform any work. Reply with exactly: OK",
+    "interval": "auto",
+    "duration": "30 minutes",
+  },
+}
+```
+
+A provider's or model's `settings.cache.warming` overrides it, and
+`settings.cache.ttl` sets how long the provider keeps the cache. See the
+[warming guide](/warming) for request behavior, customization, and cost
+considerations, and [cache lifetime](/models#cache-lifetime) for `cache.ttl`.
+
+### Skills
+
+Add directories or URLs that OpenCode should search for agent skills.
+
+```jsonc
+{
+  "skills": ["./team-skills", "https://example.com/.well-known/skills/"],
+}
+```
+
+See the [skills guide](/skills) for skill structure and automatic discovery under `.opencode/skills/`.
+
+### Commands
+
+Define reusable slash commands as named prompt templates.
+
+```jsonc
+{
+  "commands": {
+    "review": {
+      "description": "Review the current changes",
+      "template": "Review the current diff for correctness and missing tests.",
+    },
+  },
+}
+```
+
+See the [commands guide](/commands) for arguments, models, agents, and file-based commands.
+
+### Instructions
+
+Declare additional instruction files, globs, or HTTP(S) URLs. OpenCode loads
+them alongside discovered `AGENTS.md` files.
+
+```jsonc
+{
+  "instructions": ["CONTRIBUTING.md", "docs/guidelines/*.md"],
+}
+```
+
+See the [instructions guide](/instructions) for project instructions and `AGENTS.md`.
+
+### References
+
+Make local directories or Git repositories available as named supporting
+context.
+
+```jsonc
+{
+  "references": {
+    "docs": {
+      "path": "../product-docs",
+      "description": "Product behavior and terminology",
+    },
+    "effect": {
+      "repository": "Effect-TS/effect",
+      "branch": "main",
+    },
+  },
+}
+```
+
+See the [references guide](/references) for shorthand, visibility, and path resolution.
+
+### Worktrees
+
+Set the parent directory for new local worktrees. OpenCode appends the requested or generated worktree name.
+
+```jsonc
+{
+  "worktree": {
+    "directory": "../worktrees",
+  },
+}
+```
+
+Relative paths resolve against the project's saved canonical checkout. This applies to global and project
+configuration alike; absolute paths are used as-is, and `~/` resolves
+against the user's home directory.
+
+For example, this global configuration places new worktrees under each project's own `.lane/trees/` directory:
+
+```jsonc
+{
+  "worktree": {
+    "directory": ".lane/trees",
+  },
+}
+```
+
+Without this setting, creation uses the server's data directory under `worktree/<first-six-project-ID-characters>`.
+Worktree creation and refresh load configuration from the project's saved canonical checkout, including when other
+clones share its project ID. Changing it does not move existing worktrees.
+
+Git is the built-in default. A [plugin](/build/plugins/server#worktrees) that registers a strategy automatically becomes the
+default in that plugin runtime. Project operations use the canonical checkout's runtime. Strategy-specific options
+belong to that plugin, not the `worktree` config object.
+
+### Plugins
+
+Load plugins from packages or local plugin directories. Use the object form when a plugin
+accepts options.
+
+```jsonc
+{
+  "plugins": [
+    "opencode-example-plugin",
+    {
+      "package": "./plugins/local",
+      "options": {
+        "enabled": true,
+      },
+    },
+  ],
+}
+```
+
+See the [plugins guide](/plugins) for plugin loading and configuration.
+
+### Providers
+
+Configure providers and add or override their models, request settings,
+headers, and model variants.
+
+```jsonc
+{
+  "providers": {
+    "openai": {
+      "models": {
+        "gpt-6.1-sol-custom": {
+          "modelID": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol Custom",
+          "limit": {
+            "context": 200000,
+            "output": 32000,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Provider `settings.transport: "websocket"` selects its session WebSocket.
+
+See the [providers guide](/providers) for credentials, custom endpoints, provider packages, the WebSocket transport, and model configuration.
+
+## Variables
+
+You can use variable substitution in your config files to reference environment variables and file contents. Place references inside JSON strings.
+
+### Env vars
+
+Use `{env:VARIABLE_NAME}` to substitute environment variables:
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "{env:OPENCODE_MODEL}",
+  "providers": {
+    "anthropic": {
+      "settings": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}",
+      },
+    },
+  },
+}
+```
+
+If the environment variable is not set, it will be replaced with an empty string.
+
+### Files
+
+Use `{file:path/to/file}` to substitute the contents of a file:
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "openai": {
+      "settings": {
+        "apiKey": "{file:~/.secrets/openai-key}",
+      },
+    },
+  },
+}
+```
+
+File paths can be:
+
+- Relative to the config file directory
+- Absolute, or starting with `~/` for your home directory
+
+If the file does not exist, it will be replaced with an empty string.
+
+These are useful for:
+
+- Keeping sensitive data like API keys in separate files.
+- Sharing common configuration snippets across multiple config files.
+
+## Experimental
+
+<Callout type="warning">
+  Experimental settings may change, break, or be removed in any release without notice. Don't rely on them for stable
+  workflows.
+</Callout>
+
+All experimental settings live under the `experimental` key:
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "experimental": {
+    "todo": true,
+    "subagent_depth": 2,
+    "background_compaction": true,
+    "image_generate": { "model": "openai/gpt-image-2" },
+    "location_idle_timeout": "4 hours",
+  },
+}
+```
+
+### Todos
+
+Set `todo` to `true` to give agents a `todowrite` tool for tracking multi-step work. Defaults to `false`.
+
+### Subagent depth
+
+`subagent_depth` sets how deeply subagents can start their own subagents. Defaults to `1`, so a subagent cannot
+start another subagent.
+
+### Background compaction
+
+Set `background_compaction` to `true` to write the compaction summary in the background before it is needed, so
+automatic compaction doesn't pause the session. Defaults to `false`. See
+[Compaction](/compaction#background-compaction) for how it works.
+
+```jsonc
+{
+  "experimental": {
+    "background_compaction": true,
+  },
+}
+```
+
+### Image generation
+
+`image_generate` sets the default model for the [`experimental_image_generate`](/tools#image-generate) tool, as
+`providerID/modelID`, optionally with `#variant`. When that model isn't available or can't handle a request, OpenCode
+picks another image model automatically.
+
+```jsonc
+{
+  "experimental": {
+    "image_generate": {
+      "model": "openai/gpt-image-2",
+    },
+  },
+}
+```
+
+### Location idle timeout
+
+`location_idle_timeout` controls how long a project location can go without session activity before OpenCode unloads
+its services. It takes a duration such as `"2 hours"` and defaults to `"60 minutes"`. Running sessions and background
+jobs keep a location loaded. Set it to `false` to never unload idle locations. Project config can override the global
+value.
+
+```jsonc
+{
+  "experimental": {
+    "location_idle_timeout": false,
+  },
+}
+```
+
+### Deprecated policies
+
+`experimental.policies` is deprecated. Use top-level [`policies`](/policies) instead. The old key still works and
+merges into `policies`.

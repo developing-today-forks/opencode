@@ -1,13 +1,18 @@
 export * as SessionTitle from "./title.js"
 
 import { isDeepStrictEqual } from "node:util"
+<<<<<<< HEAD
 import { AIError, isContextOverflowFailure, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
+=======
+import { LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai/effect"
+>>>>>>> upstream-anomalyco/dev
 import type { Agent } from "@opencode/schema/agent"
 import { Context, DateTime, Effect, Layer, Stream } from "effect"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { isExactRootFallback } from "@opencode/util/session-title-fallback"
+import { TextBoundary } from "@opencode/util/text-boundary"
 import { llmClient } from "../effect/app-node-platform.js"
 import { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
@@ -34,6 +39,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
 
 const truncate = (value: string) =>
+<<<<<<< HEAD
   value.length <= MAX_LENGTH ? value : `${Text.truncate(value, MAX_LENGTH - 3)}...`
 
 /** Head cut for the title prompt's first user message (#1977): never splits a surrogate pair. */
@@ -41,6 +47,14 @@ export const truncateFirstMessageText = (text: string) => Text.truncate(text, MA
 
 /** Tail cut for the title prompt's recent-context window (#1977): never splits a surrogate pair. */
 export const truncateRecentContextText = (recent: string, budget: number) => Text.truncateTail(recent, budget)
+=======
+  value.length <= MAX_LENGTH ? value : `${TextBoundary.head(value, MAX_LENGTH - 3)}...`
+// Framing the input as text to name keeps models from answering or carrying out the request instead.
+const messagePrompt = (text: string) =>
+  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
+const conversationPrompt = (text: string) =>
+  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
+>>>>>>> upstream-anomalyco/dev
 export const isUntitled = (session: SessionSchema.Info) =>
   isExactRootFallback({
     title: session.title,
@@ -74,7 +88,8 @@ export const layer = Layer.effect(
       readonly text: string
       readonly model: SessionRunnerModel.Resolved
     }) {
-      const chunks: string[] = []
+      const chunks: Array<{ id: string; text: string }> = []
+      const commentary = new Set<string>()
       let failed = false
       let firstTextAt: number | undefined
       let usage: SessionUsage.Recorded | undefined
@@ -102,6 +117,7 @@ export const layer = Layer.effect(
         model: input.model,
         system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
         messages: [Message.user(input.text)],
+<<<<<<< HEAD
       }).pipe(
         // Interruption is not the only way preparation dies: a defect skips onInterrupt,
         // so the claim is handed back on any failed exit (#1486, review follow-up).
@@ -141,6 +157,20 @@ export const layer = Layer.effect(
             if (firstTextAt === undefined) firstTextAt = Date.now()
             chunks.push(event.text)
           }
+=======
+      })
+      if (prepared.event.result !== undefined) return prepared.event.result
+      const metadataKey = prepared.request.model.route.providerMetadataKey ?? prepared.request.model.provider
+      yield* llm.stream(prepared.request, prepared.options).pipe(
+        Stream.runForEach((event) => {
+          // Responses can classify a text block only when it ends; filter after the stream completes.
+          if (LLMEvent.is.textStart(event) || LLMEvent.is.textDelta(event) || LLMEvent.is.textEnd(event)) {
+            const phase = event.providerMetadata?.[metadataKey]?.phase
+            if (phase === "commentary") commentary.add(event.id)
+            if (phase === "final_answer" || phase === null) commentary.delete(event.id)
+          }
+          if (LLMEvent.is.textDelta(event)) chunks.push({ id: event.id, text: event.text })
+>>>>>>> upstream-anomalyco/dev
           if (LLMEvent.is.stepFinish(event)) {
             const step = SessionUsage.record(event.usage, input.model.cost)
             usage = usage ? SessionUsage.add(usage, step) : step
@@ -215,6 +245,8 @@ export const layer = Layer.effect(
       }
       if (failed) return
       return chunks
+        .filter((chunk) => !commentary.has(chunk.id))
+        .map((chunk) => chunk.text)
         .join("")
         .split("\n")
         .map((line) => line.trim())
@@ -229,7 +261,11 @@ export const layer = Layer.effect(
       const text = !isUntitled(session)
         ? yield* store.context(session.id).pipe(
             Effect.map((messages) => {
+<<<<<<< HEAD
               const original = `Original request:\n${truncateFirstMessageText(firstUser.text)}`
+=======
+              const original = `Original request:\n${TextBoundary.head(firstUser.text, MAX_FIRST_MESSAGE_LENGTH)}`
+>>>>>>> upstream-anomalyco/dev
               const recent = messages
                 .flatMap((message) => {
                   if (message.type === "user" && message.id !== firstUser.id) return [`User: ${message.text.trim()}`]
@@ -241,13 +277,18 @@ export const layer = Layer.effect(
                   return text ? [`Assistant: ${text}`] : []
                 })
                 .join("\n\n")
-              if (!recent) return original
+              if (!recent) return conversationPrompt(original)
               const prefix = `${original}\n\nRecent conversation:\n`
+<<<<<<< HEAD
               return `${prefix}${truncateRecentContextText(recent, MAX_CONTEXT_LENGTH - prefix.length)}`
+=======
+              const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
+              return conversationPrompt(`${prefix}${TextBoundary.tail(recent, budget)}`)
+>>>>>>> upstream-anomalyco/dev
             }),
-            Effect.orElseSucceed(() => firstUser.text),
+            Effect.orElseSucceed(() => messagePrompt(firstUser.text)),
           )
-        : firstUser.text
+        : messagePrompt(firstUser.text)
       const selection = yield* context.selectTitle(session)
       if (!selection) return
       const title =

@@ -1,10 +1,15 @@
 export * as WebFetchTool from "./webfetch.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import { Duration, Effect, Schema } from "effect"
+<<<<<<< HEAD
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+=======
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+>>>>>>> upstream-anomalyco/dev
 import { Parser } from "htmlparser2"
+import { Mime } from "../../mime.js"
 import { Permission } from "../../permission.js"
 import { convertHTMLToMarkdown, MAX_MARKDOWN_BYTES } from "../html-markdown.js"
 import { collectBoundedResponseBody } from "../http-body.js"
@@ -60,6 +65,7 @@ const openCodeUserAgent =
   "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OpenCode-User/1.0; +https://opencode.ai"
 
 const isCloudflareChallenge = (error: unknown) => {
+<<<<<<< HEAD
   // Redirect and permission errors also flow through this predicate; only an
   // HttpClientError carries a `reason` to inspect.
   const reason = (
@@ -67,6 +73,11 @@ const isCloudflareChallenge = (error: unknown) => {
   ).reason
   if (reason?._tag !== "StatusCodeError" || !reason.response) return false
   return reason.response.status === 403 && reason.response.headers["cf-mitigated"] === "challenge"
+=======
+  if (!HttpClientError.isHttpClientError(error) || error.reason._tag !== "StatusCodeError") return false
+  const response = error.reason.response
+  return response.status === 403 && response.headers["cf-mitigated"] === "challenge"
+>>>>>>> upstream-anomalyco/dev
 }
 
 const request = (url: string, format: Format, userAgent = openCodeUserAgent) =>
@@ -74,8 +85,11 @@ const request = (url: string, format: Format, userAgent = openCodeUserAgent) =>
 
 const assertHttpUrl = (url: URL) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must use http:// or https://")
+  // Rules match the URL, so `https://user@evil.com` would slip past a rule for `https://evil.com/*`.
+  if (url.username || url.password) throw new Error("URL must not include credentials")
 }
 
+<<<<<<< HEAD
 // Redirects are followed manually: the transport must not follow them itself,
 // or a permitted URL could redirect to a destination that was never checked.
 const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = openCodeUserAgent) =>
@@ -85,6 +99,41 @@ const execute = (http: HttpClient.HttpClient, url: string, format: Format, userA
 
 const isRedirect = (response: HttpClientResponse.HttpClientResponse) =>
   response.status >= 300 && response.status < 400 && response.headers["location"] !== undefined
+=======
+export const MAX_REDIRECTS = 10
+const redirectStatuses = new Set([301, 302, 303, 307, 308])
+
+// Follows redirects here instead of in fetch so each new URL is checked against the permission rules first.
+const execute = (
+  http: HttpClient.HttpClient,
+  check: (url: string) => Effect.Effect<void, Error>,
+  url: string,
+  format: Format,
+  userAgent = openCodeUserAgent,
+  redirects = 0,
+): Effect.Effect<HttpClientResponse.HttpClientResponse, Error> =>
+  http.execute(request(url, format, userAgent)).pipe(
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.flatMap((response) => {
+      const location = response.headers.location
+      if (!redirectStatuses.has(response.status) || !location) return HttpClientResponse.filterStatusOk(response)
+      if (redirects >= MAX_REDIRECTS) return Effect.fail(new Error(`Too many redirects (more than ${MAX_REDIRECTS})`))
+      return Effect.gen(function* () {
+        const next = yield* Effect.try({
+          try: () => {
+            const target = new URL(location, url)
+            assertHttpUrl(target)
+            target.hash = ""
+            return target.href
+          },
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+        })
+        yield* check(next)
+        return yield* execute(http, check, next, format, userAgent, redirects + 1)
+      })
+    }),
+  )
+>>>>>>> upstream-anomalyco/dev
 
 const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
   collectBoundedResponseBody(
@@ -96,15 +145,6 @@ const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
 const mimeFrom = (contentType: string) => contentType.split(";", 1)[0]?.trim().toLowerCase() ?? ""
 const isImageAttachment = (mime: string) =>
   mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
-const isTextualMime = (mime: string) =>
-  !mime ||
-  mime.startsWith("text/") ||
-  mime === "application/json" ||
-  mime.endsWith("+json") ||
-  mime === "application/xml" ||
-  mime.endsWith("+xml") ||
-  mime === "application/javascript" ||
-  mime === "application/x-javascript"
 const convert = (content: string, contentType: string, format: Format) => {
   if (!contentType.includes("text/html")) return content
   if (format === "markdown") return convertHTMLToMarkdown(content)
@@ -128,22 +168,24 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              // Rules match the URL as written. The fragment is never sent, and would keep a rule for the exact
+              // URL from matching.
+              const url = input.url.split("#")[0]
               yield* Effect.try({
-                try: () => assertHttpUrl(new URL(input.url)),
+                try: () => assertHttpUrl(new URL(url)),
                 catch: (error) => error,
               })
 
               yield* permission.assert({
                 action: name,
-                resources: [input.url],
+                resources: [url],
                 save: ["*"],
                 metadata: input,
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
+                ...Permission.invocation(context),
               })
 
               const { body, contentType } = yield* Effect.gen(function* () {
+<<<<<<< HEAD
                 // Every redirect destination is resolved, scheme-checked, and
                 // permission-checked before it is fetched. The initial URL was
                 // already asserted above, so it is seeded into the checked set;
@@ -186,12 +228,23 @@ export const Plugin = {
                   })
                 const response = yield* fetchFinal(openCodeUserAgent).pipe(
                   Effect.catchIf(isCloudflareChallenge, () => fetchFinal("opencode")),
+=======
+                const check = (next: string) =>
+                  permission.assertNotDenied({
+                    action: name,
+                    resources: [next],
+                    metadata: { ...input, url: next },
+                    ...Permission.invocation(context),
+                  })
+                const response = yield* execute(http, check, url, input.format).pipe(
+                  Effect.catchIf(isCloudflareChallenge, () => execute(http, check, url, input.format, "opencode")),
+>>>>>>> upstream-anomalyco/dev
                 )
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)
                 if (isImageAttachment(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched image content type: ${mime}`))
-                if (!isTextualMime(mime))
+                if (!Mime.isTextual(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched file content type: ${mime}`))
                 return { body: yield* collectBody(response), contentType }
               }).pipe(

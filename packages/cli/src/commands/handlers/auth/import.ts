@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { EOL } from "node:os"
 import { isConflictError, type CredentialCreateInput } from "@opencode/client"
-import { Credential } from "@opencode/schema/credential"
+import { CredentialLegacy } from "@opencode/schema/credential-legacy"
 import { Effect, Option, Schema } from "effect"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
@@ -35,9 +35,17 @@ export default Runtime.handler(
       const file = Option.getOrUndefined(input.file)
       if (!file && process.stdin.isTTY)
         return yield* Effect.fail(new Error("Pipe auth export output into stdin or pass a file to import"))
+<<<<<<< HEAD
       const text = yield* request(() => (file ? readAuthLocal(file) : readBoundedStdin(MAX_AUTH_TRANSFER_BYTES)))
       const credentials = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Credential.Entry)))(text)
       const client = yield* createClient({ server: Option.getOrUndefined(input.server), standalone: input.standalone })
+=======
+      const text = yield* request(() => (file ? Bun.file(file).text() : readStdin()))
+      const credentials = yield* Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Array(CredentialLegacy.Entry)),
+      )(text)
+      const client = yield* createClient()
+>>>>>>> upstream-anomalyco/dev
       const existing = yield* request((signal) => client.credential.list({ signal }))
       const ids = new Set(existing.map((credential) => credential.id))
       const integrations = new Set(existing.map((credential) => credential.integrationID))

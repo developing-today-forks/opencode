@@ -9,7 +9,7 @@ export const ModelHandler = HttpApiBuilder.group(Api, "server.model", (handlers)
     return handlers
       .handle(
         "model.list",
-        Effect.fn(function* () {
+        Effect.fn(function* (ctx) {
           yield* awaitPlugins
           const models = yield* Model.Service
           // The client catalog is a validity catalog, not the picker list (#230):

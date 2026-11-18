@@ -64,6 +64,15 @@ describe("client paths", () => {
     expect(truncateMiddle("abcdefghijklmnop", 1)).toBe("…")
     expect(truncateMiddle("abcdefghijklmnop", 2)).toBe("a…")
     expect(truncateMiddle("abcdefghijklmnop", 3)).toBe("a…p")
+  test("truncates in the middle without overflowing small widths", () => {
+    expect(truncateMiddle("abcdefghij", 0)).toBe("")
+    expect(truncateMiddle("abcdefghij", 1)).toBe("…")
+    expect(truncateMiddle("abcdefghij", 2)).toBe("a…")
+    expect(truncateMiddle("abcdefghij", 3)).toBe("a…j")
+    expect(truncateMiddle("abcdefghij", 4)).toBe("ab…j")
+    expect(truncateMiddle("abcd", 4)).toBe("abcd")
+    expect(truncateMiddle("abcd", 10)).toBe("abcd")
+    expect(truncateMiddle("a", 1)).toBe("a")
   })
 })
 

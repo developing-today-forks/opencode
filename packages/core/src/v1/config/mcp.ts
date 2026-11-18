@@ -25,6 +25,11 @@ export const Local = Schema.Struct({
   timeout: Schema.optional(TimeoutMs).annotate({
     description:
       "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified. At most 2147483647 (~24.8 days); a larger value is rejected.",
+  codemode: Schema.optional(Schema.Boolean).annotate({
+    description: "Expose this server's tools through Code Mode. Defaults to true.",
+  }),
+  timeout: Schema.optional(PositiveInt).annotate({
+    description: "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.",
   }),
 }).annotate({ identifier: "McpLocalConfig" })
 export type Local = Schema.Schema.Type<typeof Local>
@@ -52,6 +57,9 @@ export const Remote = Schema.Struct({
   url: Schema.String.annotate({ description: "URL of the remote MCP server" }),
   enabled: Schema.optional(Schema.Boolean).annotate({
     description: "Enable or disable the MCP server on startup",
+  }),
+  codemode: Schema.optional(Schema.Boolean).annotate({
+    description: "Expose this server's tools through Code Mode. Defaults to true.",
   }),
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
     description: "Headers to send with the request",

@@ -7,13 +7,18 @@
     "build": "wrangler deploy --dry-run --env dev --outdir dist",
     "dev": "wrangler dev --env dev",
     "deploy": "wrangler deploy",
+<<<<<<< HEAD
     "typecheck": "tsgo --noEmit",
     "test": "bun test"
+=======
+    "typecheck": "bun check --no-script",
+    "typecheck:tsc": "tsc --noEmit"
+>>>>>>> upstream-anomalyco/dev
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
     "@tsconfig/node22": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "wrangler": "4.110.0"
   }
 }

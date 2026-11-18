@@ -7,6 +7,8 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { Event } from "@opencode/schema/config"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Config } from "@opencode/core/config"
+import { Integration } from "@opencode/core/integration"
 import { Global } from "@opencode/util/global"
 import { Npm } from "@opencode/util/npm"
 import { Bus } from "@opencode/core/bus"
@@ -14,7 +16,6 @@ import { Command } from "@opencode/core/command"
 import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
 import { Watcher } from "@opencode/core/filesystem/watcher"
-import { ManagedPolicy } from "@opencode/core/managed-policy"
 import { Instance } from "@opencode/core/instance"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { Location } from "@opencode/core/location"
@@ -24,6 +25,7 @@ import { Tool } from "@opencode/core/tool"
 import { SdkPlugins } from "@opencode/core/plugin/sdk"
 import { AbsolutePath } from "@opencode/core/schema"
 import { tempGlobalLayer } from "../fixture/global"
+import { organizationPolicy } from "../fixture/policy"
 import { offlineModels } from "../fixture/models"
 import { tmpdirScoped } from "../fixture/tmpdir"
 import { advance } from "../lib/clock"
@@ -62,13 +64,11 @@ const instances = Layer.effect(
   LocationServiceMap.Service,
   Effect.gen(function* () {
     const watcher = yield* Watcher.Test
-    const managed = yield* ManagedPolicy.Service
     const map = yield* LayerMap.make((ref: Location.Ref) => Instance.layer(ref, { replacements: bindings }), {
       idleTimeToLive: Duration.infinity,
     })
     const bindings: LayerNode.Replacements = [
       Global.node.replace(tempGlobalLayer),
-      ManagedPolicy.node.replace(Layer.succeed(ManagedPolicy.Service, managed)),
       offlineModels,
       Npm.node.replace(npmLayer),
       Watcher.node.replace(Layer.succeed(Watcher.Service, watcher)),
@@ -81,13 +81,14 @@ const instances = Layer.effect(
     ]
     return map
   }),
-).pipe(Layer.provide(Watcher.testLayer), Layer.provide(ManagedPolicy.layer))
+).pipe(Layer.provide(Watcher.testLayer))
 
 const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([ManagedPolicy.node, Database.node, Bus.node, SdkPlugins.node, LocationServiceMap.node]),
-    [Global.node.replace(tempGlobalLayer), offlineModels, LocationServiceMap.node.replace(instances)],
-  ).pipe(Layer.provideMerge(Watcher.testLayer)),
+  AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SdkPlugins.node, LocationServiceMap.node]), [
+    Global.node.replace(tempGlobalLayer),
+    offlineModels,
+    LocationServiceMap.node.replace(instances),
+  ]).pipe(Layer.provideMerge(Watcher.testLayer)),
 )
 
 const greeter = (command: string) => `export default {
@@ -357,37 +358,48 @@ it.live("applies organization integration changes to running external plugins", 
         configuration,
         JSON.stringify({
           plugins: [root],
-          experimental: { policies: [{ action: "integration.use", resource: "plugin:*", effect: "deny" }] },
+          experimental: { policies: [{ action: "plugin.use", resource: "*", effect: "deny" }] },
         }),
       )
     })
+    const watcher = yield* Watcher.Test
     const locations = yield* LocationServiceMap.Service
     yield* Effect.gen(function* () {
       const plugins = yield* Plugin.Service
       const commands = yield* Command.Service
+<<<<<<< HEAD
       const managed = yield* ManagedPolicy.Service
+=======
+>>>>>>> upstream-anomalyco/dev
       const config = yield* Config.Service
       yield* plugins.awaitActivation
       expect(yield* commands.get("policy-greet")).toBeUndefined()
       expect(yield* Effect.promise(() => Bun.file(entered).exists())).toBe(false)
       yield* Effect.promise(() => Bun.write(configuration, JSON.stringify({ plugins: [root] })))
+<<<<<<< HEAD
       // Drive the real reload path: Config re-reads the file, refreshes its
       // cached entries, and publishes config.updated with the changed sections.
       // Publishing the bus event by hand left the cached deny policy in place.
       yield* config.reload()
+=======
+      yield* watcher.emit({ path: configuration, type: "update" })
+>>>>>>> upstream-anomalyco/dev
       yield* commands.get("policy-greet").pipe(
         Effect.flatMap((command) => (command ? Effect.void : Effect.fail("pending"))),
         Effect.retry({ times: 200, schedule: Schedule.spaced("10 millis") }),
       )
       expect(yield* Effect.promise(() => Bun.file(entered).exists())).toBe(true)
-      yield* managed.set({ statements: [{ action: "integration.use", resource: `plugin:${root}`, effect: "deny" }] })
+      yield* config.integration?.(
+        Integration.ID.make("opencode"),
+        organizationPolicy([{ action: "plugin.use", resource: root, effect: "deny" }]),
+      ) ?? Effect.void
       yield* commands.get("policy-greet").pipe(
         Effect.flatMap((command) => (command ? Effect.fail("pending") : Effect.void)),
         Effect.retry({ times: 200, schedule: Schedule.spaced("10 millis") }),
       )
       yield* plugins.awaitActivation
       expect((yield* plugins.list()).some((plugin) => plugin.id === "greeter")).toBe(false)
-      yield* managed.set({ statements: [] })
+      yield* config.integration?.(Integration.ID.make("opencode"), undefined) ?? Effect.void
       yield* commands.get("policy-greet").pipe(
         Effect.flatMap((command) => (command ? Effect.void : Effect.fail("pending"))),
         Effect.retry({ times: 200, schedule: Schedule.spaced("10 millis") }),

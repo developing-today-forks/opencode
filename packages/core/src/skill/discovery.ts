@@ -44,7 +44,7 @@ export const downloadTimeout = Duration.seconds(60)
 const skillConcurrency = 4
 const fileConcurrency = 8
 
-function isSafeSegment(value: string) {
+export function isSafeSegment(value: string) {
   return (
     value.length > 0 &&
     value !== "." &&
@@ -55,7 +55,7 @@ function isSafeSegment(value: string) {
   )
 }
 
-function isSafeRelativePath(value: string) {
+export function isSafeRelativePath(value: string) {
   const segments = value.split("/")
   return (
     value.length > 0 &&

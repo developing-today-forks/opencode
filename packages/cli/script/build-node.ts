@@ -15,6 +15,7 @@ import { nodeExecArgv, nodeTarget, type NodeTarget } from "../src/node/target"
 import { buildAppArchive } from "./app-assets"
 import { verifyArtifact } from "./verify-artifact"
 import { NativeArch } from "../../../script/native-arch"
+import { bundledModelsSnapshot } from "../../core/script/models-snapshot"
 
 const NODE_VERSION = "26.4.0"
 /** Deadline for each Node download leg (archive and SHASUMS256.txt). The archive is ~59 MiB:
@@ -26,7 +27,7 @@ const NODE_DOWNLOAD_TIMEOUT_MS = 600_000
 const dir = path.resolve(import.meta.dirname, "..")
 const outdir = path.resolve(
   dir,
-  process.argv.find((arg) => arg.startsWith("--outdir="))?.slice("--outdir=".length) ?? "dist",
+  process.argv.find((arg) => arg.startsWith("--outdir="))?.slice("--outdir=".length) ?? "dist/node",
 )
 if (outdir === dir) throw new Error("--outdir must not be the package directory")
 if (outdir === path.join(dir, "dist-node")) {
@@ -37,9 +38,9 @@ const single = process.argv.includes("--single")
 const skipInstall = process.argv.includes("--skip-install")
 const appArchiveOnly = process.argv.includes("--app-archive-only")
 const highlights = Script.preview ? undefined : embed(process.env.OPENCODE_RELEASE_NOTES)
-const requestedArchive = process.argv.find((arg) => arg.startsWith("--app-archive="))?.slice("--app-archive=".length)
+const requestedArchive = process.env.OPENCODE_APP_ARCHIVE
 const archivePath = requestedArchive ? path.resolve(dir, requestedArchive) : undefined
-const requested = process.argv.find((arg) => arg.startsWith("--target="))?.slice("--target=".length)
+const requested = process.env.OPENCODE_TARGET
 const allTargets = [
   nodeTarget("linux", "arm64"),
   nodeTarget("linux", "x64"),
@@ -59,9 +60,9 @@ if (!skipInstall) run(process.execPath, ["install", "--os=*", "--cpu=*"])
 // script, Vite stubs the uninstalled optional peer utf-8-validate with a throw, so the bundle fails at startup.
 process.env.NODE_ENV = "production"
 if (appArchiveOnly) {
-  if (!archivePath) throw new Error("--app-archive-only requires --app-archive=<path>")
+  if (!archivePath) throw new Error("--app-archive-only requires OPENCODE_APP_ARCHIVE")
   await mkdir(path.dirname(archivePath), { recursive: true })
-  await writeFile(archivePath, await buildAppArchive(Script.channel))
+  await writeFile(archivePath, await buildAppArchive(Script.channel, Script.version))
   process.exit(0)
 }
 if (targets.length === 0) {
@@ -71,11 +72,17 @@ if (targets.length === 0) {
 if (!bundleOnly && targets.some((target) => target.platform === "darwin" && target.arch === "x64")) {
   throw new Error("Node 26.4 SEA does not support macOS x64")
 }
+<<<<<<< HEAD
 const appArchive = archivePath ? await Bun.file(archivePath).bytes() : await buildAppArchive(Script.channel)
 // Directory removals that can race a just-executed binary on Windows retry
 // instead of throwing EBUSY on the first attempt (#100); they stay fatal,
 // because the build writes into these directories next.
 if (!bundleOnly) await rm(outdir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+=======
+const modelsSnapshot = await bundledModelsSnapshot()
+const appArchive = archivePath ? await Bun.file(archivePath).bytes() : await buildAppArchive(Script.channel, Script.version)
+if (!bundleOnly) await rm(outdir, { recursive: true, force: true })
+>>>>>>> upstream-anomalyco/dev
 const builder =
   !bundleOnly || targets.some((target) => target.platform === process.platform && target.arch === process.arch)
     ? await resolveHostNode()
@@ -109,6 +116,7 @@ for (const target of targets) {
     version: Script.version,
     channel: Script.channel,
     highlights,
+    modelsSnapshot,
     assetHash,
     target,
   }

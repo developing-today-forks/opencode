@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import { NodeFileSystem } from "@effect/platform-node"
 import { compile, emitEffectImported, emitEffectShape, emitPromise, write } from "@opencode/httpapi-codegen"
 import { ClientApi, effectOmitEndpoints, groupNames, promiseOmitEndpoints } from "@opencode/protocol/client"
@@ -93,51 +94,32 @@ const effectTypeReferences = [
   typeReference("RelativePath", "@opencode/schema/schema", RelativePath),
   typeReference("SessionsCursor", "@opencode/protocol/groups/session", SessionsCursor),
 ]
+=======
+#!/usr/bin/env bun
 
-await Effect.runPromise(
-  Effect.all(
-    [
-      write(
-        emitPromise(promiseContract, {
-          mutableOutputs: true,
-        }),
-        fileURLToPath(new URL("../src/promise/generated", import.meta.url)),
-      ),
-      write(
-        emitEffectImported(effectContract, {
-          module: "../../contract",
-          api: "ClientApi",
-          shapeModule: "../api/api.js",
-        }),
-        fileURLToPath(new URL("../src/effect/generated", import.meta.url)),
-      ),
-      write(
-        emitEffectShape(effectContract, {
-          typeReferences: effectTypeReferences,
-          outputTypes: {
-            "event.subscribe": {
-              name: "OpenCodeEvent",
-              import: 'import type { OpenCodeEvent } from "@opencode/protocol/groups/event"',
-            },
-          },
-        }),
-        fileURLToPath(new URL("../src/effect/api", import.meta.url)),
-      ),
-    ],
-    { concurrency: 3, discard: true },
-  ).pipe(Effect.provide(NodeFileSystem.layer)),
-)
+import { $ } from "bun"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+>>>>>>> upstream-anomalyco/dev
 
-function namespaceTypes(namespace: string, module: string, values: object) {
-  return Object.entries(values).flatMap(([name, schema]) =>
-    Schema.isSchema(schema) ? [typeReference(`${namespace}.${name}`, module, schema)] : [],
-  )
-}
+process.chdir(fileURLToPath(new URL("..", import.meta.url)))
 
-function typeReference(name: string, module: string, schema: Schema.Top) {
-  return {
-    schema,
-    name,
-    import: `import type { ${name.split(".")[0]} } from ${JSON.stringify(module)}`,
-  }
-}
+await $`rm -rf dist`
+await $`bun tsc -p tsconfig.build.json`
+const root = path.resolve("src")
+const result = await Bun.build({
+  entrypoints: await Array.fromAsync(new Bun.Glob("**/*.ts").scan({ cwd: root, absolute: true })).then((files) =>
+    files.filter((file) => !file.endsWith(".d.ts")),
+  ),
+  root,
+  outdir: "dist",
+  target: "node",
+  format: "esm",
+  packages: "external",
+  splitting: true,
+  naming: {
+    entry: "[dir]/[name].[ext]",
+    chunk: "chunks/[name]-[hash].[ext]",
+  },
+})
+if (!result.success) throw new AggregateError(result.logs, "Failed to build Client")

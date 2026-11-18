@@ -28,14 +28,20 @@ export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
 }
 
 export function truncateMiddle(text: string, maxLength = 20) {
+  if (maxLength <= 0) return ""
   if (text.length <= maxLength) return text
   if (maxLength <= 0) return ""
   const available = maxLength - 1
   const start = Math.ceil(available / 2)
   const end = Math.floor(available / 2)
+<<<<<<< HEAD
   // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
   // slicing with it would return the whole string.
   return Text.truncate(text, start) + "…" + (end > 0 ? Text.truncateTail(text, end) : "")
+=======
+  if (end <= 0) return text.slice(0, start) + "…"
+  return text.slice(0, start) + "…" + text.slice(-end)
+>>>>>>> upstream-anomalyco/dev
 }
 
 const isDrive = (value: string) => {

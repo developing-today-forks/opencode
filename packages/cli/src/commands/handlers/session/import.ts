@@ -1,7 +1,6 @@
 import { OpenCode } from "@opencode/client"
 import { Service } from "@opencode/client/effect/service"
 import { Session } from "@opencode/schema/session"
-import { SessionTransfer } from "@opencode/schema/session-transfer"
 import { Effect, Option, Schema } from "effect"
 import { readFile, stat } from "node:fs/promises"
 import { EOL } from "node:os"
@@ -109,16 +108,16 @@ export default Runtime.handler(
       catch: (cause) =>
         new Error(`Failed to read session data: ${cause instanceof Error ? cause.message : String(cause)}`),
     })
-    const data = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(SessionTransfer.Data))(text)
-    const encoded = Schema.encodeSync(SessionTransfer.Data)(data)
-    const server = yield* ServerConnection.resolve({
-      server: Option.getOrUndefined(input.server),
-      standalone: input.standalone,
-    })
+    // The server validates the transcript, including exports written by earlier releases.
+    const data = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json)))(
+      text,
+    )
+    const server = yield* ServerConnection.resolve()
     const client = OpenCode.make({
       baseUrl: server.endpoint.url,
       headers: Service.headers(server.endpoint),
     })
+<<<<<<< HEAD
     const location = yield* Effect.tryPromise({
       try: () =>
         fetchServerLocation(client, path.resolve(Option.getOrElse(input.directory, () => process.cwd()))),
@@ -136,6 +135,23 @@ export default Runtime.handler(
         ),
       catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     })
+=======
+    const location = yield* Effect.promise(() =>
+      client.location.get({
+        location: { directory: path.resolve(Option.getOrElse(input.directory, () => process.cwd())) },
+      }),
+    )
+    const response = yield* Effect.promise(() =>
+      fetch(new URL("/api/experimental/session/import", server.endpoint.url), {
+        method: "POST",
+        headers: { ...Service.headers(server.endpoint), "content-type": "application/json" },
+        body: JSON.stringify({
+          ...data,
+          location: { directory: location.directory },
+        }),
+      }),
+    )
+>>>>>>> upstream-anomalyco/dev
     if (response.status === 409) {
       process.stderr.write(`Session already exists${EOL}`)
       return

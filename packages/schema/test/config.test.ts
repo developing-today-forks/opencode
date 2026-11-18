@@ -2,12 +2,18 @@ import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { Config } from "../src/config.js"
 import { ConfigAgent } from "../src/config/agent.js"
+<<<<<<< HEAD
 import { ConfigAlias } from "../src/config/aliases.js"
 import { ConfigExperimental } from "../src/config/experimental.js"
 import { ConfigMCP } from "../src/config/mcp.js"
 import { ConfigMessaging } from "../src/config/messaging.js"
 import { ConfigModel } from "../src/config/model.js"
 import { ConfigModelRoutes } from "../src/config/model-routes.js"
+=======
+import { ConfigFlag } from "../src/config/flag.js"
+import { ConfigMCP } from "../src/config/mcp.js"
+import { ConfigPolicy } from "../src/config/policy.js"
+>>>>>>> upstream-anomalyco/dev
 import { ConfigProvider } from "../src/config/provider.js"
 import { ConfigWarming } from "../src/config/warming.js"
 import { Form } from "../src/form.js"
@@ -38,6 +44,51 @@ describe("Config.Entry", () => {
           experimental: { policies: [{ action, resource: "*", effect: "deny" }] },
         }),
       ).toThrow()
+  })
+
+  test("round-trips websearch.use statements", () => {
+    const input = {
+      policies: [
+        { action: "websearch.use", resource: "*", effect: "deny" },
+        { action: "websearch.use", resource: "opencode", effect: "allow" },
+      ],
+    } as const
+    expect(Schema.encodeSync(Config.Info)(Schema.decodeUnknownSync(Config.Info)(input))).toEqual(input)
+  })
+
+  test("normalizes legacy prefixed integration.use statements into mcp.use, skill.use and plugin.use", () => {
+    const decode = Schema.decodeUnknownSync(Schema.Array(ConfigPolicy.Info))
+    expect(
+      decode([
+        { action: "integration.use", resource: "mcp:*", effect: "deny" },
+        { action: "integration.use", resource: "mcp:github", effect: "allow" },
+        { action: "integration.use", resource: "skill:team:review", effect: "deny" },
+        { action: "integration.use", resource: "plugin:@acme/plugin", effect: "deny" },
+        { action: "integration.use", resource: "*", effect: "deny" },
+        { action: "integration.use", resource: "opencode#org_01", effect: "allow" },
+        { action: "integration.use", resource: "https://ai.acme.com", effect: "allow" },
+        { action: "integration.use", resource: "constructor:x", effect: "allow" },
+        { action: "integration.connect", resource: "mcp:x", effect: "allow" },
+      ]),
+    ).toEqual([
+      { action: "mcp.use", resource: "*", effect: "deny" },
+      { action: "mcp.use", resource: "github", effect: "allow" },
+      { action: "skill.use", resource: "team:review", effect: "deny" },
+      { action: "plugin.use", resource: "@acme/plugin", effect: "deny" },
+      // A bare wildcard keeps its action, which now means every integration.
+      { action: "integration.use", resource: "*", effect: "deny" },
+      { action: "integration.use", resource: "opencode#org_01", effect: "allow" },
+      { action: "integration.use", resource: "https://ai.acme.com", effect: "allow" },
+      { action: "integration.use", resource: "constructor:x", effect: "allow" },
+      { action: "integration.connect", resource: "mcp:x", effect: "allow" },
+    ])
+    // Config documents decode through the same schema, top-level and experimental alike.
+    const config = Schema.decodeUnknownSync(Config.Info)({
+      policies: [{ action: "integration.use", resource: "skill:deploy", effect: "deny" }],
+      experimental: { policies: [{ action: "integration.use", resource: "plugin:local", effect: "deny" }] },
+    })
+    expect(config.policies).toEqual([{ action: "skill.use", resource: "deploy", effect: "deny" }])
+    expect(config.experimental?.policies).toEqual([{ action: "plugin.use", resource: "local", effect: "deny" }])
   })
 
   test("accepts directory-only worktree config and omits it when absent", () => {
@@ -152,6 +203,7 @@ describe("Config.Entry", () => {
   })
 })
 
+<<<<<<< HEAD
 describe("ConfigModelRoutes field descriptions", () => {
   // A description annotated outside the package `optional` helper lands only on the decoded side, so the
   // encoded JSON schema — what the OpenAPI document and editors are generated from — shows nothing (#240).
@@ -632,4 +684,9 @@ describe("ConfigExperimental routes.settings (#1140)", () => {
     )
     expect(() => decodeGlobalSchedule({ when: {} })).toThrow("exactly one of factor and weight")
   })
+=======
+test("no flag is named after the everything-on switches", () => {
+  expect(ConfigFlag.registry).not.toHaveProperty("all_flags")
+  expect(ConfigFlag.registry).not.toHaveProperty(ConfigFlag.wildcard)
+>>>>>>> upstream-anomalyco/dev
 })

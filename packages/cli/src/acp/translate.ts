@@ -27,7 +27,10 @@ export type Terminal = "succeeded" | "failed" | "interrupted"
 export type TurnContext = {
   readonly sessionID: Session.ID
   readonly cwd: string
+<<<<<<< HEAD
   /** Absent for a follower that starts without a prompt, such as after `session/load`. */
+=======
+>>>>>>> upstream-anomalyco/dev
   readonly start?: TurnStart
   readonly childUpdates: boolean
   readonly compaction: boolean
@@ -47,12 +50,19 @@ type RetryStatus = {
   readonly error: SessionError.Error
 }
 
+type Child = ACPChild.Session & { readonly turnID?: string }
+
 export type TurnState = {
   readonly started: boolean
   readonly tools: ReadonlyMap<string, Tool>
   readonly retries: ReadonlyMap<string, RetryStatus>
   readonly compactions: ACPCompaction.Tracked
+<<<<<<< HEAD
   readonly children: ReadonlyMap<string, ACPChild.Session>
+=======
+  readonly children: ReadonlyMap<string, Child>
+  readonly openChildren: ReadonlySet<string>
+>>>>>>> upstream-anomalyco/dev
   readonly asks: ReadonlySet<string>
   /** Every ask this subscription saw settled, so a list read before the settlement cannot ask it again. */
   readonly settled: ReadonlySet<string>
@@ -71,9 +81,13 @@ export type Output =
       readonly _tag: "PermissionAsk"
       readonly request: Permission.Request
       readonly tool?: Tool
-      readonly child?: ACPChild.Session
+      readonly child?: Child
     }
+<<<<<<< HEAD
   | { readonly _tag: "FormAsk"; readonly form: Form.Info; readonly child?: ACPChild.Session }
+=======
+  | { readonly _tag: "FormAsk"; readonly form: FormEvent["data"]["form"]; readonly child?: Child }
+>>>>>>> upstream-anomalyco/dev
   | { readonly _tag: "AskSettled"; readonly id: string }
 
 export type Folded = {
@@ -99,6 +113,26 @@ export function fold(state: TurnState, event: OpenCodeEvent, ctx: TurnContext): 
 
   const sessionID = sessionIDFromEvent(event)
   const child = sessionID ? state.children.get(sessionID) : undefined
+<<<<<<< HEAD
+=======
+  const openChild = child && state.openChildren.has(child.id) ? child : undefined
+
+  if (event.type === "permission.asked" && (event.data.sessionID === ctx.sessionID || openChild)) {
+    const tool = event.data.source?.id
+      ? state.tools.get(toolKey(event.data.sessionID, event.data.source.id))
+      : undefined
+    return {
+      state: { ...state, asks: new Set(state.asks).add(event.data.id) },
+      outputs: [{ _tag: "PermissionAsk", event, tool, child: openChild }],
+    }
+  }
+  if (event.type === "form.created" && (event.data.form.sessionID === ctx.sessionID || openChild)) {
+    return {
+      state: { ...state, asks: new Set(state.asks).add(event.data.form.id) },
+      outputs: [{ _tag: "FormAsk", form: event.data.form, child: openChild }],
+    }
+  }
+>>>>>>> upstream-anomalyco/dev
   const settledID =
     event.type === "permission.replied"
       ? event.data.requestID
@@ -113,12 +147,21 @@ export function fold(state: TurnState, event: OpenCodeEvent, ctx: TurnContext): 
     return { state: { ...state, asks, settled }, outputs: [{ _tag: "AskSettled", id: settledID }] }
   }
   if (!sessionID || (sessionID !== ctx.sessionID && !child)) return { state, outputs: [] }
+<<<<<<< HEAD
   if (event.type === "session.inbox.delivered" && event.data.inboxID === ctx.start?.id)
+=======
+  if (
+    sessionID === ctx.sessionID &&
+    event.type === "session.inbox.delivered" &&
+    (!ctx.start || event.data.inboxID === ctx.start.id)
+  )
+>>>>>>> upstream-anomalyco/dev
     return { state: { ...state, started: true }, outputs: [] }
-  if (!state.started) return { state, outputs: [] }
+  if (!child && !state.started) return { state, outputs: [] }
   return child ? childEvent(state, event, ctx, child) : rootEvent(state, event, ctx)
 }
 
+<<<<<<< HEAD
 /** Asks already pending when the subscription started, asked as if their events had just arrived. */
 export function pending(
   state: TurnState,
@@ -154,6 +197,10 @@ export function adopt(state: TurnState, sessions: ReadonlyArray<ACPChild.Session
   const added = sessions.filter((session) => !state.children.has(session.id))
   if (added.length === 0) return state
   return { ...state, children: new Map([...state.children, ...added.map((session) => [session.id, session] as const)]) }
+=======
+export function projectChild(ctx: TurnContext, child: Child) {
+  return !ctx.childUpdates && ctx.start !== undefined && child.turnID === ctx.start.id
+>>>>>>> upstream-anomalyco/dev
 }
 
 export function failure(state: TurnState) {
@@ -224,7 +271,13 @@ function childCreated(state: TurnState, event: CreatedEvent, ctx: TurnContext): 
   if (!parentID) return { state, outputs: [] }
   const parent = parentID === ctx.sessionID ? undefined : state.children.get(parentID)
   if (!parent && parentID !== ctx.sessionID) return { state, outputs: [] }
-  const child = { id: event.data.sessionID, parentID, depth: parent ? parent.depth + 1 : 1, title: event.data.title }
+  const child: Child = {
+    id: event.data.sessionID,
+    parentID,
+    depth: parent ? parent.depth + 1 : 1,
+    title: event.data.title,
+    turnID: parent ? parent.turnID : ctx.start?.id,
+  }
   return {
     state: { ...state, children: new Map(state.children).set(child.id, child) },
     outputs: childStatus(ctx, child, { type: "status", status: "created" }),
@@ -264,20 +317,27 @@ function rootEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext): Fo
       return { state: { ...recorded, stepError: event.data.error }, outputs: [] }
     }
     case "session.execution.succeeded":
-      return { state, outputs: [], terminal: "succeeded" }
+      return { state: { ...state, started: Boolean(ctx.start) }, outputs: [], terminal: "succeeded" }
     case "session.execution.interrupted":
-      return { state, outputs: [], terminal: "interrupted" }
+      return { state: { ...state, started: Boolean(ctx.start) }, outputs: [], terminal: "interrupted" }
     case "session.execution.failed":
-      return { state: { ...state, executionError: event.data.error }, outputs: [], terminal: "failed" }
+      return {
+        state: { ...state, started: Boolean(ctx.start), executionError: event.data.error },
+        outputs: [],
+        terminal: "failed",
+      }
     default:
       return sessionEvent(state, event, ctx, undefined)
   }
 }
 
-function childEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext, child: ACPChild.Session): Folded {
+function childEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext, child: Child): Folded {
   switch (event.type) {
     case "session.execution.started":
-      return { state, outputs: childStatus(ctx, child, { type: "status", status: "running" }) }
+      return {
+        state: { ...state, openChildren: new Set(state.openChildren).add(child.id) },
+        outputs: childStatus(ctx, child, { type: "status", status: "running" }),
+      }
     case "session.execution.succeeded":
       return { state, outputs: childStatus(ctx, child, { type: "status", status: "completed" }) }
     case "session.execution.interrupted":
@@ -292,12 +352,7 @@ function childEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext, ch
   }
 }
 
-function sessionEvent(
-  state: TurnState,
-  event: OpenCodeEvent,
-  ctx: TurnContext,
-  child: ACPChild.Session | undefined,
-): Folded {
+function sessionEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext, child: Child | undefined): Folded {
   const sessionID = child?.id ?? ctx.sessionID
   const send = (update: SessionUpdate) => route(ctx, child, update)
   switch (event.type) {
@@ -458,11 +513,11 @@ function newTool(sessionID: string, id: string, name = "tool"): Tool {
   return { sessionID, id, name, input: {}, metadata: {} }
 }
 
-function route(ctx: TurnContext, child: ACPChild.Session | undefined, update: SessionUpdate): Output[] {
+function route(ctx: TurnContext, child: Child | undefined, update: SessionUpdate): Output[] {
   if (!child) return [{ _tag: "SessionUpdate", update }]
   const projected = ACPChild.project(update, child)
   if (ctx.childUpdates) return childStatus(ctx, child, { type: "update", update: projected })
-  return [{ _tag: "SessionUpdate", update: projected }]
+  return projectChild(ctx, child) ? [{ _tag: "SessionUpdate", update: projected }] : []
 }
 
 function childStatus(ctx: TurnContext, child: ACPChild.Session, event: ACPChild.Event): Output[] {

@@ -7,6 +7,7 @@ import { InvalidRequestError, UnauthorizedError } from "@opencode/protocol/error
 import { OpenCodeEvent } from "@opencode/protocol/groups/event"
 import { SharedEvents } from "../shared-events.js"
 import { ClientError, OpenCode } from "./generated/index.js"
+<<<<<<< HEAD
 import type { EventSubscribeInput } from "./api/api.js"
 import { RpcClientRuntime } from "./rpc.js"
 import type { RpcCallOptions } from "../promise/rpc.js"
@@ -20,6 +21,13 @@ const declaredEventErrors = [
 ] as const
 type DeclaredEventError = (typeof declaredEventErrors)[number]["schema"]["Type"]
 type EventFrameError = ClientError | DeclaredEventError
+=======
+import type { EventSubscribeInput } from "./api.js"
+import { RpcClientRuntime } from "./rpc.js"
+import type { RpcCallOptions } from "../promise/rpc.js"
+
+type EventType = NonNullable<EventSubscribeInput["types"]>[number]
+>>>>>>> upstream-anomalyco/dev
 
 const CurrentHeaders = Context.Reference<RpcCallOptions["headers"]>("@opencode/client/effect/rpc/headers", {
   defaultValue: () => undefined,
@@ -107,6 +115,7 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
     // with bounded backoff (#2321); terminal failures complete subscribers.
     { reconnect: { shouldRetry: eventErrorRetryable, delay: eventReconnectDelay } },
   )
+<<<<<<< HEAD
   const subscribe = (input?: EventSubscribeInput) => {
     lastEventID = input?.["last-event-id"] ?? lastEventID
     return Stream.fromAsyncIterable(
@@ -118,6 +127,10 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
       }),
       (error) => error,
     ).pipe(
+=======
+  const subscribe = <Type extends EventType = EventType>(input?: { readonly types?: ReadonlyArray<Type> }) =>
+    Stream.fromAsyncIterable(shared.subscribe({ types: input?.types }), (error) => error).pipe(
+>>>>>>> upstream-anomalyco/dev
       Stream.catch((error) =>
         Stream.failCause(error instanceof EventFailure ? error.cause : Cause.fail(new ClientError({ cause: error }))),
       ),

@@ -3,7 +3,7 @@ import { ProviderNotFoundError } from "@opencode/protocol/errors"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
-import { response } from "../location"
+import { awaitPlugins, response } from "../location"
 
 // Provider.Info deliberately carries no model inventory; the HTTP shape
 // (Provider.InfoWithModels) embeds each definition's resolved models so API
@@ -19,6 +19,7 @@ export const ProviderHandler = HttpApiBuilder.group(Api, "server.provider", (han
       .handle(
         "provider.list",
         Effect.fn(function* () {
+          yield* awaitPlugins
           const providers = yield* Provider.Service
           const snapshot = yield* providers.snapshot()
           return yield* response(Effect.succeed(snapshot.available.map(withModels)))

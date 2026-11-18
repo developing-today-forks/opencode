@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test"
+<<<<<<< HEAD
 import { fileURLToPath } from "node:url"
+=======
+import path from "node:path"
+>>>>>>> upstream-anomalyco/dev
 import { LegacyEventV1 } from "../src/legacy-event.js"
 import { PermissionV1 } from "../src/permission-v1.js"
 import { SessionV1 } from "../src/session-v1.js"
@@ -15,7 +19,11 @@ test("compatibility entrypoints preserve isolated V1 schema identity", () => {
 
 test("current source does not import the V1 subtree directly", async () => {
   const allowed = new Set(["filesystem-v1.ts", "legacy-event.ts", "permission-v1.ts", "session-v1.ts"])
+<<<<<<< HEAD
   const files = [...new Bun.Glob("*.ts").scanSync(fileURLToPath(new URL("../src", import.meta.url)))].filter(
+=======
+  const files = [...new Bun.Glob("*.ts").scanSync(path.join(import.meta.dir, "../src"))].filter(
+>>>>>>> upstream-anomalyco/dev
     (file) => !allowed.has(file),
   )
   const directImports = await Promise.all(

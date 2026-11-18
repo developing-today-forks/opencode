@@ -40,12 +40,33 @@ export const detectMediaType = (bytes: Uint8Array): string | undefined => {
   }
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46])) return "application/pdf"
   if (bytes.length >= 12 && ascii(bytes, 4, 8) === "ftyp") {
+<<<<<<< HEAD
     // ISO-BMFF is a family, not a type: the major brand (bytes 8-12) names the actual container - an M4A audiobook
     // and an AVIF image both open with ftyp. An unrecognized brand falls through to undefined rather than claiming
     // video/mp4 for a file that may be neither audio nor video (#2127).
     const brand = ascii(bytes, 8, 12)
     if (Object.hasOwn(FTYP_BRANDS, brand)) return FTYP_BRANDS[brand as keyof typeof FTYP_BRANDS]
     return undefined
+=======
+    // AVIF, HEIC, QuickTime and M4A share MP4's container; the major brand tells them apart, and generic HEIF brands
+    // list `avif`/`avis` among the compatible brands that follow the minor version.
+    const brand = ascii(bytes, 8, 12)
+    const boxEnd = Math.min(new DataView(bytes.buffer, bytes.byteOffset).getUint32(0), bytes.length)
+    const compatible = Array.from({ length: Math.floor((boxEnd - 16) / 4) }, (_, index) =>
+      ascii(bytes, 16 + index * 4, 20 + index * 4),
+    )
+    const generic = brand === "mif1" || brand === "msf1"
+    if (
+      brand === "avif" ||
+      brand === "avis" ||
+      (generic && (compatible.includes("avif") || compatible.includes("avis")))
+    )
+      return "image/avif"
+    if (generic || ["heic", "heix", "hevc", "hevx"].includes(brand)) return "image/heic"
+    if (brand === "qt  ") return "video/quicktime"
+    if (brand === "M4A ") return "audio/mp4"
+    return "video/mp4"
+>>>>>>> upstream-anomalyco/dev
   }
   if (startsWith(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm"
   if (startsWith(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"
@@ -67,11 +88,18 @@ const EXTENSIONS: Readonly<Record<string, string>> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
-  pdf: "application/pdf",
-  mp4: "video/mp4",
   avif: "image/avif",
   heic: "image/heic",
   heif: "image/heif",
+  pdf: "application/pdf",
+  mp4: "video/mp4",
+<<<<<<< HEAD
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+=======
+  mov: "video/quicktime",
+>>>>>>> upstream-anomalyco/dev
   webm: "video/webm",
   mp3: "audio/mpeg",
   m4a: "audio/mp4",

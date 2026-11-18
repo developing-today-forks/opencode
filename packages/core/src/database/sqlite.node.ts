@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
 import { Context, Effect, Layer, Predicate } from "effect"
 import { Reactivity } from "effect/reactivity"
@@ -6,26 +7,29 @@ import { classifySqliteError, LockTimeoutError, SqlError } from "effect/sql/SqlE
 import { Sqlite } from "./sqlite.js"
 
 const TypeId = "~@opencode/core/database/SqliteNode" as const
+=======
+import { SqliteClient } from "@effect/sql-sqlite-node"
+import { Layer, Option, Schema } from "effect"
+import type { SqlClient } from "effect/sql"
+>>>>>>> upstream-anomalyco/dev
 
 export const supportsTuningPragmas = true
 
-// Foreign keys default OFF and can be toggled per connection.
+// Foreign keys default ON in node:sqlite and can be toggled per connection.
 export const supportsForeignKeyToggle = true
 
-interface Config extends Sqlite.ClientConfig {
-  readonly filename: string
-  readonly readonly?: boolean
-  readonly create?: boolean
-  readonly readwrite?: boolean
-  readonly disableWAL?: boolean
-  readonly timeout?: number
-  readonly allowExtension?: boolean
-}
+// Opening the database can only fail on a broken file or a lock held past
+// busyTimeout; Database.layer treats both as fatal.
+export const sqliteLayer = (config: SqliteClient.SqliteClientConfig): Layer.Layer<SqlClient.SqlClient> =>
+  Layer.orDie(SqliteClient.layer(config))
 
-const make = (options: Config) =>
-  Effect.gen(function* () {
-    const native = (yield* Sqlite.Native) as DatabaseSync
+// node:sqlite has no error class: SQLite failures are an Error marked ERR_SQLITE_ERROR that carries SQLite's extended
+// result code in errcode.
+const decodeDriverError = Schema.decodeUnknownOption(
+  Schema.Struct({ code: Schema.Literal("ERR_SQLITE_ERROR"), errcode: Schema.Number }),
+)
 
+<<<<<<< HEAD
     const run = (query: string, params: ReadonlyArray<unknown> = []) =>
       Effect.withFiber<Array<Record<string, unknown>>, SqlError>((fiber) => {
         const statement = native.prepare(query)
@@ -112,3 +116,10 @@ export const sqliteLayer = (config: Config) => {
   const native = nativeLayer(config)
   return Layer.merge(native, clientLayer(config).pipe(Layer.provide(native))).pipe(Layer.provide(Reactivity.layer))
 }
+=======
+export const resultCode = (cause: unknown) =>
+  decodeDriverError(cause).pipe(
+    Option.map((error) => error.errcode),
+    Option.getOrUndefined,
+  )
+>>>>>>> upstream-anomalyco/dev

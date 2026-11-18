@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode/stories",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 6006"
+  },
+  "devDependencies": {
+    "@opencode/client": "workspace:*",
+    "@opencode/session-ui": "workspace:*",
+    "@opencode/ui": "workspace:*",
+    "@playwright/test": "catalog:",
+    "@solidjs/meta": "catalog:",
+<<<<<<< HEAD:packages/storybook/package.json
+    "@storybook/addon-a11y": "10.6.2",
+    "@storybook/addon-docs": "10.6.2",
+    "@storybook/addon-links": "10.6.2",
+    "@storybook/addon-onboarding": "10.6.2",
+    "@storybook/addon-vitest": "10.6.2",
+    "@storybook/builder-vite": "10.6.2",
+=======
+>>>>>>> upstream-anomalyco/dev:packages/stories/package.json
+    "@tailwindcss/vite": "catalog:",
+    "@tanstack/solid-query": "5.91.4",
+    "@tsconfig/node22": "catalog:",
+    "@types/node": "catalog:",
+    "solid-js": "catalog:",
+<<<<<<< HEAD:packages/storybook/package.json
+    "storybook": "10.6.2",
+    "storybook-solidjs-vite": "10.5.2",
+=======
+>>>>>>> upstream-anomalyco/dev:packages/stories/package.json
+    "typescript": "catalog:",
+    "vite": "7.3.7",
+    "vite-plugin-solid": "2.11.12"
+  }
+}

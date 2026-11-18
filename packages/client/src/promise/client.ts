@@ -9,6 +9,7 @@ export type { ClientOptions, RequestOptions } from "./generated/client.js"
 
 export function make(options: ClientOptions) {
   const raw = OpenCode.make(options)
+<<<<<<< HEAD
   const connect = (input: Parameters<typeof raw.server.connect>[0], requestOptions?: RequestOptions) => {
     const headers = new Headers(options.headers)
     new Headers(requestOptions?.headers).forEach((value, key) => headers.set(key, value))
@@ -18,6 +19,9 @@ export function make(options: ClientOptions) {
   const events = SharedEvents.make((signal, onActivity, resume) =>
     raw.event.subscribe({ "last-event-id": resume.lastEventID }, { signal, onActivity, onEventId: resume.onEventId }),
   )
+=======
+  const events = SharedEvents.make((signal, onActivity) => raw.event.subscribe(undefined, { signal, onActivity }))
+>>>>>>> upstream-anomalyco/dev
   return {
     ...raw,
     server: { ...raw.server, connect },

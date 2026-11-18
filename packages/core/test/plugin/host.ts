@@ -11,9 +11,15 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { WebSearch } from "@opencode/core/websearch"
 import { Effect, Stream } from "effect"
 
+<<<<<<< HEAD
 type Overrides = Partial<Omit<Plugin.Context, "options" | "serverUrl" | "session">> & {
   readonly serverUrl?: Plugin.Context["serverUrl"]
+=======
+type EventSource = ReturnType<Plugin.Context["event"]["subscribe"]>
+type Overrides = Partial<Omit<Plugin.Context, "options" | "session" | "event">> & {
+>>>>>>> upstream-anomalyco/dev
   readonly session?: Partial<Plugin.Context["session"]>
+  readonly event?: { readonly subscribe: () => EventSource }
 }
 export function host(overrides: Overrides = {}): Plugin.Context {
   return {
@@ -67,12 +73,19 @@ export function host(overrides: Overrides = {}): Plugin.Context {
     credential: overrides.credential ?? {
       activate: () => Effect.die("unused credential.activate"),
     },
-    event: overrides.event ?? {
-      subscribe: () => Stream.empty,
-    },
+    event: { subscribe: events(overrides.event?.subscribe ?? (() => Stream.empty)) },
     experimental: overrides.experimental ?? {
       terminal: {
         read: () => Effect.die("unused experimental.terminal.read"),
+      },
+      generate: {
+        text: () => Effect.die("unused experimental.generate.text"),
+        image: () => Effect.die("unused experimental.generate.image"),
+        decisions: () => Effect.die("unused experimental.generate.decisions"),
+      },
+      artifact: {
+        transform: () => Effect.die("unused experimental.artifact.transform"),
+        reload: () => Effect.die("unused experimental.artifact.reload"),
       },
     },
     generate: overrides.generate ?? {
@@ -212,6 +225,13 @@ export function host(overrides: Overrides = {}): Plugin.Context {
       interrupt: overrides.session?.interrupt ?? (() => Effect.die("unused session.interrupt")),
       wait: overrides.session?.wait ?? (() => Effect.die("unused session.wait")),
       context: overrides.session?.context ?? (() => Effect.die("unused session.context")),
+      instructions: overrides.session?.instructions ?? {
+        entry: {
+          list: () => Effect.die("unused session.instructions.entry.list"),
+          put: () => Effect.die("unused session.instructions.entry.put"),
+          remove: () => Effect.die("unused session.instructions.entry.remove"),
+        },
+      },
     },
   }
 }
@@ -270,6 +290,7 @@ export function providerHost(providers: Provider.Interface): Plugin.Context["pro
         .snapshot()
         .pipe(Effect.map((snapshot) => located(snapshot.available.map((definition) => embedModels(definition))))),
     get: (input) =>
+<<<<<<< HEAD
       providers.snapshot().pipe(
         Effect.flatMap((snapshot) => {
           const definition = snapshot.available.find((item) => item.provider.id === input.providerID)
@@ -278,6 +299,17 @@ export function providerHost(providers: Provider.Interface): Plugin.Context["pro
             : Effect.succeed(located(embedModels(definition)))
         }),
       ),
+=======
+      providers
+        .get(Provider.ID.make(input.providerID))
+        .pipe(
+          Effect.flatMap((provider) =>
+            provider === undefined
+              ? Effect.fail(new Error(`Provider not found: ${input.providerID}`))
+              : Effect.succeed(located(provider)),
+          ),
+        ),
+>>>>>>> upstream-anomalyco/dev
     reload: providers.reload,
     transform: (callback) =>
       providers.transform((editor) =>
@@ -561,4 +593,11 @@ function located<A>(data: A) {
     }),
     data,
   }
+}
+
+// Filter like the real host, so a fake source can emit any event type.
+function events(source: () => EventSource) {
+  const subscribe = (input?: { readonly types?: ReadonlyArray<string> }): EventSource =>
+    source().pipe(Stream.filter((event) => !input?.types?.length || input.types.includes(event.type)))
+  return subscribe as Plugin.Context["event"]["subscribe"]
 }

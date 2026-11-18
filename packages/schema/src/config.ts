@@ -54,7 +54,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   username: Schema.String.annotate({
     description: "Username displayed in conversations and used for telemetry identity",
   }).pipe(optional),
-  permissions: Permission.Ruleset.annotate({
+  timezone: Schema.String.pipe(optional).annotate({
+    description: "IANA time zone for schedules, e.g. America/Los_Angeles. Defaults to the server's local zone",
+  }),
+  permissions: Permission.Ruleset.pipe(optional).annotate({
     description: "Ordered tool permission rules applied to agent tool use",
   }).pipe(optional),
   policies: Schema.Array(ConfigPolicy.Info)

@@ -42,8 +42,6 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
       "/api/model",
       "/api/integration",
       `/api/session/${session.id}/permission`,
-      `/api/experimental/session/${session.id}/instructions/entries`,
-      `/api/session/${session.id}/form`,
       "/api/session/global/form",
     ]
     for (const endpoint of endpoints) {
@@ -70,6 +68,59 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
       ),
     )
     expect(recovered.status).toBe(200)
+  }),
+)
+
+it.live("manages a session whose directory was deleted", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-deleted-directory-")))
+    const directory = path.join(config.path, "project")
+    yield* Effect.promise(() => fs.mkdir(directory))
+    const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
+    const request = (endpoint: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${endpoint}`, {
+            method,
+            headers: { "content-type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    const created = yield* request("/api/session", "POST", { location: { directory } })
+    expect(created.status).toBe(200)
+    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => created.json()),
+    ).data
+    yield* Effect.promise(() => fs.rm(directory, { recursive: true }))
+
+    const statuses = [
+      yield* request(`/api/session/${session.id}`, "PATCH", { title: "Renamed" }),
+      yield* request(`/api/session/${session.id}`, "PATCH", { archived: true }),
+      yield* request(`/api/session/${session.id}/interrupt`, "POST"),
+      yield* request(`/api/experimental/session/${session.id}/instructions/entries`, "GET"),
+    ].map((response) => response.status)
+    expect(statuses).toEqual([204, 204, 200, 200])
+
+    const fetched = yield* request(`/api/session/${session.id}`, "GET")
+    const updated = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => fetched.json()),
+    ).data
+    expect(updated.title).toBe("Renamed")
+    expect(updated.time.archived).toBeDefined()
+
+    // Title generation still runs in the session's folder.
+    const generated = yield* request(`/api/session/${session.id}`, "PATCH", { title: "" })
+    expect(generated.status).toBe(404)
+    expect(yield* Effect.promise(() => generated.json())).toEqual({
+      _tag: "LocationNotFoundError",
+      location: { directory },
+      message: `Location not found: ${directory}`,
+    })
+
+    const missing = yield* request("/api/session/ses_missing/interrupt", "POST")
+    expect(missing.status).toBe(404)
+    expect(((yield* Effect.promise(() => missing.json())) as { _tag: string })._tag).toBe("SessionNotFoundError")
   }),
 )
 
@@ -115,6 +166,7 @@ function occupy(port: number, cancel = false) {
   })
 }
 
+<<<<<<< HEAD
 // Two free loopback ports, handed to the OpenAI callback for this test only. The real 1455/1457 are shared by every
 // process on the machine, so a concurrent run could hold them and the cancel probe could reach into its listener.
 const callbackPorts = Effect.gen(function* () {
@@ -134,6 +186,13 @@ const callbackPorts = Effect.gen(function* () {
   process.env.OPENCODE_TEST_OPENAI_CALLBACK_PORTS = `${primary},${fallback}`
   yield* Effect.addFinalizer(() => Effect.sync(() => delete process.env.OPENCODE_TEST_OPENAI_CALLBACK_PORTS))
   return { primary, fallback }
+=======
+// A server without its own config directory reads the developer's global config, whose remote MCP servers would
+// reach the network.
+const isolated = Effect.gen(function* () {
+  const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-openai-oauth-")))
+  return yield* ServerFetch.make({ ...options, config: { ...options.config, directory: config.path } })
+>>>>>>> upstream-anomalyco/dev
 })
 
 const connectOpenAI = (handler: Handler) =>
@@ -187,7 +246,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
-    expect(body.capabilities?.persistentPty).toBe(process.platform !== "win32")
+    expect(body.capabilities?.persistentPty).toBe(true)
   }),
 )
 
@@ -280,6 +339,18 @@ it.live("applies custom CORS origins to HTTP responses and PTY ticket checks", (
             ),
           )
           expect(invalidTicket.status).toBe(403)
+
+          const invalidMcpTicket = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                "http://opencode.local/api/experimental/client-mcp?ticket=invalid&location[directory]=/tmp&name=tui",
+                {
+                  headers: { origin },
+                },
+              ),
+            ),
+          )
+          expect(invalidMcpTicket.status).toBe(403)
 
           const connect = yield* Effect.promise(() =>
             handler(
@@ -382,6 +453,7 @@ it.live("returns 404 when a previously readable file is deleted", () =>
   ).pipe(Effect.scoped),
 )
 
+<<<<<<< HEAD
 it.live(
   "cancels a stale OpenAI OAuth callback server before falling back",
   () =>
@@ -390,6 +462,13 @@ it.live(
       const requests = yield* occupy(primary, true)
       const handler = yield* ServerFetch.make(options)
       const response = yield* connectOpenAI(handler)
+=======
+it.live("cancels a stale OpenAI OAuth callback server before falling back", () =>
+  Effect.gen(function* () {
+    const requests = yield* occupy(1455, true)
+    const handler = yield* isolated
+    const response = yield* connectOpenAI(handler)
+>>>>>>> upstream-anomalyco/dev
 
       expect(response.status).toBe(200)
       expect(requests).toContain("/cancel")
@@ -400,6 +479,7 @@ it.live(
   { timeout: 60_000 },
 )
 
+<<<<<<< HEAD
 it.live(
   "falls back to port 1457 when OpenAI OAuth port 1455 remains busy",
   () =>
@@ -408,6 +488,13 @@ it.live(
       const requests = yield* occupy(primary)
       const handler = yield* ServerFetch.make(options)
       const response = yield* connectOpenAI(handler)
+=======
+it.live("falls back to port 1457 when OpenAI OAuth port 1455 remains busy", () =>
+  Effect.gen(function* () {
+    const requests = yield* occupy(1455)
+    const handler = yield* isolated
+    const response = yield* connectOpenAI(handler)
+>>>>>>> upstream-anomalyco/dev
 
       expect(response.status).toBe(200)
       expect(requests).toContain("/cancel")
@@ -421,10 +508,16 @@ it.live(
   "explains how to recover when both OpenAI OAuth callback ports are busy",
   () =>
     Effect.gen(function* () {
+<<<<<<< HEAD
       const { primary, fallback } = yield* callbackPorts
       yield* occupy(primary)
       yield* occupy(fallback)
       const handler = yield* ServerFetch.make(options)
+=======
+      yield* occupy(1455)
+      yield* occupy(1457)
+      const handler = yield* isolated
+>>>>>>> upstream-anomalyco/dev
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(400)

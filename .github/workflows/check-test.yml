@@ -1,0 +1,713 @@
+<<<<<<< HEAD:.github/workflows/test.yml
+name: test
+# CI tier policy: .github/ci-policy.md (fast tier, full main tier; no PR triggers, #1401).
+# RUNNER-SWITCH (2026-10-18): runners in this workflow were switched from Blacksmith to
+# GitHub-hosted at Drew's direction. To switch back, grep the repo for RUNNER-SWITCH and
+# swap each commented Blacksmith line back in for the active line under it. To choose per
+# run instead, use an expression on runs-on, e.g. ${{ vars.RUNNER_UBUNTU || 'ubuntu-24.04' }},
+# or gate individual steps with if: on the runner.
+=======
+name: check-test
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+
+# Pull requests run the fast tier: the affected unit tests on Linux. The full tier — unit tests on Windows, the
+# compiled builds, and the Playwright suites on both OSes — runs on pushes to dev and beta and on nightly and manual
+# runs. A stable release also runs it through release.yml's gate, with the browser suites on Linux only.
+on:
+<<<<<<< HEAD:.github/workflows/test.yml
+  workflow_dispatch:
+  # Nightly backstop: the full main tier (build + e2e included) re-runs even
+  # if no merge lands, so nothing the affected filter skipped can vanish.
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  # Keep every run on main so cancelled checks do not pollute the default branch
+  # commit history. Non-main refs still share a group and cancel stale runs.
+  group: ${{ case(github.ref == 'refs/heads/main', format('{0}-{1}', github.workflow, github.run_id), format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref)) }}
+=======
+  push:
+    branches:
+      - dev
+      - beta
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      quarantine:
+        description: Run only the quarantined browser tests (packages/app/e2e/QUARANTINE.md)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      quarantine:
+        description: Run only the quarantined browser tests (packages/app/e2e/QUARANTINE.md)
+        type: boolean
+        default: false
+      release_gate:
+        description: Run the browser suites on Linux only
+        type: boolean
+        default: false
+
+concurrency:
+  # A new push to a pull request cancels its stale run. Every push and manual run keeps its own group, so each
+  # dev and beta commit gets a verdict and a quarantine run never cancels a normal one.
+  group: ${{ case(github.event_name == 'pull_request', format('{0}-{1}', github.workflow, github.event.pull_request.number), format('{0}-{1}', github.workflow, github.run_id)) }}
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Push and pull request runs test only what changed. Manual runs and the release gate test everything: they
+  # have no base commit to diff against.
+  AFFECTED: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+  # Pull requests diff against the merge's first parent; pushes diff against the previous dev head.
+  TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+  TURBO_SCM_HEAD: ${{ github.sha }}
+
+jobs:
+  # Only the browser suites need this, and pull requests run no browser suites.
+  affected:
+<<<<<<< HEAD:.github/workflows/test.yml
+    timeout-minutes: 15
+    name: basic affected packages
+    # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
+    outputs:
+      # e2e is a main-tier suite (ci-policy.md): it runs on pushes to main,
+      # the nightly schedule and manual dispatches. No workflow triggers on
+      # pull_request (policy #1401, gate #1406), so this output is simply
+      # the affected-app signal; the aggregator job below treats a skipped
+      # e2e-suite as the expected result whenever this output is false.
+=======
+    name: affected packages
+    if: ${{ !github.event.pull_request.draft && github.event_name != 'pull_request' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+      e2e: ${{ steps.packages.outputs.app }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+<<<<<<< HEAD:.github/workflows/test.yml
+          # Pushes diff against the previous main head, so checkout keeps full history.
+=======
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Find affected packages
+        id: packages
+<<<<<<< HEAD:.github/workflows/test.yml
+        env:
+          TURBO_SCM_BASE: ${{ github.event.before }}
+          TURBO_SCM_HEAD: ${{ github.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+=======
+        run: |
+          if [ "$AFFECTED" != "true" ]; then
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+            echo "app=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # packages/stories hosts the component tests, but no app package depends on it.
+          bun x turbo@2.10.2 ls --affected --filter=@opencode/app --filter=@opencode/stories --output=json > affected.json
+          bun -e 'const result = await Bun.file("affected.json").json(); console.log(`app=${result.packages.count > 0}`)' >> "$GITHUB_OUTPUT"
+
+  unit:
+<<<<<<< HEAD:.github/workflows/test.yml
+    timeout-minutes: 20
+    name: basic unit (${{ matrix.settings.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - name: linux
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-24.04
+          - name: windows
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-windows-2025
+            host: windows-2025
+=======
+    name: unit (${{ matrix.settings.name }})
+    if: ${{ !inputs.quarantine && !github.event.pull_request.draft }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pull requests run Linux only; Windows runs the same tests on pushes, nightly runs and the release gate.
+        settings: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"linux","host":"blacksmith-4vcpu-ubuntu-2404"}]' || '[{"name":"linux","host":"blacksmith-4vcpu-ubuntu-2404"},{"name":"windows","host":"blacksmith-4vcpu-windows-2025"}]') }}
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+    runs-on: ${{ matrix.settings.host }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Pushes diff against the previous main head, so checkout keeps full history.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install ripgrep
+        run: |
+          # Unit tests drive a real rg binary (ripgrep, search tools) and
+          # the test harness forbids RipgrepBinary's download fallback, so
+          # unit cannot depend on whether the runner image ships one (#72).
+          # Pin the same release src/ripgrep/binary.ts resolves: 15.1.0.
+          version=15.1.0
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64) platform="x86_64-unknown-linux-musl"; extension="tar.gz" ;;
+            Linux-ARM64) platform="aarch64-unknown-linux-gnu"; extension="tar.gz" ;;
+            Windows-X64) platform="x86_64-pc-windows-msvc"; extension="zip" ;;
+            Windows-ARM64) platform="aarch64-pc-windows-msvc"; extension="zip" ;;
+            *) echo "no ripgrep asset for runner ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          archive="${RUNNER_TEMP}/ripgrep-${version}-${platform}.${extension}"
+          dest="${RUNNER_TEMP}/ripgrep-${version}"
+          mkdir -p "$dest"
+          curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${version}/ripgrep-${version}-${platform}.${extension}" -o "$archive"
+          if [ "$extension" = "zip" ]; then
+            # Git's GNU tar cannot read zip; use the bsdtar in System32,
+            # the same tool src/ripgrep/binary.ts extracts zips with.
+            "/c/Windows/System32/tar.exe" -xf "$archive" -C "$dest"
+          else
+            tar -xzf "$archive" -C "$dest"
+          fi
+          bin_dir="$dest/ripgrep-${version}-${platform}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+          export PATH="$bin_dir:$PATH"
+          rg --version
+
+      - name: Test lint rules
+        # The main ast-grep rules (script/ast-grep/rules) have their own
+        # test suite (test:lint-rules) that nothing ran (#153); the
+        # effect-simplification suite below was already wired up.
+        if: runner.os == 'Linux'
+        run: bun run test:lint-rules
+
+      - name: Test Effect simplification rules
+        if: runner.os == 'Linux'
+        run: bun run test:effect-simplification-rules
+
+      - name: Check Effect simplifications
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-simplifications
+
+      - name: Check Effect patterns
+        # The pattern scan itself (no-star-import, no-json-parse-cast,
+        # no-effect-die-string, no-import-alias) was never wired into CI —
+        # only its rule tests ran — so violations accumulated unchecked
+        # (#1496).
+        if: runner.os == 'Linux'
+        run: bun run lint:effect-patterns
+
+      - name: Test gate harness
+        # script/ is not a workspace, so turbo test never picks up
+        # script/gate-harness.test.ts, and the root bunfig test root
+        # deliberately blocks running tests from the repo root (#1611).
+        # Run the file explicitly from its own directory instead.
+        working-directory: script
+        run: bun test gate-harness.test.ts
+
+      - name: Test raw-changelog classification
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#2206).
+        working-directory: script
+        run: bun test raw-changelog.test.ts
+
+      - name: Test mcpx-cleanup script
+        # script/ is not a workspace, so turbo test never picks up
+        # script/mcpx-cleanup.test.ts, and the root bunfig test root
+        # deliberately blocks running tests from the repo root (#138).
+        # Run the file explicitly from its own directory instead.
+        working-directory: script
+        run: bun test mcpx-cleanup.test.ts
+
+      - name: Check turbo.json for duplicate keys
+        # Turbo silently keeps the last definition of a repeated task key
+        # (#145); the script-level test scans turbo.json duplicate-aware.
+        # Same script/ wiring as the mcpx-cleanup step above.
+        working-directory: script
+        run: bun test turbo-json.test.ts
+
+      - name: Test main-broken reconcile run links
+        # Same script/ wiring as the mcpx-cleanup step above: script/ is
+        # not a workspace, so the test file is run explicitly. The staged
+        # three-watcher fixture pins #1314: a race-loser that is itself a
+        # former survivor must forward run links inherited via its
+        # reconcile comments, not just the link in its body.
+        working-directory: script
+        run: bun test main-broken-reconcile.test.ts
+
+      - name: Test doc env var guard
+        # Same script/ wiring as the mcpx-cleanup step above: script/ is
+        # not a workspace, so the test file is run explicitly (#116).
+        working-directory: script
+        run: bun test check-doc-env-vars.test.ts
+
+      - name: Check documented env vars have readers
+        # Every OPENCODE_* variable the English docs pages document must be read
+        # somewhere outside the docs or carry a reasoned allowlist entry,
+        # or the row is a silent no-op (#116, #931).
+        if: runner.os == 'Linux'
+        run: bun run check:doc-env-vars
+
+      - name: Test prototype-chain read guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#865).
+        working-directory: script
+        run: bun test check-proto-reads.test.ts
+
+      - name: Check prototype-chain reads are dispositioned
+        # Every P-A/P-C sweep hit in every package-owned src tree
+        # (packages/*/src incl. console/stats subtrees, services/*/src)
+        # must be guarded by ownValue/ownOr or listed with a disposition
+        # in the allowlist, or
+        # the prototype-chain class regrows one bare read at a time (#865).
+        if: runner.os == 'Linux'
+        run: bun run check:proto-reads
+
+      - name: Test bounded-http guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1129).
+        working-directory: script
+        run: bun test check-bounded-http.test.ts
+
+      - name: Check bounded-http calls are dispositioned
+        # Every fetch / direct response-read sweep hit in packages/*/src
+        # must carry a signal or a bounded reader, or be listed with a
+        # disposition in the allowlist, or the unbounded outbound class
+        # regrows one call at a time (#1129, design #1127).
+        if: runner.os == 'Linux'
+        run: bun run check:bounded-http
+
+      - name: Test numeric-boundaries guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#995).
+        working-directory: script
+        run: bun test check-numeric-boundaries.test.ts
+
+      - name: Check numeric-boundary conversions are dispositioned
+        # Every bare Number(/parseInt(/parseFloat( sweep hit in
+        # packages/core/src, packages/ai/src and packages/cli/src must be
+        # converted through the #993 primitives or listed with a
+        # disposition in the allowlist, or the bare-conversion class
+        # regrows one call at a time (#995, design #992).
+        if: runner.os == 'Linux'
+        run: bun run check:numeric-boundaries
+
+      - name: Test workflow policy guard
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly (#1406).
+        working-directory: script
+        run: bun test check-workflows.test.ts
+
+      - name: Check workflow policies are followed
+        # No workflow may trigger on pull_request/pull_request_target,
+        # every workflow must declare workflow_dispatch, and every
+        # non-reusable job must declare timeout-minutes, or the
+        # workflow policies stay convention only (#1406).
+        if: runner.os == 'Linux'
+        run: bun run check:workflows
+
+      - name: Test gate wiring meta-check
+        # script/ is not a workspace; run the fixtures from its directory.
+        working-directory: script
+        run: bun test check-gates.test.ts
+
+      - name: Test native-arch release gate
+        # Same script/ wiring as the steps above: script/ is not a
+        # workspace, so the test file is run explicitly. The test pins
+        # NativeArch.verify, the release arch gate behind the #2211
+        # universal-Mach-O rejection, which otherwise runs in no
+        # workflow (#2222).
+        working-directory: script
+        run: bun test native-arch.test.ts
+      - name: Test repo-sweeper token contract
+        # The #1972 guard (script/github/token.test.ts) asserts every
+        # script/github script the repo-sweeper invokes resolves its
+        # token through the shared helper, in the name the workflow
+        # supplies. It lives in script/github/, which the steps above
+        # do not cover — run it explicitly or the guard itself is
+        # verified nowhere (the #2222 failure mode).
+        working-directory: script/github
+        run: bun test token.test.ts close-issues.test.ts
+
+      - name: Check gate registry and wiring
+        # Every promised gate must be registered, invoked by its owning
+        # workflow, and reachable for at least one declared trigger (#1527).
+        if: runner.os == 'Linux'
+        run: bun run check:gates
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "bot@opencode.ai"
+          git config --global user.name "opencode"
+
+      - name: Run unit tests
+        timeout-minutes: 20
+        run: |
+          # The runners have four vCPUs, and each Bun test process performs its own concurrent work.
+<<<<<<< HEAD:.github/workflows/test.yml
+          # A turbo/bun segfault (exit 139, SIGSEGV) truncates the suite and would read as an ordinary
+          # test failure (#90), so both variants go through script/run-unit-tests.sh: it retries a crash
+          # once and annotates a recurrence distinctly with the turbo and bun versions. Ordinary test
+          # failures still pass straight through, unrepeated.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            GITHUB_ACTIONS=false bash script/run-unit-tests.sh bun turbo test --concurrency=3
+            exit 0
+          fi
+          GITHUB_ACTIONS=false bash script/run-unit-tests.sh bun turbo test --affected --concurrency=3
+        env:
+          OPENCODE_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+          TURBO_SCM_BASE: ${{ github.event.before }}
+          TURBO_SCM_HEAD: ${{ github.sha }}
+=======
+          if [ "$AFFECTED" = "true" ]; then
+            GITHUB_ACTIONS=false bun turbo test --affected --concurrency=3
+            exit 0
+          fi
+          GITHUB_ACTIONS=false bun turbo test --concurrency=3
+        env:
+          OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+
+      - name: Verify packed codemode package
+        if: runner.os == 'Linux'
+        working-directory: packages/codemode
+        run: bun run pack
+
+      - name: Verify packed workerd SDK
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+<<<<<<< HEAD:.github/workflows/test.yml
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            bun turbo verify:package --filter=@opencode/sdk
+            exit 0
+          fi
+          bun turbo verify:package --affected --filter=@opencode/sdk
+        env:
+          TURBO_SCM_BASE: ${{ github.event.before }}
+          TURBO_SCM_HEAD: ${{ github.sha }}
+=======
+          if [ "$AFFECTED" = "true" ]; then
+            bun turbo verify:package --affected --filter=@opencode/sdk
+            exit 0
+          fi
+          bun turbo verify:package --filter=@opencode/sdk
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+
+      - name: Check generated client
+        if: runner.os == 'Linux'
+        working-directory: packages/client
+        run: bun run check:generated
+
+<<<<<<< HEAD:.github/workflows/test.yml
+      - name: Check generated protocol
+        if: runner.os == 'Linux'
+        working-directory: packages/protocol
+        run: bun run check:generated
+
+      - name: Check generated documentation
+=======
+      - name: Check generated OpenAPI document
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+        if: runner.os == 'Linux'
+        working-directory: packages/protocol
+        run: bun run check:generated
+
+  build:
+    # Main tier only (ci-policy.md): build runs on push to main, the
+    # nightly schedule and manual dispatch -- the only events this
+    # workflow triggers on (no pull_request trigger, #1401).
+    timeout-minutes: 20
+    name: build (${{ matrix.settings.name }})
+    # Compiling the CLI and smoke-testing its service lifecycle is part of the full tier.
+    if: ${{ !inputs.quarantine && github.event_name != 'pull_request' && !github.event.pull_request.draft }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - name: linux
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-24.04
+          - name: windows
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-windows-2025
+            host: windows-2025
+    runs-on: ${{ matrix.settings.host }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+<<<<<<< HEAD:.github/workflows/test.yml
+          # Pushes diff against the previous main head, so checkout keeps full history.
+=======
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Verify compiled service lifecycle
+        timeout-minutes: 10
+        working-directory: packages/cli
+        env:
+          NODE_OPTIONS: ${{ runner.os == 'Windows' && '--max-old-space-size=4096' || '' }}
+        run: |
+          bun run script/build.ts --single --skip-install
+          bun run script/service-smoke.ts
+
+      # Unit tests import workspace sources and never build the libraries they use, so this checks those builds. The
+      # CLI and app closures hold every library a tested package depends on. The builds are tsc and Bun.build with no
+      # platform-specific steps, and the libraries publish from Linux, so Windows skips them.
+      - name: Build workspace libraries
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 10
+        run: |
+<<<<<<< HEAD:.github/workflows/test.yml
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            bun turbo build --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
+            exit 0
+          fi
+          bun turbo build --affected --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
+        env:
+          TURBO_SCM_BASE: ${{ github.event.before }}
+          TURBO_SCM_HEAD: ${{ github.sha }}
+=======
+          if [ "$AFFECTED" = "true" ]; then
+            bun turbo build --affected --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
+            exit 0
+          fi
+          bun turbo build --concurrency=3 --filter='@opencode/cli^...' --filter='@opencode/app^...'
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+
+      - name: Setup Node build runtime
+        if: ${{ !cancelled() }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "26.4.0"
+
+      - name: Verify Node build
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        working-directory: packages/cli
+        env:
+          NODE_OPTIONS: ${{ runner.os == 'Windows' && '--max-old-space-size=4096' || '' }}
+        run: |
+          bun run script/build-node.ts --single --skip-install --outdir=dist/node
+          bun run script/service-smoke.ts --node
+
+  e2e-suite:
+<<<<<<< HEAD:.github/workflows/test.yml
+    timeout-minutes: 30
+    name: e2e (${{ matrix.settings.name }}, ${{ matrix.suite.id }})
+=======
+    name: e2e (${{ matrix.settings.name }}, ${{ matrix.suite.id }}${{ matrix.quarantine && ', quarantine' || '' }})
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+    needs: affected
+    if: needs.affected.outputs.e2e == 'true'
+    # Quarantined tests are known red; their legs report without failing the e2e checks.
+    continue-on-error: ${{ matrix.quarantine }}
+    strategy:
+      fail-fast: false
+      matrix:
+<<<<<<< HEAD:.github/workflows/test.yml
+        settings:
+          - name: linux
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-24.04
+          - name: windows
+            # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): host: blacksmith-4vcpu-windows-2025
+            host: windows-2025
+=======
+        # The release gate runs the Linux browser suites only: the Windows legs still fail on dev pushes often
+        # enough that a stable release must not wait for them. Pushes and nightly runs cover Windows.
+        settings: ${{ fromJSON(inputs.release_gate && '[{"name":"linux","host":"blacksmith-4vcpu-ubuntu-2404"}]' || '[{"name":"linux","host":"blacksmith-4vcpu-ubuntu-2404"},{"name":"windows","host":"blacksmith-4vcpu-windows-2025"}]') }}
+        quarantine: ${{ fromJSON(inputs.quarantine && '[true]' || '[false]') }}
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+        # Playwright splits whole spec files across shards by test count, not duration. Every app-N
+        # entry must use the same total, and the entries must cover 1..total. The service worker suite
+        # reuses shard 2's production build. Each component suite runs once per OS in its own leg, so the
+        # two suites' story servers and test time are not added up on one runner.
+        suite:
+          - id: app-1
+            shard: 1/2
+          - id: app-2
+            shard: 2/2
+          - id: session-ui-components
+          - id: app-components
+    runs-on: ${{ matrix.settings.host }}
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+      # Beta only (packages/app/e2e/QUARANTINE.md): gate legs skip quarantined tests, retry once and stop after 8
+      # failures; quarantine legs run only those tests, to the end. Other branches keep the config defaults.
+      PLAYWRIGHT_ARGS: ${{ matrix.quarantine && '--grep @quarantine --pass-with-no-tests --retries=1' || github.ref == 'refs/heads/beta' && '--grep-invert @quarantine --max-failures=8 --retries=1' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Playwright 1.59 hangs while extracting Chromium with Node 24.16.
+          node-version: "24.15"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Read Playwright version
+        id: playwright-version
+        run: |
+          version=$(node -e 'console.log(require("./package.json").workspaces.catalog["@playwright/test"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ github.workspace }}/.playwright-browsers
+          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+
+      - name: Install Playwright system dependencies
+        if: runner.os == 'Linux'
+        working-directory: packages/app
+        run: bunx playwright install-deps chromium
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: packages/app
+        run: bunx playwright install chromium
+
+      - name: Run app e2e tests against production build
+        if: matrix.suite.shard
+        run: bun --cwd packages/app test:e2e:built --shard=${{ matrix.suite.shard }} ${{ env.PLAYWRIGHT_ARGS }}
+        env:
+          CI: true
+        timeout-minutes: ${{ (matrix.quarantine || github.ref == 'refs/heads/beta') && 10 || 15 }}
+
+      - name: Verify service worker precaching and upgrades
+        if: matrix.suite.shard == '2/2' && !matrix.quarantine
+        working-directory: packages/app
+        run: bunx playwright test --config e2e/service-worker/playwright.config.ts
+        timeout-minutes: 5
+
+      - name: Run session UI component tests
+        if: matrix.suite.id == 'session-ui-components'
+        run: bun --cwd packages/session-ui test:components ${{ env.PLAYWRIGHT_ARGS }}
+        env:
+          CI: true
+        timeout-minutes: ${{ (matrix.quarantine || github.ref == 'refs/heads/beta') && 10 || 15 }}
+
+      - name: Run app component tests
+        if: matrix.suite.id == 'app-components'
+        run: bun --cwd packages/app test:components ${{ env.PLAYWRIGHT_ARGS }}
+        env:
+          CI: true
+        timeout-minutes: ${{ (matrix.quarantine || github.ref == 'refs/heads/beta') && 10 || 15 }}
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-${{ matrix.settings.name }}-${{ matrix.suite.id }}${{ matrix.quarantine && '-quarantine' || '' }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            packages/app/e2e/test-results
+            packages/app/e2e/playwright-report
+            packages/session-ui/component-tests/test-results
+            packages/session-ui/component-tests/playwright-report
+            packages/app/component-tests/test-results
+            packages/app/component-tests/playwright-report
+
+<<<<<<< HEAD:.github/workflows/test.yml
+  # One e2e check per OS under stable names. These pass only when every
+  # leg above passed, or when no leg was needed; a failing leg on either OS fails both checks.
+=======
+  # One check per OS for the browser suites: it passes only when every leg above passed, or when no leg was
+  # needed because the changed packages have no browser tests.
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+  e2e:
+    timeout-minutes: 20
+    name: e2e (${{ matrix.os }})
+    needs: [affected, e2e-suite]
+    if: ${{ !cancelled() && !inputs.quarantine && github.event_name != 'pull_request' && !github.event.pull_request.draft }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+<<<<<<< HEAD:.github/workflows/test.yml
+    # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
+=======
+    # Aggregates results only; these do not need a paid runner.
+>>>>>>> upstream-anomalyco/dev:.github/workflows/check-test.yml
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check browser test results
+        env:
+          AFFECTED: ${{ needs.affected.result }}
+          SUITES: ${{ needs.e2e-suite.result }}
+          EXPECTED: ${{ needs.affected.outputs.e2e == 'true' && 'success' || 'skipped' }}
+        run: |
+          echo "affected packages: $AFFECTED, browser test legs: $SUITES (expected $EXPECTED)"
+          test "$AFFECTED" = success && test "$SUITES" = "$EXPECTED"
+
+  # Dispatch a ci-fix agent when any terminal job of this workflow fails.
+  # needs the terminal jobs only: affected and e2e-suite are internal
+  # stages whose results the e2e aggregator job above re-asserts, so every
+  # failure in this workflow surfaces in at least one of these needs.
+  ci-fix:
+    needs: [unit, build, e2e]
+    if: failure()
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      issues: read
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      # This wrapper loads pm-dispatch-task from .pm-central, which in turn
+      # loads its sibling actions there. A remote action download can fail in
+      # `_staging` before the continue-on-error step is reached.
+      - name: Check out the pm-dispatch actions (central)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: developing-today/code
+          ref: main
+          path: .pm-central
+          persist-credentials: false
+
+      - uses: ./.pm-central/.github/actions/pm-dispatch-ci-fix
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}

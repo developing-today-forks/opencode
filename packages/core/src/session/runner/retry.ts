@@ -1,11 +1,12 @@
 export * as SessionRunnerRetry from "./retry.js"
 
-import { AIError, isRetryable } from "@opencode/ai"
+import { AIError, isRetryable } from "@opencode/ai/effect"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
 import { SessionError } from "@opencode/schema/session-error"
-import { Clock, Duration, Effect, Pull, Schedule } from "effect"
+import { Clock, Duration, Effect } from "effect"
 import { Bus } from "../../bus.js"
+import { ModelRetry } from "../../model-retry.js"
 import type { PluginHooks } from "../../plugin/hooks.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
@@ -28,6 +29,7 @@ export interface Decision {
   readonly delay: number
 }
 
+<<<<<<< HEAD
 /** Optional bounds a caller may tighten the policy with (the runner passes the
  * resolved route's per-target attempt budget). The policy's own constants are
  * the ceiling: a caller can only ever narrow them. */
@@ -167,22 +169,38 @@ export const policy = (sessionID: SessionSchema.ID, limits?: Limits) =>
         // the remaining budget — one that exceeds it (a quota reset hours
         // away) exhausts the leg instead of parking the session on the wall.
         if (waitedMs + delay > maxWaitMs) return { retry: false as const }
+=======
+export const policy = (sessionID: SessionSchema.ID) =>
+  Effect.gen(function* () {
+    const decide = yield* ModelRetry.policy
+    return (input: Input) =>
+      Effect.gen(function* () {
+        const next = yield* decide(input)
+        if (!next) return { retry: false as const }
+>>>>>>> upstream-anomalyco/dev
         const event: PluginHooks.Domains["session"]["retry"] = {
           sessionID,
           agent: input.agent,
           model: input.model,
           error: input.error,
-          attempt,
-          decision: input.retry && timeouts <= MAX_TIMEOUT_RETRIES ? { retry: true, delay } : { retry: false },
+          attempt: next.attempt,
+          decision: next.retry ? { retry: true, delay: next.delay } : { retry: false },
         }
         yield* input.hook(event)
         if (!event.decision.retry) return event.decision
         const normalized =
+<<<<<<< HEAD
           Number.isFinite(event.decision.delay) && event.decision.delay >= 0 ? Math.ceil(event.decision.delay) : delay
         if (waitedMs + normalized > maxWaitMs) return { retry: false as const }
         granted++
         waitedMs += normalized
         return { retry: true as const, attempt, delay: normalized }
+=======
+          Number.isFinite(event.decision.delay) && event.decision.delay >= 0
+            ? Math.ceil(event.decision.delay)
+            : next.delay
+        return { retry: true as const, attempt: next.attempt, delay: normalized }
+>>>>>>> upstream-anomalyco/dev
       })
   })
 

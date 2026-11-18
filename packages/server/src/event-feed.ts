@@ -25,12 +25,16 @@ export class EncodingError extends Schema.TaggedError<EncodingError>()("EventFee
 export type Error = SubscriberOverflowError | EncodingError
 
 export interface Interface {
+<<<<<<< HEAD
   /**
    * Subscribes to live frames. A `lastEventID` from this process's current instance is answered with
    * the frames after it; a foreign or evicted id is answered with one `server.resync` frame. Either
    * way the frames that follow are live, with no gap or duplicate between replay and live.
    */
   readonly subscribe: (lastEventID?: string) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
+=======
+  readonly subscribe: (types?: ReadonlyArray<string>) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
+>>>>>>> upstream-anomalyco/dev
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/server/EventFeed") {}
@@ -56,6 +60,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
 ) {
   const capacity = options?.capacity ?? SubscriberCapacity
   const render = options?.encode ?? frame
+<<<<<<< HEAD
   const replayFrames = options?.replayFrames ?? ReplayCapacity
   const replayBytes = options?.replayBytes ?? ReplayBytes
   const instance = crypto.randomUUID()
@@ -100,10 +105,13 @@ export const make = Effect.fn("EventFeed.make")(function* (
   }
 
   const resync = () => frame({ id: Event.ID.create(), type: "server.resync", data: {} } as const, idOf(sequence))
+=======
+  const subscribers = new Map<Queue.Queue<string, Error>, ReadonlySet<string> | undefined>()
+>>>>>>> upstream-anomalyco/dev
 
   const fail = (error: Error) =>
     Effect.sync(() => {
-      const current = Array.from(subscribers)
+      const current = Array.from(subscribers.keys())
       subscribers.clear()
       for (const subscriber of current) Queue.failCauseUnsafe(subscriber, Cause.fail(error))
     })
@@ -120,6 +128,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
 
   const publish = Effect.fnUntraced(function* (event: Event.Payload) {
     if (!isOpenCodeEvent(event)) return
+<<<<<<< HEAD
     // Encoding happens with or without subscribers so the replay window stays current.
     const seq = sequence + 1
     const id = idOf(seq)
@@ -139,6 +148,24 @@ export const make = Effect.fn("EventFeed.make")(function* (
     sequence = seq
     retain({ seq, frame: encoded })
     for (const subscriber of subscribers) {
+=======
+    let encoded: string | undefined
+    for (const [subscriber, types] of subscribers) {
+      if (types && !types.has(event.type)) continue
+      encoded ??= yield* Effect.try({
+        try: () => render(event),
+        catch: (cause) => new EncodingError({ eventID: event.id, eventType: event.type, cause }),
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logError("Failed to encode public event", {
+            eventID: error.eventID,
+            eventType: error.eventType,
+            cause: error.cause,
+          }).pipe(Effect.andThen(fail(error)), Effect.as(undefined)),
+        ),
+      )
+      if (encoded === undefined) return
+>>>>>>> upstream-anomalyco/dev
       if (Queue.offerUnsafe(subscriber, encoded)) continue
       subscribers.delete(subscriber)
       Queue.failCauseUnsafe(subscriber, Cause.fail(new SubscriberOverflowError({ capacity })))
@@ -149,6 +176,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
   yield* Effect.addFinalizer(() => unsubscribe)
 
   return Service.of({
+<<<<<<< HEAD
     subscribe: (lastEventID) =>
       Effect.acquireRelease(
         // Replay is taken and the subscriber registered in one synchronous step, so a publish either lands in
@@ -162,6 +190,12 @@ export const make = Effect.fn("EventFeed.make")(function* (
               subscribers.add(queue)
             }),
           ),
+=======
+    subscribe: (types) =>
+      Effect.acquireRelease(
+        Queue.dropping<string, Error>(capacity).pipe(
+          Effect.tap((queue) => Effect.sync(() => subscribers.set(queue, types?.length ? new Set(types) : undefined))),
+>>>>>>> upstream-anomalyco/dev
         ),
         (queue) =>
           Effect.sync(() => subscribers.delete(queue)).pipe(Effect.andThen(Queue.shutdown(queue)), Effect.asVoid),

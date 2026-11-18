@@ -47,6 +47,7 @@ import m44 from "./migration/20260819222447_session_viewed_state.js"
 import m45 from "./migration/20260823191254_nullable_workspace_binding.js"
 import m46 from "./migration/20260910120000_clear_v1_session_permission.js"
 import m47 from "./migration/20260923013825_project_time_active.js"
+<<<<<<< HEAD
 import m48 from "./migration/20261006083034_model_route_log.js"
 import m49 from "./migration/20261007002324_route_attempt_token_estimate.js"
 import m50 from "./migration/20261007053223_route_attempt_drop_error_body.js"
@@ -63,6 +64,19 @@ import m60 from "./migration/20261031233710_route_attempt_credential.js"
 import m61 from "./migration/20261102215234_openai_facade_response.js"
 import m62 from "./migration/20261105070500_workspace_safety_snapshots.js"
 import m63 from "./migration/20261107011629_session_detached.js"
+=======
+import m48 from "./migration/20261007190000_azure_cli_external_credential.js"
+import m49 from "./migration/20261010180456_project_time_archived.js"
+import m50 from "./migration/20261024002554_session_allowance.js"
+import m51 from "./migration/20261024175301_drop_session_allowance.js"
+import m52 from "./migration/20261025123711_blob.js"
+import m53 from "./migration/20261025154125_drop_session_pending.js"
+import m54 from "./migration/20261026223005_schedule.js"
+import m55 from "./migration/20261029002625_session_part.js"
+import m56 from "./migration/20261029073502_session_time_busy.js"
+import m57 from "./migration/20261029165540_schedule_checks.js"
+import m58 from "./migration/20261030054400_job.js"
+>>>>>>> upstream-anomalyco/dev
 
 export const migrations = [
   m00,
@@ -124,9 +138,12 @@ export const migrations = [
   m56,
   m57,
   m58,
+<<<<<<< HEAD
   m59,
   m60,
   m61,
   m62,
   m63,
+=======
+>>>>>>> upstream-anomalyco/dev
 ] satisfies DatabaseMigration.Migration[]

@@ -3,10 +3,18 @@ export * as ConfigAgentPlugin from "./agent.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Document, type Entry } from "@opencode/schema/config"
 import path from "path"
+<<<<<<< HEAD
 import { Effect, PubSub, Stream } from "effect"
 import { Agent } from "../../agent.js"
 import { Config, reloadsSections } from "../../config.js"
 import { ConfigAgentDocuments } from "../agent-documents.js"
+=======
+import { Effect, Result, SchemaIssue, SchemaParser } from "effect"
+import { Agent } from "../../agent.js"
+import { Config } from "../../config.js"
+import { ConfigMarkdown } from "../markdown.js"
+import { ConfigEntryObserver } from "./entry-observer.js"
+>>>>>>> upstream-anomalyco/dev
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Permission } from "../../permission.js"
@@ -14,8 +22,25 @@ import type { FileAccess } from "../../file-access.js"
 import type { ReadTool } from "../../tool/plugin/read.js"
 import type { EditTool } from "../../tool/plugin/edit.js"
 
+<<<<<<< HEAD
 type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof ReadTool.name | typeof EditTool.name
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
+=======
+const legacySources = [
+  { pattern: "{agent,agents}/**/*.md", primary: false },
+  { pattern: "{mode,modes}/*.md", primary: true },
+] as const
+// Keep in sync with the legacySources patterns and the name-strip regex in decode.
+const sourceDirectories = ["agent", "agents", "mode", "modes"] as const
+const decodeAgent = SchemaParser.decodeUnknownResult(ConfigAgent.Info)
+const decodeLegacyAgent = SchemaParser.decodeUnknownResult(ConfigAgentV1.Info)
+const formatIssue = SchemaIssue.makeFormatterDefault()
+type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof ReadTool.name | typeof EditTool.name
+const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
+const agentKeys = new Set(["variant", ...Object.keys(ConfigAgent.Info.fields)])
+// Fields only V2 understands. A file that uses any of them is read as V2, whatever else it contains.
+const nativeKeys = ["permissions", "request", "system", "disabled"]
+>>>>>>> upstream-anomalyco/dev
 
 export const Plugin = define({
   id: "opencode.config.agent",
@@ -23,6 +48,7 @@ export const Plugin = define({
     const config = yield* Config.Service
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
+<<<<<<< HEAD
     const loadEntry = (entry: Entry) => ConfigAgentDocuments.expandEntry(fs, entry)
     const load = Effect.fn("ConfigAgentPlugin.load")(function* () {
       return yield* Effect.forEach(yield* config.entries(), loadEntry).pipe(Effect.map((documents) => documents.flat()))
@@ -56,6 +82,29 @@ export const Plugin = define({
       Effect.forkScoped({ startImmediately: true }),
     )
     loaded.documents = yield* load()
+=======
+    const loadEntry = Effect.fnUntraced(function* (entry: Entry) {
+      if (entry.type === "document") return [entry]
+      if (entry.type !== "directory") return []
+      const files = yield* discover(fs, entry.path)
+      return yield* Effect.forEach(files, (file) =>
+        fs.readFileStringSafe(file.filepath).pipe(
+          Effect.flatMap((content) => (content ? decode(file, content) : Effect.succeed(undefined))),
+          Effect.orElseSucceed(() => undefined),
+        ),
+      ).pipe(Effect.map((documents) => documents.filter((document): document is Document => document !== undefined)))
+    })
+    const load = Effect.fn("ConfigAgentPlugin.load")(function* () {
+      return yield* Effect.forEach(yield* config.entries(), loadEntry).pipe(Effect.map((documents) => documents.flat()))
+    })
+    const loaded = yield* ConfigEntryObserver.observeSources({
+      config,
+      event: ctx.event,
+      directories: sourceDirectories,
+      load,
+      reload: ctx.agent.reload(),
+    })
+>>>>>>> upstream-anomalyco/dev
     yield* ctx.agent.transform((editor) => {
       const permissions = expandPermissions(
         loaded.documents.flatMap((document) => document.info.permissions ?? []),
@@ -110,6 +159,7 @@ export const Plugin = define({
   }),
 })
 
+<<<<<<< HEAD
 // Matches anything at or under <root>/{agent,agents,mode,modes}. No file-suffix
 // check: directory-level events such as renames carry no per-file paths.
 function isAgentSource(entries: Entry[], file: string) {
@@ -120,6 +170,8 @@ function isAgentSource(entries: Entry[], file: string) {
   )
 }
 
+=======
+>>>>>>> upstream-anomalyco/dev
 function expandPermissions(rules: Permission.Ruleset, home: string): Permission.Ruleset {
   // Expand only resources tools resolve as filesystem paths. Bash resources are raw shell text:
   // rewriting `$HOME/private/**` would miss `$HOME/private/key`, and safe expansion needs shell-aware parsing.
@@ -143,3 +195,68 @@ function expandHome(resource: string, home: string) {
   return resource
 }
 
+<<<<<<< HEAD
+=======
+function discover(fs: FSUtil.Interface, directory: string) {
+  return Effect.forEach(legacySources, (source) =>
+    fs
+      .scan(source.pattern, { cwd: directory, absolute: true, dot: true, symlink: true, ignore: FSUtil.ignoreGlobs })
+      .pipe(
+        Effect.map((files) => files.toSorted().map((filepath) => ({ directory, filepath, primary: source.primary }))),
+      ),
+  ).pipe(
+    Effect.map((files) => files.flat()),
+    Effect.orElseSucceed(() => []),
+  )
+}
+
+const decode = Effect.fnUntraced(function* (
+  file: { directory: string; filepath: string; primary: boolean },
+  content: string,
+) {
+  const markdown = ConfigMarkdown.parseOption(content)
+  if (!markdown) {
+    yield* Effect.logWarning("agent file skipped", { filepath: file.filepath, reason: "markdown" })
+    return
+  }
+  const name = path
+    .relative(file.directory, file.filepath)
+    .replaceAll("\\", "/")
+    .replace(/^(agent|agents|mode|modes)\//, "")
+    .replace(/\.md$/, "")
+  const body = markdown.content.trim()
+  const keys = Object.keys(markdown.data)
+  const unsupported = keys.filter((key) => !agentKeys.has(key))
+  const legacy = unsupported.length > 0 && !keys.some((key) => nativeKeys.includes(key))
+  if (!legacy && unsupported.length > 0)
+    yield* Effect.logWarning("ignored unsupported agent fields", { path: file.filepath, fields: unsupported })
+  // Join legacy model + variant without sending native request/permissions through migration.
+  // Embedded and structured native selections, and a variant without a model, stay unchanged.
+  const data =
+    typeof markdown.data.model === "string" &&
+    !markdown.data.model.includes("#") &&
+    typeof markdown.data.variant === "string" &&
+    /^[^#]+$/.test(markdown.data.variant)
+      ? { ...markdown.data, model: `${markdown.data.model}#${markdown.data.variant}` }
+      : markdown.data
+  const decoded = legacy
+    ? Result.map(
+        decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all" }),
+        ConfigMigrateV1.migrateAgent,
+      )
+    : decodeAgent({ ...data, system: body }, { errors: "all" })
+  if (Result.isFailure(decoded)) {
+    yield* Effect.logWarning("agent file skipped", {
+      filepath: file.filepath,
+      reason: "frontmatter",
+      issue: formatIssue(decoded.failure),
+    })
+    return
+  }
+  const agent = decoded.success
+  const info = Info.make({
+    agents: { [name]: file.primary ? ConfigAgent.Info.make({ ...agent, mode: "primary" }) : agent },
+  })
+  return new Document({ type: "document", path: AbsolutePath.make(file.filepath), info })
+})
+>>>>>>> upstream-anomalyco/dev

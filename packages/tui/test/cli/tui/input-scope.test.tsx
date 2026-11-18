@@ -14,6 +14,7 @@ import { RouteProvider } from "../../../src/context/route"
 import { ThemeProvider } from "../../../src/context/theme"
 import { FormPrompt, FORM_MODE } from "../../../src/routes/session/form"
 import { PermissionPrompt } from "../../../src/routes/session/permission"
+import { DialogProvider } from "../../../src/ui/dialog"
 import { ToastProvider } from "../../../src/ui/toast"
 import { emptyThemeSource, tmpdir } from "../../fixture/fixture"
 import { createApi, createEventStream, createFetch, json } from "../../fixture/tui-client"
@@ -82,9 +83,15 @@ async function mountPanes(root: string, render: () => JSX.Element, parentID?: st
                 <LocationProvider>
                   <ThemeProvider mode="dark" source={emptyThemeSource}>
                     <ToastProvider>
+<<<<<<< HEAD
                       <RouteProvider initialRoute={{ type: "session", sessionID: "ses_scoped" }}>
                         <Panes />
                       </RouteProvider>
+=======
+                      <DialogProvider>
+                        <Panes />
+                      </DialogProvider>
+>>>>>>> upstream-anomalyco/dev
                     </ToastProvider>
                   </ThemeProvider>
                 </LocationProvider>
