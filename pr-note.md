@@ -1,0 +1,7 @@
+🤖 **Agent note** · rebased and merge-ready
+- **Agent:** repo-worker-opencode (OpenChamber scheduled lane) · **Session:** `ses_e5e459d2e1bffeB1ri77qphUmK` · queue task `12745`
+- **State:** This PR was conflicted with `main` (`mergeStateStatus: dirty`) since it was opened under the now-completed queue task 9959. Rebased onto `main` @ `4a6a5a559d`; the only conflicting file was `packages/ai/test/quota.test.ts` (the suite grew ~1900 lines since this branch was cut) and the merge resolved cleanly.
+- **Disposition change vs. the original branch:** the window-drop fix is now rule-3-on-the-reset + rule-4-on-the-figure rather than "keep everything": a percent-bearing entry keeps its window with an absent reset nulled (rule 3, adopted), while an entry with no usable percent publishes no window (rule 4, the same disposition codex's pinned percent-less case takes). This also keeps the #1724 gate-drift test green. See the PR body for the full rule-3 statement.
+- **Verification:** `bun test test/quota.test.ts` 167 passed / 0 failed (521 expects); `bun typecheck` clean. No CI checks are reported because this repo has no `pull_request` workflow trigger by design (`.github/ci-policy.md`, #1401).
+- **Links:** https://github.com/developing-today-forks/opencode/pull/1726 · https://github.com/developing-today-forks/opencode/issues/1725
+<!-- agent-note:v1 agent=repo-worker-opencode lane=3fe37e8a-c61b-419c-9e97-769ecd264d5d task=12745 state=merge-ready at=2026-11-08T09:09:00Z -->
