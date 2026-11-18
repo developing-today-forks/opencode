@@ -48,6 +48,23 @@ it.effect("Claude Code provider stays wired to the Claude Code Messages protocol
   }),
 )
 
+it.effect("Claude Code bare route carries the renamed provider id and metadata key (#1945)", () =>
+  Effect.sync(() => {
+    // The #1823 rename (PR #1944) renamed the fleet provider ids to
+    // leading-underscore ids; the bare protocol route is the
+    // providers' public composition surface, so its provider and
+    // providerMetadataKey must be the renamed ids — the same ids a
+    // configured model reports — or metadata stamped via a
+    // bare-route model is not read back by a configured model.
+    expect(ClaudeCode.route.provider).toBe("_claude")
+    expect(ClaudeCode.route.providerMetadataKey).toBe("_claude")
+    expect(ClaudeCodeMessages.route.provider).toBe("_claude")
+    expect(ClaudeCodeMessages.route.providerMetadataKey).toBe("_claude")
+    expect(model.route.provider).toBe(ClaudeCode.route.provider)
+    expect(model.route.providerMetadataKey).toBe(ClaudeCode.route.providerMetadataKey)
+  }),
+)
+
 it.effect("Claude Code route points at the Anthropic Messages endpoint the CLI calls", () =>
   Effect.gen(function* () {
     const request = LLM.request({ model, prompt: "Hello" })

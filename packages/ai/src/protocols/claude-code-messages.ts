@@ -109,8 +109,12 @@ export const protocol = Protocol.make({
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "claude-code",
-  providerMetadataKey: "claude-code",
+  // The #1823 rename (PR #1944): the bare route carries the renamed
+  // fleet id, matching the antigravity protocol route and the
+  // configured models — metadata stamped via this route must be
+  // readable by a configured model (#1945).
+  provider: "_claude",
+  providerMetadataKey: "_claude",
   protocol,
   endpoint: Endpoint.path(AnthropicMessages.PATH, { baseURL: AnthropicMessages.DEFAULT_BASE_URL }),
   auth: Auth.none,

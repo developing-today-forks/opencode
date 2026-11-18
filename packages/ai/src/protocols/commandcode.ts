@@ -731,8 +731,11 @@ export const httpTransport = HttpTransport.sseJson.with<CommandCodeBody>().with(
 
 export const route = Route.make({
   id: ADAPTER,
-  provider: "commandcode",
-  providerMetadataKey: "commandcode",
+  // The #1823 rename (PR #1944): the bare route carries the renamed
+  // fleet id, matching the antigravity protocol route and the
+  // configured models (#1945).
+  provider: "_commandcode",
+  providerMetadataKey: "_commandcode",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,

@@ -36,6 +36,20 @@ it.effect("Command Code provider stays wired to the /alpha/generate protocol", (
   }),
 )
 
+it.effect("Command Code bare route carries the renamed provider id and metadata key (#1945)", () =>
+  Effect.sync(() => {
+    // The #1823 rename (PR #1944): same pin as the Claude Code bare
+    // route — the exported protocol route reports the renamed fleet
+    // id and metadata key a configured model reports.
+    expect(Commandcode.route.provider).toBe("_commandcode")
+    expect(Commandcode.route.providerMetadataKey).toBe("_commandcode")
+    expect(CommandCode.route.provider).toBe("_commandcode")
+    expect(CommandCode.route.providerMetadataKey).toBe("_commandcode")
+    expect(model.route.provider).toBe(Commandcode.route.provider)
+    expect(model.route.providerMetadataKey).toBe(Commandcode.route.providerMetadataKey)
+  }),
+)
+
 it.effect("Command Code route points at the CLI's own gateway endpoint, not the Provider API", () =>
   Effect.gen(function* () {
     const request = LLM.request({ model, prompt: "Hello" })
