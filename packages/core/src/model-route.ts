@@ -623,7 +623,28 @@ export const networkSuspect = (now = Date.now(), location?: string) =>
       .map((failure) => failure.provider),
   ).size >= currentConstants(location).network.providers
 
+/** Consecutive terminal Authentication refusals a provider may collect across its legs
+ * before the provider itself is gated (#2519). */
+const PROVIDER_HARD_FAILURE_LIMIT = 3
+
+/** Provider-scope terminal-auth gate (#2519). An auth bench lives on the leg that served
+ * the refused attempt, so a provider whose every leg answers 401/403 keeps being dealt
+ * one fresh leg per session wave: _commandcode took 545 attempts across 95 sessions in
+ * one 08:41-10:30Z wave, 412 of them ending with no failover. This record counts
+ * consecutive auth refusals at provider scope; at the limit the whole provider is held
+ * out on the long quota ladder, extended by each further refusal, and cleared only by a
+ * live provider success. The gate lapses at its `until` like any bench — the lapse is the
+ * provider's next probe window, not a success — so a dead provider cannot wall itself
+ * forever on a record no success may ever reach. */
+const providerHardFailures = new Map<string, { failures: number; until: number }>()
+
+const providerHardFailure = (providerID: string, now: number) => {
+  const state = providerHardFailures.get(providerID)
+  return state && state.failures >= PROVIDER_HARD_FAILURE_LIMIT && state.until > now ? state : undefined
+}
+
 const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
+  const hard = providerHardFailure(providerID, now)?.until ?? 0
   const prefix = `${providerID}/`
   // The corroboration count is per MODEL: a model cooling at several efforts is
   // still one model. Traffic benches live on the leg's own map now, so both maps
@@ -641,7 +662,7 @@ const providerCooldownUntil = (providerID: string, now: number, location?: strin
     models.add(id.slice(0, id.lastIndexOf("@")))
     until = Math.max(until, state.cooldownUntil)
   }
-  return models.size >= currentConstants(location).network.providerModels ? until : 0
+  return Math.max(hard, models.size >= currentConstants(location).network.providerModels ? until : 0)
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) =>
@@ -2177,6 +2198,24 @@ export const failed = (
     }
     return
   }
+  // A terminal auth refusal is provider-scope evidence: the auth bench above holds the
+  // leg that served it, but a provider whose every leg is refused keeps being dealt
+  // anew (#2519). Count the refusals across the provider's legs; at the limit the
+  // provider gate takes over. Any live success clears the run in completed().
+  if (hint?.auth) {
+    const previous = providerHardFailures.get(target.providerID)
+    const failures = (previous?.failures ?? 0) + 1
+    const ladder = currentConstants(location).bench
+    const until =
+      now +
+      Math.min(
+        policy.quotaCooldownMs * ladder.multiplier ** Math.max(0, failures - PROVIDER_HARD_FAILURE_LIMIT),
+        ladder.maxCooldownMs,
+      )
+    providerHardFailures.set(target.providerID, { failures, until })
+    if (failures === PROVIDER_HARD_FAILURE_LIMIT)
+      logHealth(target, "cooldown-start", `provider:${target.providerID} hard-failure-gated`, until)
+  }
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   // The scope within that rule follows the signal: a quota failure benches the pool scope
@@ -3450,6 +3489,10 @@ export const providerRootStartBlocked = (
   now = Date.now(),
   location?: string,
 ): { readonly until: number | null } | undefined => {
+  // A provider whose legs are terminally refused refuses a root start on any leg, even
+  // when the quota root-start switch is off: this is auth evidence, not quota (#2519).
+  const hard = providerHardFailure(target.providerID, now)
+  if (hard) return { until: hard.until }
   const gate = currentConstants(location).quotaGate
   if (!gate.rootStartEnabled) return undefined
   const state = providerQuota.get(target.providerID)
@@ -3549,6 +3592,14 @@ export const completed = (
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
   state.consecutiveRateLimits = 0
+  // A live provider success ends the provider-scope terminal-auth run (#2519): whatever
+  // leg of the provider served, the provider is not dead and may be dealt again.
+  const hardFailure = providerHardFailures.get(target.providerID)
+  if (hardFailure) {
+    providerHardFailures.delete(target.providerID)
+    if (hardFailure.failures >= PROVIDER_HARD_FAILURE_LIMIT)
+      logHealth(target, "cooldown-end", `provider:${target.providerID} hard-failure-cleared`)
+  }
   // The leg's traffic scope settles on the same success: its failure and rate-limit
   // runs end, and a probe claim this pick spent there ends its bench — a success at
   // one effort says nothing about a sibling effort's bench, so only the serving
@@ -3622,6 +3673,7 @@ export const resetHealth = () => {
   credentialQuota.clear()
   providerQuota.clear()
   gatheredProviderQuota.clear()
+  providerHardFailures.clear()
   quotaEvents.clear()
   restoredDemotionAttempts.clear()
   quotaFailureSources.clear()
