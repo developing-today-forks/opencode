@@ -168,3 +168,48 @@ it.live("rejects a route override that names excludeWindows and stores nothing",
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
+
+it.live("serves the route-attempt read API over HTTP: empty ledger, aggregate shape, read-only", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-attempts-")))
+    const server = yield* startServer(tmp.path)
+
+    const attempts = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts?provider=openai&session=ses_1&since=0", server.base), {
+        headers: server.headers,
+      }),
+    )
+    expect(attempts.status).toBe(200)
+    expect(yield* Effect.promise(() => attempts.json())).toEqual({ data: [] })
+
+    const stats = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts/stats?since=0", server.base), { headers: server.headers }),
+    )
+    expect(stats.status).toBe(200)
+    expect(yield* Effect.promise(() => stats.json())).toEqual({
+      data: {
+        targets: [],
+        errors: [],
+        coverage: { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
+      },
+    })
+
+    const decisions = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/decisions?since=0", server.base), { headers: server.headers }),
+    )
+    expect(decisions.status).toBe(200)
+    expect(yield* Effect.promise(() => decisions.json())).toEqual({ data: [] })
+
+    // Read-only surface (#2497): there is no mutation endpoint for attempts.
+    const posted = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts", server.base), {
+        method: "POST",
+        headers: { ...server.headers, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    )
+    expect(posted.status).not.toBe(200)
+    const after = yield* list(server.base, server.headers)
+    expect(after.status).toBe(200)
+  }),
+)
