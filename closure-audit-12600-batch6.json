@@ -1,0 +1,1232 @@
+{
+ "repo": "developing-today-forks/opencode",
+ "governing_issue": "developing-today/code#7079",
+ "task": 12600,
+ "batch": 6,
+ "final_batch": true,
+ "enumeration_total_closed_issues": 1021,
+ "previous_batches_unique": 976,
+ "candidate_batch_size": 45,
+ "remaining_after_this_batch_at_enumeration": 0,
+ "selection": "fresh closed-issue enumeration; exclude exact batch 1-5 JSON item sets (batch1 from goal hidden_files artifact, batches 2-4 from laptop audit dir, batch5 from worktree artifact); take all remaining by closed_at descending",
+ "span": {
+  "first": {
+   "number": 1418,
+   "closed_at": "2026-11-09T02:03:13Z"
+  },
+  "last": {
+   "number": 851,
+   "closed_at": "2026-10-29T10:00:55Z"
+  }
+ },
+ "summary": {
+  "LEGITIMATE-linked": 40,
+  "LEGITIMATE-by-record": 5,
+  "partial_closed": 0,
+  "no_evidence": 0,
+  "wrongful_closures_confirmed": 0
+ },
+ "record_read_items": [
+  631,
+  661,
+  818,
+  889,
+  1418
+ ],
+ "title_sample_checks": [
+  {
+   "issue": 1418,
+   "issue_title": "main CI failure: main-broken (run 41487561227)",
+   "pr": null,
+   "class": "LEGITIMATE-by-record",
+   "note": "record read individually (see evidence)"
+  },
+  {
+   "issue": 899,
+   "issue_title": "fix(core): DigitalOcean expires_in has no upper bound \u2014 a millisecond-scale value wedges the credential for weeks (companion to #892)",
+   "pr": 901,
+   "class": "LEGITIMATE-linked",
+   "note": "evidence read and topically aligned"
+  },
+  {
+   "issue": 803,
+   "issue_title": "feat(codemode): sleep primitive + std async helpers (mapLimit, retry, withTimeout) (design #800, phase 2)",
+   "pr": 872,
+   "class": "LEGITIMATE-linked",
+   "note": "evidence read and topically aligned"
+  },
+  {
+   "issue": 851,
+   "issue_title": "fix(web): docs locale lookups read through the prototype chain \u2014 \"constructor\" and \"__proto__\" become garbage redirects",
+   "pr": 852,
+   "class": "LEGITIMATE-linked",
+   "note": "evidence read and topically aligned"
+  }
+ ],
+ "items": [
+  {
+   "number": 1418,
+   "title": "main CI failure: main-broken (run 41487561227)",
+   "closed_at": "2026-11-09T02:03:13Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-by-record",
+   "evidence": "Read individually: closing record 2026-11-09T02:03:03Z (task 14261) closes as completed/transient-gone: Nov 2-3 failures died in Set up job while GitHub Actions staged the external developing-today/code action archive (no opencode code ran, no repo fix owed), and fresh main-broken run 42546999294 on main completed success with the dispatch-action checkout passing.",
+   "merged_pr_cross_references": [
+    {
+     "number": 1676,
+     "title": "fix(ci): load pm-dispatch actions locally",
+     "state": "closed",
+     "merged_at": "2026-11-05T01:55:32Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1676"
+    }
+   ]
+  },
+  {
+   "number": 924,
+   "title": "fix(core): route-overrides.json is written in place, not atomically \u2014 a crash or concurrent read mid-write silently drops every route override",
+   "closed_at": "2026-10-29T21:39:50Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #925 \u2014 fix(core): write route-overrides.json atomically (#924) (merged_at 2026-10-29T21:39:49Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 925,
+   "merged_pr_cross_references": [
+    {
+     "number": 925,
+     "title": "fix(core): write route-overrides.json atomically (#924)",
+     "state": "closed",
+     "merged_at": "2026-10-29T21:39:49Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/925"
+    }
+   ]
+  },
+  {
+   "number": 917,
+   "title": "fix(ai): speech finish-path tables read through the prototype chain \u2014 PCM_CODECS, HEADERLESS_ENCODINGS and SpeechStream media types",
+   "closed_at": "2026-10-29T20:52:55Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #922 \u2014 fix(ai): guard speech finish-path tables against prototype-chain reads (merged_at 2026-10-29T20:52:53Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 922,
+   "merged_pr_cross_references": [
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    },
+    {
+     "number": 922,
+     "title": "fix(ai): guard speech finish-path tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:53Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/922"
+    }
+   ]
+  },
+  {
+   "number": 916,
+   "title": "fix(ai): bedrock-media MIME tables read through the prototype chain \u2014 media type \"constructor\" bypasses the unsupported-type error",
+   "closed_at": "2026-10-29T20:52:33Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #921 \u2014 fix(ai): guard bedrock-media MIME tables against prototype-chain reads (merged_at 2026-10-29T20:52:32Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 921,
+   "merged_pr_cross_references": [
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    },
+    {
+     "number": 921,
+     "title": "fix(ai): guard bedrock-media MIME tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:32Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/921"
+    }
+   ]
+  },
+  {
+   "number": 870,
+   "title": "fix(routes): thread the credential dimension through restore, escalation, ranking, rate-limit holds and catalog headers (PR #854 follow-up)",
+   "closed_at": "2026-10-29T20:46:41Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #920 \u2014 fix(core): thread the credential dimension through restore, escalation, ranking, rate-limit holds and catalog headers (merged_at 2026-10-29T20:46:39Z); 5 merged PR cross-reference(s) present.",
+   "best_pr": 920,
+   "merged_pr_cross_references": [
+    {
+     "number": 854,
+     "title": "feat(core): credential failover on quota exhaustion via credential.activate (#6)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:13:48Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/854"
+    },
+    {
+     "number": 920,
+     "title": "fix(core): thread the credential dimension through restore, escalation, ranking, rate-limit holds and catalog headers",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:46:39Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/920"
+    },
+    {
+     "number": 1058,
+     "title": "feat(core): add credential_id to route_health",
+     "state": "closed",
+     "merged_at": "2026-10-31T06:28:38Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1058"
+    },
+    {
+     "number": 1113,
+     "title": "fix(core): scope quota usage to the serving credential",
+     "state": "closed",
+     "merged_at": "2026-10-31T23:57:43Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1113"
+    },
+    {
+     "number": 1130,
+     "title": "fix(core): key restored attempt quota snapshots by credential_id",
+     "state": "closed",
+     "merged_at": "2026-11-01T02:04:46Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1130"
+    }
+   ]
+  },
+  {
+   "number": 915,
+   "title": "fix(core): Copilot device poll interval has no ceiling and slow_down can speed polling up \u2014 a large interval makes login expire before the first poll",
+   "closed_at": "2026-10-29T20:40:35Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #918 \u2014 fix(core): bound Copilot device poll interval and keep slow_down monotonic (merged_at 2026-10-29T20:40:34Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 918,
+   "merged_pr_cross_references": [
+    {
+     "number": 918,
+     "title": "fix(core): bound Copilot device poll interval and keep slow_down monotonic",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:40:34Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/918"
+    },
+    {
+     "number": 943,
+     "title": "fix(core): clamp OpenAI, OpenCode and xAI device poll intervals at 60s (#941)",
+     "state": "closed",
+     "merged_at": "2026-10-30T06:09:41Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/943"
+    }
+   ]
+  },
+  {
+   "number": 913,
+   "title": "fix(core): WebSearch cooldownMillis has no upper bound \u2014 a Retry-After of 999999999 sidelines a provider for ~31 years",
+   "closed_at": "2026-10-29T19:43:02Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #914 \u2014 fix(core): clamp WebSearch Retry-After cooldown to 15 minutes (merged_at 2026-10-29T19:43:01Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 914,
+   "merged_pr_cross_references": [
+    {
+     "number": 914,
+     "title": "fix(core): clamp WebSearch Retry-After cooldown to 15 minutes",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:43:01Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/914"
+    }
+   ]
+  },
+  {
+   "number": 906,
+   "title": "fix(ai): media-type lookups read through the prototype chain \u2014 a \".constructor\" file or \"constructor\" media type returns the Object function instead of undefined",
+   "closed_at": "2026-10-29T19:41:43Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #909 \u2014 fix(ai): guard media-type lookups against prototype-chain reads (merged_at 2026-10-29T19:41:42Z); 4 merged PR cross-reference(s) present.",
+   "best_pr": 909,
+   "merged_pr_cross_references": [
+    {
+     "number": 909,
+     "title": "fix(ai): guard media-type lookups against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:41:42Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/909"
+    },
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    },
+    {
+     "number": 921,
+     "title": "fix(ai): guard bedrock-media MIME tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:32Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/921"
+    },
+    {
+     "number": 922,
+     "title": "fix(ai): guard speech finish-path tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:53Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/922"
+    }
+   ]
+  },
+  {
+   "number": 904,
+   "title": "fix(core): ModelPlan.readNotes fractional limit in (0,1) returns every note \u2014 slice(-0.5) is slice(0), the #542 break between the guarded cases (PR #741)",
+   "closed_at": "2026-10-29T19:41:27Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #905 \u2014 fix(core): floor ModelPlan.readNotes limit so fractional limits cannot return every note (#904) (merged_at 2026-10-29T19:41:26Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 905,
+   "merged_pr_cross_references": [
+    {
+     "number": 905,
+     "title": "fix(core): floor ModelPlan.readNotes limit so fractional limits cannot return every note (#904)",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:41:26Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/905"
+    }
+   ]
+  },
+  {
+   "number": 891,
+   "title": "feat(routes): per-target context ceilings never filter live sessions \u2014 the runner never passes requestTokens to the resolver",
+   "closed_at": "2026-10-29T19:28:52Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #898 \u2014 feat(core): thread requestTokens through the session runner so per-target ceilings filter live (merged_at 2026-10-29T19:28:50Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 898,
+   "merged_pr_cross_references": [
+    {
+     "number": 898,
+     "title": "feat(core): thread requestTokens through the session runner so per-target ceilings filter live",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:28:50Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/898"
+    }
+   ]
+  },
+  {
+   "number": 907,
+   "title": "fix(ai): speech format tables read through the prototype chain \u2014 format \"constructor\" bypasses the unsupported-format rejection in Deepgram, Cartesia and ElevenLabs",
+   "closed_at": "2026-10-29T19:17:29Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #911 \u2014 fix(ai): guard speech format tables against prototype-chain reads (merged_at 2026-10-29T19:17:28Z); 4 merged PR cross-reference(s) present.",
+   "best_pr": 911,
+   "merged_pr_cross_references": [
+    {
+     "number": 911,
+     "title": "fix(ai): guard speech format tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:17:28Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/911"
+    },
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    },
+    {
+     "number": 921,
+     "title": "fix(ai): guard bedrock-media MIME tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:32Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/921"
+    },
+    {
+     "number": 922,
+     "title": "fix(ai): guard speech finish-path tables against prototype-chain reads",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:52:53Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/922"
+    }
+   ]
+  },
+  {
+   "number": 908,
+   "title": "fix(ai): open-responses item-ID prefix reads through the prototype chain \u2014 an item typed \"constructor\" mints an ID containing the Object function source",
+   "closed_at": "2026-10-29T18:52:28Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #910 \u2014 fix(ai): read open-responses item-ID prefixes by own property (#908) (merged_at 2026-10-29T18:52:26Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 910,
+   "merged_pr_cross_references": [
+    {
+     "number": 910,
+     "title": "fix(ai): read open-responses item-ID prefixes by own property (#908)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:52:26Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/910"
+    },
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    }
+   ]
+  },
+  {
+   "number": 900,
+   "title": "fix(core): device-code expires_in has no upper bound \u2014 a millisecond-scale value polls the token endpoint for days (opencode + xAI)",
+   "closed_at": "2026-10-29T18:44:02Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #902 \u2014 fix(core): bound oversized device-code expires_in in opencode + xAI (#900) (merged_at 2026-10-29T18:44:00Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 902,
+   "merged_pr_cross_references": [
+    {
+     "number": 902,
+     "title": "fix(core): bound oversized device-code expires_in in opencode + xAI (#900)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:44:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/902"
+    }
+   ]
+  },
+  {
+   "number": 866,
+   "title": "docs(web): document the experimental model_routes config family \u2014 routes, schedules, windows, tuning and log are schema-only",
+   "closed_at": "2026-10-29T18:42:00Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #903 \u2014 docs(web): document the experimental model_routes config family (merged_at 2026-10-29T18:41:58Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 903,
+   "merged_pr_cross_references": [
+    {
+     "number": 903,
+     "title": "docs(web): document the experimental model_routes config family",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:41:58Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/903"
+    }
+   ]
+  },
+  {
+   "number": 6,
+   "title": "feat(routing): automatic multi-credential failover on 429 quota exhaustion via credential.activate",
+   "closed_at": "2026-10-29T18:13:50Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #854 \u2014 feat(core): credential failover on quota exhaustion via credential.activate (#6) (merged_at 2026-10-29T18:13:48Z); 6 merged PR cross-reference(s) present.",
+   "best_pr": 854,
+   "merged_pr_cross_references": [
+    {
+     "number": 594,
+     "title": "docs(roadmap): drop the landed Nix-check row (#49)",
+     "state": "closed",
+     "merged_at": "2026-10-27T15:17:07Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/594"
+    },
+    {
+     "number": 854,
+     "title": "feat(core): credential failover on quota exhaustion via credential.activate (#6)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:13:48Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/854"
+    },
+    {
+     "number": 991,
+     "title": "feat(core): gate quota-exhausted pools until their stated reset (#984)",
+     "state": "closed",
+     "merged_at": "2026-10-30T13:27:38Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/991"
+    },
+    {
+     "number": 997,
+     "title": "docs(roadmap): program tending 2026-10-30 \u2014 drop landed failover row",
+     "state": "closed",
+     "merged_at": "2026-11-01T15:28:40Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/997"
+    },
+    {
+     "number": 1619,
+     "title": "fix(core): ledger-backed demotion counts from route_attempt (#1151)",
+     "state": "closed",
+     "merged_at": "2026-11-04T13:49:15Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1619"
+    },
+    {
+     "number": 1827,
+     "title": "fix(core): judge multi-credential leaves by an eligible credential (#1806)",
+     "state": "closed",
+     "merged_at": "2026-11-06T11:56:54Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1827"
+    }
+   ]
+  },
+  {
+   "number": 899,
+   "title": "fix(core): DigitalOcean expires_in has no upper bound \u2014 a millisecond-scale value wedges the credential for weeks (companion to #892)",
+   "closed_at": "2026-10-29T17:32:26Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #901 \u2014 fix(core): bound oversized expires_in in DigitalOcean (merged_at 2026-10-29T17:32:25Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 901,
+   "merged_pr_cross_references": [
+    {
+     "number": 901,
+     "title": "fix(core): bound oversized expires_in in DigitalOcean",
+     "state": "closed",
+     "merged_at": "2026-10-29T17:32:25Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/901"
+    }
+   ]
+  },
+  {
+   "number": 892,
+   "title": "fix(core): xAI and Poe expires_in guards have no upper bound \u2014 a millisecond-scale value disables refresh for weeks (companion to #879)",
+   "closed_at": "2026-10-29T16:49:25Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #894 \u2014 fix(core): bound oversized expires_in in xAI and Poe (merged_at 2026-10-29T16:49:23Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 894,
+   "merged_pr_cross_references": [
+    {
+     "number": 894,
+     "title": "fix(core): bound oversized expires_in in xAI and Poe",
+     "state": "closed",
+     "merged_at": "2026-10-29T16:49:23Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/894"
+    },
+    {
+     "number": 901,
+     "title": "fix(core): bound oversized expires_in in DigitalOcean",
+     "state": "closed",
+     "merged_at": "2026-10-29T17:32:25Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/901"
+    }
+   ]
+  },
+  {
+   "number": 896,
+   "title": "fix(ci): check:proto-reads fails on main \u2014 variant.ts guarded read is unlisted and its pre-#878 allowlist entry is stale",
+   "closed_at": "2026-10-29T16:25:56Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #897 \u2014 fix(ci): refresh variant.ts proto-reads allowlist entry for #878 guard (merged_at 2026-10-29T16:25:54Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 897,
+   "merged_pr_cross_references": [
+    {
+     "number": 897,
+     "title": "fix(ci): refresh variant.ts proto-reads allowlist entry for #878 guard",
+     "state": "closed",
+     "merged_at": "2026-10-29T16:25:54Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/897"
+    }
+   ]
+  },
+  {
+   "number": 869,
+   "title": "fix(routes): door-set governance variant remaps + retarget across concrete doors (PR #810 follow-up)",
+   "closed_at": "2026-10-29T16:05:25Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #871 \u2014 fix(core): judge door-set variants through remaps and retarget across doors (merged_at 2026-10-29T16:05:23Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 871,
+   "merged_pr_cross_references": [
+    {
+     "number": 871,
+     "title": "fix(core): judge door-set variants through remaps and retarget across doors",
+     "state": "closed",
+     "merged_at": "2026-10-29T16:05:23Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/871"
+    }
+   ]
+  },
+  {
+   "number": 865,
+   "title": "audit(core): shared own-property guard + regression net for prototype-chain dictionary reads (#833 follow-up)",
+   "closed_at": "2026-10-29T15:26:02Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #883 \u2014 feat(core): shared own-property guard + prototype-chain read regression net (merged_at 2026-10-29T15:26:00Z); 3 merged PR cross-reference(s) present.",
+   "best_pr": 883,
+   "merged_pr_cross_references": [
+    {
+     "number": 883,
+     "title": "feat(core): shared own-property guard + prototype-chain read regression net",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:26:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/883"
+    },
+    {
+     "number": 1099,
+     "title": "fix(core): guard AISDK toolNames against prototype-chain reads and the __proto__ write swallow",
+     "state": "closed",
+     "merged_at": "2026-10-31T20:08:14Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1099"
+    },
+    {
+     "number": 1160,
+     "title": "feat(script): check:bounded-http regression net for unbounded outbound calls (#1129)",
+     "state": "closed",
+     "merged_at": "2026-11-01T06:54:55Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1160"
+    }
+   ]
+  },
+  {
+   "number": 839,
+   "title": "fix(codemode): std.pick reads through the prototype chain \u2014 picking \"toString\" or \"constructor\" from {} fabricates the key with the inherited function",
+   "closed_at": "2026-10-29T15:22:45Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #861 \u2014 fix(codemode): std.pick copies only own properties (#839) (merged_at 2026-10-29T15:22:44Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 861,
+   "merged_pr_cross_references": [
+    {
+     "number": 861,
+     "title": "fix(codemode): std.pick copies only own properties (#839)",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:22:44Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/861"
+    }
+   ]
+  },
+  {
+   "number": 879,
+   "title": "fix(core): OAuth expires_in stored unvalidated in five providers \u2014 negative makes a born-expired credential, an oversized value disables refresh for weeks",
+   "closed_at": "2026-10-29T15:10:20Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #884 \u2014 fix(core): validate OAuth expires_in in five providers (merged_at 2026-10-29T15:10:19Z); 3 merged PR cross-reference(s) present.",
+   "best_pr": 884,
+   "merged_pr_cross_references": [
+    {
+     "number": 884,
+     "title": "fix(core): validate OAuth expires_in in five providers",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:10:19Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/884"
+    },
+    {
+     "number": 894,
+     "title": "fix(core): bound oversized expires_in in xAI and Poe",
+     "state": "closed",
+     "merged_at": "2026-10-29T16:49:23Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/894"
+    },
+    {
+     "number": 901,
+     "title": "fix(core): bound oversized expires_in in DigitalOcean",
+     "state": "closed",
+     "merged_at": "2026-10-29T17:32:25Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/901"
+    }
+   ]
+  },
+  {
+   "number": 889,
+   "title": "fix(core): governance pruning of requested-variant leaves can bypass subagent exclusions for retarget-added leaves (Codex P1 on #871)",
+   "closed_at": "2026-10-29T15:06:57Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-by-record",
+   "evidence": "Read individually: closing comment by dezren39 2026-10-29T15:06:55Z verifies against PR #871 head d77f8128a4 that the bypass is closed by the variant refresh in 203b8f7d1d (retargetDefinition now returns routeVariants over post-transform leaves; resolver rejects unadvertised variants before loading), naming regression coverage in packages/core/test/model-route-transform-models.test.ts. PR #871 merged (verified in this batch under #869).",
+   "merged_pr_cross_references": []
+  },
+  {
+   "number": 880,
+   "title": "fix(core): opencode device-code poll trusts the server interval with no floor \u2014 interval 0 or negative busy-polls the token endpoint for the full 10-minute attempt window",
+   "closed_at": "2026-10-29T14:56:09Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #882 \u2014 fix(core): floor opencode device-code poll interval and pass expiresAt (merged_at 2026-10-29T14:56:06Z); 3 merged PR cross-reference(s) present.",
+   "best_pr": 882,
+   "merged_pr_cross_references": [
+    {
+     "number": 882,
+     "title": "fix(core): floor opencode device-code poll interval and pass expiresAt",
+     "state": "closed",
+     "merged_at": "2026-10-29T14:56:06Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/882"
+    },
+    {
+     "number": 902,
+     "title": "fix(core): bound oversized device-code expires_in in opencode + xAI (#900)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:44:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/902"
+    },
+    {
+     "number": 918,
+     "title": "fix(core): bound Copilot device poll interval and keep slow_down monotonic",
+     "state": "closed",
+     "merged_at": "2026-10-29T20:40:34Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/918"
+    }
+   ]
+  },
+  {
+   "number": 862,
+   "title": "fix(core): Variant PROTOCOLS table reads through the prototype chain \u2014 a model package named \"constructor\" resolves to the Object function",
+   "closed_at": "2026-10-29T14:45:26Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #878 \u2014 fix(core): read Variant PROTOCOLS table with an own-property guard (merged_at 2026-10-29T14:45:24Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 878,
+   "merged_pr_cross_references": [
+    {
+     "number": 878,
+     "title": "fix(core): read Variant PROTOCOLS table with an own-property guard",
+     "state": "closed",
+     "merged_at": "2026-10-29T14:45:24Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/878"
+    },
+    {
+     "number": 883,
+     "title": "feat(core): shared own-property guard + prototype-chain read regression net",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:26:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/883"
+    }
+   ]
+  },
+  {
+   "number": 885,
+   "title": "fix(core): MCP OAuth toCredential trusts expires_in \u2014 a negative value stores a born-expired credential, a millisecond-scale value disables refresh for weeks",
+   "closed_at": "2026-10-29T14:43:18Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #887 \u2014 fix(core): validate MCP OAuth expires_in before storing it (merged_at 2026-10-29T14:43:17Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 887,
+   "merged_pr_cross_references": [
+    {
+     "number": 887,
+     "title": "fix(core): validate MCP OAuth expires_in before storing it",
+     "state": "closed",
+     "merged_at": "2026-10-29T14:43:17Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/887"
+    }
+   ]
+  },
+  {
+   "number": 886,
+   "title": "fix(core): Copilot model release dates roll calendar-invalid versions over \u2014 \"2026-02-30\" becomes a March 2 release and outranks newer models",
+   "closed_at": "2026-10-29T14:37:17Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #888 \u2014 fix(core): stop Copilot release-date rollover via parseReleaseDate (#886) (merged_at 2026-10-29T14:37:16Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 888,
+   "merged_pr_cross_references": [
+    {
+     "number": 888,
+     "title": "fix(core): stop Copilot release-date rollover via parseReleaseDate (#886)",
+     "state": "closed",
+     "merged_at": "2026-10-29T14:37:16Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/888"
+    }
+   ]
+  },
+  {
+   "number": 710,
+   "title": "feat(routes): per-element (per-target) context limits",
+   "closed_at": "2026-10-29T13:42:55Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #811 \u2014 feat(core): per-target context limits for model routes (merged_at 2026-10-29T13:42:54Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 811,
+   "merged_pr_cross_references": [
+    {
+     "number": 811,
+     "title": "feat(core): per-target context limits for model routes",
+     "state": "closed",
+     "merged_at": "2026-10-29T13:42:54Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/811"
+    },
+    {
+     "number": 898,
+     "title": "feat(core): thread requestTokens through the session runner so per-target ceilings filter live",
+     "state": "closed",
+     "merged_at": "2026-10-29T19:28:50Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/898"
+    }
+   ]
+  },
+  {
+   "number": 864,
+   "title": "fix(core): WellKnown {env:} substitution reads through the prototype chain \u2014 \"{env:constructor}\" injects the Object function into remote-config URLs/headers",
+   "closed_at": "2026-10-29T13:08:39Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #868 \u2014 fix(core): resolve wellknown env substitution by own property (merged_at 2026-10-29T13:08:37Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 868,
+   "merged_pr_cross_references": [
+    {
+     "number": 868,
+     "title": "fix(core): resolve wellknown env substitution by own property",
+     "state": "closed",
+     "merged_at": "2026-10-29T13:08:37Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/868"
+    },
+    {
+     "number": 883,
+     "title": "feat(core): shared own-property guard + prototype-chain read regression net",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:26:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/883"
+    }
+   ]
+  },
+  {
+   "number": 863,
+   "title": "fix(core): ModelPlan setPool pools lookup reads through the prototype chain \u2014 a pool named \"constructor\" never takes the ?? {} fallback",
+   "closed_at": "2026-10-29T13:07:43Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #867 \u2014 fix(core): own-property reads in ModelPlan setPool and setModel (merged_at 2026-10-29T13:07:41Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 867,
+   "merged_pr_cross_references": [
+    {
+     "number": 867,
+     "title": "fix(core): own-property reads in ModelPlan setPool and setModel",
+     "state": "closed",
+     "merged_at": "2026-10-29T13:07:41Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/867"
+    },
+    {
+     "number": 883,
+     "title": "feat(core): shared own-property guard + prototype-chain read regression net",
+     "state": "closed",
+     "merged_at": "2026-10-29T15:26:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/883"
+    }
+   ]
+  },
+  {
+   "number": 803,
+   "title": "feat(codemode): sleep primitive + std async helpers (mapLimit, retry, withTimeout) (design #800, phase 2)",
+   "closed_at": "2026-10-29T13:06:48Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #872 \u2014 feat(codemode): std async helpers on a capped sleep primitive (merged_at 2026-10-29T13:05:48Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 872,
+   "merged_pr_cross_references": [
+    {
+     "number": 812,
+     "title": "feat(codemode): versioned libraries and std v1 pure helpers",
+     "state": "closed",
+     "merged_at": "2026-10-29T06:08:04Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/812"
+    },
+    {
+     "number": 872,
+     "title": "feat(codemode): std async helpers on a capped sleep primitive",
+     "state": "closed",
+     "merged_at": "2026-10-29T13:05:48Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/872"
+    }
+   ]
+  },
+  {
+   "number": 875,
+   "title": "fix(cli): service set port parses with bare Number() \u2014 \"0x10\" stores port 16, \"1e3\" stores 1000, \"8080.0\" stores 8080",
+   "closed_at": "2026-10-29T12:57:39Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #876 \u2014 fix(cli): accept only plain decimal spellings for service set port (merged_at 2026-10-29T12:57:38Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 876,
+   "merged_pr_cross_references": [
+    {
+     "number": 876,
+     "title": "fix(cli): accept only plain decimal spellings for service set port",
+     "state": "closed",
+     "merged_at": "2026-10-29T12:57:38Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/876"
+    }
+   ]
+  },
+  {
+   "number": 874,
+   "title": "fix(cli,client): OPENCODE_SHUTDOWN_GRACE_MS blank reads as 0 \u2014 an empty env var silently disables the shutdown drain in both copies of the grace parser",
+   "closed_at": "2026-10-29T12:45:02Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #877 \u2014 fix(cli,client): treat blank OPENCODE_SHUTDOWN_GRACE_MS as unset (merged_at 2026-10-29T12:45:00Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 877,
+   "merged_pr_cross_references": [
+    {
+     "number": 877,
+     "title": "fix(cli,client): treat blank OPENCODE_SHUTDOWN_GRACE_MS as unset",
+     "state": "closed",
+     "merged_at": "2026-10-29T12:45:00Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/877"
+    }
+   ]
+  },
+  {
+   "number": 661,
+   "title": "fix(server): PR #596 provider.get embeds models from the unfiltered state record while provider.list embeds only snapshot.available \u2014 disabled/stale-connection providers leak their catalog through get",
+   "closed_at": "2026-10-29T12:27:56Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-by-record",
+   "evidence": "Read individually: closing record 2026-10-29T12:27:54Z states the fix landed in PR #596, merged 2026-10-29T08:43:51Z (merge commit 33a7ecfa28); its commit 03606bb5 implements the triage verdict aligning provider.get to snapshot().available and removing the unfiltered Provider.definition() read; no Fixes keyword, hence by-record.",
+   "merged_pr_cross_references": [
+    {
+     "number": 663,
+     "title": "docs(protocol): regenerate OpenAPI documents for PR #596 provider shape",
+     "state": "closed",
+     "merged_at": "2026-10-28T03:00:39Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/663"
+    },
+    {
+     "number": 664,
+     "title": "fix(client): update ProviderInfo consumers to ProviderInfoWithModels",
+     "state": "closed",
+     "merged_at": "2026-10-28T03:05:28Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/664"
+    }
+   ]
+  },
+  {
+   "number": 831,
+   "title": "fix(core): ModelGovernance route and variant lookups read through the prototype chain \u2014 a route or variant named 'constructor' crashes the governance gate",
+   "closed_at": "2026-10-29T12:27:09Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #838 \u2014 fix(core): own-property route and variant lookups in ModelGovernance (merged_at 2026-10-29T12:27:07Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 838,
+   "merged_pr_cross_references": [
+    {
+     "number": 838,
+     "title": "fix(core): own-property route and variant lookups in ModelGovernance",
+     "state": "closed",
+     "merged_at": "2026-10-29T12:27:07Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/838"
+    }
+   ]
+  },
+  {
+   "number": 830,
+   "title": "fix(core): QuotaBurnRate priors lookup reads through the prototype chain \u2014 an effort named 'constructor' returns a function as percentPerSession",
+   "closed_at": "2026-10-29T12:23:15Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #837 \u2014 fix(core): guard QuotaBurnRate priors lookup against prototype chain (merged_at 2026-10-29T12:23:13Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 837,
+   "merged_pr_cross_references": [
+    {
+     "number": 837,
+     "title": "fix(core): guard QuotaBurnRate priors lookup against prototype chain",
+     "state": "closed",
+     "merged_at": "2026-10-29T12:23:13Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/837"
+    }
+   ]
+  },
+  {
+   "number": 853,
+   "title": "fix(core): Form validateWhen accepts non-finite when values a number target can never answer \u2014 NaN/Infinity make eq never match and neq always match (PR #706)",
+   "closed_at": "2026-10-29T11:57:58Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #860 \u2014 fix(core): reject non-finite when values on number targets (#853) (merged_at 2026-10-29T11:57:57Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 860,
+   "merged_pr_cross_references": [
+    {
+     "number": 860,
+     "title": "fix(core): reject non-finite when values on number targets (#853)",
+     "state": "closed",
+     "merged_at": "2026-10-29T11:57:57Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/860"
+    }
+   ]
+  },
+  {
+   "number": 818,
+   "title": "Meta provider sessions fail with client_attestation_denied (403) despite healthy quota picture",
+   "closed_at": "2026-10-29T11:36:55Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-by-record",
+   "evidence": "Read individually: closing comment by dezren39 2026-10-29T11:36:07Z root-causes the failures from the server message store (exactly 5 client_attestation_denied outcomes in a ~22-minute window 2026-10-29T03:36-03:58Z, Meta-side attestation rollout, no client change), verifies the route healthy, and files the quota-masking follow-up as openchamber#787.",
+   "merged_pr_cross_references": [
+    {
+     "number": 816,
+     "title": "fix(core): surface watcher subscribe failures \u2014 node fallback + degraded event (#797)",
+     "state": "closed",
+     "merged_at": "2026-10-29T09:31:26Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/816"
+    },
+    {
+     "number": 810,
+     "title": "feat(core): door-set targets with exclusions for model routes (#637)",
+     "state": "closed",
+     "merged_at": "2026-10-29T11:02:05Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/810"
+    }
+   ]
+  },
+  {
+   "number": 824,
+   "title": "fix(core): QuotaSnapshot per-plan max-age lookup reads through the prototype chain \u2014 a plan named 'constructor' never goes stale",
+   "closed_at": "2026-10-29T11:26:27Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #835 \u2014 fix(core): resolve QuotaSnapshot per-plan max-age with own-property semantics (#824) (merged_at 2026-10-29T11:26:26Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 835,
+   "merged_pr_cross_references": [
+    {
+     "number": 835,
+     "title": "fix(core): resolve QuotaSnapshot per-plan max-age with own-property semantics (#824)",
+     "state": "closed",
+     "merged_at": "2026-10-29T11:26:26Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/835"
+    },
+    {
+     "number": 854,
+     "title": "feat(core): credential failover on quota exhaustion via credential.activate (#6)",
+     "state": "closed",
+     "merged_at": "2026-10-29T18:13:48Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/854"
+    }
+   ]
+  },
+  {
+   "number": 856,
+   "title": "fix(ai): Anthropic server-tool-result gate reads through the prototype chain \u2014 a block typed \"constructor\" kills the whole stream",
+   "closed_at": "2026-10-29T11:24:59Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #858 \u2014 fix(ai): server-tool-result gate matches own keys only (#856) (merged_at 2026-10-29T11:24:57Z); 3 merged PR cross-reference(s) present.",
+   "best_pr": 858,
+   "merged_pr_cross_references": [
+    {
+     "number": 858,
+     "title": "fix(ai): server-tool-result gate matches own keys only (#856)",
+     "state": "closed",
+     "merged_at": "2026-10-29T11:24:57Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/858"
+    },
+    {
+     "number": 919,
+     "title": "fix(ci): scan packages/ai in the check:proto-reads gate",
+     "state": "closed",
+     "merged_at": "2026-11-03T22:49:52Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/919"
+    },
+    {
+     "number": 928,
+     "title": "fix(ai): guard ResponsesHostedTools against prototype-named item types (#927)",
+     "state": "closed",
+     "merged_at": "2026-10-29T23:09:56Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/928"
+    }
+   ]
+  },
+  {
+   "number": 637,
+   "title": "feat(routes): exclusion expressions for plan pool definitions (model on all doors except X)",
+   "closed_at": "2026-10-29T11:03:40Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #810 \u2014 feat(core): door-set targets with exclusions for model routes (#637) (merged_at 2026-10-29T11:02:05Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 810,
+   "merged_pr_cross_references": [
+    {
+     "number": 810,
+     "title": "feat(core): door-set targets with exclusions for model routes (#637)",
+     "state": "closed",
+     "merged_at": "2026-10-29T11:02:05Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/810"
+    },
+    {
+     "number": 871,
+     "title": "fix(core): judge door-set variants through remaps and retarget across doors",
+     "state": "closed",
+     "merged_at": "2026-10-29T16:05:23Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/871"
+    }
+   ]
+  },
+  {
+   "number": 8,
+   "title": "feat(telemetry): multi-chunk response continuation cost stitching in route_attempt",
+   "closed_at": "2026-10-29T10:54:17Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #762 \u2014 feat(core): stitch continued route attempts into one turn (merged_at 2026-10-29T10:54:16Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 762,
+   "merged_pr_cross_references": [
+    {
+     "number": 762,
+     "title": "feat(core): stitch continued route attempts into one turn",
+     "state": "closed",
+     "merged_at": "2026-10-29T10:54:16Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/762"
+    },
+    {
+     "number": 890,
+     "title": "docs(roadmap): program tending 2026-10-29 \u2014 drop landed rows",
+     "state": "closed",
+     "merged_at": "2026-10-30T01:27:18Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/890"
+    }
+   ]
+  },
+  {
+   "number": 784,
+   "title": "fix(client,app): client-side session root walks ignore the fork link \u2014 a fork splits its family, cost and titlebar root from the source tree",
+   "closed_at": "2026-10-29T10:48:38Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #807 \u2014 fix(client,app): follow fork links for session roots (merged_at 2026-10-29T10:48:37Z); 1 merged PR cross-reference(s) present.",
+   "best_pr": 807,
+   "merged_pr_cross_references": [
+    {
+     "number": 807,
+     "title": "fix(client,app): follow fork links for session roots",
+     "state": "closed",
+     "merged_at": "2026-10-29T10:48:37Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/807"
+    }
+   ]
+  },
+  {
+   "number": 631,
+   "title": "ci(app): e2e app-2 regression specs fail on subagent navigation/timeline visibility \u2014 reproduced on unrelated PR #607 (attempts 1+2)",
+   "closed_at": "2026-10-29T10:16:45Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-by-record",
+   "evidence": "Read individually: closing record 2026-10-29T10:18:35Z states PR #843 merged (merge commit 71608cb842068d4103c5fc3fdaabd2605bf03703) fixing the root cause (session.sync never loaded ancestors of a directly opened nested subagent), with every check SUCCESS on head 0483469342 including e2e linux/windows. PR #843 is not a timeline cross-reference, hence by-record.",
+   "merged_pr_cross_references": [
+    {
+     "number": 688,
+     "title": "fix(ai): make SpeechStream.headerUsage reject blank, negative and non-plain usage headers",
+     "state": "closed",
+     "merged_at": "2026-10-28T09:32:47Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/688"
+    },
+    {
+     "number": 649,
+     "title": "feat(core): named route windows and target eligibility gates (#639)",
+     "state": "closed",
+     "merged_at": "2026-10-28T15:05:54Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/649"
+    },
+    {
+     "number": 716,
+     "title": "fix(core,ai): calendar-check both retry-after date branches (#713)",
+     "state": "closed",
+     "merged_at": "2026-10-28T16:46:36Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/716"
+    },
+    {
+     "number": 761,
+     "title": "fix(ci): distinguish a turbo crash from unit test failures",
+     "state": "closed",
+     "merged_at": "2026-10-28T23:41:04Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/761"
+    },
+    {
+     "number": 596,
+     "title": "fix(server): embed resolved models in /api/provider responses",
+     "state": "closed",
+     "merged_at": "2026-10-29T08:43:51Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/596"
+    },
+    {
+     "number": 1048,
+     "title": "fix(client): retry truncated ancestor walks instead of caching them",
+     "state": "closed",
+     "merged_at": "2026-10-31T02:14:27Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1048"
+    },
+    {
+     "number": 1052,
+     "title": "fix(client): do not let a family sync overwrite a newer target snapshot",
+     "state": "closed",
+     "merged_at": "2026-10-31T03:50:41Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1052"
+    },
+    {
+     "number": 1054,
+     "title": "fix(client): retry family sync target when covering plain sync fails (#1053)",
+     "state": "closed",
+     "merged_at": "2026-10-31T05:28:49Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1054"
+    }
+   ]
+  },
+  {
+   "number": 851,
+   "title": "fix(web): docs locale lookups read through the prototype chain \u2014 \"constructor\" and \"__proto__\" become garbage redirects",
+   "closed_at": "2026-10-29T10:00:55Z",
+   "state": "closed",
+   "state_reason": "completed",
+   "class": "LEGITIMATE-linked",
+   "evidence": "Live issue timeline cross-reference to merged PR #852 \u2014 fix(web): reject inherited names in docs locale lookups (#851) (merged_at 2026-10-29T10:00:54Z); 2 merged PR cross-reference(s) present.",
+   "best_pr": 852,
+   "merged_pr_cross_references": [
+    {
+     "number": 852,
+     "title": "fix(web): reject inherited names in docs locale lookups (#851)",
+     "state": "closed",
+     "merged_at": "2026-10-29T10:00:54Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/852"
+    },
+    {
+     "number": 1324,
+     "title": "fix(console): guard locale lookups against prototype names and malformed oc_locale cookies",
+     "state": "closed",
+     "merged_at": "2026-11-01T20:52:49Z",
+     "html_url": "https://github.com/developing-today-forks/opencode/pull/1324"
+    }
+   ]
+  }
+ ]
+}

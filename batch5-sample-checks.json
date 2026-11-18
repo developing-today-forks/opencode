@@ -1,0 +1,123 @@
+[
+  {
+    "issue": 1871,
+    "issue_title": "main CI failure: nix-hashes (run 42263623640)",
+    "pr": 2200,
+    "pr_title": "fix(ci): nix-hashes darwin fallback on macos-15 (macos-14 retired)",
+    "state": "closed",
+    "merged_at": "2026-11-09T01:00:47Z",
+    "merge_commit_sha": "e340f54ac2847afe7bed16ebcb5365a77875118e",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/2200",
+    "matches_title": true
+  },
+  {
+    "issue": 2127,
+    "issue_title": "fix(ai): media-type sniffer labels every ISO-BMFF file video/mp4 \u2014 the ftyp major brand is never read, so M4A/M4B audio and AVIF/HEIC images are published as video",
+    "pr": 2144,
+    "pr_title": "fix(ai): dispatch media-type sniffer on ftyp major brand (#2127)",
+    "state": "closed",
+    "merged_at": "2026-11-08T17:43:07Z",
+    "merge_commit_sha": "391e43eb3675fb967b0ee89a86a161f222287553",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/2144",
+    "matches_title": true
+  },
+  {
+    "issue": 1928,
+    "issue_title": "fix(ai): deepseek quota publishes a negative balance \u2014 the no-positive fallback bypasses its own >0 filter, so a negative-only payload returns \"$-5.00\" with ok:true",
+    "pr": 2124,
+    "pr_title": "fix(ai): reject negative DeepSeek balances",
+    "state": "closed",
+    "merged_at": "2026-11-08T12:25:36Z",
+    "merge_commit_sha": "1f322f284863573fd58020957a8715ae996cca28",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/2124",
+    "matches_title": true
+  },
+  {
+    "issue": 1759,
+    "issue_title": "fix(ci): check:workflows never validates job-level permissions content \u2014 caller jobs bypass the #1503 policy entirely, excepted jobs unchecked",
+    "pr": 2105,
+    "pr_title": "fix(ci): validate job-level permissions content in check:workflows (#1759)",
+    "state": "closed",
+    "merged_at": "2026-11-08T09:38:49Z",
+    "merge_commit_sha": "426c71b0d95b395b5d59936711227c6acb8aaac1",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/2105",
+    "matches_title": true
+  },
+  {
+    "issue": 993,
+    "issue_title": "feat(core): shared numeric normalisation primitives in util/number.ts + paging migration (design #992, phase 1)",
+    "pr": 1191,
+    "pr_title": "feat(core): shared numeric normalisation primitives + paging migration (#993)",
+    "state": "closed",
+    "merged_at": "2026-11-01T11:39:29Z",
+    "merge_commit_sha": "7028dd00eae5363426c173044f44dce6d3d350b0",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/1191",
+    "matches_title": true
+  },
+  {
+    "issue": 1116,
+    "issue_title": "fix(core): restart restore of stored attempt quota snapshots ignores credential_id \u2014 one credential's snapshot is restored target-wide (#1113 residual)",
+    "pr": 1130,
+    "pr_title": "fix(core): key restored attempt quota snapshots by credential_id",
+    "state": "closed",
+    "merged_at": "2026-11-01T02:04:46Z",
+    "merge_commit_sha": "f14dda9cf109e4e3209bd7423011a72b8337d2cf",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/1130",
+    "matches_title": true
+  },
+  {
+    "issue": 1090,
+    "issue_title": "fix(console,stats): GitHub metadata queries have no timeout and no body cap \u2014 console lib/github.ts and stats getGitHubStars hang past their own fallbacks when GitHub stalls",
+    "pr": 1096,
+    "pr_title": "fix(console,stats): bound GitHub metadata fetches (timeouts + body caps)",
+    "state": "closed",
+    "merged_at": "2026-10-31T19:38:08Z",
+    "merge_commit_sha": "f6987d33247239dd954465eddcd2d7ce1bb8c06b",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/1096",
+    "matches_title": true
+  },
+  {
+    "issue": 1055,
+    "issue_title": "feat(core): route_health has no credential column \u2014 per-credential health persists only as free-text reason that restart replay regex-parses (#854 follow-up)",
+    "pr": 1058,
+    "pr_title": "feat(core): add credential_id to route_health",
+    "state": "closed",
+    "merged_at": "2026-10-31T06:28:38Z",
+    "merge_commit_sha": "93e1084cc2d0aba532a5f581dbd62502735086d4",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/1058",
+    "matches_title": true
+  },
+  {
+    "issue": 984,
+    "issue_title": "router: auto-disable providers at 100% quota until a fresh read shows headroom (cline-pass, commandcode, go)",
+    "pr": 1028,
+    "pr_title": "fix(core): feed current quota reads into route candidacy gate (#984)",
+    "state": "closed",
+    "merged_at": "2026-10-30T23:59:33Z",
+    "merge_commit_sha": "18e33f84ec20e2969f496d90ffdf234701844b5e",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/1028",
+    "matches_title": true
+  },
+  {
+    "issue": 965,
+    "issue_title": "fix(core): Vcs.branches passes its limit to the provider untouched \u2014 invalid values silently return an empty branch list, limit 0 returns every branch",
+    "pr": 966,
+    "pr_title": "fix(core): normalise Vcs.branches limit at the service boundary",
+    "state": "closed",
+    "merged_at": "2026-10-30T10:37:31Z",
+    "merge_commit_sha": "8ed1f5a144d9a67b8b0d26a1314c029770bdea46",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/966",
+    "matches_title": true
+  },
+  {
+    "issue": 936,
+    "issue_title": "test(cli): the mini half of the stdin-read log (PR #767) has no test \u2014 the only regression test spawns run",
+    "pr": 938,
+    "pr_title": "test(cli): cover the mini half of the stdin-read log",
+    "state": "closed",
+    "merged_at": "2026-10-30T03:41:21Z",
+    "merge_commit_sha": "668f65c1eb75d7501a4e692e5fbf96ab2a238d72",
+    "html_url": "https://github.com/developing-today-forks/opencode/pull/938",
+    "matches_title": true
+  }
+]

@@ -1,0 +1,1221 @@
+{
+  "repo": "developing-today-forks/opencode",
+  "task": 12600,
+  "batch": 5,
+  "enumeration_total": 1020,
+  "covered_prior": 776,
+  "candidate_count": 200,
+  "remaining_after": 44,
+  "span": {
+    "first": {
+      "number": 1871,
+      "closed_at": "2026-11-09T01:00:48Z"
+    },
+    "last": {
+      "number": 927,
+      "closed_at": "2026-10-29T23:09:58Z"
+    }
+  },
+  "items": [
+    {
+      "number": 1871,
+      "closed_at": "2026-11-09T01:00:48Z",
+      "title": "main CI failure: nix-hashes (run 42263623640)",
+      "state_reason": null
+    },
+    {
+      "number": 2196,
+      "closed_at": "2026-11-09T00:53:40Z",
+      "title": "fix(core): lazy caches a synchronous initializer throw as undefined — loaded is set before fn() runs, so a transient load failure is never retried or rethrown and later calls return undefined as T",
+      "state_reason": null
+    },
+    {
+      "number": 2186,
+      "closed_at": "2026-11-09T00:48:31Z",
+      "title": "fix(util): containsDirectory treats an empty parent as containing every absolute path — the workspace-scope containment family has no tests",
+      "state_reason": null
+    },
+    {
+      "number": 2150,
+      "closed_at": "2026-11-09T00:37:51Z",
+      "title": "fix(core): Mime.detect has no ftyp brand dispatch — HEIC/HEIF/M4A attachments sniff as application/octet-stream, and detected AVIF cannot be ingested by the read tool",
+      "state_reason": null
+    },
+    {
+      "number": 1888,
+      "closed_at": "2026-11-09T00:16:39Z",
+      "title": "prompts: model-family prompts contradict each other on subagent spawning — and DeepSeek matches no family at all",
+      "state_reason": null
+    },
+    {
+      "number": 1898,
+      "closed_at": "2026-11-09T00:08:13Z",
+      "title": "fix(function): githubActionsJWKSet cache key ignores jose options — a later caller with different options silently gets the first caller's set",
+      "state_reason": null
+    },
+    {
+      "number": 1927,
+      "closed_at": "2026-11-09T00:04:03Z",
+      "title": "docs(ci): ci-policy.md still describes a push-to-main tier after PR #1635 removed every push trigger — check/nix-eval are dispatch-only, test is dispatch+nightly",
+      "state_reason": null
+    },
+    {
+      "number": 2187,
+      "closed_at": "2026-11-08T23:59:40Z",
+      "title": "fix(util): parsePathLineSuffix consumes an out-of-range line suffix and drops it — path stripped with no selection, and the suffix grammar has no tests",
+      "state_reason": null
+    },
+    {
+      "number": 2154,
+      "closed_at": "2026-11-08T23:45:22Z",
+      "title": "fix(ai): Turso plan-label matching never trims whitespace — a padded plan name silently regresses a Scaler org to Starter limits (the PR #2153 incident shape)",
+      "state_reason": null
+    },
+    {
+      "number": 2178,
+      "closed_at": "2026-11-08T23:40:30Z",
+      "title": "fix(ai): normalizeToolHistory collapses duplicate tool-call ids — the second call overwrites the first in the pending map, one missing result is never synthesized, and a real result is renamed to the wrong call",
+      "state_reason": null
+    },
+    {
+      "number": 2171,
+      "closed_at": "2026-11-08T23:37:50Z",
+      "title": "fix(ai): mergeJsonRecords drops a __proto__ key and re-prototypes the merged record — http.body/providerOptions overlays lose the key and shadow absent-key reads",
+      "state_reason": null
+    },
+    {
+      "number": 2158,
+      "closed_at": "2026-11-08T23:36:24Z",
+      "title": "fix(ai): claude-code sign-in callback accepts a code-only paste — the OAuth state check is skipped when the paste has no '#', and the sign-in's own state is substituted in the exchange",
+      "state_reason": null
+    },
+    {
+      "number": 2152,
+      "closed_at": "2026-11-08T23:35:19Z",
+      "title": "fix(ai): sanitizeSurrogates silently drops entries when sanitized keys collide — distinct lone-surrogate keys collapse into one U+FFFD key",
+      "state_reason": null
+    },
+    {
+      "number": 2159,
+      "closed_at": "2026-11-08T23:33:35Z",
+      "title": "test(ai): vibe-auth shadow diagnostic never-break guarantee is untested — no throwing keyringLookup or onShadowDiagnostic case exists",
+      "state_reason": null
+    },
+    {
+      "number": 2165,
+      "closed_at": "2026-11-08T22:50:29Z",
+      "title": "test(ai): cdpPageFetch page-eval-exception passthrough is untested — no exceptionDetails case in cdp.test.ts, so the classification split from cdp-unavailable has no pin",
+      "state_reason": null
+    },
+    {
+      "number": 2119,
+      "closed_at": "2026-11-08T22:42:13Z",
+      "title": "fix(ai): vibe parseDotEnv fabricates keys from inside multiline quoted values — a KEY= line inside a quoted block becomes a real entry, and the value itself is truncated with its quote attached",
+      "state_reason": null
+    },
+    {
+      "number": 2149,
+      "closed_at": "2026-11-08T22:36:42Z",
+      "title": "fix(core): Mime.detect labels plain text as an image — a file starting with \"BM\" or \"GIF8\" is sniffed as image/bmp / image/gif",
+      "state_reason": null
+    },
+    {
+      "number": 2151,
+      "closed_at": "2026-11-08T22:30:51Z",
+      "title": "fix(ai): media-type frame-sync sniffer labels a UTF-16LE text file audio/mpeg — the BOM pair FF FE passes the MPEG sync test and overrides the .txt extension",
+      "state_reason": null
+    },
+    {
+      "number": 2145,
+      "closed_at": "2026-11-08T22:25:16Z",
+      "title": "fix(ai): writeCredential leaves the credential-bearing temp file behind when the rename fails — rotated claude-code tokens persist outside the credentials file",
+      "state_reason": null
+    },
+    {
+      "number": 2120,
+      "closed_at": "2026-11-08T22:22:09Z",
+      "title": "fix(ci): repo-sweeper stale-issue closer treats pull requests as issues — close-issues.ts never filters the PR items the issues endpoint returns, so a stale PR is closed as not_planned with the issue message, bypassing close-prs",
+      "state_reason": null
+    },
+    {
+      "number": 2147,
+      "closed_at": "2026-11-08T22:17:58Z",
+      "title": "test(ai): antigravity GOCSPX scan's literal-prefix split branch has no committed test — every boundary case starts the run at least 10 chars inside (#1843)",
+      "state_reason": null
+    },
+    {
+      "number": 1964,
+      "closed_at": "2026-11-08T20:40:50Z",
+      "title": "fix(ai): remove secret-tool/agy binary dependencies from antigravity + vibe credential paths (#1825 remainder)",
+      "state_reason": null
+    },
+    {
+      "number": 2146,
+      "closed_at": "2026-11-08T20:35:35Z",
+      "title": "test(core): SessionStep cascade failover has no tests for UnsupportedOperation, NoRoute, or the payload-too-large exclusion (#1853)",
+      "state_reason": null
+    },
+    {
+      "number": 2132,
+      "closed_at": "2026-11-08T20:26:52Z",
+      "title": "fix(ci): repo-sweeper stale-issue closer skips a full page per pass — close-issues.ts closes items from the open list it is still offset-paginating, so the next 100 stale issues shift onto the fetched page and are never examined",
+      "state_reason": null
+    },
+    {
+      "number": 1967,
+      "closed_at": "2026-11-08T19:54:04Z",
+      "title": "test(ai): PR #1779's meta rolling/weekly collision fix has no test — neither collision site is pinned",
+      "state_reason": null
+    },
+    {
+      "number": 1931,
+      "closed_at": "2026-11-08T19:51:55Z",
+      "title": "fix(ai): meta quota portal read never uses the page's team — teamIdOf's page-URL branch is dead, so every portal read targets the default team",
+      "state_reason": null
+    },
+    {
+      "number": 2108,
+      "closed_at": "2026-11-08T19:41:09Z",
+      "title": "fix(core): failureHint extracts the stated quota reset from message ?? body — a reset stated only in the error body classifies as quota but is never bound to the bench",
+      "state_reason": null
+    },
+    {
+      "number": 1945,
+      "closed_at": "2026-11-08T18:52:59Z",
+      "title": "fix(ai): claude-code and commandcode protocol routes still carry pre-rename provider ids — the bare route exports split from the #1823 rename",
+      "state_reason": null
+    },
+    {
+      "number": 1942,
+      "closed_at": "2026-11-08T18:47:17Z",
+      "title": "design(ai): a figure that cannot exist is not a figure — one figure contract for the quota parsers' amounts, balances, counts and percents",
+      "state_reason": null
+    },
+    {
+      "number": 2112,
+      "closed_at": "2026-11-08T17:52:01Z",
+      "title": "main CI failure: repo-sweeper (run 42465242039)",
+      "state_reason": null
+    },
+    {
+      "number": 2127,
+      "closed_at": "2026-11-08T17:43:08Z",
+      "title": "fix(ai): media-type sniffer labels every ISO-BMFF file video/mp4 — the ftyp major brand is never read, so M4A/M4B audio and AVIF/HEIC images are published as video",
+      "state_reason": null
+    },
+    {
+      "number": 1962,
+      "closed_at": "2026-11-08T17:32:16Z",
+      "title": "fix(ai): image routes double the version segment — BFL, Replicate and Stability baseURLs ending in /v1 or /v2beta post to /v1/v1/... and /v2beta/v2beta/...",
+      "state_reason": null
+    },
+    {
+      "number": 2110,
+      "closed_at": "2026-11-08T16:59:21Z",
+      "title": "fix(ai): quota model maps drop a model named __proto__ — plain-object assignment keyed by payload model names (claude scoped windows, antigravity models)",
+      "state_reason": null
+    },
+    {
+      "number": 2111,
+      "closed_at": "2026-11-08T16:50:38Z",
+      "title": "fix(ai): antigravity quota parseBucket drops DAILY buckets — the 'daily' window spelling is no longer recognized after #1837",
+      "state_reason": null
+    },
+    {
+      "number": 1959,
+      "closed_at": "2026-11-08T16:44:36Z",
+      "title": "fix(ai): media routes double the version segment — Deepgram, ElevenLabs and AssemblyAI baseURLs ending in /v1 or /v2 post to /v1/v1/... and /v2/v2/...",
+      "state_reason": null
+    },
+    {
+      "number": 2113,
+      "closed_at": "2026-11-08T16:22:05Z",
+      "title": "fix(core): SessionStep.failureHint emits quotaResetAtMs present-but-undefined when a quota error states no reset",
+      "state_reason": null
+    },
+    {
+      "number": 2102,
+      "closed_at": "2026-11-08T16:14:13Z",
+      "title": "fix(ai): shared quota toNumber reinterprets hex/binary/octal/exponent strings — \"0x64\" publishes as 100, \"1e2\" as a spent claude window",
+      "state_reason": null
+    },
+    {
+      "number": 2096,
+      "closed_at": "2026-11-08T16:06:01Z",
+      "title": "fix(core): quota-reset relative grammar has no week unit — 'resets in 1 week' reads as no reset, and compounds silently drop the week",
+      "state_reason": null
+    },
+    {
+      "number": 1973,
+      "closed_at": "2026-11-08T16:00:29Z",
+      "title": "fix(core): truncations outside messaging still split surrogate pairs — session title, codemode catalog, embedding clip, LLM input excerpt, route-log body, ripgrep match text",
+      "state_reason": null
+    },
+    {
+      "number": 2095,
+      "closed_at": "2026-11-08T15:58:05Z",
+      "title": "stale-pr: resolve opencode#1726 — conflicted (dirty) and duplicated in flight: its #1725 quota-parser work was re-enqueued as task 12745, and two current-main test pins contradict it",
+      "state_reason": null
+    },
+    {
+      "number": 1948,
+      "closed_at": "2026-11-08T14:56:55Z",
+      "title": "fix(ai): commandcode protocol sends the server cwd path and top-level directory listing to api.commandcode.ai on every generate call — disposition the disclosure and minimize",
+      "state_reason": null
+    },
+    {
+      "number": 2129,
+      "closed_at": "2026-11-08T13:46:54Z",
+      "title": "fix(ai): deepseek quota drops a zero balance in a third currency — the zero fallback chain has no third-currency step, so a drained EUR/GBP account errors as no-data instead of publishing 0.00",
+      "state_reason": null
+    },
+    {
+      "number": 1946,
+      "closed_at": "2026-11-08T13:29:08Z",
+      "title": "fix(ai): commandcode threadId is silently dropped when non-UUID and permissionMode is unvalidated — both untested (#1749)",
+      "state_reason": null
+    },
+    {
+      "number": 1818,
+      "closed_at": "2026-11-08T12:52:11Z",
+      "title": "claude-code provider: no OAuth renewal — emulation depends on the real CLI keeping ~/.claude/.credentials.json fresh",
+      "state_reason": null
+    },
+    {
+      "number": 1943,
+      "closed_at": "2026-11-08T12:31:37Z",
+      "title": "test(ai): quota figure contract — figure inventory + shared figure probe matrix for the 13 quota providers (design #1942, phase 1)",
+      "state_reason": null
+    },
+    {
+      "number": 1928,
+      "closed_at": "2026-11-08T12:25:37Z",
+      "title": "fix(ai): deepseek quota publishes a negative balance — the no-positive fallback bypasses its own >0 filter, so a negative-only payload returns \"$-5.00\" with ok:true",
+      "state_reason": null
+    },
+    {
+      "number": 1941,
+      "closed_at": "2026-11-08T12:22:41Z",
+      "title": "fix(ai): antigravity quota publishes integer-quantized percents — 99.9% used reads as 100% / 0% remaining, 0.1% used reads as 0%",
+      "state_reason": null
+    },
+    {
+      "number": 1932,
+      "closed_at": "2026-11-08T12:20:57Z",
+      "title": "fix(core): custom-tool override order is lexicographic by file path, not config priority — a project tool can lose to a global tool of the same name (#1748)",
+      "state_reason": null
+    },
+    {
+      "number": 1924,
+      "closed_at": "2026-11-08T12:18:41Z",
+      "title": "fix(ai): codex quota credits publishes a negative balance — \"-5\" as the credits_balance label, and a negative-only payload still returns ok:true",
+      "state_reason": null
+    },
+    {
+      "number": 1885,
+      "closed_at": "2026-11-08T10:55:23Z",
+      "title": "feat: API launch mode that disables the `question` tool entirely for detached / non-interactive sessions",
+      "state_reason": null
+    },
+    {
+      "number": 1867,
+      "closed_at": "2026-11-08T10:48:10Z",
+      "title": "fix(ai): vibe parseDotEnv keeps the quotes on a quoted value carrying a trailing comment — the resolved key is sent with literal quotes",
+      "state_reason": null
+    },
+    {
+      "number": 2039,
+      "closed_at": "2026-11-08T10:23:47Z",
+      "title": "muse-direct: classify the account-token (portal-cookie) renewal class against emulation rule 3 (#1717)",
+      "state_reason": null
+    },
+    {
+      "number": 1934,
+      "closed_at": "2026-11-08T10:20:56Z",
+      "title": "test(ai): quota.test.ts describes for #1744/#1746/#1821 are nested inside the #1741 describe (from PR #1745)",
+      "state_reason": null
+    },
+    {
+      "number": 1970,
+      "closed_at": "2026-11-08T10:19:45Z",
+      "title": "fix(core): messaging.ts truncations split surrogate pairs at five cuts — delivered body, preview, toast, firstLine and rerank text lack the #1966 guard",
+      "state_reason": null
+    },
+    {
+      "number": 1834,
+      "closed_at": "2026-11-08T10:15:20Z",
+      "title": "Wire identity fidelity: direct providers must present their binary's User-Agent",
+      "state_reason": null
+    },
+    {
+      "number": 1689,
+      "closed_at": "2026-11-08T10:12:33Z",
+      "title": "Embeddings step 4 (#1554): retire the :18752 sidecar — remove HTTP backend path, service, and stale docs",
+      "state_reason": null
+    },
+    {
+      "number": 2103,
+      "closed_at": "2026-11-08T09:55:14Z",
+      "title": "fix(ai): quota resetAfterFormatted always duplicates resetAtFormatted — the relative formatted field never carries a duration",
+      "state_reason": null
+    },
+    {
+      "number": 1974,
+      "closed_at": "2026-11-08T09:53:50Z",
+      "title": "fix(core): quota gates never re-admit after a window roll — attempt-reported skip 'until' outlives its period (opendesign dark 33h)",
+      "state_reason": null
+    },
+    {
+      "number": 1933,
+      "closed_at": "2026-11-08T09:53:00Z",
+      "title": "test(ai): fidelity corpus still marks the moonshot prefixItems-with-items row known-lossy against closed #1574 — the post-#1647 fold has no live tracking (from PR #1723)",
+      "state_reason": null
+    },
+    {
+      "number": 1926,
+      "closed_at": "2026-11-08T09:48:30Z",
+      "title": "fix(ai): antigravity convertSchema merges a multi-valued type union into the node's own anyOf/oneOf — conjunction becomes disjunction (constraints dropped on Gemini, valid calls rejected on Anthropic)",
+      "state_reason": null
+    },
+    {
+      "number": 1759,
+      "closed_at": "2026-11-08T09:38:51Z",
+      "title": "fix(ci): check:workflows never validates job-level permissions content — caller jobs bypass the #1503 policy entirely, excepted jobs unchecked",
+      "state_reason": null
+    },
+    {
+      "number": 1777,
+      "closed_at": "2026-11-08T09:17:10Z",
+      "title": "fix(ai): meta quota rolling window keyed only by derived label — a weekly-length rolling window is silently overwritten by the weekly window",
+      "state_reason": null
+    },
+    {
+      "number": 1758,
+      "closed_at": "2026-11-08T09:12:36Z",
+      "title": "fix(ci): gate drift guard walks only packages/ and services/ — sdks/vscode/src, github/script and sdks/vscode/script already escape all three allowlist gates",
+      "state_reason": null
+    },
+    {
+      "number": 1725,
+      "closed_at": "2026-11-08T09:09:43Z",
+      "title": "test(ai): PR #1722's quota suite pins 4 of its pure parsers — opencode-go's three parsers and openrouter's reset math have none, and opencode-go silently drops windows its siblings would keep",
+      "state_reason": null
+    },
+    {
+      "number": 1879,
+      "closed_at": "2026-11-08T08:40:11Z",
+      "title": "fix(ai): opendesign quota parseCodingPlanWindows publishes out-of-range remaining raw — \"-50 / 100 credits\" at 100% used, \"150 / 100 credits\" at 0% used",
+      "state_reason": null
+    },
+    {
+      "number": 1550,
+      "closed_at": "2026-11-08T08:07:00Z",
+      "title": "Antigravity door: Claude leaf (claude-sonnet-5-5) 400s on workhorse attempts, Anthropic-shaped error",
+      "state_reason": null
+    },
+    {
+      "number": 1506,
+      "closed_at": "2026-11-08T08:03:02Z",
+      "title": "fix(ci): check:numeric-boundaries collector still builds hit paths with OS separators — #1286's POSIX fix missed the third gate, so the gate fails on Windows",
+      "state_reason": null
+    },
+    {
+      "number": 1261,
+      "closed_at": "2026-11-01T16:33:13Z",
+      "title": "Preserved branch: queue/3563-906-media-type-proto — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1263,
+      "closed_at": "2026-11-01T16:32:44Z",
+      "title": "Preserved branch: queue/3635-924-atomic-overrides — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1294,
+      "closed_at": "2026-11-01T15:39:01Z",
+      "title": "fix(ci): check:numeric-boundaries scans core/ai/cli only — packages/server's client-supplied conversions escape the regression net",
+      "state_reason": null
+    },
+    {
+      "number": 1291,
+      "closed_at": "2026-11-01T15:37:12Z",
+      "title": "mcp add: config temp file is not created exclusively (writeFile without the wx flag)",
+      "state_reason": null
+    },
+    {
+      "number": 1281,
+      "closed_at": "2026-11-01T15:21:51Z",
+      "title": "fix(gui-extensions): primary SSH remote download (stageBinary) has no size cap — curl/wget bound time only, unlike the fallback's 256 MiB cap (#1011)",
+      "state_reason": null
+    },
+    {
+      "number": 1286,
+      "closed_at": "2026-11-01T14:39:09Z",
+      "title": "fix(script): regression-gate collectors build repo-relative paths with OS separators — bounded-http services test fails on Windows CI",
+      "state_reason": null
+    },
+    {
+      "number": 1285,
+      "closed_at": "2026-11-01T14:38:21Z",
+      "title": "test(core): deterministic per-field guard that every config schema field survives normalization — the Arbitrary round-trip missed the provider_routes drop",
+      "state_reason": null
+    },
+    {
+      "number": 1275,
+      "closed_at": "2026-11-01T14:24:50Z",
+      "title": "fix(script): release version resolution fetches the npm registry latest doc with no timeout and an unbounded res.json() read — a stalled registry hangs every latest-channel build/publish",
+      "state_reason": null
+    },
+    {
+      "number": 1284,
+      "closed_at": "2026-11-01T14:16:24Z",
+      "title": "provider_routes: group never candidated after config collapse — GPT pair invisible past health-expiry under the group shape; explicit routes serve immediately (rollback evidence, #1134)",
+      "state_reason": null
+    },
+    {
+      "number": 1283,
+      "closed_at": "2026-11-01T13:48:57Z",
+      "title": "fix(ci): check:bounded-http gate is red on main — install.astro allowlist entry went stale when the #1246 fix changed the fetch line",
+      "state_reason": null
+    },
+    {
+      "number": 1282,
+      "closed_at": "2026-11-01T13:47:56Z",
+      "title": "fix(ci): check:proto-reads gate is red on main since #1277 — two unlisted model-route.ts reads and one stale allowlist entry",
+      "state_reason": null
+    },
+    {
+      "number": 995,
+      "closed_at": "2026-11-01T13:39:39Z",
+      "title": "ci(core): check:numeric-boundaries regression net for bare string→number conversions (design #992, phase 3)",
+      "state_reason": null
+    },
+    {
+      "number": 1265,
+      "closed_at": "2026-11-01T13:29:53Z",
+      "title": "Preserved branch: queue/3701-931-doc-env-vars — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1266,
+      "closed_at": "2026-11-01T13:29:28Z",
+      "title": "Preserved branch: queue/3711-933-quota-reset-ceiling — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1267,
+      "closed_at": "2026-11-01T13:29:04Z",
+      "title": "Preserved branch: queue/3730-935-session-list-default — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1268,
+      "closed_at": "2026-11-01T13:28:41Z",
+      "title": "Preserved branch: queue/3739-937-latex-proto-guards — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1276,
+      "closed_at": "2026-11-01T13:28:31Z",
+      "title": "fix(cli): Node build download fetches have no timeout — a stalled nodejs.org hangs build-node forever (integrity is checked, the deadline is not; #1159 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1269,
+      "closed_at": "2026-11-01T13:28:16Z",
+      "title": "Preserved branch: queue/3757-941-poll-interval-ceiling — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1256,
+      "closed_at": "2026-11-01T13:23:47Z",
+      "title": "fix(ci): check:bounded-http scans only packages/*/src — services/ outbound fetches escape the regression net entirely",
+      "state_reason": null
+    },
+    {
+      "number": 1181,
+      "closed_at": "2026-11-01T13:20:07Z",
+      "title": "fix(web): share page og:image model parameter is 'undefined & -1 others' when the session has no recorded model",
+      "state_reason": null
+    },
+    {
+      "number": 1203,
+      "closed_at": "2026-11-01T13:08:13Z",
+      "title": "Unpreserved local rescue: queue/3041-631-subagent-ancestor worktree WIP — server pre-receive hook declines push",
+      "state_reason": null
+    },
+    {
+      "number": 1246,
+      "closed_at": "2026-11-01T12:26:16Z",
+      "title": "fix(www): /install proxy fetch has no deadline — a stalled upstream hangs the install-script route indefinitely",
+      "state_reason": null
+    },
+    {
+      "number": 1250,
+      "closed_at": "2026-11-01T11:49:42Z",
+      "title": "fix(changelog): changelog worker refresh reads the upstream body unbounded — the 5s deadline bounds duration, not bytes",
+      "state_reason": null
+    },
+    {
+      "number": 993,
+      "closed_at": "2026-11-01T11:39:31Z",
+      "title": "feat(core): shared numeric normalisation primitives in util/number.ts + paging migration (design #992, phase 1)",
+      "state_reason": null
+    },
+    {
+      "number": 1186,
+      "closed_at": "2026-11-01T11:30:34Z",
+      "title": "fix(console): inference proxy fetch has no deadline — a stalled inference backend hangs every Zen/Go route instead of settling as 503",
+      "state_reason": null
+    },
+    {
+      "number": 1188,
+      "closed_at": "2026-11-01T10:46:13Z",
+      "title": "fix(ci): check:bounded-http gate is red on main — allowlist drifted from api.ts after the #1144 timeout fix (4 stale, 7 unlisted)",
+      "state_reason": null
+    },
+    {
+      "number": 1173,
+      "closed_at": "2026-11-01T10:43:26Z",
+      "title": "Preserved branch: ci-baseline-check — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1172,
+      "closed_at": "2026-11-01T10:27:31Z",
+      "title": "Preserved branch: creator/235-roadmap-done-229-232 — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1171,
+      "closed_at": "2026-11-01T10:27:28Z",
+      "title": "Preserved branch: creator/470-roadmap-465 — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1170,
+      "closed_at": "2026-11-01T10:27:25Z",
+      "title": "Preserved branch: creator/217-roadmap-done — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1184,
+      "closed_at": "2026-11-01T09:42:28Z",
+      "title": "fix(ci): branch-cleanup workflow job has no timeout-minutes — the one runnable job that regressed #61's cap rule",
+      "state_reason": null
+    },
+    {
+      "number": 1179,
+      "closed_at": "2026-11-01T09:37:10Z",
+      "title": "fix(web): public share page fetches share_data with no timeout and reads its JSON unbounded — a stalled API hangs the Astro render, an oversized body buffers whole in the web server",
+      "state_reason": null
+    },
+    {
+      "number": 1168,
+      "closed_at": "2026-11-01T09:29:49Z",
+      "title": "fix(core): models-snapshot refresh script fetches api.json with no timeout and no body cap — response.text() unbounded, body written straight into the committed snapshot",
+      "state_reason": null
+    },
+    {
+      "number": 1107,
+      "closed_at": "2026-11-01T09:24:34Z",
+      "title": "model-governance: agentDefinitions skips non-document entries — Markdown-defined agents escape governance resolution (PR #468 Codex P1 unaddressed)",
+      "state_reason": null
+    },
+    {
+      "number": 1158,
+      "closed_at": "2026-11-01T09:14:25Z",
+      "title": "fix(console): console-account CRM lookup reads its JSON body unbounded — 3s timeout bounds duration, not bytes (response.json() with no cap)",
+      "state_reason": null
+    },
+    {
+      "number": 1167,
+      "closed_at": "2026-11-01T09:06:19Z",
+      "title": "fix(cli): session import's server POST has no timeout and reads its response unbounded — remote leg is bounded (#1115), the server leg in the same handler is not",
+      "state_reason": null
+    },
+    {
+      "number": 1174,
+      "closed_at": "2026-11-01T07:35:04Z",
+      "title": "Preserved branch: sweep/61-workflow-timeouts — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1176,
+      "closed_at": "2026-11-01T07:34:19Z",
+      "title": "Preserved branch: rescue/1146-quota-keywords-local-2026-11-01 — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1175,
+      "closed_at": "2026-11-01T07:33:49Z",
+      "title": "Preserved branch: sweep/63-runscript-windows — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1169,
+      "closed_at": "2026-11-01T07:33:15Z",
+      "title": "Preserved branch: creator/269-wsl-probe-banner — decision needed (merge / cherry-pick / drop)",
+      "state_reason": null
+    },
+    {
+      "number": 1129,
+      "closed_at": "2026-11-01T06:56:43Z",
+      "title": "ci: check:bounded-http regression net for unbounded outbound calls (design #1127, phase 3)",
+      "state_reason": null
+    },
+    {
+      "number": 1119,
+      "closed_at": "2026-11-01T06:16:48Z",
+      "title": "auth: guard credential activation against method/backend mismatch (token-sharing credential with a Codex-flow token fails as opaque 401)",
+      "state_reason": null
+    },
+    {
+      "number": 1143,
+      "closed_at": "2026-11-01T05:53:25Z",
+      "title": "fix(console): SES sendEmail fetch has no timeout — a stalled SES endpoint pins the whole enterprise-form request",
+      "state_reason": null
+    },
+    {
+      "number": 1144,
+      "closed_at": "2026-11-01T04:56:08Z",
+      "title": "fix(cli): opencode api fetches have no timeout — a stalled --server hangs the CLI forever (#987 covers body size, not deadlines)",
+      "state_reason": null
+    },
+    {
+      "number": 1111,
+      "closed_at": "2026-11-01T04:33:50Z",
+      "title": "fix(console,stats): EmailOctopus subscribe fetches have no timeout — enterprise error path also reads the body unbounded via res.text()",
+      "state_reason": null
+    },
+    {
+      "number": 1141,
+      "closed_at": "2026-11-01T04:29:48Z",
+      "title": "feat(routes): experimental.model_route_settings — route machinery constants as config, defaulted to current values",
+      "state_reason": null
+    },
+    {
+      "number": 1132,
+      "closed_at": "2026-11-01T04:03:36Z",
+      "title": "feat(routes): provider routes — provider-level pools with ordered/round-robin/weighted selection",
+      "state_reason": null
+    },
+    {
+      "number": 1137,
+      "closed_at": "2026-11-01T03:49:30Z",
+      "title": "fix(core): ripgrep archive download has no integrity check — a version-pinned executable is extracted and run with no sha256 pin, unlike the embedding downloads",
+      "state_reason": null
+    },
+    {
+      "number": 1128,
+      "closed_at": "2026-11-01T03:06:38Z",
+      "title": "feat(util,core): shared bounded-call pair in @opencode/util — bounded + excerpt readers, deadline composition (design #1127, phase 1)",
+      "state_reason": null
+    },
+    {
+      "number": 1126,
+      "closed_at": "2026-11-01T02:56:02Z",
+      "title": "fix(console): Honeycomb webhook Discord relay fetch has no timeout — a stalled Discord endpoint hangs alert delivery forever",
+      "state_reason": null
+    },
+    {
+      "number": 1125,
+      "closed_at": "2026-11-01T02:44:00Z",
+      "title": "fix(core): skill pull publishes an incomplete skill — unversioned branch discards download failures (PR #926)",
+      "state_reason": null
+    },
+    {
+      "number": 1110,
+      "closed_at": "2026-11-01T02:36:40Z",
+      "title": "fix(console): docs, share and enterprise proxy routes fetch upstream with no timeout — a stalled upstream hangs the console request forever",
+      "state_reason": null
+    },
+    {
+      "number": 923,
+      "closed_at": "2026-11-01T02:26:21Z",
+      "title": "fix(core,ai): four download paths buffer whole response bodies with no size cap — media assets, skill files, the ripgrep archive and CodeMode fetch",
+      "state_reason": null
+    },
+    {
+      "number": 1116,
+      "closed_at": "2026-11-01T02:04:48Z",
+      "title": "fix(core): restart restore of stored attempt quota snapshots ignores credential_id — one credential's snapshot is restored target-wide (#1113 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1122,
+      "closed_at": "2026-11-01T02:02:00Z",
+      "title": "feat(routes): round-robin weights as priority tiers — rotate within a tier, fall through when it is exhausted",
+      "state_reason": null
+    },
+    {
+      "number": 1115,
+      "closed_at": "2026-11-01T01:56:30Z",
+      "title": "fix(cli): session import remote fetch has no timeout — a stalled or slow-dripping source hangs the import forever (#942 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1010,
+      "closed_at": "2026-11-01T01:35:59Z",
+      "title": "fix(core): SessionStore.list passes its limit to drizzle untouched — the store-boundary normalisation #983 gave messages never covered list",
+      "state_reason": null
+    },
+    {
+      "number": 1114,
+      "closed_at": "2026-11-01T01:29:44Z",
+      "title": "fix(function): Discord support-relay fetch has no timeout — error path reads the body unbounded via response.text()",
+      "state_reason": null
+    },
+    {
+      "number": 1104,
+      "closed_at": "2026-11-01T01:25:05Z",
+      "title": "fix(console): stats proxy fetches upstream with no timeout and buffers whole HTML bodies unbounded — response.text() on the rewrite path has no byte cap",
+      "state_reason": null
+    },
+    {
+      "number": 1109,
+      "closed_at": "2026-11-01T01:23:00Z",
+      "title": "Consolidate: PR #940 is superseded by merged #954 — close or rebase to its live test only, and resolve #935",
+      "state_reason": null
+    },
+    {
+      "number": 1006,
+      "closed_at": "2026-11-01T01:18:25Z",
+      "title": "fix(gui-extensions): SSH bootstrap fallback downloads the CLI archive with response.arrayBuffer — no size cap, no timeout",
+      "state_reason": null
+    },
+    {
+      "number": 957,
+      "closed_at": "2026-11-01T00:38:09Z",
+      "title": "fix(core): Messaging log chars and grep context are never validated — NaN chars replaces entry text with a garbage marker, fractional context defects the read",
+      "state_reason": null
+    },
+    {
+      "number": 935,
+      "closed_at": "2026-11-01T00:17:54Z",
+      "title": "fix(core): plugin session.list has no default page size — a no-limit call returns every session, not the documented newest 50 (PR #766)",
+      "state_reason": null
+    },
+    {
+      "number": 942,
+      "closed_at": "2026-11-01T00:10:18Z",
+      "title": "fix(cli): session import buffers a remote URL's whole body with no size cap — session import https://… reads response.text() unbounded before any validation",
+      "state_reason": null
+    },
+    {
+      "number": 1106,
+      "closed_at": "2026-10-31T23:57:45Z",
+      "title": "model-resolver: quota usage is summed provider-wide and assigned to the active credential — multi-credential providers misattribute usage (PR #1028 Codex P1 unaddressed)",
+      "state_reason": null
+    },
+    {
+      "number": 1103,
+      "closed_at": "2026-10-31T21:22:02Z",
+      "title": "feat(core): config changes should auto-apply to a running server — no reload, no restart",
+      "state_reason": null
+    },
+    {
+      "number": 1100,
+      "closed_at": "2026-10-31T20:30:32Z",
+      "title": "fix(ai): native-route executor reads provider error bodies unbounded — response.text in statusError buffers the whole body and stores it whole on the error, though the message uses only 2,000 chars",
+      "state_reason": null
+    },
+    {
+      "number": 1085,
+      "closed_at": "2026-10-31T20:08:16Z",
+      "title": "fix(core): AISDK toolNames reads through the prototype chain — a provider tool id of \"constructor\" yields the Object function as the tool name",
+      "state_reason": null
+    },
+    {
+      "number": 1090,
+      "closed_at": "2026-10-31T19:38:10Z",
+      "title": "fix(console,stats): GitHub metadata queries have no timeout and no body cap — console lib/github.ts and stats getGitHubStars hang past their own fallbacks when GitHub stalls",
+      "state_reason": null
+    },
+    {
+      "number": 1071,
+      "closed_at": "2026-10-31T19:36:16Z",
+      "title": "fix(core): custom embedding model downloads have no size bound at all — the custom-URL shape carries neither sha256 nor size, so download() streams unbounded to disk (#929 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1089,
+      "closed_at": "2026-10-31T19:30:15Z",
+      "title": "fix(console): download redirect route fetches update-API metadata with no timeout and no body cap — a stalled response hangs /download and release.json() buffers unbounded",
+      "state_reason": null
+    },
+    {
+      "number": 1083,
+      "closed_at": "2026-10-31T18:52:22Z",
+      "title": "fix(console): console changelog loader fetches GitHub releases with no timeout and no body cap — a stalled response hangs the page and /changelog.json instead of serving the empty fallback",
+      "state_reason": null
+    },
+    {
+      "number": 1086,
+      "closed_at": "2026-10-31T18:49:55Z",
+      "title": "fix(ci): check:proto-reads gate misses computed-key reads and lets one allowlist entry cover duplicate lines",
+      "state_reason": null
+    },
+    {
+      "number": 1082,
+      "closed_at": "2026-10-31T18:40:32Z",
+      "title": "fix(stats): stats catalog fetches are unbounded in time and size — app model-catalog uses bare fetch with no timeout or cap, stats-core catalog-identity bounds time only",
+      "state_reason": null
+    },
+    {
+      "number": 1088,
+      "closed_at": "2026-10-31T18:34:58Z",
+      "title": "docs: ROADMAP Areas index still advertises PR #890s landed items and links a dead #plugin-api anchor",
+      "state_reason": null
+    },
+    {
+      "number": 1079,
+      "closed_at": "2026-10-31T16:23:35Z",
+      "title": "fix(core): MessagingEmbedding.request reads both response bodies unbounded — error text buffered whole to use 500 chars, success body via schemaBodyJson with no cap (#1029 pattern, uncovered surface)",
+      "state_reason": null
+    },
+    {
+      "number": 1073,
+      "closed_at": "2026-10-31T13:11:57Z",
+      "title": "fix(cli): config migration writer renames over symlinks and always resets mode to 0600 — the one writer of cli.json that #1067/#1070 missed",
+      "state_reason": null
+    },
+    {
+      "number": 1067,
+      "closed_at": "2026-10-31T12:06:23Z",
+      "title": "fix(cli): service-config and cli-config writers still use a shared .tmp name and rename over symlinks — service.json holds the service password, and its writer has no lock at all (#1056 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1068,
+      "closed_at": "2026-10-31T11:09:27Z",
+      "title": "test(core): the canonical bounded-body helpers in tool/http-body.ts have no tests — 15 call sites depend on them, and every layering copy is tested except this one",
+      "state_reason": null
+    },
+    {
+      "number": 1063,
+      "closed_at": "2026-10-31T10:22:04Z",
+      "title": "test(gui-extensions): the whats-new changelog size cap (#1061) has no regression test — its bounded reader is private, unlike both tested siblings",
+      "state_reason": null
+    },
+    {
+      "number": 1065,
+      "closed_at": "2026-10-31T10:01:58Z",
+      "title": "fix(cli,tui): numeric form defaults in exponent notation (1e-7, 1e21) cannot be confirmed — pre-fill renders String(default), which PR #846's strict grammar rejects",
+      "state_reason": null
+    },
+    {
+      "number": 1061,
+      "closed_at": "2026-10-31T08:09:48Z",
+      "title": "fix(ui,gui-extensions): two renderer remote-JSON fetches buffer the whole body — whats-new changelog and theme loader read response.json() with no size cap",
+      "state_reason": null
+    },
+    {
+      "number": 1059,
+      "closed_at": "2026-10-31T07:11:55Z",
+      "title": "docs(web): route-window docs omit the #821 date fields — dates, excludeDates and excludeWindows are undiscoverable",
+      "state_reason": null
+    },
+    {
+      "number": 1055,
+      "closed_at": "2026-10-31T06:28:39Z",
+      "title": "feat(core): route_health has no credential column — per-credential health persists only as free-text reason that restart replay regex-parses (#854 follow-up)",
+      "state_reason": null
+    },
+    {
+      "number": 1056,
+      "closed_at": "2026-10-31T05:48:10Z",
+      "title": "fix(cli): plugin add/remove config writers break symlinked configs, collide on a shared .tmp name, and widen read-only permissions — unlike mcp add",
+      "state_reason": null
+    },
+    {
+      "number": 1053,
+      "closed_at": "2026-10-31T05:28:51Z",
+      "title": "fix(client): family sync drops its target snapshot when the covering plain sync fails — the family key still completes, so the stale snapshot sticks (the #1051 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1051,
+      "closed_at": "2026-10-31T03:50:43Z",
+      "title": "fix(client): family sync publishes its own target's snapshot unconditionally — a newer snapshot that arrived during the ancestor walk is overwritten (the #1038 residual)",
+      "state_reason": null
+    },
+    {
+      "number": 1040,
+      "closed_at": "2026-10-31T03:15:43Z",
+      "title": "test(tui): two direct-footer tests skipped since 2026-10-17 — one passes today, the other fails on the composer frame lookup; the stated OpenTUI crash does not reproduce",
+      "state_reason": null
+    },
+    {
+      "number": 1034,
+      "closed_at": "2026-10-31T02:52:45Z",
+      "title": "fix(core): networkSuspect cooldown undo leaves consecutiveFailures incremented, so the next failure after an outage gets a doubled bench",
+      "state_reason": null
+    },
+    {
+      "number": 1038,
+      "closed_at": "2026-10-31T02:49:36Z",
+      "title": "fix(client): family sync publishes ancestor snapshots unconditionally, overwriting newer store state that arrived during the walk",
+      "state_reason": null
+    },
+    {
+      "number": 1035,
+      "closed_at": "2026-10-31T02:23:12Z",
+      "title": "fix(ci): release-github-action manual dispatches lost serialization in #827 — two dispatches can run concurrently and compute the same next version",
+      "state_reason": null
+    },
+    {
+      "number": 1039,
+      "closed_at": "2026-10-31T02:14:29Z",
+      "title": "fix(client): an ancestor walk that fails partway is cached as a complete family sync, so the missing ancestor is never retried",
+      "state_reason": null
+    },
+    {
+      "number": 1037,
+      "closed_at": "2026-10-31T02:05:21Z",
+      "title": "fix(ci): main-broken watcher lookup-then-create is unserialized — simultaneous failures with the same Breakage-ID can file duplicate issues",
+      "state_reason": null
+    },
+    {
+      "number": 1036,
+      "closed_at": "2026-10-31T01:58:08Z",
+      "title": "fix(ci): main-broken watcher accepts failed fork-PR runs whose head branch is named main — files main-broken for a healthy main",
+      "state_reason": null
+    },
+    {
+      "number": 1033,
+      "closed_at": "2026-10-31T01:53:30Z",
+      "title": "fix(core): route_usage burn-rate samples duplicate a session's window share per pool target and mix distinct quota windows into one bucket",
+      "state_reason": null
+    },
+    {
+      "number": 1031,
+      "closed_at": "2026-10-31T01:34:56Z",
+      "title": "fix(cli): updater release check buffers the whole response body — response.json() with no size cap in Updater.release",
+      "state_reason": null
+    },
+    {
+      "number": 1026,
+      "closed_at": "2026-10-31T01:23:22Z",
+      "title": "fix(core): provider OAuth token/device/discovery responses are read unbounded — response.json()/text() with no size cap in the chatgpt/openai/copilot/xai auth helpers",
+      "state_reason": null
+    },
+    {
+      "number": 1025,
+      "closed_at": "2026-10-31T01:02:44Z",
+      "title": "fix(core): remote instruction URLs are fetched with no body size cap — response.text buffers the whole body into model context",
+      "state_reason": null
+    },
+    {
+      "number": 984,
+      "closed_at": "2026-10-30T23:59:35Z",
+      "title": "router: auto-disable providers at 100% quota until a fresh read shows headroom (cline-pass, commandcode, go)",
+      "state_reason": null
+    },
+    {
+      "number": 1018,
+      "closed_at": "2026-10-30T23:42:26Z",
+      "title": "fix(client): service probe buffers the whole /api/info body unbounded — response.json() with no size cap in service-probe",
+      "state_reason": null
+    },
+    {
+      "number": 1023,
+      "closed_at": "2026-10-30T23:30:37Z",
+      "title": "fix(core): mcpx daemon client has no timeout and no response-body cap — a hung daemon hangs the tool call forever, oversized bodies buffer whole",
+      "state_reason": null
+    },
+    {
+      "number": 1019,
+      "closed_at": "2026-10-30T22:36:54Z",
+      "title": "fix(core): MCP OAuth configured discovery fetches the metadata document with no timeout and no body size cap",
+      "state_reason": null
+    },
+    {
+      "number": 1017,
+      "closed_at": "2026-10-30T22:33:52Z",
+      "title": "fix(core): Copilot and Modal model-list loaders buffer the whole /models body unbounded — response.json() with no size cap",
+      "state_reason": null
+    },
+    {
+      "number": 1015,
+      "closed_at": "2026-10-30T21:00:43Z",
+      "title": "fix(client,httpapi-codegen): generated client's binary path buffers the whole response with response.arrayBuffer() — no cap, unlike its capped json() and SSE paths",
+      "state_reason": null
+    },
+    {
+      "number": 1009,
+      "closed_at": "2026-10-30T19:56:36Z",
+      "title": "fix(core): ReadToolFileSystem page offset/limit are never normalised — a negative or fractional offset dies with a schema defect, a negative limit returns a non-advancing page",
+      "state_reason": null
+    },
+    {
+      "number": 1007,
+      "closed_at": "2026-10-30T19:45:37Z",
+      "title": "fix(client,httpapi-codegen): generated client's json() buffers the whole response with response.text() — no cap, unlike the same client's 16 MiB SSE bound",
+      "state_reason": null
+    },
+    {
+      "number": 988,
+      "closed_at": "2026-10-30T13:14:35Z",
+      "title": "fix(cli): uninstall rewrites shell config files in place — a non-atomic truncation of the user's .bashrc/.zshrc",
+      "state_reason": null
+    },
+    {
+      "number": 985,
+      "closed_at": "2026-10-30T12:33:41Z",
+      "title": "router: antigravity-agy / antigravity-ls leaves are never selected by routes (silent zero-expansion)",
+      "state_reason": null
+    },
+    {
+      "number": 981,
+      "closed_at": "2026-10-30T12:26:16Z",
+      "title": "fix(core): SessionStore.messages limit is never validated at the service boundary — a negative or NaN limit returns every message, a fractional or infinite one defects the read",
+      "state_reason": null
+    },
+    {
+      "number": 980,
+      "closed_at": "2026-10-30T12:14:42Z",
+      "title": "fix(core): Session.diff context is never normalised — a negative, fractional or non-finite context reaches git --unified= raw and fails the whole turn diff",
+      "state_reason": null
+    },
+    {
+      "number": 977,
+      "closed_at": "2026-10-30T11:14:17Z",
+      "title": "fix(cli): mcp add writes the config file in place with default permissions — non-atomic, and a fresh secret-bearing config is created world-readable",
+      "state_reason": null
+    },
+    {
+      "number": 968,
+      "closed_at": "2026-10-30T11:02:11Z",
+      "title": "test(core): PR #781's node fs.watch directory fallback has no event-delivery test — only its failure path is covered",
+      "state_reason": null
+    },
+    {
+      "number": 960,
+      "closed_at": "2026-10-30T10:41:15Z",
+      "title": "fix(core): Copilot utilityTitle buffers the whole chat-completion response with no size cap — response.text() bounded only by a 20s timeout",
+      "state_reason": null
+    },
+    {
+      "number": 965,
+      "closed_at": "2026-10-30T10:37:32Z",
+      "title": "fix(core): Vcs.branches passes its limit to the provider untouched — invalid values silently return an empty branch list, limit 0 returns every branch",
+      "state_reason": null
+    },
+    {
+      "number": 959,
+      "closed_at": "2026-10-30T10:37:23Z",
+      "title": "fix(core): SessionStats range is never bounded — an ancient from or far-future to makes one stats request run millions of sequential window scans",
+      "state_reason": null
+    },
+    {
+      "number": 970,
+      "closed_at": "2026-10-30T10:30:10Z",
+      "title": "fix(ci): seven workflows can never run since #963 — cancel-in-progress: true combined with queue: max fails every run at startup",
+      "state_reason": null
+    },
+    {
+      "number": 969,
+      "closed_at": "2026-10-30T10:09:27Z",
+      "title": "fix(core): detached stop policy is not enforced on a direct interrupt — Session.interrupt stops the target regardless of policy, contradicting the docs (PR #768)",
+      "state_reason": null
+    },
+    {
+      "number": 972,
+      "closed_at": "2026-10-30T09:58:31Z",
+      "title": "fix(ai,core): provider HTTP timeouts have no upper bound — a value over ~24.8 days (or Infinity) makes setTimeout fire in ~1ms and breaks every request on the AISDK route",
+      "state_reason": null
+    },
+    {
+      "number": 964,
+      "closed_at": "2026-10-30T09:47:02Z",
+      "title": "fix(core): Shell.output paging is never validated at the service boundary — a negative or NaN limit defects the read, limit 0 returns a non-advancing empty page",
+      "state_reason": null
+    },
+    {
+      "number": 953,
+      "closed_at": "2026-10-30T09:11:26Z",
+      "title": "fix(core): Messaging offset is never validated — a negative offset makes log return the wrong end of the transcript and tail report more on an empty page",
+      "state_reason": null
+    },
+    {
+      "number": 951,
+      "closed_at": "2026-10-30T08:43:32Z",
+      "title": "fix(core): plugin session.list limit from PR #766 is never normalised — negative returns every session, fractional/NaN defects the store query",
+      "state_reason": null
+    },
+    {
+      "number": 952,
+      "closed_at": "2026-10-30T08:41:39Z",
+      "title": "feat(routing): show cache savings in route_usage — the #9 part-3 remainder",
+      "state_reason": null
+    },
+    {
+      "number": 947,
+      "closed_at": "2026-10-30T07:36:07Z",
+      "title": "fix(core): plugin vcs.diff context has no integer floor — a negative or fractional context fails the whole diff with a git usage error",
+      "state_reason": null
+    },
+    {
+      "number": 948,
+      "closed_at": "2026-10-30T07:33:01Z",
+      "title": "fix(core): Messaging limits are clamped only from above — a negative limit returns every row, a fractional one defects the read",
+      "state_reason": null
+    },
+    {
+      "number": 941,
+      "closed_at": "2026-10-30T06:09:42Z",
+      "title": "fix(core): OpenAI, OpenCode and xAI device poll intervals have no ceiling — a large server interval makes login expire before the next poll (the #915 class, in the three sibling flows #915 did not cover)",
+      "state_reason": null
+    },
+    {
+      "number": 945,
+      "closed_at": "2026-10-30T05:13:04Z",
+      "title": "fix(core): plugin vcs.branch.list has no default or ceiling — no-limit and limit:0 return every branch, fractional/negative limits fail the git call",
+      "state_reason": null
+    },
+    {
+      "number": 937,
+      "closed_at": "2026-10-30T04:03:40Z",
+      "title": "fix(latex): parser command tables read through the prototype chain — \"\\constructor{x}\" becomes an accent node holding the Object function",
+      "state_reason": null
+    },
+    {
+      "number": 933,
+      "closed_at": "2026-10-30T04:02:06Z",
+      "title": "fix(core): ModelRouteTuning.predict quota-reset has no ceiling — a year-9999 or 100000-day provider reset benches a target for centuries, and a larger one throws RangeError",
+      "state_reason": null
+    },
+    {
+      "number": 936,
+      "closed_at": "2026-10-30T03:41:22Z",
+      "title": "test(cli): the mini half of the stdin-read log (PR #767) has no test — the only regression test spawns run",
+      "state_reason": null
+    },
+    {
+      "number": 833,
+      "closed_at": "2026-10-30T01:34:51Z",
+      "title": "audit(core): prototype-chain dictionary lookups — systematic sweep, shared guard, regression net",
+      "state_reason": null
+    },
+    {
+      "number": 931,
+      "closed_at": "2026-10-30T01:29:42Z",
+      "title": "fix(ci): check:doc-env-vars scans only cli.mdx — dead OPENCODE_* rows on every other docs page pass CI",
+      "state_reason": null
+    },
+    {
+      "number": 929,
+      "closed_at": "2026-10-29T23:39:33Z",
+      "title": "fix(core): MessagingEmbedding.download has no in-flight size bound — oversized or endless body fills disk before finish() checks run",
+      "state_reason": null
+    },
+    {
+      "number": 927,
+      "closed_at": "2026-10-29T23:09:58Z",
+      "title": "fix(ai): ResponsesHostedTools.isItem reads through the prototype chain — an output item typed \"constructor\" kills the Responses stream with a TypeError defect",
+      "state_reason": null
+    }
+  ]
+}

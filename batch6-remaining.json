@@ -1,0 +1,277 @@
+{
+ "enumeration_total": 1021,
+ "prior_unique": 976,
+ "remaining_count": 45,
+ "items": [
+  {
+   "number": 1418,
+   "closed_at": "2026-11-09T02:03:13Z",
+   "title": "main CI failure: main-broken (run 41487561227)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 924,
+   "closed_at": "2026-10-29T21:39:50Z",
+   "title": "fix(core): route-overrides.json is written in place, not atomically \u2014 a crash or concurrent read mid-write silently drops every route override",
+   "state_reason": "completed"
+  },
+  {
+   "number": 917,
+   "closed_at": "2026-10-29T20:52:55Z",
+   "title": "fix(ai): speech finish-path tables read through the prototype chain \u2014 PCM_CODECS, HEADERLESS_ENCODINGS and SpeechStream media types",
+   "state_reason": "completed"
+  },
+  {
+   "number": 916,
+   "closed_at": "2026-10-29T20:52:33Z",
+   "title": "fix(ai): bedrock-media MIME tables read through the prototype chain \u2014 media type \"constructor\" bypasses the unsupported-type error",
+   "state_reason": "completed"
+  },
+  {
+   "number": 870,
+   "closed_at": "2026-10-29T20:46:41Z",
+   "title": "fix(routes): thread the credential dimension through restore, escalation, ranking, rate-limit holds and catalog headers (PR #854 follow-up)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 915,
+   "closed_at": "2026-10-29T20:40:35Z",
+   "title": "fix(core): Copilot device poll interval has no ceiling and slow_down can speed polling up \u2014 a large interval makes login expire before the first poll",
+   "state_reason": "completed"
+  },
+  {
+   "number": 913,
+   "closed_at": "2026-10-29T19:43:02Z",
+   "title": "fix(core): WebSearch cooldownMillis has no upper bound \u2014 a Retry-After of 999999999 sidelines a provider for ~31 years",
+   "state_reason": "completed"
+  },
+  {
+   "number": 906,
+   "closed_at": "2026-10-29T19:41:43Z",
+   "title": "fix(ai): media-type lookups read through the prototype chain \u2014 a \".constructor\" file or \"constructor\" media type returns the Object function instead of undefined",
+   "state_reason": "completed"
+  },
+  {
+   "number": 904,
+   "closed_at": "2026-10-29T19:41:27Z",
+   "title": "fix(core): ModelPlan.readNotes fractional limit in (0,1) returns every note \u2014 slice(-0.5) is slice(0), the #542 break between the guarded cases (PR #741)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 891,
+   "closed_at": "2026-10-29T19:28:52Z",
+   "title": "feat(routes): per-target context ceilings never filter live sessions \u2014 the runner never passes requestTokens to the resolver",
+   "state_reason": "completed"
+  },
+  {
+   "number": 907,
+   "closed_at": "2026-10-29T19:17:29Z",
+   "title": "fix(ai): speech format tables read through the prototype chain \u2014 format \"constructor\" bypasses the unsupported-format rejection in Deepgram, Cartesia and ElevenLabs",
+   "state_reason": "completed"
+  },
+  {
+   "number": 908,
+   "closed_at": "2026-10-29T18:52:28Z",
+   "title": "fix(ai): open-responses item-ID prefix reads through the prototype chain \u2014 an item typed \"constructor\" mints an ID containing the Object function source",
+   "state_reason": "completed"
+  },
+  {
+   "number": 900,
+   "closed_at": "2026-10-29T18:44:02Z",
+   "title": "fix(core): device-code expires_in has no upper bound \u2014 a millisecond-scale value polls the token endpoint for days (opencode + xAI)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 866,
+   "closed_at": "2026-10-29T18:42:00Z",
+   "title": "docs(web): document the experimental model_routes config family \u2014 routes, schedules, windows, tuning and log are schema-only",
+   "state_reason": "completed"
+  },
+  {
+   "number": 6,
+   "closed_at": "2026-10-29T18:13:50Z",
+   "title": "feat(routing): automatic multi-credential failover on 429 quota exhaustion via credential.activate",
+   "state_reason": "completed"
+  },
+  {
+   "number": 899,
+   "closed_at": "2026-10-29T17:32:26Z",
+   "title": "fix(core): DigitalOcean expires_in has no upper bound \u2014 a millisecond-scale value wedges the credential for weeks (companion to #892)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 892,
+   "closed_at": "2026-10-29T16:49:25Z",
+   "title": "fix(core): xAI and Poe expires_in guards have no upper bound \u2014 a millisecond-scale value disables refresh for weeks (companion to #879)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 896,
+   "closed_at": "2026-10-29T16:25:56Z",
+   "title": "fix(ci): check:proto-reads fails on main \u2014 variant.ts guarded read is unlisted and its pre-#878 allowlist entry is stale",
+   "state_reason": "completed"
+  },
+  {
+   "number": 869,
+   "closed_at": "2026-10-29T16:05:25Z",
+   "title": "fix(routes): door-set governance variant remaps + retarget across concrete doors (PR #810 follow-up)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 865,
+   "closed_at": "2026-10-29T15:26:02Z",
+   "title": "audit(core): shared own-property guard + regression net for prototype-chain dictionary reads (#833 follow-up)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 839,
+   "closed_at": "2026-10-29T15:22:45Z",
+   "title": "fix(codemode): std.pick reads through the prototype chain \u2014 picking \"toString\" or \"constructor\" from {} fabricates the key with the inherited function",
+   "state_reason": "completed"
+  },
+  {
+   "number": 879,
+   "closed_at": "2026-10-29T15:10:20Z",
+   "title": "fix(core): OAuth expires_in stored unvalidated in five providers \u2014 negative makes a born-expired credential, an oversized value disables refresh for weeks",
+   "state_reason": "completed"
+  },
+  {
+   "number": 889,
+   "closed_at": "2026-10-29T15:06:57Z",
+   "title": "fix(core): governance pruning of requested-variant leaves can bypass subagent exclusions for retarget-added leaves (Codex P1 on #871)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 880,
+   "closed_at": "2026-10-29T14:56:09Z",
+   "title": "fix(core): opencode device-code poll trusts the server interval with no floor \u2014 interval 0 or negative busy-polls the token endpoint for the full 10-minute attempt window",
+   "state_reason": "completed"
+  },
+  {
+   "number": 862,
+   "closed_at": "2026-10-29T14:45:26Z",
+   "title": "fix(core): Variant PROTOCOLS table reads through the prototype chain \u2014 a model package named \"constructor\" resolves to the Object function",
+   "state_reason": "completed"
+  },
+  {
+   "number": 885,
+   "closed_at": "2026-10-29T14:43:18Z",
+   "title": "fix(core): MCP OAuth toCredential trusts expires_in \u2014 a negative value stores a born-expired credential, a millisecond-scale value disables refresh for weeks",
+   "state_reason": "completed"
+  },
+  {
+   "number": 886,
+   "closed_at": "2026-10-29T14:37:17Z",
+   "title": "fix(core): Copilot model release dates roll calendar-invalid versions over \u2014 \"2026-02-30\" becomes a March 2 release and outranks newer models",
+   "state_reason": "completed"
+  },
+  {
+   "number": 710,
+   "closed_at": "2026-10-29T13:42:55Z",
+   "title": "feat(routes): per-element (per-target) context limits",
+   "state_reason": "completed"
+  },
+  {
+   "number": 864,
+   "closed_at": "2026-10-29T13:08:39Z",
+   "title": "fix(core): WellKnown {env:} substitution reads through the prototype chain \u2014 \"{env:constructor}\" injects the Object function into remote-config URLs/headers",
+   "state_reason": "completed"
+  },
+  {
+   "number": 863,
+   "closed_at": "2026-10-29T13:07:43Z",
+   "title": "fix(core): ModelPlan setPool pools lookup reads through the prototype chain \u2014 a pool named \"constructor\" never takes the ?? {} fallback",
+   "state_reason": "completed"
+  },
+  {
+   "number": 803,
+   "closed_at": "2026-10-29T13:06:48Z",
+   "title": "feat(codemode): sleep primitive + std async helpers (mapLimit, retry, withTimeout) (design #800, phase 2)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 875,
+   "closed_at": "2026-10-29T12:57:39Z",
+   "title": "fix(cli): service set port parses with bare Number() \u2014 \"0x10\" stores port 16, \"1e3\" stores 1000, \"8080.0\" stores 8080",
+   "state_reason": "completed"
+  },
+  {
+   "number": 874,
+   "closed_at": "2026-10-29T12:45:02Z",
+   "title": "fix(cli,client): OPENCODE_SHUTDOWN_GRACE_MS blank reads as 0 \u2014 an empty env var silently disables the shutdown drain in both copies of the grace parser",
+   "state_reason": "completed"
+  },
+  {
+   "number": 661,
+   "closed_at": "2026-10-29T12:27:56Z",
+   "title": "fix(server): PR #596 provider.get embeds models from the unfiltered state record while provider.list embeds only snapshot.available \u2014 disabled/stale-connection providers leak their catalog through get",
+   "state_reason": "completed"
+  },
+  {
+   "number": 831,
+   "closed_at": "2026-10-29T12:27:09Z",
+   "title": "fix(core): ModelGovernance route and variant lookups read through the prototype chain \u2014 a route or variant named 'constructor' crashes the governance gate",
+   "state_reason": "completed"
+  },
+  {
+   "number": 830,
+   "closed_at": "2026-10-29T12:23:15Z",
+   "title": "fix(core): QuotaBurnRate priors lookup reads through the prototype chain \u2014 an effort named 'constructor' returns a function as percentPerSession",
+   "state_reason": "completed"
+  },
+  {
+   "number": 853,
+   "closed_at": "2026-10-29T11:57:58Z",
+   "title": "fix(core): Form validateWhen accepts non-finite when values a number target can never answer \u2014 NaN/Infinity make eq never match and neq always match (PR #706)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 818,
+   "closed_at": "2026-10-29T11:36:55Z",
+   "title": "Meta provider sessions fail with client_attestation_denied (403) despite healthy quota picture",
+   "state_reason": "completed"
+  },
+  {
+   "number": 824,
+   "closed_at": "2026-10-29T11:26:27Z",
+   "title": "fix(core): QuotaSnapshot per-plan max-age lookup reads through the prototype chain \u2014 a plan named 'constructor' never goes stale",
+   "state_reason": "completed"
+  },
+  {
+   "number": 856,
+   "closed_at": "2026-10-29T11:24:59Z",
+   "title": "fix(ai): Anthropic server-tool-result gate reads through the prototype chain \u2014 a block typed \"constructor\" kills the whole stream",
+   "state_reason": "completed"
+  },
+  {
+   "number": 637,
+   "closed_at": "2026-10-29T11:03:40Z",
+   "title": "feat(routes): exclusion expressions for plan pool definitions (model on all doors except X)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 8,
+   "closed_at": "2026-10-29T10:54:17Z",
+   "title": "feat(telemetry): multi-chunk response continuation cost stitching in route_attempt",
+   "state_reason": "completed"
+  },
+  {
+   "number": 784,
+   "closed_at": "2026-10-29T10:48:38Z",
+   "title": "fix(client,app): client-side session root walks ignore the fork link \u2014 a fork splits its family, cost and titlebar root from the source tree",
+   "state_reason": "completed"
+  },
+  {
+   "number": 631,
+   "closed_at": "2026-10-29T10:16:45Z",
+   "title": "ci(app): e2e app-2 regression specs fail on subagent navigation/timeline visibility \u2014 reproduced on unrelated PR #607 (attempts 1+2)",
+   "state_reason": "completed"
+  },
+  {
+   "number": 851,
+   "closed_at": "2026-10-29T10:00:55Z",
+   "title": "fix(web): docs locale lookups read through the prototype chain \u2014 \"constructor\" and \"__proto__\" become garbage redirects",
+   "state_reason": "completed"
+  }
+ ]
+}

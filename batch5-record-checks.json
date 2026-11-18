@@ -1,0 +1,154 @@
+[
+  {
+    "number": 2169,
+    "title": "test(ai): pin vibe-auth shadow diagnostic never-break guarantee",
+    "state": "closed",
+    "merged_at": "2026-11-08T23:33:33Z",
+    "merge_commit_sha": "9f56e78084ae5dcc93acba10642be7540a2b354c",
+    "url": "https://github.com/developing-today-forks/opencode/pull/2169"
+  },
+  {
+    "number": 2170,
+    "title": "fix(ai): multiline-aware parseDotEnv in vibe-auth",
+    "state": "closed",
+    "merged_at": "2026-11-08T22:42:11Z",
+    "merge_commit_sha": "d5908bce7ca0f2fce041c447b0323385f44a217f",
+    "url": "https://github.com/developing-today-forks/opencode/pull/2170"
+  },
+  {
+    "number": 2164,
+    "title": "fix(ai): remove binary credential dependencies",
+    "state": "closed",
+    "merged_at": "2026-11-08T20:40:49Z",
+    "merge_commit_sha": "e61c8e6891fba6e48db2fdac8303ef72ed4a9b34",
+    "url": "https://github.com/developing-today-forks/opencode/pull/2164"
+  },
+  {
+    "number": 2104,
+    "title": "fix(ai): meta rolling window key never collides with weekly",
+    "state": "closed",
+    "merged_at": "2026-11-08T09:17:09Z",
+    "merge_commit_sha": "2961e602aa011cd3c8dbefb51ec3708ca126c333",
+    "url": "https://github.com/developing-today-forks/opencode/pull/2104"
+  },
+  {
+    "number": 1726,
+    "title": "test(ai): cover quota parsers and reset boundaries",
+    "state": "closed",
+    "merged_at": "2026-11-08T09:09:41Z",
+    "merge_commit_sha": "42e133c49b55a199b5c60b46d68293a1a07aac62",
+    "url": "https://github.com/developing-today-forks/opencode/pull/1726"
+  },
+  {
+    "number": 1277,
+    "title": "fix(config): provider_routes dropped by config normalization \u2014 provider-route groups never candidated (#1134)",
+    "state": "closed",
+    "merged_at": "2026-11-01T13:09:15Z",
+    "merge_commit_sha": "6fb3bacf37a4c374bf2c26c2a3cd64a0e223606a",
+    "url": "https://github.com/developing-today-forks/opencode/pull/1277"
+  },
+  {
+    "number": 932,
+    "title": "fix(ci): scan every English docs page in check:doc-env-vars",
+    "state": "closed",
+    "merged_at": "2026-10-30T01:29:41Z",
+    "merge_commit_sha": "3a1c3a0c7828f7fd0dee5945bcf5527c75dca594",
+    "url": "https://github.com/developing-today-forks/opencode/pull/932"
+  },
+  {
+    "number": 934,
+    "title": "fix(core): bound quota-reset predictions at a 30-day ceiling",
+    "state": "closed",
+    "merged_at": "2026-10-30T04:02:04Z",
+    "merge_commit_sha": "3badc50d6af928dd5afbd22a72336f0762a5bc08",
+    "url": "https://github.com/developing-today-forks/opencode/pull/934"
+  },
+  {
+    "number": 940,
+    "title": "test(core): plugin session.list defaults to newest 50 \u2014 regression test for #935",
+    "state": "closed",
+    "merged_at": "2026-11-01T01:22:27Z",
+    "merge_commit_sha": "c4ad56aaea3542e561e481918f59091b38f2134b",
+    "url": "https://github.com/developing-today-forks/opencode/pull/940"
+  },
+  {
+    "number": 939,
+    "title": "fix(latex): read command dispatch tables by own property only",
+    "state": "closed",
+    "merged_at": "2026-10-30T04:03:38Z",
+    "merge_commit_sha": "f6a1b4c2ee877c9ddea87f9272ab77c8991d14e8",
+    "url": "https://github.com/developing-today-forks/opencode/pull/939"
+  },
+  {
+    "number": 943,
+    "title": "fix(core): clamp OpenAI, OpenCode and xAI device poll intervals at 60s (#941)",
+    "state": "closed",
+    "merged_at": "2026-10-30T06:09:41Z",
+    "merge_commit_sha": "294f03032ec6dce7d71821e9e0cff1f8f137f900",
+    "url": "https://github.com/developing-today-forks/opencode/pull/943"
+  },
+  {
+    "number": 469,
+    "title": "chore: ci baseline check (throwaway)",
+    "state": "closed",
+    "merged_at": null,
+    "merge_commit_sha": "5cb3b58569b9f39ea6ce2a764e006e0da9207286",
+    "url": "https://github.com/developing-today-forks/opencode/pull/469"
+  },
+  {
+    "number": 473,
+    "title": "docs: record the #465/#467 completion in ROADMAP Done",
+    "state": "closed",
+    "merged_at": "2026-10-26T06:01:54Z",
+    "merge_commit_sha": "65437641ef5ec37d838e9ce454f4142b1d0c1ea6",
+    "url": "https://github.com/developing-today-forks/opencode/pull/473"
+  },
+  {
+    "number": 121,
+    "title": "ci: add timeout-minutes caps to every workflow job",
+    "state": "closed",
+    "merged_at": "2026-10-19T15:27:15Z",
+    "merge_commit_sha": "5214f4d8ae610963a9a8bf63c31da58488ea3091",
+    "url": "https://github.com/developing-today-forks/opencode/pull/121"
+  },
+  {
+    "number": 593,
+    "title": "fix(core): unify absolute-time keywords across quota-reset parsers (#532)",
+    "state": "closed",
+    "merged_at": "2026-10-27T15:17:19Z",
+    "merge_commit_sha": "809474e29d9e93dc67d0eb24ef27d1ec787b0a7d",
+    "url": "https://github.com/developing-today-forks/opencode/pull/593"
+  },
+  {
+    "number": 167,
+    "title": "test(desktop): run runScript tests with a cross-platform child",
+    "state": "closed",
+    "merged_at": "2026-10-20T09:24:00Z",
+    "merge_commit_sha": "0523751b428fe385fd303dd85642e6c689c15fcf",
+    "url": "https://github.com/developing-today-forks/opencode/pull/167"
+  },
+  {
+    "number": 271,
+    "title": "fix(gui-extensions): read WSL probe answer line instead of whole login-shell output",
+    "state": "closed",
+    "merged_at": "2026-10-22T07:13:22Z",
+    "merge_commit_sha": "bf809fa9a77ed2684aeb5aaa4ac12b7c63826cbf",
+    "url": "https://github.com/developing-today-forks/opencode/pull/271"
+  },
+  {
+    "number": 1135,
+    "title": "fix(console): bound Honeycomb webhook Discord relay with a 5s deadline",
+    "state": "closed",
+    "merged_at": "2026-11-01T02:55:12Z",
+    "merge_commit_sha": "7d4a25484037c03f5300f5e8e86a03760cdafec6",
+    "url": "https://github.com/developing-today-forks/opencode/pull/1135"
+  },
+  {
+    "number": 1108,
+    "title": "fix(config): auto-apply model and default_agent edits without reload",
+    "state": "closed",
+    "merged_at": "2026-10-31T21:21:52Z",
+    "merge_commit_sha": "05b37bd71fdc6ca62f1b26ec6f2073faf7ad4ba4",
+    "url": "https://github.com/developing-today-forks/opencode/pull/1108"
+  }
+]
