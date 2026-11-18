@@ -664,6 +664,47 @@ it.effect("compaction preserves a hooked prior summary when flattening older exc
   }),
 )
 
+it.effect("compaction keeps an unedited prior summary when flattening older exchanges", () =>
+  Effect.gen(function* () {
+    requests = []
+    const session = yield* insertSession(Session.ID.make("ses_unedited_summary_flatten"))
+    const prior = Schema.decodeUnknownSync(SessionMessage.CompactionCompleted)({
+      id: SessionMessage.ID.create(),
+      type: "compaction",
+      status: "completed",
+      reason: "auto",
+      summary: "Original summary",
+      recent: "Previously summarized recent context",
+      time: { created: 0, completed: 0 },
+    })
+    const user = (text: string) =>
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text,
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+
+    expect(
+      yield* compactManually(session, [
+        prior,
+        user(`old exchange one ${"x".repeat(400_000)}`),
+        user(`old exchange two ${"x".repeat(400_000)}`),
+        user(`old exchange three ${"x".repeat(400_000)}`),
+        user("latest exchange"),
+      ]),
+    ).toEqual({ status: "completed" })
+
+    expect(requests).toHaveLength(1)
+    const request = JSON.stringify(requests[0]?.messages)
+    expect(request).toContain("Original summary")
+    expect(request).toContain("old exchange three")
+    expect(request).not.toContain("old exchange one")
+    expect(request).not.toContain("old exchange two")
+    expect(request).not.toContain("Previously summarized recent context")
+  }),
+)
+
 it.effect("native compaction fails without a model call on a route that cannot compact", () =>
   Effect.gen(function* () {
     requests = []
