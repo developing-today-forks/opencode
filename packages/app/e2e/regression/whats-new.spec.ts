@@ -75,11 +75,21 @@ test("What's New shows the highlights since the version seen, pages to Get start
   await expect(title).toHaveText("Split panes")
   await expect(dialog.getByText("Work side by side.", { exact: true })).toBeVisible()
   await expect(dialog.getByRole("img", { name: "Split panes", exact: true })).toHaveAttribute("src", "/split.png")
+  // The pager dots name their position instead of announcing bare "button"s, and mark the one shown.
+  await expect(dialog.getByRole("button", { name: /^Highlight \d+ of 5$/ })).toHaveCount(5)
+  await expect(dialog.getByRole("button", { name: "Highlight 1 of 5", exact: true })).toHaveAttribute(
+    "aria-current",
+    "true",
+  )
   // Seen as soon as it shows, so however it closes, the next start shows nothing.
   await expect.poll(() => stored(page, SEEN)).toEqual({ version: current })
 
   await next.click()
   await expect(title).toHaveText("Voice input")
+  await expect(dialog.getByRole("button", { name: "Highlight 2 of 5", exact: true })).toHaveAttribute(
+    "aria-current",
+    "true",
+  )
   await expect(dialog.getByText("Talk to the agent.", { exact: true })).toBeVisible()
   await expect(dialog.locator("video")).toHaveAttribute("src", "/voice.mp4")
   await page.keyboard.press("ArrowLeft")

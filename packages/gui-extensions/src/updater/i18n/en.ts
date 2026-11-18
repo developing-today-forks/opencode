@@ -29,4 +29,5 @@ export default {
   "releaseNotes.action.next": "Next",
   "releaseNotes.action.hideFuture": "Don't show these in the future",
   "releaseNotes.media.alt": "Release preview",
+  "releaseNotes.pager": "Highlight {{index}} of {{total}}",
 }

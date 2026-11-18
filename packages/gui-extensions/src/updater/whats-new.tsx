@@ -297,6 +297,8 @@ function DialogReleaseNotes(props: { highlights: Highlight[]; dialog: DialogHand
                         "w-8": i === index(),
                         "w-3": i !== index(),
                       }}
+                      aria-label={ctx.t("releaseNotes.pager", { index: i + 1, total: total() })}
+                      aria-current={i === index() ? "true" : undefined}
                       onClick={() => setIndex(i)}
                     >
                       <div
