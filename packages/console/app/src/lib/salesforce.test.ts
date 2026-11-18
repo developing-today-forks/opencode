@@ -14,6 +14,22 @@ const server = Bun.serve({
       leads.push(await request.json())
       return Response.json({ id: "local-test-lead", success: true }, { status: 201 })
     }
+    if (path === "/scenario/ordinary") return Response.json({ ok: true })
+    if (path === "/scenario/no-content") return new Response(null, { status: 204 })
+    if (path === "/scenario/declared-oversized") {
+      return new Response("x".repeat(1024 * 1024 + 1), {
+        headers: { "Content-Length": String(1024 * 1024 + 1) },
+      })
+    }
+    if (path === "/scenario/streamed-oversized") {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("x".repeat(1024 * 1024 + 1)))
+          },
+        }),
+      )
+    }
     return new Response("Not found", { status: 404 })
   },
 })
@@ -225,6 +241,19 @@ test("an over-cap streamed lead error body is cancelled instead of buffering unb
   const { output, exitCode } = await runLeadAttempt(streamedError.url.origin)
   expect(exitCode).toBe(0)
   expect(JSON.parse(output)).toEqual({ accepted: false })
+})
+
+test("salesforceRequest caps response bodies, preserves 204, and parses ordinary JSON", async () => {
+  const { salesforceRequest, SALESFORCE_MAX_RESPONSE_BYTES } = await import("./salesforce")
+  const request = await salesforceRequest()
+  expect(await request("/scenario/ordinary")).toEqual({ ok: true })
+  expect(await request("/scenario/no-content")).toBeNull()
+  await expect(request("/scenario/declared-oversized")).rejects.toThrow(
+    `Salesforce response exceeded ${SALESFORCE_MAX_RESPONSE_BYTES} bytes`,
+  )
+  await expect(request("/scenario/streamed-oversized")).rejects.toThrow(
+    `Salesforce response exceeded ${SALESFORCE_MAX_RESPONSE_BYTES} bytes`,
+  )
 })
 
 test("small error bodies and malformed token JSON keep the existing failure returns", async () => {

@@ -215,7 +215,7 @@ export async function salesforceRequest(): Promise<SalesforceRequest> {
     })
     if (!response.ok) throw new Error(`Salesforce request failed (${response.status})`)
     if (response.status === 204) return null
-    return response.json()
+    return JSON.parse(await readCappedBodyText(response)) as unknown
   }
 }
 
