@@ -596,6 +596,16 @@ let activeDb: Database.Interface["db"] | undefined
 const maxPersistAttempts = 10
 const persistRetryDelayMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 1), 5_000)
 
+/**
+ * Cap on pending telemetry events (#2335). Recording is asynchronous by design — the sink only
+ * offers a row to an in-memory queue so a failing database never fails a model request — which
+ * leaves a slow or stalled writer free to fall behind an unbounded backlog. Bounding the queue caps
+ * both that backlog and the batch the writer takes into one transaction. On overflow the newest
+ * event is dropped and counted; the writer logs the running total as it drains, so the loss is
+ * explicit, never silent, matching the batch cap above.
+ */
+export const maxPendingEvents = 4096
+
 const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]) =>
   Effect.gen(function* () {
     for (let attempt = 1; ; attempt++) {
@@ -638,14 +648,20 @@ const notifyAttemptsPersisted = (events: readonly Event[]) => {
   }
 }
 
-const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
+const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>, takeDropped: () => number) =>
   Queue.takeAll(queue).pipe(
     Effect.flatMap((events) =>
-      events.length
-        ? persistWithRetry(db, events).pipe(
+      Effect.gen(function* () {
+        if (events.length)
+          yield* persistWithRetry(db, events).pipe(
             Effect.tap((persisted) => (persisted ? Effect.sync(() => notifyAttemptsPersisted(events)) : Effect.void)),
           )
-        : Effect.void,
+        // Overflow happened while the writer was behind; the sink cannot log, so report the drop
+        // count here as the writer drains and resets it.
+        const dropped = takeDropped()
+        if (dropped > 0)
+          yield* Effect.logWarning("dropped model route telemetry events while the writer was behind", { dropped })
+      }),
     ),
     Effect.forever,
   )
@@ -662,10 +678,18 @@ const layer = Layer.effectDiscard(
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db, QuotaCurrent.readSnapshot(Global.Path.state))
     yield* restoreDemotionFrom(db)
-    const queue = yield* Queue.unbounded<Event>()
-    setSink((event) => void Queue.offerUnsafe(queue, event))
+    const queue = yield* Queue.bounded<Event>(maxPendingEvents)
+    let dropped = 0
+    setSink((event) => {
+      if (Queue.offerUnsafe(queue, event)) return
+      dropped++
+    })
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
-    yield* writerLoop(db, queue).pipe(Effect.forkScoped)
+    yield* writerLoop(db, queue, () => {
+      const count = dropped
+      dropped = 0
+      return count
+    }).pipe(Effect.forkScoped)
   }),
 )
 
