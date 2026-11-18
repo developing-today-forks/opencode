@@ -10,6 +10,15 @@ import { optional, PositiveInt } from "../schema.js"
 const BoundedPositiveInt = PositiveInt.check(Schema.isLessThanOrEqualTo(3_600_000))
 const SampleCount = PositiveInt.check(Schema.isLessThanOrEqualTo(50))
 const PositiveFinite = Schema.Finite.check(Schema.isGreaterThan(0))
+/** Give each custom filter a stable representation and emit its self-contained predicate
+ * inline: promise-type codegen intentionally does not support import artifacts. */
+const runtimeFilter = <T>(name: string, predicate: (input: T) => Schema.FilterOutput) =>
+  Schema.makeFilter<T>(predicate, {
+    representation: { id: `opencode/model-routes/${name}`, payload: null },
+    toCode: () => ({
+      runtime: `Schema.makeFilter(${predicate.toString().replace(/:\s*(?:string|WindowClass)(?=\s*[)=])/g, "")})`,
+    }),
+  })
 /** A duration of at most a day: bench bases and their caps, the retry-after floor, the network window. */
 const DayDurationMs = PositiveInt.check(Schema.isLessThanOrEqualTo(86_400_000))
 /** A duration of at most 90 days: a quota gate can believe a provider reset up to 30 days out,
@@ -142,40 +151,15 @@ export class Health extends Schema.Class<Health>("Config.ModelRoute.Health")({
   }).pipe(optional),
 }) {}
 
-/** The parser's day-name table (model-route-schedule.ts DAY_NAMES), restated for the
- * decode check below (#2041): the parser trims and lower-cases before lookup, so any case
- * or padding of these names is a parser-accepted form. Set lookup is own-entry only, so
- * inherited names such as "constructor" never resolve (the parser's #791 rule). */
-const DAY_NAMES: ReadonlySet<string> = new Set([
-  "sun",
-  "sunday",
-  "mon",
-  "monday",
-  "tue",
-  "tuesday",
-  "tues",
-  "wed",
-  "wednesday",
-  "thu",
-  "thursday",
-  "thur",
-  "thurs",
-  "fri",
-  "friday",
-  "sat",
-  "saturday",
-])
-
 /** A weekday in a parser-accepted text form: a day name in any case or padding, or a
  * numeric string "0" to "6" (zero-padding allowed), mirroring the parser's dayOfWeek. */
-const DayOfWeekText = Schema.String.check(
-  Schema.makeFilter((value: string) => {
-    const text = value.trim().toLowerCase()
-    return /^0?[0-6]$/.test(text) || DAY_NAMES.has(text)
-      ? undefined
-      : `invalid weekday "${value}": expected a day name (sun to saturday, any case) or a number from 0 to 6`
-  }),
-)
+export const dayOfWeekTextCheck = runtimeFilter("dayOfWeekTextCheck", (value: string) => {
+  const text = value.trim().toLowerCase()
+  return /^0?[0-6]$/.test(text) || ["sun", "sunday", "mon", "monday", "tue", "tuesday", "tues", "wed", "wednesday", "thu", "thursday", "thur", "thurs", "fri", "friday", "sat", "saturday"].includes(text)
+    ? undefined
+    : `invalid weekday "${value}": expected a day name (sun to saturday, any case) or a number from 0 to 6`
+})
+const DayOfWeekText = Schema.String.check(dayOfWeekTextCheck)
 
 const DayOfWeek = Schema.Union([
   Schema.Literals([
@@ -207,15 +191,14 @@ const DayOfWeek = Schema.Union([
 /** A day of month in the parser's numeric-string form ("15", "-1", padding ignored),
  * mirroring the parser's dayOfMonth: an optionally signed integer string whose value
  * is -1 or 1 to 31. */
-const DayOfMonthText = Schema.String.check(
-  Schema.makeFilter((value: string) => {
-    const text = value.trim()
-    const parsed = /^-?\d+$/.test(text) ? Number(text) : Number.NaN
-    return parsed === -1 || (parsed >= 1 && parsed <= 31)
-      ? undefined
-      : `invalid day of month "${value}": expected 1 to 31, or -1 for the last day of the month`
-  }),
-)
+export const dayOfMonthTextCheck = runtimeFilter("dayOfMonthTextCheck", (value: string) => {
+  const text = value.trim()
+  const parsed = /^-?\d+$/.test(text) ? Number(text) : Number.NaN
+  return parsed === -1 || (parsed >= 1 && parsed <= 31)
+    ? undefined
+    : `invalid day of month "${value}": expected 1 to 31, or -1 for the last day of the month`
+})
+const DayOfMonthText = Schema.String.check(dayOfMonthTextCheck)
 
 const DayOfMonth = Schema.Union([
   Schema.Literal(-1),
@@ -227,13 +210,14 @@ const DayOfMonth = Schema.Union([
 
 /** A window name: the parser trims before testing its pattern and stores the trimmed
  * name, so decode tests the trimmed value too (#2041). */
-const WindowName = Schema.String.check(
-  Schema.makeFilter((value: string) =>
+export const windowNameCheck = runtimeFilter(
+  "windowNameCheck",
+  (value: string) =>
     /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.trim())
       ? undefined
       : `invalid window name "${value}": expected 1 to 128 letters, digits, ".", "_" or "-", starting with a letter or digit`,
-  ),
 )
+const WindowName = Schema.String.check(windowNameCheck)
 
 /** Decode-time validation for the Window fields (#1681 for the string fields, #2041 for
  * the list, day and epoch fields). The oracle is the runtime
@@ -242,66 +226,53 @@ const WindowName = Schema.String.check(
  * whole window — must fail decode instead, with a diagnostic. Schema must not import Core
  * (the package boundary), so the small grammars are restated here and pinned by tests
  * against the parser's documented acceptance set. */
-const DATE_ENTRY = /^(\d{4}-\d{2}-\d{2})(?:\/(\d{4}-\d{2}-\d{2}))?$/
-
-/** A real calendar date check: 2026-02-30 matches the shape but is not a date. */
-const isRealDate = (text: string): boolean => {
-  const [year, month, day] = text.split("-").map(Number)
-  const date = new Date(Date.UTC(year, month - 1, day))
-  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
-}
-
 /** One `dates`/`excludeDates` entry: a single "YYYY-MM-DD" day, or an inclusive
  * "YYYY-MM-DD/YYYY-MM-DD" range whose end is not before its start. */
-const DateEntry = Schema.String.check(
-  Schema.makeFilter((value: string) => {
-    const match = DATE_ENTRY.exec(value.trim())
-    if (!match)
-      return `invalid window date entry "${value}": expected "YYYY-MM-DD" or an inclusive "YYYY-MM-DD/YYYY-MM-DD" range`
-    const start = match[1]
-    const end = match[2]
-    if (!isRealDate(start) || (end !== undefined && !isRealDate(end)))
-      return `invalid window date entry "${value}": not a real calendar date`
-    if (end !== undefined && end < start)
-      return `invalid window date entry "${value}": range end is before its start`
-    return undefined
-  }),
-)
+export const dateEntryCheck = runtimeFilter("dateEntryCheck", (value: string) => {
+  const DATE_ENTRY = /^(\d{4}-\d{2}-\d{2})(?:\/(\d{4}-\d{2}-\d{2}))?$/
+  const isRealDate = (text: string) => {
+    const [year, month, day] = text.split("-").map(Number)
+    const date = new Date(Date.UTC(year, month - 1, day))
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  }
+  const match = DATE_ENTRY.exec(value.trim())
+  if (!match)
+    return `invalid window date entry "${value}": expected "YYYY-MM-DD" or an inclusive "YYYY-MM-DD/YYYY-MM-DD" range`
+  const start = match[1]
+  const end = match[2]
+  if (!isRealDate(start) || (end !== undefined && !isRealDate(end)))
+    return `invalid window date entry "${value}": not a real calendar date`
+  if (end !== undefined && end < start)
+    return `invalid window date entry "${value}": range end is before its start`
+  return undefined
+})
+const DateEntry = Schema.String.check(dateEntryCheck)
 
-/** Minutes since local midnight for a parser-accepted time ("9:30", "09:30", "9:5",
- * "9:30:15" — seconds round down, as in the runtime parser), or undefined. */
-const timeMinutes = (value: string): number | undefined => {
+export const timeOfDayCheck = runtimeFilter("timeOfDayCheck", (value: string) => {
   const match = /^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/.exec(value.trim())
-  if (!match) return undefined
+  if (!match) return `invalid window time "${value}": expected "HH:mm" with hours 0-23 and minutes 0-59`
   const hours = Number(match[1])
   const minutes = Number(match[2])
   const seconds = match[3] === undefined ? 0 : Number(match[3])
-  if (hours > 23 || minutes > 59 || seconds > 59) return undefined
-  return hours * 60 + minutes
-}
+  return hours <= 23 && minutes <= 59 && seconds <= 59
+    ? undefined
+    : `invalid window time "${value}": expected "HH:mm" with hours 0-23 and minutes 0-59`
+})
 
-const timeOfDay = (description: string) =>
-  Schema.String.annotate({ description }).check(
-    Schema.makeFilter((value: string) =>
-      timeMinutes(value) === undefined
-        ? `invalid window time "${value}": expected "HH:mm" with hours 0-23 and minutes 0-59`
-        : undefined,
-    ),
-  )
+const timeOfDay = (description: string) => Schema.String.annotate({ description }).check(timeOfDayCheck)
 
 /** A timezone the runtime recognizes: `Intl` must resolve it, as in the runtime parser.
  * The parser trims before resolving, so this check does the same. */
-const timezone = (description: string) =>
-  Schema.String.annotate({ description }).check(
-    Schema.makeFilter((value: string) => {
-      try {
-        new Intl.DateTimeFormat("en-US", { timeZone: value.trim() })
-        return undefined
-      } catch {
-        return `unknown window timezone "${value}": expected an IANA timezone such as "America/Chicago"`
-      }
-    }),
-  )
+export const timezoneCheck = runtimeFilter("timezoneCheck", (value: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value.trim() })
+    return undefined
+  } catch {
+    return `unknown window timezone "${value}": expected an IANA timezone such as "America/Chicago"`
+  }
+})
+
+const timezone = (description: string) => Schema.String.annotate({ description }).check(timezoneCheck)
 
 /** A recurring local-time window. Days and time bounds all have to match when set, so
  * `daysOfMonth: [1..7]` with `daysOfWeek: ["mon"]` is the first Monday of the month. */
@@ -345,8 +316,16 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
   }).pipe(optional),
 }) {}
 
-export const Window = WindowClass.check(
-  Schema.makeFilter((window: WindowClass) => {
+export const windowCheck = runtimeFilter("windowCheck", (window: WindowClass) => {
+    const timeMinutes = (value: string): number | undefined => {
+      const match = /^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/.exec(value.trim())
+      if (!match) return undefined
+      const hours = Number(match[1])
+      const minutes = Number(match[2])
+      const seconds = match[3] === undefined ? 0 : Number(match[3])
+      if (hours > 23 || minutes > 59 || seconds > 59) return undefined
+      return hours * 60 + minutes
+    }
     // An empty list is unreadable to the runtime parser, which drops the window (#1681
     // for the date lists, #2041 for the day and exclusion lists).
     if (window.daysOfWeek !== undefined && window.daysOfWeek.length === 0)
@@ -369,8 +348,8 @@ export const Window = WindowClass.check(
     return window.from === undefined || window.until === undefined || window.from < window.until
       ? undefined
       : "window from must be before until"
-  }),
-).annotate({ identifier: "Config.ModelRoute.Window" })
+})
+export const Window = WindowClass.check(windowCheck).annotate({ identifier: "Config.ModelRoute.Window" })
 export type Window = WindowClass
 
 /** A schedule's window: inline, or the name of a window defined once in
@@ -408,12 +387,15 @@ class ScheduleClass extends Schema.Class<ScheduleClass>("Config.ModelRoute.Sched
  * silently lets `weight` win and discards `factor`; with neither, the schedule matches
  * its window and targets and then changes nothing — either way the operator believes
  * a weight change is in force that routing does not perform. */
-export const Schedule = ScheduleClass.check(
-  Schema.makeFilter((schedule: ScheduleClass) =>
+export const scheduleCheck = runtimeFilter(
+  "scheduleCheck",
+  (schedule: ScheduleClass) =>
     (schedule.factor === undefined) !== (schedule.weight === undefined)
       ? undefined
       : "a schedule must set exactly one of factor and weight",
-  ),
+)
+export const Schedule = ScheduleClass.check(
+  scheduleCheck,
   // The check wrapper drops the class identifier from the encoded JSON
   // schema (the struct inlines at every use site instead of registering
   // as a named definition); restating it keeps the OpenAPI shape stable.
@@ -458,12 +440,15 @@ class GlobalScheduleClass extends Schema.Class<GlobalScheduleClass>("Config.Mode
  * same reason — core's scheduled() interpreter applies this class through the same
  * weight-wins path, so a both-set global schedule silently discards its `factor` and a
  * neither-set one is silently inert. */
-export const GlobalSchedule = GlobalScheduleClass.check(
-  Schema.makeFilter((schedule: GlobalScheduleClass) =>
+export const globalScheduleCheck = runtimeFilter(
+  "globalScheduleCheck",
+  (schedule: GlobalScheduleClass) =>
     (schedule.factor === undefined) !== (schedule.weight === undefined)
       ? undefined
       : "a global schedule must set exactly one of factor and weight",
-  ),
+)
+export const GlobalSchedule = GlobalScheduleClass.check(
+  globalScheduleCheck,
   // See Schedule: restating the identifier keeps the encoded definition.
 ).annotate({ identifier: "Config.ModelRoute.GlobalSchedule" })
 export type GlobalSchedule = GlobalScheduleClass
@@ -702,12 +687,15 @@ class EscalationClass extends Schema.Class<EscalationClass>("Config.ModelRoute.S
  * silently inert. Reject that combination at decode, applying the field defaults (2 and 5)
  * when either side is omitted, so one-sided overrides are checked too. Equality is valid:
  * every outcome in the window giving up reaches the threshold exactly. */
-export const Escalation = EscalationClass.check(
-  Schema.makeFilter((escalation: EscalationClass) =>
+export const escalationCheck = runtimeFilter(
+  "escalationCheck",
+  (escalation: EscalationClass) =>
     (escalation.afterGiveUps ?? 2) <= (escalation.outcomeWindow ?? 5)
       ? undefined
       : "escalation afterGiveUps must not exceed outcomeWindow",
-  ),
+)
+export const Escalation = EscalationClass.check(
+  escalationCheck,
 )
 export type Escalation = EscalationClass
 

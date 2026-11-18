@@ -56,6 +56,10 @@ export type ServerInfoOperation<E = never> = () => Effect.Effect<ServerInfoOutpu
 export type ServerPairOutput = { readonly code: string; readonly expires_in: number }
 export type ServerPairOperation<E = never> = () => Effect.Effect<ServerPairOutput, E>
 
+export type ServerRedeemInput = { readonly code: string }
+export type ServerRedeemOutput = { readonly token: string }
+export type ServerRedeemOperation<E = never> = (input: ServerRedeemInput) => Effect.Effect<ServerRedeemOutput, E>
+
 export type ServerConnectInput = { readonly code: string }
 export type ServerConnectOutput = { readonly token: string }
 export type ServerConnectOperation<E = never> = (input: ServerConnectInput) => Effect.Effect<ServerConnectOutput, E>
@@ -63,6 +67,7 @@ export type ServerConnectOperation<E = never> = (input: ServerConnectInput) => E
 export interface ServerApi<E = never> {
   readonly info: ServerInfoOperation<E>
   readonly pair: ServerPairOperation<E>
+  readonly redeem: ServerRedeemOperation<E>
   readonly connect: ServerConnectOperation<E>
 }
 
@@ -676,6 +681,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
           }
@@ -825,6 +832,7 @@ export type SessionLogOutput =
             }
             readonly snapshot?: Snapshot.ID | undefined
             readonly files?: ReadonlyArray<RelativePath> | undefined
+            readonly planNotices?: ReadonlyArray<string> | undefined
           }
         }
       | {
@@ -843,6 +851,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly finish?: "content-filter" | undefined
@@ -1031,6 +1041,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly content?:
@@ -1078,6 +1090,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
           }
@@ -1155,6 +1169,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly inputID?: SessionMessage.ID | undefined
@@ -1442,6 +1458,12 @@ export type ServerCompletionsEmbeddingsOperation<E = never> = (
   input: ServerCompletionsEmbeddingsInput,
 ) => Effect.Effect<ServerCompletionsEmbeddingsOutput, E>
 
+export type ServerCompletionsTranscriptionsInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsTranscriptionsOutput = unknown
+export type ServerCompletionsTranscriptionsOperation<E = never> = (
+  input: ServerCompletionsTranscriptionsInput,
+) => Effect.Effect<ServerCompletionsTranscriptionsOutput, E>
+
 export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
 export type ServerCompletionsMessagesOutput = unknown
 export type ServerCompletionsMessagesOperation<E = never> = (
@@ -1473,6 +1495,7 @@ export interface ServerCompletionsApi<E = never> {
   readonly chat: ServerCompletionsChatOperation<E>
   readonly responses: ServerCompletionsResponsesOperation<E>
   readonly embeddings: ServerCompletionsEmbeddingsOperation<E>
+  readonly transcriptions: ServerCompletionsTranscriptionsOperation<E>
   readonly messages: ServerCompletionsMessagesOperation<E>
   readonly systemone: ServerCompletionsSystemoneOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
