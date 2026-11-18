@@ -188,18 +188,18 @@ export const layer = Layer.effect(
           // visible message and the ask resolves with that terminal state, instead of
           // pending forever (a pending form's cache entry never expires). The cancel
           // settles the shared deferred, so the race returns that same state either way.
-          // The cancel is owner-only (#2445): a joined ask does not own the form, so
-          // its timeout never cancels the original asker's pending question — the
-          // joiner just keeps waiting on the shared deferred.
+          // The cancel is owner-only (#2445): a joined ask returns a local timeout
+          // result without settling the shared deferred or changing the pending form.
+          const timeoutMessage = options?.timeoutMessage ?? "Form timed out without being answered"
           const timedOut = Effect.sleep(timeout).pipe(
             Effect.andThen(
               existing
-                ? Effect.void
-                : cancel(form.id, {
-                    message: options?.timeoutMessage ?? "Form timed out without being answered",
-                  }).pipe(Effect.ignore),
+                ? Effect.succeed<TerminalState>({ status: "cancelled", message: timeoutMessage })
+                : cancel(form.id, { message: timeoutMessage }).pipe(
+                    Effect.ignore,
+                    Effect.andThen(Deferred.await(entry.deferred)),
+                  ),
             ),
-            Effect.andThen(Deferred.await(entry.deferred)),
           )
           return yield* restore(awaited.pipe(Effect.race(timedOut)))
         }),

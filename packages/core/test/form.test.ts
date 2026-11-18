@@ -848,14 +848,13 @@ describe("Form ask bounds (#1883)", () => {
         .pipe(Effect.forkScoped)
       // Fire the joiner timer (1 minute); the owner timer (10 minutes) is far off.
       yield* TestClock.adjust("2 minutes")
-      // Oracle: the shared form state the form endpoints serve. A joiner timeout
-      // must not settle it: the form stays pending and joinable, and a later reply
-      // still answers both asks.
+      // Oracle: the joiner resolves locally while the shared form remains pending.
+      // A later reply still answers the owner.
+      expect(yield* Fiber.join(joiner)).toEqual({ status: "cancelled", message: "joiner timed out" })
       expect(yield* service.list({ sessionID: askInput.sessionID })).toHaveLength(1)
       expect(yield* service.state(pending[0]!.id)).toEqual({ status: "pending" })
       yield* service.reply({ id: pending[0]!.id, answer: { name: "Ava" } })
       expect(yield* Fiber.join(owner)).toEqual({ status: "answered", answer: { name: "Ava" } })
-      expect(yield* Fiber.join(joiner)).toEqual({ status: "answered", answer: { name: "Ava" } })
     }),
   )
 
