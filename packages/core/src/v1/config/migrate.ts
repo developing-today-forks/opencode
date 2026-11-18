@@ -260,7 +260,11 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, npm: string | un
     body: migrated?.body,
     variants:
       info.variants &&
-      Object.entries(info.variants).map(([id, options]) => ({ id, ...split(options) })),
+      Object.entries(info.variants).map(([id, options]) => {
+        const { options: bag, ...rest } = options
+        const value = typeof bag === "object" && bag !== null && !Array.isArray(bag) ? { ...rest, ...bag } : options
+        return { id, ...split(value) }
+      }),
     cost: costs,
     disabled: info.status === "deprecated" ? true : undefined,
     limit: info.limit && {

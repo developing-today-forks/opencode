@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { Effect } from "effect"
 import { Provider } from "@opencode/core/provider"
+import { ConfigMigrateV1 } from "@opencode/core/v1/config/migrate"
 import { LLM } from "@opencode/ai"
 import { compileRequest } from "@opencode/ai/route/client"
 
@@ -135,6 +136,28 @@ describe("Provider", () => {
     }
     expect(body.model).toBe("gemini-3.8-flash-low")
     expect(body.request?.generationConfig?.thinkingConfig?.thinkingLevel).toBe("LOW")
+  })
+
+  test("a v1 variant options bag reaches the native Gemini request", async () => {
+    const migrated = ConfigMigrateV1.migrateProvider("google", {
+      npm: "@ai-sdk/google",
+      models: {
+        "gemini-3.1-flash": {
+          options: { thinkingConfig: { thinkingLevel: "high" } },
+          variants: { high: { options: { thinkingConfig: { thinkingLevel: "high" } } } },
+        },
+      },
+    })
+    const migratedModel = migrated.models?.["gemini-3.1-flash"]
+    const variant = migratedModel?.variants?.[0]
+    expect(migratedModel?.settings).toEqual(variant?.settings)
+    expect(variant?.settings).toEqual({ thinkingConfig: { thinkingLevel: "high" } })
+
+    const loaded = await Effect.runPromise(Provider.loadPackage("@opencode/ai/providers/google"))
+    const model = loaded.model("gemini-3.1-flash", Provider.nativeSettings({ apiKey: "fixture", ...variant?.settings }))
+    const compiled = await Effect.runPromise(compileRequest(LLM.request({ model, prompt: "Hi" })))
+    expect((compiled.body as { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }).generationConfig
+      ?.thinkingConfig?.thinkingLevel).toBe("high")
   })
 
   test("inherits shared and loose settings without provider-only policies", () => {
