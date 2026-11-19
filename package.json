@@ -163,7 +163,7 @@
     "electron"
   ],
   "overrides": {
-    "@bruits/satteri-wasm32-wasi": "https://registry.npmmirror.com/@bruits/satteri-wasm32-wasi/-/satteri-wasm32-wasi-0.10.5.tgz",
+    "@bruits/satteri-wasm32-wasi": "https://registry.npmjs.org/@bruits/satteri-wasm32-wasi/-/satteri-wasm32-wasi-0.10.5.tgz",
     "@opentui/core": "catalog:",
     "@opentui/keymap": "catalog:",
     "@opentui/solid": "catalog:",
