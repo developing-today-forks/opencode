@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, open, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { BrowserFiles } from "../src/files.js"
+import { BrowserFiles, readWith } from "../src/files.js"
 
 let base: string
 let project: string
@@ -51,4 +51,23 @@ test("rejects an in-project symlink whose target is outside the project", async 
   await expect(Effect.runPromise(BrowserFiles.read(["escape.txt"], project))).rejects.toThrow(
     "outside the project directory",
   )
+})
+
+test("rejects an outside file opened during a path replacement even if the path is restored", async () => {
+  const path = join(project, "inside.txt")
+  const moved = join(project, "inside-original.txt")
+  const fileSystem = {
+    realpath,
+    stat,
+    open: async (target: string, flags: string) => {
+      await rename(path, moved)
+      await symlink(join(outside, "secret.txt"), path)
+      const handle = await open(target, flags)
+      await unlink(path)
+      await rename(moved, path)
+      return handle
+    },
+  }
+
+  await expect(readWith(["inside.txt"], project, fileSystem)).rejects.toThrow("changed")
 })

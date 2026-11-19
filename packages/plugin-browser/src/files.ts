@@ -3,62 +3,77 @@ export * as BrowserFiles from "./files.js"
 import { Browser } from "./rpc.js"
 import { Tool } from "@opencode/schema/tool"
 import { Effect } from "effect"
+import type { Stats } from "node:fs"
+import type { FileHandle } from "node:fs/promises"
 
 // Files cross machines as bytes. Only this endpoint interprets its local paths.
 export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], directory: string) =>
   Effect.tryPromise({
     try: async () => {
-      const { open, realpath } = await import("node:fs/promises")
-      const { resolve, relative, isAbsolute, sep, basename, extname } = await import("node:path")
-      // Uploads are authorized by containment in the project directory
-      // (#2289): the plugin context exposes no FileAccess service, so
-      // the project directory is the authorization boundary. The
-      // candidate is compared only after realpath so both sides are
-      // canonical: the root's own realpath and a caller's absolute path
-      // can otherwise disagree on Windows short names such as RUNNER~1,
-      // and an in-project symlink must not escape the directory.
-      const root = await realpath(directory)
-      const contained = (candidate: string) => {
-        const rel = relative(root, candidate)
-        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
-      }
-      const files = await Promise.all(
-        paths.map(async (input) => {
-          const candidate = resolve(root, input)
-          const real = await realpath(candidate)
-          if (!contained(real))
-            throw new Error(
-              `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
-            )
-          const file = await open(real, "r")
-          try {
-            const stat = await file.stat()
-            if (!stat.isFile())
-              throw new Error("Upload paths must name files, not directories. Select a server-local file.")
-            if (stat.size > Browser.MAX_FILE_BYTES)
-              throw new Error(
-                `Upload is ${stat.size} bytes; the limit is ${Browser.MAX_FILE_BYTES} bytes (5 MiB). Select a smaller file; do not retry the same upload.`,
-              )
-            return {
-              id: Browser.FileID.make(`file_${crypto.randomUUID()}`),
-              name: basename(input),
-              mime: types[extname(input).toLowerCase()] ?? "application/octet-stream",
-              data: new Uint8Array(await file.readFile()),
-            }
-          } finally {
-            await file.close()
-          }
-        }),
-      )
-      if (files.reduce((size, file) => size + file.data.byteLength, 0) > Browser.MAX_FILE_BYTES)
-        throw new Error(
-          "The selected upload files exceed 5 MiB in total. Send fewer or smaller files; splitting them into one batch does not bypass the total limit.",
-        )
-      return files
+      const { open, realpath, stat } = await import("node:fs/promises")
+      return readWith(paths, directory, { open, realpath, stat })
     },
     catch: (error) => failure("read", error),
   }),
 )
+
+type ReadFileSystem = {
+  open: (path: string, flags: string) => Promise<FileHandle>
+  realpath: (path: string) => Promise<string>
+  stat: (path: string) => Promise<Stats>
+}
+
+export async function readWith(paths: readonly string[], directory: string, fileSystem: ReadFileSystem) {
+  const { resolve, relative, isAbsolute, sep, basename, extname } = await import("node:path")
+  // Compare canonical paths so Windows short names and in-project symlinks
+  // obey the same project-directory boundary.
+  const root = await fileSystem.realpath(directory)
+  const contained = (candidate: string) => {
+    const rel = relative(root, candidate)
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  }
+  const files = await Promise.all(
+    paths.map(async (input) => {
+      const candidate = resolve(root, input)
+      const real = await fileSystem.realpath(candidate)
+      if (!contained(real))
+        throw new Error(
+          `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
+        )
+      const file = await fileSystem.open(real, "r")
+      try {
+        const opened = await file.stat()
+        const current = await fileSystem.realpath(candidate)
+        if (!contained(current))
+          throw new Error(
+            `Upload path '${input}' is outside the project directory. Uploads must name a file inside the project; move the file into the project first.`,
+          )
+        const currentStat = await fileSystem.stat(current)
+        if (opened.dev !== currentStat.dev || opened.ino !== currentStat.ino)
+          throw new Error(`Upload path '${input}' changed while it was being opened. Select the file again.`)
+        if (!opened.isFile())
+          throw new Error("Upload paths must name files, not directories. Select a server-local file.")
+        if (opened.size > Browser.MAX_FILE_BYTES)
+          throw new Error(
+            `Upload is ${opened.size} bytes; the limit is ${Browser.MAX_FILE_BYTES} bytes (5 MiB). Select a smaller file; do not retry the same upload.`,
+          )
+        return {
+          id: Browser.FileID.make(`file_${crypto.randomUUID()}`),
+          name: basename(input),
+          mime: types[extname(input).toLowerCase()] ?? "application/octet-stream",
+          data: new Uint8Array(await file.readFile()),
+        }
+      } finally {
+        await file.close()
+      }
+    }),
+  )
+  if (files.reduce((size, file) => size + file.data.byteLength, 0) > Browser.MAX_FILE_BYTES)
+    throw new Error(
+      "The selected upload files exceed 5 MiB in total. Send fewer or smaller files; splitting them into one batch does not bypass the total limit.",
+    )
+  return files
+}
 
 const types: Record<string, string> = {
   ".txt": "text/plain",
