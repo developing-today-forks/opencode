@@ -8308,7 +8308,7 @@
             }
           }
         },
-        "description": "List every stored integration credential, including its secret value.",
+        "description": "List every stored integration credential, including its secret value. Session-cookie credentials are provider-only: listings return their metadata with the cookie redacted.",
         "summary": "List credentials"
       },
       "post": {
@@ -18326,6 +18326,26 @@
         "required": ["type", "methodID", "refresh", "access", "expires"],
         "additionalProperties": false
       },
+      "Credential.SessionCookie": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["session-cookie"]
+          },
+          "cookie": {
+            "type": "string"
+          },
+          "workspaceID": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          }
+        },
+        "required": ["type", "cookie", "workspaceID"],
+        "additionalProperties": false
+      },
       "Credential.Value": {
         "anyOf": [
           {
@@ -18336,6 +18356,9 @@
           },
           {
             "$ref": "#/components/schemas/Credential.External"
+          },
+          {
+            "$ref": "#/components/schemas/Credential.SessionCookie"
           }
         ]
       },

@@ -311,6 +311,7 @@ export function make(
         if (
           !credential ||
           credential.type === "oauth" ||
+          credential.type === "session-cookie" ||
           (credential.type === "external" && credential.methodID !== methodID)
         )
           return

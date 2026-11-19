@@ -257,7 +257,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Manag
           }
           return yield* ctx.integration.connection.resolve(connection).pipe(
             Effect.flatMap((credential) => {
-              if (!credential || credential.type === "external")
+              if (!credential || credential.type === "external" || credential.type === "session-cookie")
                 return Effect.succeed({ config: undefined, connection, organization: undefined, mcp: undefined })
               return fetchConfig(http, credential).pipe(
                 Effect.map((config) => ({
@@ -461,7 +461,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Manag
                     return yield* Effect.fail(new Error("OpenCode Console connection changed"))
                   }
                   const credential = yield* ctx.integration.connection.resolve(active)
-                  if (!credential || credential.type === "external")
+                  if (!credential || credential.type === "external" || credential.type === "session-cookie")
                     return yield* Effect.fail(new Error("OpenCode Console is not connected"))
                   const metadata = credential.metadata
                   const orgID = typeof metadata?.orgID === "string" ? metadata.orgID : undefined
