@@ -33,7 +33,6 @@ import { ServerConnection } from "@/runtime/server/registry"
 import { useProviders } from "@/providers/catalog/providers"
 import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/console"
 import { useIntegrations } from "@/providers/catalog/integrations"
-import { CustomProviderForm } from "@/providers/credentials/dialog"
 import { ProviderModelGroup, ProviderModelIcon } from "@/providers/models/provider-group"
 import type { ModelSelection } from "@/providers/models/selection"
 import { decode64 } from "@/runtime/persistence/base64"
@@ -58,8 +57,6 @@ import { useProviderAccountActions } from "@/settings/providers/account-actions"
 import { IconButton } from "@opencode/ui/icon-button"
 import { Menu } from "@opencode/ui/menu"
 import "./models.css"
-
-const CUSTOM_ID = "_custom"
 
 type IntegrationForm = NonNullable<ProviderConnectMethod["form"]>[number]
 
@@ -125,12 +122,9 @@ export const DialogConnectProvider: Component<{
   function Content() {
     return (
       <Switch>
-        <Match when={controller.selected() === CUSTOM_ID}>
-          <CustomProviderForm autofocus={false} />
-        </Match>
         <Match
           keyed
-          when={controller.selected() && controller.selected() !== CUSTOM_ID ? controller.selected() : undefined}
+          when={controller.selected() ? controller.selected() : undefined}
         >
           {(provider) => (
             <ProviderConnection
@@ -238,13 +232,11 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
   })
 
   const featured = ["opencode-go", "opencode", "anthropic", "openai", "google", "openrouter", "vercel"]
-  const custom = () => ({ id: CUSTOM_ID, name: language.t("dialog.provider.custom.label") })
-
   const all = createMemo(() => {
     language.locale()
     const query = store.filter.trim().toLowerCase()
 
-    const values = [custom(), ...integrations.list()]
+    const values = integrations.list()
 
     if (!query) return values
 
@@ -260,13 +252,7 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
   const other = createMemo(() =>
     all()
       .filter((provider) => !featured.includes(provider.id))
-      .sort((a, b) => {
-        if (a.id === CUSTOM_ID) return -1
-
-        if (b.id === CUSTOM_ID) return 1
-
-        return a.name.localeCompare(b.name)
-      }),
+      .sort((a, b) => a.name.localeCompare(b.name)),
   )
 
   const rows = createMemo(() => [...popular(), ...other()])
@@ -371,11 +357,6 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
                           </span>
                           <span class="flex h-4 shrink-0 items-center rounded-xs border-[0.5px] border-v2-border-border-base bg-v2-background-bg-layer-03 px-1 text-[11px] font-[530] leading-none tracking-[0.05px] text-v2-text-text-muted">
                             {language.t("dialog.provider.tag.recommended")}
-                          </span>
-                        </Show>
-                        <Show when={provider.id === CUSTOM_ID}>
-                          <span class="flex h-4 shrink-0 items-center rounded-xs border-[0.5px] border-v2-border-border-base bg-v2-background-bg-layer-03 px-1 text-[11px] font-[530] leading-none tracking-[0.05px] text-v2-text-text-muted">
-                            {language.t("settings.providers.tag.custom")}
                           </span>
                         </Show>
                         <Show when={store.connecting === provider.id}>
