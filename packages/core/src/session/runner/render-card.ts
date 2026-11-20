@@ -300,6 +300,7 @@ export const parseRenderAnswer = (
   const answer = asRecord(data?.answer) ?? (data === undefined && root.data === undefined ? root : undefined)
   if (!answer) return { type: "none" }
   if (answer.answered === false) {
+    if (answer.reason !== "chat") return { type: "none" }
     return { type: "chat", note: typeof data?.note === "string" ? data.note : RENDER_PAGE_CLOSED_IN_CHAT_NOTE }
   }
   if (answer.action === "fallback") {

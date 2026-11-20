@@ -141,6 +141,15 @@ describe("answer application with a fake render tool", () => {
     expect(answer.note).toBe(RenderCard.RENDER_PAGE_CLOSED_IN_CHAT_NOTE)
   })
 
+  test("unanswered results without reason chat parse to none, never chat", () => {
+    // Oracle: the documented contract — only { answered: false, reason: "chat" }
+    // is a chat answer; timeout or reason-less unanswered results are none.
+    expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: true, data: { answer: { answered: false, reason: "timeout" } } })).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: true, data: { answer: { answered: false } } })).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: true, data: { answer: { answered: false, reason: "dismissed" } } })).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: true, data: { answer: { answered: false, reason: "chat" } } })).type).toBe("chat")
+  })
+
   test("failed calls and malformed answers parse to none, never a guess", () => {
     expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: false, error: "nope" })).type).toBe("none")
     expect(RenderCard.parseRenderAnswer(JSON.stringify({ ok: true, data: { answer: { tier: "huge", model: "x" } } })).type).toBe("none")
