@@ -13,6 +13,10 @@ export const Key = Schema.String.check(Schema.isPattern(/^[a-z0-9](?:[a-z0-9._-]
 })
 export type Key = typeof Key.Type
 
+export class NotFoundError extends Schema.TaggedError<NotFoundError>()("InstructionEntry.NotFoundError", {
+  key: Schema.String,
+}) {}
+
 export const Info = Schema.Struct({
   key: Key,
   value: Schema.Json.annotate({ description: "JSON value attached to the session's instructions" }),

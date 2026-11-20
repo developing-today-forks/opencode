@@ -11,6 +11,7 @@ import { InstructionEntryTable } from "./sql.js"
 
 export const Key = InstructionEntry.Key
 export type Key = typeof Key.Type
+export const NotFoundError = InstructionEntry.NotFoundError
 export const Info = InstructionEntry.Info
 export type Info = typeof Info.Type
 export const Snapshot = InstructionEntry.Snapshot
@@ -73,7 +74,10 @@ export interface Interface {
     readonly key: Key
     readonly value: Schema.Json
   }) => Effect.Effect<void, InstructionEntry.ValueTooLargeError>
-  readonly remove: (input: { readonly sessionID: SessionSchema.ID; readonly key: Key }) => Effect.Effect<void>
+  readonly remove: (input: {
+    readonly sessionID: SessionSchema.ID
+    readonly key: Key
+  }) => Effect.Effect<void, InstructionEntry.NotFoundError>
   /** Produces one Instructions source per stored entry, keyed `api/<key>`. */
   readonly load: (sessionID: SessionSchema.ID) => Effect.Effect<Instructions.List>
 }
@@ -156,7 +160,7 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("InstructionEntry.remove")(function* (input: Parameters<Interface["remove"]>[0]) {
-      yield* db
+      const removed = yield* db
         .update(InstructionEntryTable)
         .set({ value: null, removed: true, time_updated: Date.now() })
         .where(
@@ -166,8 +170,10 @@ const layer = Layer.effect(
             eq(InstructionEntryTable.removed, false),
           ),
         )
-        .run()
+        .returning({ key: InstructionEntryTable.key })
+        .get()
         .pipe(Effect.orDie)
+      if (!removed) return yield* new NotFoundError({ key: input.key })
     })
 
     const load = Effect.fn("InstructionEntry.load")(function* (sessionID: SessionSchema.ID) {

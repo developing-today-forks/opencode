@@ -172,6 +172,12 @@ export class SessionNotFoundError extends Schema.TaggedError<SessionNotFoundErro
   { httpApiStatus: 404 },
 ) {}
 
+export class InstructionEntryNotFoundError extends Schema.TaggedError<InstructionEntryNotFoundError>()(
+  "InstructionEntryNotFoundError",
+  { key: Schema.String, message: Schema.String },
+  { httpApiStatus: 404 },
+) {}
+
 export class MessageNotFoundError extends Schema.TaggedError<MessageNotFoundError>()(
   "MessageNotFoundError",
   {
