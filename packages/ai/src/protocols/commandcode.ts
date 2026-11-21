@@ -408,7 +408,7 @@ const fromRequest = Effect.fn("CommandCode.fromRequest")(function* (request: LLM
         type: "tool-result",
         toolCallId: part.id,
         toolName: part.name,
-        output: { type: "text", value: ProviderShared.toolResultText(part) },
+        output: { type: "text", value: ProviderShared.markedToolResultText(part) },
       })
     }
     if (content.length) messages.push({ role: "tool", content })

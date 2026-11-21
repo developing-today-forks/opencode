@@ -187,6 +187,48 @@ it.effect("history lowers to the bundle's wire messages: tool-call parts and too
   }),
 )
 
+it.effect("history marks failed tool results while leaving identical successful text unchanged", () =>
+  Effect.gen(function* () {
+    const compiled = yield* compileRequest(
+      LLM.request({
+        model,
+        messages: [
+          Message.assistant([
+            ToolCallPart.make({ id: "call_success", name: "lookup", input: {} }),
+            ToolCallPart.make({ id: "call_error", name: "lookup", input: {} }),
+          ]),
+          Message.tool({ id: "call_success", name: "lookup", result: "timed out", resultType: "text" }),
+          Message.tool({ id: "call_error", name: "lookup", result: "timed out", resultType: "error" }),
+          Message.user("try again"),
+        ],
+      }),
+    )
+    const params = (compiled.body as Record<string, never>).params as Record<string, never>
+    expect(params.messages).toContainEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call_success",
+          toolName: "lookup",
+          output: { type: "text", value: "timed out" },
+        },
+      ],
+    })
+    expect(params.messages).toContainEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call_error",
+          toolName: "lookup",
+          output: { type: "text", value: "[tool_error] timed out" },
+        },
+      ],
+    })
+  }),
+)
+
 it.effect("a forced tool choice fails closed: the wire has no tool_choice field to honor it with", () =>
   Effect.gen(function* () {
     for (const toolChoice of [{ type: "required" }, { type: "tool", name: "get_weather" }] as const) {
