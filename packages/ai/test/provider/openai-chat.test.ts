@@ -557,7 +557,9 @@ describe("OpenAI Chat route", () => {
       expect(prepared.body.messages.at(-1)).toEqual({
         role: "tool",
         tool_call_id: "call_1",
-        content: ProviderShared.encodeJson(error),
+        // Wire oracle (#2226): chat tool messages have no error field, so failed
+        // results carry the stable [tool_error] prefix.
+        content: `${ProviderShared.toolErrorMarker}${ProviderShared.encodeJson(error)}`,
       })
     }),
   )

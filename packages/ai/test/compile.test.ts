@@ -11,6 +11,7 @@ import {
   mergeProviderOptions,
 } from "../src/index.js"
 import { AnthropicMessages, OpenAIChat, OpenAIResponses } from "../src/protocols.js"
+import { ProviderShared } from "../src/protocols/shared.js"
 import { Auth, LLMClient } from "../src/route.js"
 import { compileRequest } from "../src/route/client.js"
 import { it } from "./lib/effect.js"
@@ -182,7 +183,8 @@ describe("request option precedence", () => {
 
       expect(prepared.body.messages).toMatchObject([
         { role: "assistant", tool_calls: [{ id: "call_1", function: { name: "lookup" } }] },
-        { role: "tool", tool_call_id: "call_1", content: "Tool result missing" },
+        // The history fill is an error result, so the wire carries the error marker (#2226).
+        { role: "tool", tool_call_id: "call_1", content: `${ProviderShared.toolErrorMarker}Tool result missing` },
         { role: "user", content: "Continue." },
       ])
     }),

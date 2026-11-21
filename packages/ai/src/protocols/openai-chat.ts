@@ -511,7 +511,7 @@ const lowerToolMessages = Effect.fnUntraced(function* (
       messages.push(
         toolMessage(
           options.toolCallID?.(part.id) ?? part.id,
-          ProviderShared.toolResultText(part),
+          ProviderShared.markedToolResultText(part),
           options.cacheControl?.(part.cache),
         ),
       )

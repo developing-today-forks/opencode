@@ -320,6 +320,15 @@ export const toolResultText = (part: ToolResultPart) => {
   return encodeJson(part.result.value)
 }
 
+/**
+ * Stable wire prefix for failed tool results in protocols whose tool-result schema has no error field. Bracketed so it
+ * cannot be confused with error text a tool itself produced (`new Error("boom")` already stringifies to `Error: boom`).
+ */
+export const toolErrorMarker = "[tool_error] "
+
+export const markedToolResultText = (part: ToolResultPart) =>
+  part.result.type === "error" ? `${toolErrorMarker}${toolResultText(part)}` : toolResultText(part)
+
 export const errorText = (error: unknown) => {
   if (error instanceof Error) return error.message
   if (typeof error === "string") return error

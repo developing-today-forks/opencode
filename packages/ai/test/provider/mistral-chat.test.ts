@@ -310,6 +310,26 @@ describe("Mistral Chat", () => {
     }),
   )
 
+  it.effect("marks failed tool results with the wire error prefix", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model,
+          messages: [
+            Message.tool({ id: "Ab12Cd34E", name: "lookup", resultType: "error", result: "timed out" }),
+            Message.tool({ id: "Ef56Gh78I", name: "lookup", resultType: "text", result: "timed out" }),
+          ],
+        }),
+      )
+      // Wire oracle (#2226): tool messages have no error field, so failures are
+      // distinguishable only by the stable [tool_error] prefix.
+      expect(prepared.body.messages).toEqual([
+        { role: "tool", tool_call_id: "Ab12Cd34E", name: "lookup", content: "[tool_error] timed out" },
+        { role: "tool", tool_call_id: "Ef56Gh78I", name: "lookup", content: "timed out" },
+      ])
+    }),
+  )
+
   it.effect("streams ordered thinking and text and replays native thinking metadata", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(request).pipe(

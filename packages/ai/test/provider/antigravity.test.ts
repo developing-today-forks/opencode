@@ -763,6 +763,32 @@ it.effect("Antigravity lowers tool results as proto Structs, exactly like the do
   }),
 )
 
+it.effect("Antigravity marks failed tool results with the Gemini error key", () =>
+  Effect.gen(function* () {
+    const compiled = yield* compileRequest(
+      LLM.request({
+        model,
+        messages: [
+          Message.user("weather?"),
+          Message.assistant([ToolCallPart.make({ id: "call_1", name: "get_weather", input: { city: "Oslo" } })]),
+          Message.tool({ id: "call_1", name: "get_weather", result: '{"temp": 3}', resultType: "error" }),
+          Message.assistant([ToolCallPart.make({ id: "call_2", name: "get_weather", input: { city: "Oslo" } })]),
+          Message.tool({ id: "call_2", name: "get_weather", result: { code: 503 }, resultType: "error" }),
+        ],
+      }),
+    )
+    const request = (compiled.body as Record<string, never>).request as Record<string, never>
+    const contents = request.contents as ReadonlyArray<Record<string, never>>
+    const responses = contents
+      .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
+      .filter((part) => "functionResponse" in part)
+      .map((part) => (part.functionResponse as Record<string, never>).response)
+    // Wire oracle (#2226): functionResponse.response is a Struct; a failed result
+    // is { error: <text> } where text is the same encoding as the success path.
+    expect(responses).toEqual([{ error: '{"temp": 3}' }, { error: '{"code":503}' }])
+  }),
+)
+
 it.effect("Antigravity recovers chat-carried signatures when replaying tool history after a leaf switch", () =>
   Effect.gen(function* () {
     const history = [

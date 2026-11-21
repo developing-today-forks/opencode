@@ -594,7 +594,7 @@ const lowerToolResultOutput = Effect.fnUntraced(function* (
 ) {
   // Text/json/error results are encoded as a plain string for backward
   // compatibility with existing cassettes and provider expectations.
-  if (part.result.type !== "content") return ProviderShared.toolResultText(part)
+  if (part.result.type !== "content") return ProviderShared.markedToolResultText(part)
   // Preserve the narrowed array element type when compiled through a consumer package.
   const content: ReadonlyArray<Content> = part.result.value
   return yield* Effect.forEach(content, (item) => lowerToolResultContentItem(item, request, adapter))
@@ -721,7 +721,7 @@ const lowerMessages = Effect.fnUntraced(function* (
           const content: ReadonlyArray<Content> =
             part.result.type === "content"
               ? part.result.value
-              : [{ type: "text", text: ProviderShared.toolResultText(part) }]
+              : [{ type: "text", text: ProviderShared.markedToolResultText(part) }]
           input.push({
             type: "message",
             role: "user",
