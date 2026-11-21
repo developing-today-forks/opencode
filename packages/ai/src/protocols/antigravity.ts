@@ -705,7 +705,10 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
       if (!ProviderShared.supportsContent(part, ["tool-result"]))
         return yield* ProviderShared.unsupportedContent("Antigravity", "tool", ["tool-result"])
       let response: unknown
-      if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
+      if (part.result.type === "error") {
+        // Gemini's documented error convention: functionResponse.response carries an `error` key instead of `result`.
+        response = { error: ProviderShared.toolResultText(part) }
+      } else if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
         response = part.result.value
       } else {
         const text = ProviderShared.toolResultText(part)

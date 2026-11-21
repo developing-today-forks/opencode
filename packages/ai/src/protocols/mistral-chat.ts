@@ -311,7 +311,7 @@ const lowerToolResults = Effect.fnUntraced(function* (
         role: "tool",
         tool_call_id: normalizeID(part.id),
         name: part.name,
-        content: ProviderShared.toolResultText(part),
+        content: ProviderShared.markedToolResultText(part),
       })
       continue
     }

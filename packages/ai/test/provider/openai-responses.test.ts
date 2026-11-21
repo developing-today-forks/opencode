@@ -1580,7 +1580,7 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
-  it.effect("preserves structured tool errors for the model", () =>
+  it.effect("marks structured tool errors with the wire error prefix", () =>
     Effect.gen(function* () {
       const error = {
         error: { type: "unknown", message: "Tool execution interrupted" },
@@ -1602,11 +1602,15 @@ describe("OpenAI Responses route", () => {
         }),
       )
 
-      expect(expectToolOutput(prepared.body).output).toBe(ProviderShared.encodeJson(error))
+      // Wire oracle (#2226): function_call_output has no error field, so the
+      // lowered output carries the stable [tool_error] prefix.
+      expect(expectToolOutput(prepared.body).output).toBe(
+        `${ProviderShared.toolErrorMarker}${ProviderShared.encodeJson(error)}`,
+      )
     }),
   )
 
-  it.effect("keeps primitive tool errors as plain text", () =>
+  it.effect("marks primitive tool errors with the wire error prefix", () =>
     Effect.gen(function* () {
       const prepared = yield* compileRequest(
         LLM.request({
@@ -1618,11 +1622,11 @@ describe("OpenAI Responses route", () => {
         }),
       )
 
-      expect(expectToolOutput(prepared.body).output).toBe("503")
+      expect(expectToolOutput(prepared.body).output).toBe(`${ProviderShared.toolErrorMarker}503`)
     }),
   )
 
-  it.effect("keeps non-JSON tool errors as plain text", () =>
+  it.effect("marks non-JSON tool errors with the wire error prefix", () =>
     Effect.gen(function* () {
       const prepared = yield* compileRequest(
         LLM.request({
@@ -1634,7 +1638,7 @@ describe("OpenAI Responses route", () => {
         }),
       )
 
-      expect(expectToolOutput(prepared.body).output).toBe("Error: boom")
+      expect(expectToolOutput(prepared.body).output).toBe(`${ProviderShared.toolErrorMarker}Error: boom`)
     }),
   )
 
@@ -3824,8 +3828,16 @@ describe("OpenAI Responses route", () => {
           name: "lookup",
           arguments: '{"query":"news"}',
         },
-        { type: "function_call_output", call_id: "call_1", output: "Tool result missing" },
-        { type: "function_call_output", call_id: "call_2", output: "Tool result missing" },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: `${ProviderShared.toolErrorMarker}Tool result missing`,
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_2",
+          output: `${ProviderShared.toolErrorMarker}Tool result missing`,
+        },
       ])
     }),
   )
@@ -4825,7 +4837,12 @@ describe("OpenAI Responses route", () => {
         {
           type: "message",
           role: "user",
-          content: [{ type: "input_text", text: '{"code":"search_failed","message":"Search unavailable"}' }],
+          content: [
+            {
+              type: "input_text",
+              text: `${ProviderShared.toolErrorMarker}{"code":"search_failed","message":"Search unavailable"}`,
+            },
+          ],
         },
       ])
     }),
