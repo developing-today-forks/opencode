@@ -17,6 +17,7 @@ import {
   FormNotFoundError,
   InvalidRequestError,
   InvalidCursorError,
+  InstructionEntryNotFoundError,
   MessageNotFoundError,
   ServiceUnavailableError,
   SessionBusyError,
@@ -662,6 +663,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.instructions.entry.list",
         Effect.fn(function* (ctx) {
+          yield* session.get(ctx.params.sessionID).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
           const instructions = yield* InstructionEntry.Service
           return { data: yield* instructions.list(ctx.params.sessionID) }
         }),
@@ -669,6 +671,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.instructions.entry.put",
         Effect.fn(function* (ctx) {
+          yield* session.get(ctx.params.sessionID).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
           const instructions = yield* InstructionEntry.Service
           yield* instructions.put({ sessionID: ctx.params.sessionID, key: ctx.params.key, value: ctx.payload.value })
           return HttpApiSchema.NoContent.make()
@@ -677,8 +680,18 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.instructions.entry.remove",
         Effect.fn(function* (ctx) {
+          yield* session.get(ctx.params.sessionID).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
           const instructions = yield* InstructionEntry.Service
-          yield* instructions.remove({ sessionID: ctx.params.sessionID, key: ctx.params.key })
+          yield* instructions.remove({ sessionID: ctx.params.sessionID, key: ctx.params.key }).pipe(
+            Effect.catchTag(
+              "InstructionEntry.NotFoundError",
+              (error) =>
+                new InstructionEntryNotFoundError({
+                  key: error.key,
+                  message: `Instruction entry not found: ${error.key}`,
+                }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )

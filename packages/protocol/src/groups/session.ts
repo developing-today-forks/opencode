@@ -27,6 +27,7 @@ import {
   FormNotFoundError,
   InvalidCursorError,
   InvalidRequestError,
+  InstructionEntryNotFoundError,
   MessageNotFoundError,
   ServiceUnavailableError,
   SessionBusyError,
@@ -705,7 +706,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
         {
           params: { sessionID: Session.ID, key: InstructionEntry.Key },
           success: HttpApiSchema.NoContent,
-          error: SessionNotFoundError,
+          error: [SessionNotFoundError, InstructionEntryNotFoundError],
         },
       )
         .middleware(sessionLocationMiddleware)

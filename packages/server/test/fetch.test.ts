@@ -73,6 +73,62 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
   }),
 )
 
+it.live("validates session and entry existence on instruction entry endpoints", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-instruction-entry-")))
+    const directory = config.path
+    const handler = yield* ServerFetch.make({ ...options, config: { directory } })
+    const headers = { "content-type": "application/json", "x-opencode-directory": encodeURIComponent(directory) }
+    const created = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ location: { directory } }),
+        }),
+      ),
+    )
+    expect(created.status).toBe(200)
+    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => created.json()),
+    ).data
+    const url = (sessionID: string, key = "entry") =>
+      `http://opencode.local/api/experimental/session/${sessionID}/instructions/entries${key ? `/${key}` : ""}`
+
+    const unknownSession = yield* Effect.forEach(
+      [
+        ["GET", url("ses_unknown", ""), undefined],
+        ["PUT", url("ses_unknown"), JSON.stringify({ value: "value" })],
+        ["DELETE", url("ses_unknown"), undefined],
+      ] as const,
+      ([method, target, body]) =>
+        Effect.promise(() => handler(new Request(target, { method, headers, body }))).pipe(
+          Effect.flatMap((response) =>
+            Effect.promise(() => response.json()).pipe(
+              Effect.map((json) => ({ method, status: response.status, tag: (json as { _tag: string })._tag })),
+            ),
+          ),
+        ),
+    )
+    expect(unknownSession).toEqual([
+      { method: "GET", status: 404, tag: "SessionNotFoundError" },
+      { method: "PUT", status: 404, tag: "SessionNotFoundError" },
+      { method: "DELETE", status: 404, tag: "SessionNotFoundError" },
+    ])
+
+    const missing = yield* Effect.promise(() => handler(new Request(url(session.id), { method: "DELETE", headers })))
+    expect(missing.status).toBe(404)
+    expect((yield* Effect.promise(() => missing.json()))._tag).toBe("InstructionEntryNotFoundError")
+
+    const put = yield* Effect.promise(() =>
+      handler(new Request(url(session.id), { method: "PUT", headers, body: JSON.stringify({ value: "value" }) })),
+    )
+    expect(put.status).toBe(204)
+    const removed = yield* Effect.promise(() => handler(new Request(url(session.id), { method: "DELETE", headers })))
+    expect(removed.status).toBe(204)
+  }),
+)
+
 type Handler = (request: Request) => Promise<Response>
 
 function occupy(port: number, cancel = false) {
