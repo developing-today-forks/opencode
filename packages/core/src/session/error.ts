@@ -88,3 +88,12 @@ export class InboxConflictError extends Schema.TaggedError<InboxConflictError>()
 export class SkillNotFoundError extends Schema.TaggedError<SkillNotFoundError>()("Session.SkillNotFoundError", {
   skill: Skill.ID,
 }) {}
+
+export class RouteTargetError extends Schema.TaggedError<RouteTargetError>()("Session.RouteTargetError", {
+  routeID: Schema.String,
+  reason: Schema.String,
+}) {
+  override get message() {
+    return `Cannot pin a member of ${this.routeID}: ${this.reason}`
+  }
+}

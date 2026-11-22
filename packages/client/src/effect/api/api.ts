@@ -56,6 +56,10 @@ export type ServerInfoOperation<E = never> = () => Effect.Effect<ServerInfoOutpu
 export type ServerPairOutput = { readonly code: string; readonly expires_in: number }
 export type ServerPairOperation<E = never> = () => Effect.Effect<ServerPairOutput, E>
 
+export type ServerRedeemInput = { readonly code: string }
+export type ServerRedeemOutput = { readonly token: string }
+export type ServerRedeemOperation<E = never> = (input: ServerRedeemInput) => Effect.Effect<ServerRedeemOutput, E>
+
 export type ServerConnectInput = { readonly code: string }
 export type ServerConnectOutput = { readonly token: string }
 export type ServerConnectOperation<E = never> = (input: ServerConnectInput) => Effect.Effect<ServerConnectOutput, E>
@@ -63,6 +67,7 @@ export type ServerConnectOperation<E = never> = (input: ServerConnectInput) => E
 export interface ServerApi<E = never> {
   readonly info: ServerInfoOperation<E>
   readonly pair: ServerPairOperation<E>
+  readonly redeem: ServerRedeemOperation<E>
   readonly connect: ServerConnectOperation<E>
 }
 
@@ -253,6 +258,22 @@ export type SessionSwitchModelOutput = void
 export type SessionSwitchModelOperation<E = never> = (
   input: SessionSwitchModelInput,
 ) => Effect.Effect<SessionSwitchModelOutput, E>
+
+export type SessionRouteTargetListInput = { readonly sessionID: Session.ID }
+export type SessionRouteTargetListOutput = ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>
+export type SessionRouteTargetListOperation<E = never> = (
+  input: SessionRouteTargetListInput,
+) => Effect.Effect<SessionRouteTargetListOutput, E>
+
+export type SessionRouteTargetSetInput = {
+  readonly sessionID: Session.ID
+  readonly routeID: string
+  readonly target: Model.Ref | null
+}
+export type SessionRouteTargetSetOutput = ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>
+export type SessionRouteTargetSetOperation<E = never> = (
+  input: SessionRouteTargetSetInput,
+) => Effect.Effect<SessionRouteTargetSetOutput, E>
 
 export type SessionUpdateInput = {
   readonly sessionID: Session.ID
@@ -676,6 +697,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
           }
@@ -825,6 +848,7 @@ export type SessionLogOutput =
             }
             readonly snapshot?: Snapshot.ID | undefined
             readonly files?: ReadonlyArray<RelativePath> | undefined
+            readonly planNotices?: ReadonlyArray<string> | undefined
           }
         }
       | {
@@ -843,6 +867,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly finish?: "content-filter" | undefined
@@ -1031,6 +1057,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly content?:
@@ -1078,6 +1106,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
           }
@@ -1155,6 +1185,8 @@ export type SessionLogOutput =
               readonly type: string
               readonly message: string
               readonly status?: number | undefined
+              readonly provider?: string | undefined
+              readonly model?: string | undefined
               readonly response?: { readonly body: string } | undefined
             }
             readonly inputID?: SessionMessage.ID | undefined
@@ -1331,6 +1363,10 @@ export interface SessionApi<E = never> {
   readonly fork: SessionForkOperation<E>
   readonly switchAgent: SessionSwitchAgentOperation<E>
   readonly switchModel: SessionSwitchModelOperation<E>
+  readonly routeTarget: {
+    readonly list: SessionRouteTargetListOperation<E>
+    readonly set: SessionRouteTargetSetOperation<E>
+  }
   readonly update: SessionUpdateOperation<E>
   readonly move: SessionMoveOperation<E>
   readonly prompt: SessionPromptOperation<E>
@@ -1442,6 +1478,12 @@ export type ServerCompletionsEmbeddingsOperation<E = never> = (
   input: ServerCompletionsEmbeddingsInput,
 ) => Effect.Effect<ServerCompletionsEmbeddingsOutput, E>
 
+export type ServerCompletionsTranscriptionsInput = { readonly payload: { readonly [x: string]: unknown } }
+export type ServerCompletionsTranscriptionsOutput = unknown
+export type ServerCompletionsTranscriptionsOperation<E = never> = (
+  input: ServerCompletionsTranscriptionsInput,
+) => Effect.Effect<ServerCompletionsTranscriptionsOutput, E>
+
 export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
 export type ServerCompletionsMessagesOutput = unknown
 export type ServerCompletionsMessagesOperation<E = never> = (
@@ -1473,6 +1515,7 @@ export interface ServerCompletionsApi<E = never> {
   readonly chat: ServerCompletionsChatOperation<E>
   readonly responses: ServerCompletionsResponsesOperation<E>
   readonly embeddings: ServerCompletionsEmbeddingsOperation<E>
+  readonly transcriptions: ServerCompletionsTranscriptionsOperation<E>
   readonly messages: ServerCompletionsMessagesOperation<E>
   readonly systemone: ServerCompletionsSystemoneOperation<E>
   readonly models: ServerCompletionsModelsOperation<E>
@@ -1797,6 +1840,110 @@ export interface CredentialApi<E = never> {
   readonly update: CredentialUpdateOperation<E>
   readonly activate: CredentialActivateOperation<E>
   readonly remove: CredentialRemoveOperation<E>
+}
+
+export type RouteOverrideListOutput = ReadonlyArray<{
+  readonly id: string
+  readonly action: "avoid" | "prefer" | "allow-over-budget"
+  readonly providers: ReadonlyArray<string>
+  readonly models: ReadonlyArray<string>
+  readonly routes: ReadonlyArray<string>
+  readonly fixed: boolean
+  readonly factor?: number | undefined
+  readonly weight?: number | undefined
+  readonly schedule?:
+    | {
+        readonly daysOfWeek?: ReadonlyArray<number> | undefined
+        readonly daysOfMonth?: ReadonlyArray<number> | undefined
+        readonly start?: string | undefined
+        readonly end?: string | undefined
+        readonly timezone?: string | undefined
+        readonly dates?: ReadonlyArray<string> | undefined
+        readonly excludeDates?: ReadonlyArray<string> | undefined
+        readonly excludeWindows?: ReadonlyArray<string> | undefined
+        readonly from?: number | undefined
+        readonly until?: number | undefined
+      }
+    | undefined
+  readonly until?: number | undefined
+  readonly text: string
+  readonly source: "user" | "interpreter"
+  readonly createdAt: number
+}>
+export type RouteOverrideListOperation<E = never> = () => Effect.Effect<RouteOverrideListOutput, E>
+
+export type RouteOverrideAddInput = {
+  readonly id: string
+  readonly action: "avoid" | "prefer" | "allow-over-budget"
+  readonly providers: ReadonlyArray<string>
+  readonly models: ReadonlyArray<string>
+  readonly routes: ReadonlyArray<string>
+  readonly fixed: boolean
+  readonly factor?: number | undefined
+  readonly weight?: number | undefined
+  readonly schedule?:
+    | {
+        readonly daysOfWeek?: ReadonlyArray<number> | undefined
+        readonly daysOfMonth?: ReadonlyArray<number> | undefined
+        readonly start?: string | undefined
+        readonly end?: string | undefined
+        readonly timezone?: string | undefined
+        readonly dates?: ReadonlyArray<string> | undefined
+        readonly excludeDates?: ReadonlyArray<string> | undefined
+        readonly excludeWindows?: ReadonlyArray<string> | undefined
+        readonly from?: number | undefined
+        readonly until?: number | undefined
+      }
+    | undefined
+  readonly until?: number | undefined
+  readonly text: string
+  readonly source: "user" | "interpreter"
+  readonly createdAt: number
+}
+export type RouteOverrideAddOutput = ReadonlyArray<{
+  readonly id: string
+  readonly action: "avoid" | "prefer" | "allow-over-budget"
+  readonly providers: ReadonlyArray<string>
+  readonly models: ReadonlyArray<string>
+  readonly routes: ReadonlyArray<string>
+  readonly fixed: boolean
+  readonly factor?: number | undefined
+  readonly weight?: number | undefined
+  readonly schedule?:
+    | {
+        readonly daysOfWeek?: ReadonlyArray<number> | undefined
+        readonly daysOfMonth?: ReadonlyArray<number> | undefined
+        readonly start?: string | undefined
+        readonly end?: string | undefined
+        readonly timezone?: string | undefined
+        readonly dates?: ReadonlyArray<string> | undefined
+        readonly excludeDates?: ReadonlyArray<string> | undefined
+        readonly excludeWindows?: ReadonlyArray<string> | undefined
+        readonly from?: number | undefined
+        readonly until?: number | undefined
+      }
+    | undefined
+  readonly until?: number | undefined
+  readonly text: string
+  readonly source: "user" | "interpreter"
+  readonly createdAt: number
+}>
+export type RouteOverrideAddOperation<E = never> = (
+  input: RouteOverrideAddInput,
+) => Effect.Effect<RouteOverrideAddOutput, E>
+
+export type RouteOverrideRemoveInput = { readonly overrideID: string }
+export type RouteOverrideRemoveOutput = void
+export type RouteOverrideRemoveOperation<E = never> = (
+  input: RouteOverrideRemoveInput,
+) => Effect.Effect<RouteOverrideRemoveOutput, E>
+
+export interface RouteApi<E = never> {
+  readonly override: {
+    readonly list: RouteOverrideListOperation<E>
+    readonly add: RouteOverrideAddOperation<E>
+    readonly remove: RouteOverrideRemoveOperation<E>
+  }
 }
 
 export type ProjectListInput = { readonly archived?: boolean | undefined }
@@ -2638,6 +2785,7 @@ export interface AppApi<E = never> {
   readonly integration: IntegrationApi<E>
   readonly mcp: McpApi<E>
   readonly credential: CredentialApi<E>
+  readonly route: RouteApi<E>
   readonly project: ProjectApi<E>
   readonly form: FormApi<E>
   readonly permission: PermissionApi<E>
