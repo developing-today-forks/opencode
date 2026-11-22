@@ -1345,11 +1345,16 @@ it.effect("does not fail over within the same message when a quota failure follo
       .pipe(Effect.exit)
 
     // Pinned gate (#1014): partial output is already published on this assistant message, so a
-    // different model must not append to it via Failover; the post-output cascade is the
-    // Continue outcome on a new message when a retry is authorized. The target is still
-    // marked failed, so a later re-selection sees it cooling.
+    // different model must not append to it via Failover. The cascade continues on a new message
+    // instead: Continue when a retry is authorized, and otherwise -- a quota failure is never
+    // retried -- ContinueOn with the route's next member (#1806: a session errors only when every
+    // candidate is exhausted). The target is still marked failed, so a later re-selection sees it
+    // cooling.
     expect(Exit.isSuccess(result) ? result.value._tag : undefined).not.toBe("Failover")
-    expect(fallbackCalls).toBe(0)
+    expect(Exit.isSuccess(result) ? result.value : undefined).toEqual(
+      SessionStep.Outcome.ContinueOn({ model: fallback, error: expect.anything() }),
+    )
+    expect(fallbackCalls).toBe(1)
     expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
     expect(yield* llm.requests()).toHaveLength(1)
   }),

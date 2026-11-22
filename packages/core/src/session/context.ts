@@ -62,8 +62,13 @@ export interface Loaded {
 export interface Interface {
   /** Selects the Session, agent, instructions, and tools used by subsequent work. */
   readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
-  /** Resolves the model and active history for that selection. */
-  readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
+  /** Resolves the model and active history for that selection. `chosen` is a route member a
+   * turn already continues on (the next member after a failure with output): it is used as
+   * is, since resolving again could choose a different member or claim a probe. */
+  readonly load: (
+    selection: Selection,
+    chosen?: SessionRunnerModel.Resolved,
+  ) => Effect.Effect<Loaded, SessionRunnerModel.Error>
   readonly resolveModel: (
     session: SessionSchema.Info,
     request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
@@ -238,7 +243,22 @@ const layer = Layer.effect(
       }))
     })
 
-    const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
+    const load = Effect.fn("SessionContext.load")(function* (
+      selection: Selection,
+      chosen?: SessionRunnerModel.Resolved,
+    ) {
+      // A route member a turn already continues on is used as is: resolving again could choose another member.
+      if (chosen) {
+        const history = yield* SessionHistory.entriesForRunner(db, selection.session.id, selection.instructions, chosen.ref)
+        return {
+          session: selection.session,
+          agent: selection.agent,
+          model: chosen,
+          initial: history.initial,
+          messages: history.entries.map((entry) => entry.message),
+          tools: selection.tools,
+        }
+      }
       const request = { kind: "primary" as const, agent: selection.agent.id }
       // A routed model resolves to a leaf whose per-target context ceiling can only filter live turns if resolution
       // knows the request size (#891). For a route the history is read first, shaped for the route's own entry, and

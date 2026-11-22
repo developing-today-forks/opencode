@@ -65,6 +65,9 @@ export type Outcome = Data.TaggedEnum<{
     readonly freshAssistant?: boolean
   }
   Failover: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
+  /** A routed attempt failed after its output started and no further request was granted: the
+   * turn continues in a new reply on the route's next member, which is already resolved. */
+  ContinueOn: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
   RecoverFull: {}
   Compacted: {}
   /** The step hit a quota wall with the failover walk exhausted and the host
@@ -858,6 +861,8 @@ export const make = Effect.gen(function* () {
         // The failover decision: where this attempt moves to, if anywhere. It is computed
         // after the retry hook below, and the attempt row names its destination.
         let failover: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
+        // Where the turn continues, in a new reply, when the attempt failed after its output started.
+        let continueOn: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
         // The attempt row is written exactly once, normally after the failover decision so
         // it can name the destination. The retry hook runs behind restore(), so a session
         // interrupted while the hook runs would otherwise exit before that write and the
@@ -894,7 +899,7 @@ export const make = Effect.gen(function* () {
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
               output_started: recorded.outputStarted,
-              failed_over_to: failover?.overTo,
+              failed_over_to: failover?.overTo ?? continueOn?.overTo,
               first_token_ms: firstOutputAt === undefined ? undefined : firstOutputAt - requestStarted,
               response_ms: streamedAt - requestStarted,
               tokens_per_second:
@@ -994,9 +999,10 @@ export const make = Effect.gen(function* () {
         // while eligible candidates remain (#1014).
         // Output already started keeps this gate closed on purpose: partial output is already
         // published on this assistant message, so another model's output must not be appended
-        // to it. That case cascades through the Continue outcome below when a retry is
-        // authorized -- a new assistant message whose re-selection sees the target marked
-        // failed above; a hook that declines any further request ends the turn, as instructed.
+        // to it. That case continues in a new assistant message instead: through the Continue
+        // outcome below when a retry is granted -- re-selection sees the target marked failed
+        // above -- and otherwise through ContinueOn, on the next member of this attempt's own
+        // fallback chain.
         if (
           input.model.routing &&
           llmFailure &&
@@ -1043,6 +1049,29 @@ export const make = Effect.gen(function* () {
             }
             if (failover && input.sessionID)
               ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+          } else if (!retry?.retry && tools.declines.length === 0 && !tools.interrupted) {
+            // No further request was granted: the failure cannot be retried, or the step's
+            // retry budget (the route's `attempts`, two by default) is spent. That budget is
+            // for asking a target again, and must not end a pool's turn while another member
+            // could answer (#1806: a session errors only when every candidate is exhausted).
+            // The next member comes from this attempt's own fallback chain, which skips every
+            // member already tried, so no member is asked twice and the walk ends after the
+            // last one.
+            const fallback = yield* Effect.result(input.model.routing.fallback())
+            if (Result.isSuccess(fallback) && fallback.success) {
+              continueOn = {
+                model: fallback.success,
+                overTo: `${fallback.success.ref.providerID}/${fallback.success.ref.id}`,
+              }
+              yield* Effect.logInfo("model route continues on the next member after output", {
+                routeID: input.model.routing.routeID,
+                from: `${input.model.routing.target.providerID}/${input.model.routing.target.id}`,
+                to: continueOn.overTo,
+                reason: failureError?.message,
+              })
+              if (input.sessionID)
+                ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+            }
           }
         }
 
@@ -1243,6 +1272,8 @@ export const make = Effect.gen(function* () {
         // Output already started: the retry continues on a fresh assistant message.
         if (llmError && retry?.retry && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
           return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
+        if (continueOn && llmError && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
+          return Outcome.ContinueOn({ model: continueOn.model, error: llmError })
 
         // Quota wall (#2384 slice 3): every serving path above — same-target
         // retry, credential switch, route failover, continuation — has had

@@ -798,6 +798,10 @@ const incompleteStream = () =>
 const providerRejected = (input: { readonly message: string; readonly classification?: "context-overflow" }) =>
   new AIError({ reason: new InvalidRequestError(input) })
 
+// The note the runner adds before a turn continues on the next pool member (#2679).
+const INCOMPLETE_STREAM_CONTINUATION =
+  "The previous response was interrupted. Continue from where you left off without repeating completed content."
+
 const invalidRequest = () =>
   new AIError({
     reason: new InvalidRequestError({ message: "Invalid request" }),
@@ -1335,6 +1339,157 @@ describe("SessionRunnerLLM", () => {
     expect(String(s.requests[1]?.model.id)).toBe("replacement")
     expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
   })
+
+  const poolMemberOptions = {
+    capabilities: { tools: true, input: ["text"], output: ["text"] },
+    cost: [],
+    limit: defaultModelLimit,
+  } as const
+  const poolRouting = (member: string, next: SessionRunnerModel.Resolved | undefined, attempts = 1) => ({
+    routeID: Model.ID.make("pool"),
+    target: ModelRoute.ref({ providerID: "fake", model: member }),
+    policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+    attempts,
+    fallback: () => Effect.succeed(next),
+  })
+  // Text first, so the failure arrives after the reply's output started.
+  const partialThenFail = (failure: AIError, text = "Partial") =>
+    TestLLM.failAfter(
+      failure,
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.textStart({ id: `partial-${text}` }),
+      LLMEvent.textDelta({ id: `partial-${text}`, text }),
+    )
+  const requestedModels = (s: Scenario) => s.requests.map((request) => String(request.model.id))
+
+  // Oracle: #1806, "a session moves to the next candidate on ANY candidate error and errors only
+  // when every candidate is exhausted", once output has started: the partial reply stays as it was
+  // and the next member answers in a new reply. An invalid request is never retried, so before this
+  // the turn ended here with a member left.
+  scenario("continues on the next member in a new reply when a failure after output cannot be retried", function* (s) {
+    ModelRoute.resetHealth()
+    let fallbacks = 0
+    const next = SessionRunnerModel.resolved(replacementModel, poolMemberOptions)
+    s.routing = { ...poolRouting("fake-model", next, 2), fallback: () => Effect.sync(() => (fallbacks++, next)) }
+    yield* s.admit("Say something")
+    yield* s.llm.push(partialThenFail(invalidRequest()))
+    yield* s.llm.push(TestLLM.text(" from the next member", "next-member"))
+    yield* s.resume
+
+    expect(fallbacks).toBe(1)
+    expect(requestedModels(s)).toEqual(["fake-model", "replacement"])
+    // Since the upstream sync a failed stream's partial text is not replayed to the model (to-llm-message.ts keeps
+    // only the calls that ran), so the next member's request ends on the note; the partial reply stays in the
+    // transcript below.
+    expect(s.requests[1]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }],
+    })
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Say something"),
+      Expected.assistant({ finish: "error", error: { type: "provider.invalid-request" } }, [Expected.text("Partial")]),
+      { type: "synthetic", text: INCOMPLETE_STREAM_CONTINUATION },
+      Expected.assistant({ finish: "stop" }, [Expected.text(" from the next member")]),
+    ])
+    // A different member answers, so nothing waits on the retry schedule.
+    expect((yield* recordedEventTypes(sessionID)).filter((type) => type.startsWith("session.retry.scheduled"))).toEqual(
+      [],
+    )
+  })
+
+  // Oracle: a route's `attempts` is how often one member is asked before the route moves on. With 1
+  // there is no retry at all, which must not stop the move to another member.
+  scenario("continues on the next member when attempts 1 leaves no retry for a failure after output", function* (s) {
+    ModelRoute.resetHealth()
+    s.routing = poolRouting("fake-model", SessionRunnerModel.resolved(replacementModel, poolMemberOptions))
+    yield* s.admit("Say something")
+    yield* s.llm.push(partialThenFail(incompleteStream()))
+    yield* s.llm.push(TestLLM.text(" from the next member", "next-member"))
+    yield* s.resume
+
+    expect(requestedModels(s)).toEqual(["fake-model", "replacement"])
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain(" from the next member")
+  })
+
+  // Oracle: with the default budget (`attempts` 2) a step has one granted retry. The first failure
+  // after output spends it: the route chooses again, and picks member-1 as it would with fake-model
+  // benched. The second failure must still reach member-2 instead of ending the turn.
+  scenario("continues on the next member after the step's retry budget is spent", function* (s) {
+    ModelRoute.resetHealth()
+    const third = SessionRunnerModel.resolved(testModel("member-2"), poolMemberOptions)
+    const secondRouting = poolRouting("member-1", third, 2)
+    s.routing = poolRouting("fake-model", SessionRunnerModel.resolved(testModel("member-1"), poolMemberOptions), 2)
+    s.modelResolveHook = Effect.sync(() => {
+      if (s.requests.length === 0) return
+      s.currentModel = testModel("member-1")
+      s.routing = secondRouting
+    })
+    yield* s.admit("Say something")
+    yield* s.llm.push(partialThenFail(incompleteStream(), "First part"))
+    yield* s.llm.push(partialThenFail(incompleteStream(), "Second part"))
+    yield* s.llm.push(TestLLM.text(" from the third member", "third-member"))
+
+    const scheduled = yield* subscribeRetries(s)
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* Queue.take(scheduled)
+    yield* TestClock.adjust("2400 millis")
+    yield* Fiber.join(run)
+
+    expect(requestedModels(s)).toEqual(["fake-model", "member-1", "member-2"])
+    const assistants = (yield* s.context).filter((message) => message.type === "assistant")
+    expect(assistants).toHaveLength(3)
+    expect(JSON.stringify(assistants.at(-1))).toContain(" from the third member")
+  })
+
+  // Model: a pool's members are asked in order, each at most once. A failure before output moves to
+  // the next member in the same reply; a failure after output keeps the partial reply and moves on in
+  // a new reply. The turn ends with the first answer, or with the last member's error once every
+  // member failed. Every sequence of member behaviours up to three members is checked against it.
+  type MemberBehaviour = "answers" | "fails-before-output" | "fails-after-output"
+  const memberFailures: ReadonlyArray<MemberBehaviour> = ["fails-before-output", "fails-after-output"]
+  const failurePrefixes = (length: number): ReadonlyArray<ReadonlyArray<MemberBehaviour>> =>
+    length === 0
+      ? [[]]
+      : failurePrefixes(length - 1).flatMap((prefix) => memberFailures.map((failure) => [...prefix, failure]))
+  const poolWalks = [
+    ...[0, 1, 2].flatMap((failures) => failurePrefixes(failures).map((prefix) => [...prefix, "answers" as const])),
+    ...[1, 2, 3].flatMap((members) => failurePrefixes(members)),
+  ]
+  for (const walk of poolWalks) {
+    scenario(`walks a pool in order: ${walk.join(", ")}`, function* (s) {
+      ModelRoute.resetHealth()
+      const ids = walk.map((_, index) => (index === 0 ? "fake-model" : `member-${index}`))
+      let following: SessionRunnerModel.Resolved | undefined
+      for (let index = walk.length - 1; index >= 1; index--)
+        following = SessionRunnerModel.resolved(testModel(ids[index]!), {
+          ...poolMemberOptions,
+          routing: poolRouting(ids[index]!, following),
+        })
+      s.routing = poolRouting("fake-model", following)
+      yield* s.admit("Say something")
+      for (const [index, behaviour] of walk.entries()) {
+        if (behaviour === "answers") yield* s.llm.push(TestLLM.text(`answer from ${ids[index]}`, `answer-${index}`))
+        else if (behaviour === "fails-before-output") yield* s.llm.push(TestLLM.failAfter(providerUnavailable()))
+        else yield* s.llm.push(partialThenFail(invalidRequest(), `partial from ${ids[index]}`))
+      }
+
+      const last = walk.at(-1)
+      if (last === "answers") yield* s.resume
+      // Every member failed: the turn ends with the last member's own failure.
+      else
+        expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({
+          reason: { _tag: last === "fails-after-output" ? "InvalidRequest" : "Transport" },
+        })
+
+      expect(requestedModels(s)).toEqual(ids)
+      const assistants = (yield* s.context).filter((message) => message.type === "assistant")
+      // Only a failure after output that another member follows opens a new reply.
+      expect(assistants).toHaveLength(
+        1 + walk.slice(0, -1).filter((behaviour) => behaviour === "fails-after-output").length,
+      )
+      if (last === "answers") expect(JSON.stringify(assistants.at(-1))).toContain(`answer from ${ids.at(-1)}`)
+    })
+  }
 
   scenario("fails over on a content-policy rejection without benching or gating the target", function* (s) {
     ModelRoute.resetHealth()
