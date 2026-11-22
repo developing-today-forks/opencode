@@ -57,6 +57,9 @@ export const DEFAULT_OUTPUT_LIMIT = 65536
  * discards the bytes, and the capture reports `truncated` instead of looking complete.
  */
 export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+// How often the server checks a daemon command's output file against MAX_OUTPUT_BYTES; a file can outgrow the cap by
+// what the command writes in this time before it is cut back.
+const CAP_CHECK_INTERVAL = Duration.seconds(1)
 
 /**
  * Page clamp (#2486): one `output` page never materialises more than 1 MiB in memory, so a
@@ -139,6 +142,8 @@ const Stored = Schema.Struct({
   toolCall: Schema.optional(ToolCall),
   timeoutDeadline: Schema.optional(Schema.Number),
   stopReason: Schema.optional(Schema.Literals(["timeout", "killed"])),
+  // The server cut the output file back to MAX_OUTPUT_BYTES, so later output was discarded (#2486).
+  capped: Schema.optional(Schema.Boolean),
 })
 type Stored = typeof Stored.Type
 const decodeStored = Schema.decodeUnknownOption(Stored)
@@ -179,10 +184,13 @@ type Run = {
   outputError?: string
   // Why it was killed without a signal of its own.
   killed?: string
+  // The server cut the output file back to MAX_OUTPUT_BYTES at least once (#2486).
+  capped?: boolean
   done: Deferred.Deferred<Info, NotFoundError>
   timeoutFiber?: Fiber.Fiber<void>
   stopping?: Fiber.Fiber<void>
   wait?: Fiber.Fiber<void>
+  capFiber?: Fiber.Fiber<void>
 }
 
 type Command = Spawned | Run
@@ -396,7 +404,7 @@ const commandRuns = <E>(host: CommandHost<E>) =>
     const scope = yield* Effect.scope
     const context = yield* Effect.context()
     const global = yield* Global.Service
-    const { unlink } = yield* Effect.promise(() => import("fs/promises"))
+    const { unlink, stat, truncate } = yield* Effect.promise(() => import("fs/promises"))
     // Keyed by canonical Location. `recovered` resolves once the Location's commands were taken back.
     const places = new Map<string, { runs: Runs<E>; recovered: Deferred.Deferred<void> }>()
     // Fibers run with the server's context in its scope, so a Location closing never interrupts them. On shutdown
@@ -411,7 +419,7 @@ const commandRuns = <E>(host: CommandHost<E>) =>
       const ref = Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID })
       const outputDir = path.join(global.data, DIRECTORY, location.project.id)
 
-      const persisted = (run: Pick<Run, "info" | "toolCall" | "timeoutDeadline" | "stopReason">): Stored => ({
+      const persisted = (run: Pick<Run, "info" | "toolCall" | "timeoutDeadline" | "stopReason" | "capped">): Stored => ({
         id: run.info.id,
         command: run.info.command,
         shell: run.info.shell,
@@ -423,6 +431,7 @@ const commandRuns = <E>(host: CommandHost<E>) =>
         toolCall: run.toolCall,
         timeoutDeadline: run.timeoutDeadline,
         stopReason: run.stopReason,
+        ...(run.capped ? { capped: true } : {}),
       })
 
       // Records the command's latest timeout and stop reason in the daemon, so a restart sees them.
@@ -442,6 +451,7 @@ const commandRuns = <E>(host: CommandHost<E>) =>
         if (!run) return
         runs.delete(id)
         if (run.timeoutFiber) yield* Fiber.interrupt(run.timeoutFiber)
+        if (run.capFiber) yield* Fiber.interrupt(run.capFiber)
         if (run.stopping) yield* Fiber.interrupt(run.stopping)
         // Stop waiting first, so forgetting the process is not mistaken for losing it.
         if (run.wait) yield* Fiber.interrupt(run.wait)
@@ -522,8 +532,28 @@ const commandRuns = <E>(host: CommandHost<E>) =>
         if (duration !== 0) yield* arm(run, duration)
       })
 
+      // The daemon writes a command's whole output, so the server bounds the file on disk the way the spawner bounds its
+      // capture (#2486): past MAX_OUTPUT_BYTES the file is cut back to the cap and the rest is discarded. Readers never
+      // read past the cap, so what the daemon writes after a cut (appended again, or past a hole) is never seen.
+      const cap = Effect.fnUntraced(function* (run: Run) {
+        const size = yield* Effect.promise(() => stat(run.info.file).then((info) => info.size, () => 0))
+        if (size <= MAX_OUTPUT_BYTES) return
+        yield* Effect.promise(() => truncate(run.info.file, MAX_OUTPUT_BYTES).catch(() => {}))
+        if (run.capped) return
+        run.capped = true
+        yield* store(run)
+      })
+      const watchCap = (run: Run) =>
+        fork(
+          cap(run).pipe(
+            Effect.andThen(Effect.sleep(CAP_CHECK_INTERVAL)),
+            Effect.forever,
+          ),
+        )
+
       // Watches the exit, and the timeout (in ms from now, none if undefined).
       const attach = Effect.fnUntraced(function* (run: Run, duration: number | undefined) {
+        run.capFiber = yield* watchCap(run)
         run.wait = yield* fork(
           run.process.wait().pipe(
             Effect.map((exit): Ended => {
@@ -547,6 +577,10 @@ const commandRuns = <E>(host: CommandHost<E>) =>
                   }),
                 ),
               ),
+            ),
+            // The last output before the exit is cut back too.
+            Effect.tap(() =>
+              (run.capFiber ? Fiber.interrupt(run.capFiber) : Effect.void).pipe(Effect.andThen(cap(run))),
             ),
             Effect.flatMap((outcome) => finish(run, outcome)),
           ),
@@ -639,6 +673,7 @@ const commandRuns = <E>(host: CommandHost<E>) =>
             toolCall: stored.toolCall,
             timeoutDeadline: stored.timeoutDeadline,
             stopReason: stored.stopReason,
+            ...(stored.capped ? { capped: true } : {}),
             ...(running ? {} : { outputLines: process.outputLines, outputError: process.outputError }),
             ...(process.lifecycle.status === "failed" && !stored.stopReason
               ? { killed: `Command was killed: ${process.lifecycle.message}` }
@@ -872,7 +907,10 @@ const layer = () =>
           ? Effect.succeed({ size: command.size, truncated: command.truncated })
           : Effect.promise(() =>
               stat(command.info.file).then(
-                (info) => ({ size: Math.min(info.size, MAX_OUTPUT_BYTES), truncated: info.size > MAX_OUTPUT_BYTES }),
+                (info) => ({
+                  size: Math.min(info.size, MAX_OUTPUT_BYTES),
+                  truncated: command.capped === true || info.size > MAX_OUTPUT_BYTES,
+                }),
                 () => ({ size: 0, truncated: false }),
               ),
             )
@@ -964,18 +1002,8 @@ const layer = () =>
           const maxLines = limits?.max_lines ?? ToolOutput.MAX_LINES
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const command = yield* require(info.id)
-          // The result reads a bounded tail of the whole file. Only the spawner's capture stops at the cap, so only it
-          // says later output was discarded; a daemon file still holds everything up to its tail.
-          const size =
-            command.kind === "spawned"
-              ? command.size
-              : yield* Effect.promise(() =>
-                  stat(command.info.file).then(
-                    (info) => info.size,
-                    () => 0,
-                  ),
-                )
-          const overCap = command.kind === "spawned" && command.truncated
+          // The result reads a bounded tail of the capture, which stops at the cap for both hosts (#2486).
+          const { size, truncated: overCap } = yield* captureOf(command)
           const start = Math.max(0, size - maxBytes)
           // Read the byte before the window too, to tell whether the window starts on a line boundary.
           const before = Math.max(0, start - 1)
