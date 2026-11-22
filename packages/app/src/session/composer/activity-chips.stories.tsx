@@ -59,7 +59,8 @@ const pin = (behavior: ScrollBehavior) =>
     timeline?.scrollTo({ top: timeline.scrollHeight, behavior })
   }, 150)
 
-type PreviewArgs = { stage: number; subagents: number; shells: number }
+// `nested` puts every subagent after the first one level below it, as when one subagent launched the others.
+type PreviewArgs = { stage: number; subagents: number; shells: number; nested?: boolean }
 
 // Driven by args, so moving between these stories updates the same capsule and its transitions play.
 function Preview(props: PreviewArgs) {
@@ -67,7 +68,10 @@ function Preview(props: PreviewArgs) {
   // Built once per count, so each item keeps the start time it had when it appeared.
 
   const activity = createMemo(() => ({
-    subagents: Array.from({ length: props.subagents }, (_, index) => subagentItem(index)),
+    subagents: Array.from({ length: props.subagents }, (_, index) => ({
+      ...subagentItem(index),
+      ...(props.nested && index > 0 ? { depth: 1 } : {}),
+    })),
     shells: Array.from({ length: props.shells }, (_, index) => shellItem(index)),
   }))
 
@@ -274,6 +278,8 @@ export const TwoSubagents = { args: { stage: 2, subagents: 2, shells: 0 } }
 export const OneShell = { args: { stage: 7, subagents: 0, shells: 1 } }
 
 export const SubagentsAndShells = { args: { stage: 4, subagents: 2, shells: 2 } }
+
+export const NestedSubagents = { args: { stage: 4, subagents: 2, shells: 0, nested: true } }
 
 export const ManySubagents = { args: { stage: 4, subagents: 12, shells: 2 } }
 

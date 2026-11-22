@@ -45,3 +45,14 @@ story("opens a background shell's output in the menu and returns focus on the wa
   await chip.click()
   await expect(panel).toHaveAttribute("data-view", "list")
 })
+
+story("indents a subagent below the one that launched it", async ({ mount, page }) => {
+  await mount("session-activity-chips--nested-subagents")
+  await page.locator('[data-slot="session-activity-chip"]').click()
+  const rows = page.locator('[data-slot="session-activity-panel"] [role="menuitem"]')
+  await expect(rows).toHaveCount(2)
+  const inset = (index: number) => rows.nth(index).evaluate((node) => getComputedStyle(node).paddingInlineStart)
+  // The base row inset is 4px; one level down adds 16px.
+  expect(await inset(0)).toBe("4px")
+  expect(await inset(1)).toBe("20px")
+})
