@@ -626,3 +626,4 @@ services/site/src/routes/changelog/index.tsx :: const page = () => Number(params
 services/site/src/routes/devices.tsx :: onInput={(event) => setScale(Number(event.currentTarget.value))} :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/routes/index.tsx :: <SlotDigit digit={Number(char)} start={props.start} place={place(index())} stat={props.stat} /> :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/routes/index.tsx :: style={{ "--target": turns() * 10 + Number(char), "--index": position() }} :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
+packages/httpapi-codegen/src/index.ts :: : new SchemaAST.Number(ast.annotations, checks, ast.encoding, ast.context) :: safe: constructs the Effect SchemaAST.Number node class, not a numeric conversion

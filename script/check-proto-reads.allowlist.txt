@@ -474,3 +474,4 @@ services/site/src/lib/legal/architect.ts :: export const label = (layout: Archit
 services/site/src/lib/legal.ts :: return (legalHistory as Record<string, LegalVersion[]>)[path] ?? [] :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/lib/og.ts :: return cards[path] ?? cards["/"] ?? fallback :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/lib/source-logo-nav.ts :: description: ("description" in row ? row.description : undefined) ?? descriptions[row.href] ?? "", :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
+packages/core/src/config/plugin/model-routes.ts :: ? [ModelRouteMatch.poolsNamed(routes.keys(), ref.id)[0] ?? String(ref.id)] :: safe: numeric [0] index into the array poolsNamed returns, not a dictionary read
