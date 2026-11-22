@@ -120,8 +120,9 @@ export const read = Effect.fn("ReadTool.read")(function* (
   files: Files,
   input: AbsolutePath,
   resource: string,
-  page: PageInput = {},
+  requested: PageInput = {},
 ) {
+  const page = normalisePage(requested)
   const virtual = resource.startsWith("skill://")
   const first = yield* files.read(input, { offset: 0, length: FIRST_CHUNK }).pipe(
     Effect.catchTag("Environment.WrongKind", (error) =>
@@ -168,6 +169,21 @@ export const read = Effect.fn("ReadTool.read")(function* (
 
   return yield* textPage(files, input, resource, first, page)
 })
+
+// In-process callers bypass the tool schema, so NaN, infinite, fractional or negative paging values can arrive here.
+// Non-finite values mean "absent" and fractions truncate. A limit below one reads one line, so a page always
+// advances. Offsets keep their sign: a negative offset reads from the end of the file.
+const normalisePage = (page: PageInput): PageInput => {
+  const offset = page.offset === undefined || !Number.isFinite(page.offset) ? undefined : Math.trunc(page.offset)
+  const limit =
+    page.limit === undefined || !Number.isFinite(page.limit)
+      ? undefined
+      : Math.min(Math.max(1, Math.trunc(page.limit)), MAX_READ_LINES)
+  return {
+    ...(offset === undefined || offset === 0 ? {} : { offset }),
+    ...(limit === undefined ? {} : { limit }),
+  }
+}
 
 const readFile = (
   files: Files,

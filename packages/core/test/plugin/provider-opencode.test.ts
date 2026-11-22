@@ -2664,3 +2664,115 @@ for (const key of [undefined, "secret"]) {
       ),
   )
 }
+
+// Oracle: the documented behavior of an `opencode` instance (docs providers.mdx, #377): a second Console account
+// contributes its Console providers under its suffix and nothing else, and one whose organization sends policies is
+// refused, including after a later load fails.
+describe("OpencodePlugin instances", () => {
+  const work = Integration.ID.make("opencode.work")
+  const instances = Config.testLayer([
+    new Document({
+      type: "document",
+      info: Schema.decodeUnknownSync(Info)({ providers: { "opencode.work": { instanceOf: "opencode" } } }),
+    }),
+  ])
+  const addInstancePlugin = Effect.fn(function* () {
+    const plugin = yield* Plugin.Service
+    const host = yield* PluginHost.make(plugin, "test")
+    yield* OpencodePlugin.effect(host).pipe(Effect.provide(instances))
+  })
+  const goServer = (state: { failing: boolean; policies: Record<string, ConfigPolicy.Info[]> }) => ({
+    fetch: (request: Request) => {
+      if (state.failing) return new Response("Unavailable", { status: 502 })
+      const orgID = request.headers.get("x-org-id") ?? ""
+      return Response.json({
+        providers: { "opencode-go": { name: "OpenCode Go", models: { glm: { name: "GLM" } } } },
+        ...(state.policies[orgID] ? { policies: state.policies[orgID] } : {}),
+      })
+    },
+  })
+  const account = (integrationID: Integration.ID, orgID: string, orgName: string) =>
+    Effect.gen(function* () {
+      const credentials = yield* Credential.Service
+      return yield* credentials.create({
+        integrationID,
+        value: Credential.Key.make({
+          type: "key",
+          key: orgID,
+          metadata: { server: "https://console.example", orgID, orgName },
+        }),
+      })
+    })
+  // The instance's own copy of the Zen catalog, as ProviderInstancePlugin adds it.
+  const instanceCopy = Effect.gen(function* () {
+    const providers = yield* Provider.Service
+    yield* providers.transform((editor) => {
+      editor.update(Provider.ID.make("opencode.work"), (provider) => {
+        provider.integrationID = work
+        provider.instanceOf = Provider.ID.opencode
+      })
+    })
+  })
+
+  it.effect("serves a second Console account's Go providers alongside the first", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      const models = yield* Model.Service
+      const integrations = yield* Integration.Service
+      const server = goServer({ failing: false, policies: {} })
+      yield* account(Integration.ID.make("opencode"), "org_alpha", "Alpha")
+      yield* account(work, "org_go", "Go Team")
+      yield* addInstancePlugin().pipe(inProcess(server))
+      yield* drain
+
+      expect((yield* providers.get(Provider.ID.make("opencode-go")))?.integrationID).toBe(
+        Integration.ID.make("opencode"),
+      )
+      expect(yield* providers.get(Provider.ID.make("opencode-go.work"))).toMatchObject({
+        name: "OpenCode Go (work)",
+        integrationID: work,
+        instanceOf: Provider.ID.make("opencode-go"),
+        canonical: Provider.ID.make("opencode-go"),
+      })
+      expect(yield* models.get(Provider.ID.make("opencode-go.work"), Model.ID.make("glm"))).toMatchObject({
+        name: "GLM",
+      })
+      const integration = required(yield* integrations.get(work))
+      expect(integration.name).toBe("OpenCode Console (work)")
+      expect(integration.methods.map((method) => method.type)).toEqual(["oauth", "key"])
+    }),
+  )
+
+  it.effect("refuses a second Console account whose organization sends policies, also after a failed reload", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      const integrations = yield* Integration.Service
+      const state = {
+        failing: false,
+        policies: { org_strict: [{ action: "tool.use", resource: "shell:sudo *", effect: "deny" as const }] },
+      }
+      yield* instanceCopy
+      yield* account(work, "org_strict", "Strict")
+      yield* addInstancePlugin().pipe(inProcess(goServer(state)))
+      yield* drain
+
+      const refused = Effect.gen(function* () {
+        expect(yield* providers.get(Provider.ID.make("opencode-go.work"))).toBeUndefined()
+        expect((yield* providers.available()).map((provider) => provider.id)).not.toContain(
+          Provider.ID.make("opencode.work"),
+        )
+        expect(required(yield* integrations.get(work)).connections[0]?.status).toMatchObject({
+          status: "needs_auth",
+          message: expect.stringContaining("Strict has policies"),
+        })
+      })
+      yield* refused
+
+      // The failed reload keeps the previous snapshot's refusal.
+      state.failing = true
+      yield* TestClock.adjust("1 minute")
+      yield* drain
+      yield* refused
+    }),
+  )
+})

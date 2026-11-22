@@ -789,6 +789,66 @@ describe("ReadToolFileSystem", () => {
   )
 })
 
+// Oracle: the documented paging contract for in-process callers, which bypass the tool schema (#964 shape): a
+// non-finite value is absent, a fraction truncates and a limit below one still reads one line. A negative offset
+// is a tail read since the upstream sync, so it is not normalised away.
+describe("ReadToolFileSystem page normalisation", () => {
+  const lines = "one\ntwo\nthree\nfour\n"
+  // An absent page reads the whole file, final separator included; an explicit first-line page does not.
+  const full = { content: lines, offset: 1, next: undefined }
+  const paged = { content: "one\ntwo\nthree\nfour", offset: 1, next: undefined }
+  const first = { content: "one", offset: 1, next: 2 }
+  const textCases = [
+    { name: "reads offset 0 from the first line", page: { offset: 0 }, ...full },
+    { name: "truncates offset 0.5 to the first line", page: { offset: 0.5 }, ...full },
+    { name: "truncates offset 1.5 to the first line", page: { offset: 1.5 }, ...paged },
+    { name: "defaults a NaN offset to the first line", page: { offset: NaN }, ...full },
+    { name: "defaults an infinite offset to the first line", page: { offset: Infinity }, ...full },
+    { name: "defaults a negative infinite offset to the first line", page: { offset: -Infinity }, ...full },
+    { name: "floors limit -100 to one line with an advancing next", page: { limit: -100 }, ...first },
+    { name: "floors limit 0 to one line with an advancing next", page: { limit: 0 }, ...first },
+    { name: "truncates limit 0.5 to one line with an advancing next", page: { limit: 0.5 }, ...first },
+    { name: "truncates limit 1.5 to one line with an advancing next", page: { limit: 1.5 }, ...first },
+    { name: "defaults a NaN limit to the whole page", page: { limit: NaN }, ...full },
+    { name: "defaults an infinite limit to the whole page", page: { limit: Infinity }, ...full },
+    { name: "keeps a valid page", page: { offset: 2, limit: 2 }, content: "two\nthree", offset: 2, next: 4 },
+  ]
+
+  textCases.forEach((input) => {
+    it.effect(input.name, () =>
+      Effect.gen(function* () {
+        const { environment, files, directory } = yield* fixture
+        const file = path.join(directory, "lines.txt")
+        yield* files.writeFileString(file, lines)
+        const result = yield* ReadToolFileSystem.read(environment, absolute(file), "lines.txt", input.page)
+        expect(result.type).toBe("text")
+        if (result.type !== "text") return
+        expect(result.content).toBe(input.content)
+        expect(result.offset).toBe(input.offset)
+        expect(result.next).toBe(input.next)
+      }),
+    )
+  })
+
+  it.effect("truncates a fractional directory page and defaults a NaN one", () =>
+    Effect.gen(function* () {
+      const { environment, files, directory } = yield* fixture
+      yield* files.makeDirectory(path.join(directory, "c"))
+      yield* files.writeFileString(path.join(directory, "a.txt"), "a")
+      yield* files.writeFileString(path.join(directory, "b.txt"), "b")
+      expect(yield* ReadToolFileSystem.read(environment, absolute(directory), ".", { offset: 1.5, limit: 1.5 })).toEqual({
+        type: "directory",
+        entries: [`c${path.sep}`],
+        next: 2,
+      })
+      expect(yield* ReadToolFileSystem.read(environment, absolute(directory), ".", { offset: NaN, limit: NaN })).toEqual({
+        type: "directory",
+        entries: [`c${path.sep}`, "a.txt", "b.txt"],
+      })
+    }),
+  )
+})
+
 describe("clampLine well-formedness (#1977)", () => {
   const astral = "\u{1F600}"
   test("drops a straddling pair whole at the 2000 cut", () => {

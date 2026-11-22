@@ -462,10 +462,10 @@ export function ActiveSessionComposerRegion(props: {
     },
   )
 
+  // Running subagents of the whole session tree, also inside a subagent view (#370).
   const subagents = createMemo<SessionActivityItem[]>(() =>
     props.model.region.state.background
-      .tasks()
-      .filter((task) => task.type === "subagent")
+      .subagents()
       .map((task) => ({
         ...task,
         agent: task.agent ?? data.session.get(task.sessionID)?.agent,
@@ -606,7 +606,8 @@ export function ActiveSessionComposerRegion(props: {
         </Show>
       }
       above={
-        <Show when={!missing() && !props.session.data.isChild()}>
+        // A subagent view still shows its tree's running subagents (#370); shells and scripts stay with the root.
+        <Show when={!missing() && (!props.session.data.isChild() || subagents().length > 0)}>
           <SessionComposerLane>
             <SessionActivityChips
               subagents={subagents()}

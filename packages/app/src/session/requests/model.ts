@@ -293,9 +293,12 @@ export function createSessionRequestModel() {
     jobs: runningJobs,
   })
 
-  // Moving to the background and the plugins' background list stay with the primary session's own work.
+  // Moving to the background and the plugins' background list stay with the primary session's own work. A subagent
+  // view still lists the running subagents of its whole tree, rooted at the root (#370), so a grandchild shows its
+  // siblings and the root's other children.
   const blocking = createMemo(() => (primary() ? running.blocking() : []))
   const tasks = createMemo(() => (primary() ? running.tasks() : []))
+  const subagents = createMemo(() => running.tasks().filter((task) => task.type === "subagent"))
   const scripts = createMemo(() => (primary() ? running.scripts() : []))
 
   const cancelJob = (id: string) => serverSDK.api.experimental.job.cancel({ id })
@@ -400,6 +403,7 @@ export function createSessionRequestModel() {
     background: {
       blocking,
       tasks,
+      subagents,
       scripts,
       cancelJob,
       move: moveToBackground,

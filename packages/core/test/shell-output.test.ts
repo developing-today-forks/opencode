@@ -138,16 +138,13 @@ if (process.platform !== "win32") {
     ),
   )
 
-  // Coverage for #2486: capture is bounded by a total cap and one page is clamped, so a
-  // runaway command cannot exhaust the disk and one output request cannot allocate the
-  // whole capture. The oracle is the documented constants: size stops at MAX_OUTPUT_BYTES
+  // Coverage for #2486: the capture a reader sees is bounded by a total cap and one page is
+  // clamped, so one output request cannot allocate the whole capture. This runs on the process
+  // daemon, which still writes the whole file to disk; only the in-process spawner stops writing
+  // at the cap (daemon-side cap: #2677). The oracle is the documented constants: size stops at MAX_OUTPUT_BYTES
   // with truncated reported, and a page never exceeds MAX_OUTPUT_PAGE_BYTES while paging
   // still reconstructs the capture byte-identically.
-  // SKIPPED since the 2026-11-22 upstream sync: local commands now run in the process daemon
-  // (packages/process-daemon), which writes the capture file itself and has no total cap yet, so
-  // this test (which runs on the daemon) can't pass until the cap is ported there. The in-process
-  // spawner still enforces it. Tracked by the sync follow-up issue (#2677).
-  it.live.skip("capture stops growing at the total cap and reports truncated", () =>
+  it.live("capture stops growing at the total cap and reports truncated", () =>
     provide(
       Effect.gen(function* () {
         const shell = yield* Shell.Service

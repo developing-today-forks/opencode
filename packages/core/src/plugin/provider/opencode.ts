@@ -32,6 +32,7 @@ import { SkillDiscovery } from "../../skill/discovery.js"
 import { WebSearch } from "../../websearch.js"
 import { OpencodeArtifacts } from "./opencode-artifacts.js"
 import { OpencodeWatches } from "./opencode-watches.js"
+import { eachInstance, instanceLabel, type InstanceIDs } from "./instance.js"
 import { ProviderRefresh } from "./refresh.js"
 import { deviceLifetimeSeconds, expiresInSeconds } from "./expires.js"
 
@@ -111,9 +112,9 @@ class SignedOutError extends Schema.TaggedError<SignedOutError>()("OpencodeConso
   }
 }
 
-function oauth(http: HttpClient.HttpClient) {
+function oauth(http: HttpClient.HttpClient, integrationID = Integration.ID.make("opencode")) {
   return {
-    integrationID: Integration.ID.make("opencode"),
+    integrationID,
     method: {
       id: methodID,
       type: "oauth",
@@ -220,6 +221,15 @@ export const OpencodePlugin = define<
     const scope = yield* Scope.Scope
     const loading = Semaphore.makeUnsafe(1)
     type ActiveConnection = Effect.Success<ReturnType<typeof ctx.integration.connection.active>>
+    // The active connection as a config integration document records it.
+    const documentConnection = (connection: NonNullable<ActiveConnection>) =>
+      connection.type === "credential"
+        ? {
+            ...connection,
+            id: Credential.ID.make(connection.id),
+            methodID: connection.methodID === undefined ? undefined : Integration.MethodID.make(connection.methodID),
+          }
+        : connection
     let snapshot: {
       // The Console's regular OpenCode config, merged as an integration config layer.
       remote: ConsoleConfig | undefined
@@ -340,17 +350,7 @@ export const OpencodePlugin = define<
         next.connection &&
         ConfigIntegration.make({
           integrationID: Integration.ID.make("opencode"),
-          connection:
-            next.connection.type === "credential"
-              ? {
-                  ...next.connection,
-                  id: Credential.ID.make(next.connection.id),
-                  methodID:
-                    next.connection.methodID === undefined
-                      ? undefined
-                      : Integration.MethodID.make(next.connection.methodID),
-                }
-              : next.connection,
+          connection: documentConnection(next.connection),
           organization: next.organization,
           // `make` keeps only the standard config keys, so instructions and skills stay here.
           info: next.remote,
@@ -603,6 +603,128 @@ export const OpencodePlugin = define<
     })
     yield* ProviderRefresh.onSwitch("opencode", refresh().pipe(Effect.andThen(poll())))
     yield* poll()
+
+    // An instance such as `opencode.work` is another Console account with its own sign-in. Its Console providers
+    // appear under its suffix (`opencode-go.work`). Organization policy, instructions, skills, watches, artifacts,
+    // hosted search and Console MCP servers come only from the main connection, so an instance whose organization
+    // sends policies is refused: its statements could not be enforced alongside the main one's.
+    const instance = Effect.fnUntraced(function* (ids: InstanceIDs) {
+      const label = instanceLabel(ids.providerID, Provider.ID.opencode)
+      const instanceLoading = Semaphore.makeUnsafe(1)
+      type InstanceSnapshot = {
+        remote: Effect.Success<ReturnType<typeof fetchConfig>>
+        connection: ActiveConnection
+        organization: string | undefined
+        refused?: true
+      }
+      let current: InstanceSnapshot = { remote: undefined, connection: undefined, organization: undefined }
+      const loadInstance = Effect.fn("OpencodePlugin.loadInstance")(function* () {
+        const connection = yield* ctx.integration.connection.active(ids.integrationID)
+        if (!connection) return { remote: undefined, connection, organization: undefined } satisfies InstanceSnapshot
+        const status = (status: IntegrationConnection.Status | undefined) =>
+          ctx.integration.connection.status({ integrationID: ids.integrationID, connection, status })
+        return yield* ctx.integration.connection.resolve(connection).pipe(
+          Effect.flatMap((credential) =>
+            !credential || credential.type === "external"
+              ? Effect.succeed<InstanceSnapshot>({ remote: undefined, connection, organization: undefined })
+              : fetchConfig(http, credential).pipe(
+                  Effect.map((remote): InstanceSnapshot => ({
+                    remote,
+                    connection,
+                    organization: organizationName(credential),
+                  })),
+                ),
+          ),
+          Effect.flatMap((next) =>
+            (next.remote?.policies?.length ?? 0) === 0
+              ? status(undefined).pipe(Effect.as(next))
+              : status({
+                  status: "needs_auth",
+                  message: `${next.organization ?? "This organization"} has policies, which only apply to the main OpenCode Console connection: sign it in with \`opencode auth login opencode\``,
+                }).pipe(Effect.as<InstanceSnapshot>({ ...next, remote: undefined, refused: true })),
+          ),
+          Effect.catch((cause) =>
+            Effect.gen(function* () {
+              const next = connectionStatus(cause)
+              if (next) yield* status(next)
+              yield* Effect.logWarning("failed to load OpenCode Console instance config", {
+                integrationID: ids.integrationID,
+                cause,
+              })
+              // A failed load for the same connection keeps the last snapshot, a refusal included: dropping it would
+              // re-enable the refused account's catalog copy.
+              return IntegrationConnection.key(connection) === IntegrationConnection.key(current.connection)
+                ? { ...current, connection }
+                : ({ remote: undefined, connection, organization: undefined } satisfies InstanceSnapshot)
+            }),
+          ),
+        )
+      })
+
+      yield* ctx.integration.transform((editor) => {
+        editor.update(ids.integrationID, (integration) => {
+          integration.name = `OpenCode Console (${label})`
+        })
+        editor.method.update(oauth(http, ids.integrationID))
+        editor.method.update({
+          integrationID: ids.integrationID,
+          method: { type: "key", label: "API key (service account)" },
+        })
+      })
+
+      current = yield* loadInstance()
+      yield* ctx.provider.transform((providers) => {
+        if (current.refused) {
+          // The instance's own copy of the catalog would otherwise still serve the refused account.
+          if (providers.get(ids.providerID))
+            providers.update(ids.providerID, (provider) => {
+              provider.activation = "disabled"
+            })
+          return
+        }
+        if (!current.connection || !current.remote?.providers) return
+        const remote = Object.entries(current.remote.providers)
+        ConfigProviderPlugin.integrate(
+          providers,
+          ConfigIntegration.make({
+            integrationID: ids.integrationID,
+            connection: documentConnection(current.connection),
+            organization: current.organization,
+            info: {
+              // A Console provider such as `opencode-go` becomes `opencode-go.work`, copied from the catalog's.
+              providers: Object.fromEntries(
+                remote.map(([id, item]) => [`${id}.${label}`, { ...item, canonical: item.canonical ?? Provider.ID.make(id) }]),
+              ),
+            },
+          }),
+        )
+        for (const [id] of remote)
+          providers.update(`${id}.${label}`, (provider) => {
+            provider.instanceOf = Provider.ID.make(id)
+            provider.name = `${provider.name} (${label})`
+          })
+      })
+
+      const refreshInstance = () =>
+        instanceLoading.withPermit(
+          Effect.gen(function* () {
+            const next = yield* loadInstance()
+            if (Equal.equals(current, next)) return
+            current = next
+            yield* ctx.provider.reload()
+          }),
+        )
+      yield* ProviderRefresh.onSwitch(ids.integrationID, refreshInstance())
+      // Console config changes without local activity too, so re-check while signed in, like the main connection.
+      yield* Effect.sleep(Duration.minutes(1)).pipe(
+        Effect.andThen(Effect.suspend(() => (current.connection ? refreshInstance() : Effect.void))),
+        Effect.forever,
+        Effect.forkScoped,
+      )
+    })
+    yield* eachInstance(ctx.event, Provider.ID.opencode, (ids) =>
+      ids.providerID === Provider.ID.opencode ? Effect.void : instance(ids),
+    )
   }),
 })
 

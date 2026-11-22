@@ -864,14 +864,16 @@ const layer = () =>
                 }),
             )
 
-      // A daemon command's file is the only record of its output, so its size is the file's; a missing file is empty.
-      const sizeOf = (command: Command) =>
+      // The capture a reader sees, bounded by MAX_OUTPUT_BYTES (#2486). The spawner stops writing at the cap. A daemon
+      // command's file is the only record of its output and the daemon writes all of it, so its readable size is the
+      // file's up to the cap, and a longer file reads as truncated; a missing file is empty.
+      const captureOf = (command: Command) =>
         command.kind === "spawned"
-          ? Effect.succeed(command.size)
+          ? Effect.succeed({ size: command.size, truncated: command.truncated })
           : Effect.promise(() =>
               stat(command.info.file).then(
-                (info) => info.size,
-                () => 0,
+                (info) => ({ size: Math.min(info.size, MAX_OUTPUT_BYTES), truncated: info.size > MAX_OUTPUT_BYTES }),
+                () => ({ size: 0, truncated: false }),
               ),
             )
 
@@ -880,9 +882,8 @@ const layer = () =>
         const cursor = outputCursor(input?.cursor)
         const limit = outputLimit(input?.limit)
         const running = command.info.status === "running"
-        const size = yield* sizeOf(command)
         // A capture that hit MAX_OUTPUT_BYTES reports truncated on every page (#2486).
-        const truncated = command.kind === "spawned" && command.truncated
+        const { size, truncated } = yield* captureOf(command)
         if (cursor >= size) return { output: "", cursor: size, size, truncated }
         const start = cursor
         // A UTF-8 character can straddle either edge by up to three bytes.
@@ -963,7 +964,7 @@ const layer = () =>
           const maxLines = limits?.max_lines ?? ToolOutput.MAX_LINES
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const command = yield* require(info.id)
-          const size = yield* sizeOf(command)
+          const { size, truncated: overCap } = yield* captureOf(command)
           const start = Math.max(0, size - maxBytes)
           // Read the byte before the window too, to tell whether the window starts on a line boundary.
           const before = Math.max(0, start - 1)
@@ -1016,8 +1017,7 @@ const layer = () =>
           // One blank line before the notice, whether or not the output ended with a newline.
           const shown = stoppedEarly && page.endsWith("\n") ? page.slice(0, -1) : page
           // A capture that hit MAX_OUTPUT_BYTES is incomplete even when the tail fits (#2486).
-          const capped =
-            command.kind === "spawned" && command.truncated
+          const capped = overCap
               ? `\n\n[output capped at ${formatSize(MAX_OUTPUT_BYTES)}; later output was discarded; ${suffix}`
               : ""
           return {
