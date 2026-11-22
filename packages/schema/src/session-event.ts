@@ -147,7 +147,11 @@ export type Viewed = typeof Viewed.Type
 export const Archived = Event.durable({
   type: "session.archived",
   ...options,
-  schema: Base,
+  schema: {
+    ...Base,
+    /** Epoch-millisecond archive time when the session was archived elsewhere first, such as a client's own archive carried over; absent means the event's own time. */
+    time: Schema.Finite.pipe(Schema.optional),
+  },
 })
 export type Archived = typeof Archived.Type
 

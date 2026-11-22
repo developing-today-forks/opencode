@@ -235,7 +235,7 @@ export interface Interface {
     sessionID: SessionSchema.ID,
   ) => Effect.Effect<ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>, NotFoundError>
   readonly rename: (input: { sessionID: SessionSchema.ID; title: string }) => Effect.Effect<void, NotFoundError>
-  readonly archive: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
+  readonly archive: (sessionID: SessionSchema.ID, input?: { time?: number }) => Effect.Effect<void, NotFoundError>
   readonly unarchive: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly setMetadata: (input: {
     sessionID: SessionSchema.ID
@@ -723,7 +723,7 @@ const layer = Layer.effect(
         return ModelRoute.pinnedTargets(sessionID)
       }),
       rename: (input) => sessions.forSession(input.sessionID).rename(input),
-      archive: (sessionID) => sessions.forSession(sessionID).archive(),
+      archive: (sessionID, input) => sessions.forSession(sessionID).archive(input),
       unarchive: (sessionID) => sessions.forSession(sessionID).unarchive(),
       setMetadata: (input) => sessions.forSession(input.sessionID).setMetadata(input),
       setPermissions: (input) => sessions.forSession(input.sessionID).setPermissions(input),

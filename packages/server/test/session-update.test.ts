@@ -64,3 +64,33 @@ it.live("archives and unarchives a session through PATCH", () =>
     expect(yield* listed(false)).toContain(created.data.id)
   }).pipe(Effect.scoped),
 )
+
+it.live("archives at the experimental archivedAt time and ignores it without archived: true", () =>
+  Effect.gen(function* () {
+    const request = yield* makeRequest()
+    const create = () =>
+      request("/api/session", "POST", {}).pipe(
+        Effect.map((body) => Schema.decodeUnknownSync(SessionResponse)(body).data),
+      )
+    const archived = (id: string) =>
+      request(`/api/session/${id}`, "GET").pipe(
+        Effect.map((body) => Schema.decodeUnknownSync(SessionResponse)(body).data.time.archived),
+      )
+
+    const carried = yield* create()
+    yield* request(`/api/session/${carried.id}`, "PATCH", {
+      archived: true,
+      experimental: { archivedAt: 1_700_000_000_123 },
+    })
+    expect(yield* archived(carried.id)).toBe(1_700_000_000_123)
+    yield* request(`/api/session/${carried.id}`, "PATCH", {
+      archived: true,
+      experimental: { archivedAt: 1_800_000_000_000 },
+    })
+    expect(yield* archived(carried.id)).toBe(1_700_000_000_123)
+
+    const untouched = yield* create()
+    yield* request(`/api/session/${untouched.id}`, "PATCH", { experimental: { archivedAt: 1_700_000_000_123 } })
+    expect(yield* archived(untouched.id)).toBeUndefined()
+  }).pipe(Effect.scoped),
+)

@@ -1591,7 +1591,7 @@ export type SessionArchived = {
   type: "session.archived"
   durable: { aggregateID: string; seq: EventSeq; version: 1 }
   location?: LocationRef
-  data: { sessionID: SessionID }
+  data: { sessionID: SessionID; time?: number | undefined }
 }
 
 export type SessionUnarchived = {
@@ -4327,6 +4327,7 @@ export type SessionUpdateInput = {
     | null
     | undefined
   readonly archived?: boolean | null | undefined
+  readonly experimental?: { readonly archivedAt?: number | null } | null | undefined
 }
 
 export type SessionUpdateOutput = void

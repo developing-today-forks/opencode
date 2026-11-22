@@ -12,7 +12,8 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionStore } from "@opencode/core/session/store"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Effect } from "effect"
+import { DateTime, Effect } from "effect"
+import FastCheck from "fast-check"
 import { eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import { globalProjectNode } from "./lib/project"
@@ -52,6 +53,33 @@ describe("Session.archive", () => {
         .all()).map((event) => event.type)
       expect(types.filter((type) => type === Bus.versionedType(SessionEvent.Archived.type, 1))).toHaveLength(1)
       expect(types.filter((type) => type === Bus.versionedType(SessionEvent.Unarchived.type, 1))).toHaveLength(1)
+    }),
+  )
+
+  it.effect("archives at a carried-over time, keeps it on a repeat, and uses the event time otherwise", () =>
+    Effect.gen(function* () {
+      // Oracle: the time passed in. A client carrying its own archive over (OpenChamber's
+      // sessions-archive.json) passes each session's original epoch-ms archive time.
+      const session = yield* Session.Service
+      const archivedAt = (sessionID: Session.ID) =>
+        session
+          .get(sessionID)
+          .pipe(Effect.map((info) => (info.time.archived ? DateTime.toEpochMillis(info.time.archived) : undefined)))
+      const times = FastCheck.sample(FastCheck.integer({ min: 1, max: 4_102_444_800_000 }), { numRuns: 40, seed: 2683 })
+      for (const time of times) {
+        const created = yield* session.create({ location })
+        yield* session.archive(created.id, { time })
+        yield* session.archive(created.id, { time: time + 1 })
+        expect(yield* archivedAt(created.id)).toBe(time)
+      }
+
+      const plain = yield* session.create({ location })
+      yield* session.archive(plain.id, { time: 5 })
+      yield* session.unarchive(plain.id)
+      yield* session.archive(plain.id)
+      const again = yield* archivedAt(plain.id)
+      expect(again).toBeNumber()
+      expect(again).not.toBe(5)
     }),
   )
 

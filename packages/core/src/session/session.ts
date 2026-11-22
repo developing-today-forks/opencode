@@ -76,10 +76,10 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     yield* bus.publish(SessionEvent.Renamed, { sessionID, title: input.title })
   })
-  const archive = Effect.fn("Session.archive")(function* (sessionID: SessionSchema.ID) {
+  const archive = Effect.fn("Session.archive")(function* (sessionID: SessionSchema.ID, input?: { time?: number }) {
     const session = yield* get(sessionID)
     if (session.time.archived) return
-    yield* bus.publish(SessionEvent.Archived, { sessionID })
+    yield* bus.publish(SessionEvent.Archived, { sessionID, time: input?.time })
   })
   const unarchive = Effect.fn("Session.unarchive")(function* (sessionID: SessionSchema.ID) {
     const session = yield* get(sessionID)

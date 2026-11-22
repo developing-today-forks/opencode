@@ -1051,7 +1051,7 @@ const layer = Layer.effectDiscard(
       })
     })
     yield* bus.project(SessionEvent.Archived, (event) =>
-      setSession(db, event.data.sessionID, { time_archived: event.created, time_updated: event.created }),
+      setSession(db, event.data.sessionID, { time_archived: event.data.time ?? event.created, time_updated: event.created }),
     )
     yield* bus.project(SessionEvent.Unarchived, (event) =>
       setSession(db, event.data.sessionID, { time_archived: null, time_updated: event.created }),
