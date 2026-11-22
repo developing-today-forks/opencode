@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, renameSync } from "node:fs"
 import path from "node:path"
 import { Option, Schema } from "effect"
 import electron from "electron"
 
+import { writeFileSyncAtomic } from "../atomic-write"
 import { SETTINGS_STORE } from "./keys"
 
 /** The file: one JSON object, each key a setting whose reader decodes its value. */
@@ -37,9 +38,7 @@ export function createSettingsStore(file: string) {
   let data = read(file)
 
   const write = () => {
-    mkdirSync(path.dirname(file), { recursive: true })
-    writeFileSync(`${file}.tmp`, JSON.stringify(data, null, "\t"))
-    renameSync(`${file}.tmp`, file)
+    writeFileSyncAtomic(file, JSON.stringify(data, null, "\t"))
   }
 
   return {

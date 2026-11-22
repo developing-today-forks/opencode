@@ -6,6 +6,9 @@ import { ServerConnection } from "../../services/server-connection"
 export default Runtime.handler(Commands.commands.run, (input) =>
   Effect.gen(function* () {
     const { reportRunError, runNonInteractive } = yield* Effect.promise(() => import("../../run/run"))
+    const runFork = Effect.runForkWith(yield* Effect.context<never>())
+    // Everything after `--` is prompt text, even when it looks like an option.
+    const separator = process.argv.indexOf("--", 2)
     // A one-off run uses the background service when it is already up, but never leaves a new one running.
     const server = yield* ServerConnection.resolve({ autostart: false }).pipe(
       Effect.tapError((error) => Effect.logError("run could not resolve its server", { cause: error })),
@@ -19,7 +22,8 @@ export default Runtime.handler(Commands.commands.run, (input) =>
       const done = runNonInteractive(
         {
           server,
-          message: [...input.message],
+          log: (message) => runFork(Effect.logInfo(message)),
+          message: [...input.message, ...(separator === -1 ? [] : process.argv.slice(separator + 1))],
           continue: input.continue,
           session: Option.getOrUndefined(input.session),
           fork: input.fork,

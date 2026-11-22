@@ -16,6 +16,7 @@ import { createRunFetch } from "./fetch"
 
 export type RunCommandInput = {
   server: ServerConnection.Resolved
+  log?: (message: string) => void
   message: string[]
   continue?: boolean
   session?: string
@@ -65,6 +66,8 @@ async function run(input: RunCommandInput, signal: AbortSignal) {
   const argument = input.message.join(" ") || undefined
   // With a message argument, stdin is extra context: a shell pipe is read in full, but the open, silent
   // stdin that spawn's default stdio gives a child must not hold the run.
+  if (!process.stdin.isTTY)
+    input.log?.("Reading stdin until EOF; redirect from /dev/null when no piped input is intended")
   const piped = process.stdin.isTTY
     ? undefined
     : argument

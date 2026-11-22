@@ -446,6 +446,7 @@ function providerOptionKey(packageName: string | undefined, providerID: Provider
   if (packageName === "@ai-sdk/amazon-bedrock") return "bedrock"
   if (packageName === "@ai-sdk/amazon-bedrock/mantle") return "openai"
   if (packageName === "@ai-sdk/azure") return "azure"
+  if (packageName === "@ai-sdk/github-copilot") return "copilot"
   if (packageName === "@jerome-benoit/sap-ai-provider-v2") return "sap-ai"
   if (packageName === "@ai-sdk/openai-compatible") return providerID.split(".")[0]
   if (packageName === "@openrouter/ai-sdk-provider") return "openrouter"
@@ -503,8 +504,32 @@ function callOptions(
     tools: flattened.tools.map(tool),
     toolChoice: toolChoice(request.toolChoice),
     headers: request.headers,
-    providerOptions: requestProviderOptions(request.providerOptions, packageName, modelID, optionKey),
+    providerOptions: callProviderOptions(request, packageName, modelID, optionKey),
   }
+}
+
+// The bundled Copilot Responses model reads `promptCacheKey` from its provider
+// options and sends it as the request body's `prompt_cache_key`, but the AI SDK
+// bridge otherwise drops the request's session cache key on the floor: core sets
+// `request.promptCacheKey` from session affinity, and only the native protocols
+// forward it. Forward it for Copilot (gated and clamped like the native path via
+// ProviderShared.promptCacheKey) unless the caller already set one explicitly.
+function callProviderOptions(
+  request: LLMRequest,
+  packageName: string | undefined,
+  modelID: ID,
+  optionKey: string,
+): SharedV3ProviderOptions | undefined {
+  const options = requestProviderOptions(request.providerOptions, packageName, modelID, optionKey)
+  if (packageName !== "@ai-sdk/github-copilot") return options
+  const promptCacheKey = ProviderShared.promptCacheKey(request)
+  if (promptCacheKey === undefined) return options
+  const existing = options?.[optionKey]
+  if (existing !== undefined && typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
+    if (existing.promptCacheKey !== undefined) return options
+    return { ...options, [optionKey]: { ...existing, promptCacheKey } }
+  }
+  return { ...options, [optionKey]: { promptCacheKey } }
 }
 
 function prompt(request: LLMRequest): LanguageModelV3Prompt {

@@ -79,7 +79,7 @@ export function truncateMiddle(str: string, maxLength: number = 35): string {
   const ellipsis = "…"
   const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
   const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
-  if (keepEnd <= 0) return str.slice(0, keepStart) + ellipsis
+  if (keepEnd <= 0) return Text.truncate(str, keepStart) + ellipsis
 
   // slice(-0) is slice(0): at maxLength 1-2 nothing is kept from the end, and
   // slicing with it would return the whole string.

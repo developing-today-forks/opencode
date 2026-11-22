@@ -1065,6 +1065,12 @@ const layer = () =>
           shell: program,
           env: {
             ...baseEnv,
+            // When OPENCODE_TMPDIR configures a durable scratch directory, the
+            // child's temp vars point at the same directory Global advertises
+            // to the model, so `$TMPDIR` inside commands agrees with it.
+            ...(target.hostsServer && process.env.OPENCODE_TMPDIR?.trim()
+              ? { TMPDIR: global.tmp, TMP: global.tmp, TEMP: global.tmp }
+              : {}),
             TERM: "xterm-256color",
             OPENCODE_TERMINAL: "1",
           },

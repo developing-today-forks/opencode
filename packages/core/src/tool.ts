@@ -439,6 +439,9 @@ const layer = Layer.effect(
               }
               const tool = direct.get(name)
               if (tool) return yield* executeTool(tool, name, event.input, context)
+              // Only a detached session hides `question`; a stale call gets the same guidance as a denied one.
+              if (name === "question" && hidden?.has(name))
+                return yield* new Tool.Error({ message: Permission.DETACHED_QUESTION_MESSAGE })
               return yield* new Tool.Error({
                 message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
               })

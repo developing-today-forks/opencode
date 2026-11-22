@@ -189,17 +189,17 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           const translator = new Completions.ChatStreamTranslator(meta)
           const frames = generate.stream(input).pipe(
             Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
+            // A failed stream is one error frame and then [DONE], the same
+            // framing the doors write whether or not output had started.
             Stream.catchCause((cause) =>
               Stream.make(
-                translator.fail(
+                Completions.errorFrame(
                   streamErrorMessage(cause),
                   streamIsQuota(cause) ? "rate_limit_error" : "server_error",
                 ),
               ),
             ),
-            Stream.concat(
-              Stream.suspend(() => (translator.failed ? Stream.empty : Stream.make(Completions.DONE_FRAME))),
-            ),
+            Stream.concat(Stream.make(Completions.DONE_FRAME)),
             Stream.provide(services),
           )
           return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {

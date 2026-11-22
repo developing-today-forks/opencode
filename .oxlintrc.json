@@ -59,6 +59,24 @@
     },
     {
       "files": [
+        "packages/ai/src/quota/**",
+        "packages/ai/src/providers/antigravity-auth.ts",
+        "packages/ai/src/providers/claude-code-auth.ts",
+        "packages/ai/src/providers/muse-direct-auth.ts"
+      ],
+      "rules": {
+        "no-restricted-globals": [
+          "error",
+          {
+            "name": "Reflect",
+            "message": "Use typed property access or direct invocation. Suppress this rule only for genuine reflection."
+          }
+        ],
+        "no-restricted-imports": "off"
+      }
+    },
+    {
+      "files": [
         "packages/app/**",
         "packages/desktop/**",
         "packages/gui-plugins/**",

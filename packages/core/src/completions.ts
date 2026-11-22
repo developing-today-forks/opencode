@@ -335,7 +335,6 @@ export const errorFrame = (message: string, type = "server_error") =>
  * usage when the provider reported it); the handler appends [DONE].
  */
 export class ChatStreamTranslator {
-  failed = false
   private started = false
   private hasToolCalls = false
   private readonly toolIndex = new Map<string, number>()
@@ -343,12 +342,6 @@ export class ChatStreamTranslator {
   constructor(
     private readonly meta: { readonly id: string; readonly created: number; readonly model: string },
   ) {}
-
-  /** The error frame for a stream that failed; no `[DONE]` follows a failed stream. */
-  fail(message: string, type?: string): string {
-    this.failed = true
-    return errorFrame(message, type)
-  }
 
   private chunk(delta: Record<string, unknown>, finish: string | null = null, usage?: Usage): string {
     const first = !this.started

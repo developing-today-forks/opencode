@@ -174,12 +174,7 @@
     "./providers/claude-code": "./src/providers/claude-code.ts",
     "./providers/commandcode": "./src/providers/commandcode.ts",
     "./providers/muse-direct": "./src/providers/muse-direct.ts",
-    "./providers/vibe": "./src/providers/vibe.ts",
-    "./providers/amazon-bedrock-mantle": "./src/providers/amazon-bedrock-mantle.ts",
-    "./providers/google-vertex-chat": "./src/providers/google-vertex-chat.ts",
-    "./providers/google-vertex-interactions": "./src/providers/google-vertex-interactions.ts",
-    "./providers/google-vertex-mistral": "./src/providers/google-vertex-mistral.ts",
-    "./providers/google-vertex-responses": "./src/providers/google-vertex-responses.ts"
+    "./providers/vibe": "./src/providers/vibe.ts"
   },
   "devDependencies": {
     "@clack/prompts": "1.0.0-alpha.1",

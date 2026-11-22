@@ -21,6 +21,10 @@ const EventType = Schema.Struct({
   ),
 })
 
+export const ListInput = Schema.Struct({
+  server: Schema.String.annotate({ description: "MCP server name as configured" }),
+})
+
 export const Plugin = {
   id: "opencode.tools.mcp-events",
   effect: Effect.fn("McpEventTools.Plugin")(function* (ctx: Context) {
@@ -33,9 +37,7 @@ export const Plugin = {
           name: "list_mcp_events",
           options: { namespace: "opencode", codemode: true },
           description: "List the events an MCP server sends. Use one as an automation's event trigger.",
-          input: Schema.Struct({
-            server: Schema.String.annotate({ description: "MCP server name as configured" }),
-          }),
+          input: ListInput,
           output: Schema.Struct({ events: Schema.Array(EventType) }),
           execute: (input, context) =>
             Effect.gen(function* () {
