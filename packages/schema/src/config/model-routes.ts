@@ -116,7 +116,13 @@ export class Health extends Schema.Class<Health>("Config.ModelRoute.Health")({
   firstTokenTimeoutMs: Schema.Union([BoundedPositiveInt, Schema.Literal(false)])
     .annotate({
       description:
-        "Fail over if the target produces no response output within this many milliseconds. Defaults to 10000.",
+        "Fail over if the target produces no response output within this many milliseconds. Defaults to 30000; a route that nests other routes defaults to the longest wait among them (see nestedTimeout). false waits without a limit.",
+    })
+    .pipe(optional),
+  lastTargetTimeoutMs: Schema.Union([BoundedPositiveInt, Schema.Literal(false)])
+    .annotate({
+      description:
+        "How long the last target that can take the request may go without response output. firstTokenTimeoutMs only moves a request to another target, so once it passes with no other target left, the target keeps going until this many milliseconds instead of failing. Defaults to 900000 (15 minutes), the silence OpenCode allows any streaming response. A value at or below firstTokenTimeoutMs ends the last target at firstTokenTimeoutMs; false waits without a limit.",
     })
     .pipe(optional),
   maxResponseTimeMs: BoundedPositiveInt.annotate({
@@ -521,6 +527,12 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     .pipe(optional),
   cache_format: CacheFormat.pipe(optional),
   health: Health.pipe(optional),
+  nestedTimeout: Schema.Literals(["longest", "shortest", "own"])
+    .annotate({
+      description:
+        "How a route that nests other routes (as opencode-route/<id> targets, or by name in include or match) waits for first output. longest (the default when health.firstTokenTimeoutMs is unset) and shortest take the longest or shortest wait of the nested routes and apply it to every target, replacing health.firstTokenTimeoutMs. own keeps health.firstTokenTimeoutMs for the route's own targets and lets each nested route's targets wait as long as that nested route would. Has no effect on a route that nests none.",
+    })
+    .pipe(optional),
   budgets: Schema.Record(Schema.String, Budget)
     .annotate({
       description:

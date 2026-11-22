@@ -13,7 +13,7 @@ afterEach(() => {
 describe("ModelRoute health", () => {
   test("starts with bounded first-token and rolling-window defaults", () => {
     expect(ModelRoute.policy()).toMatchObject({
-      firstTokenTimeoutMs: 10_000,
+      firstTokenTimeoutMs: 30_000,
       sampleWindow: 5,
       slowThreshold: 3,
       cooldownMs: 60_000,

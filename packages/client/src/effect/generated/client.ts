@@ -7,6 +7,8 @@ import { ClientApi } from "../../contract"
 import type {
   ServerInfoOutput,
   ServerPairOutput,
+  ServerRedeemInput,
+  ServerRedeemOutput,
   ServerConnectInput,
   ServerConnectOutput,
   LocationGetInput,
@@ -43,6 +45,10 @@ import type {
   SessionSwitchAgentOutput,
   SessionSwitchModelInput,
   SessionSwitchModelOutput,
+  SessionRouteTargetListInput,
+  SessionRouteTargetListOutput,
+  SessionRouteTargetSetInput,
+  SessionRouteTargetSetOutput,
   SessionUpdateInput,
   SessionUpdateOutput,
   SessionMoveInput,
@@ -121,6 +127,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsTranscriptionsInput,
+  ServerCompletionsTranscriptionsOutput,
   ServerCompletionsMessagesInput,
   ServerCompletionsMessagesOutput,
   ServerCompletionsSystemoneInput,
@@ -179,6 +187,11 @@ import type {
   CredentialActivateOutput,
   CredentialRemoveInput,
   CredentialRemoveOutput,
+  RouteOverrideListOutput,
+  RouteOverrideAddInput,
+  RouteOverrideAddOutput,
+  RouteOverrideRemoveInput,
+  RouteOverrideRemoveOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -352,6 +365,11 @@ const EndpointServerInfo = (raw: RawClient["server.server"]) => () =>
 const EndpointServerPair = (raw: RawClient["server.server"]) => () =>
   preserveEffect<ServerPairOutput>()(raw["server.pair"]({}).pipe(Effect.mapError(mapClientError)))
 
+const EndpointServerRedeem = (raw: RawClient["server.server"]) => (input: ServerRedeemInput) =>
+  preserveEffect<ServerRedeemOutput>()(
+    raw["server.redeem"]({ params: { code: input["code"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
 const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: ServerConnectInput) =>
   preserveEffect<ServerConnectOutput>()(
     raw["server.connect"]({ params: { code: input["code"] } }).pipe(Effect.mapError(mapClientError)),
@@ -360,6 +378,7 @@ const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: Serve
 const adaptGroupServer = (raw: RawClient["server.server"]) => ({
   info: EndpointServerInfo(raw),
   pair: EndpointServerPair(raw),
+  redeem: EndpointServerRedeem(raw),
   connect: EndpointServerConnect(raw),
 })
 
@@ -530,6 +549,25 @@ const EndpointSessionSwitchModel = (raw: RawClient["server.session"]) => (input:
   preserveEffect<SessionSwitchModelOutput>()(
     raw["session.switchModel"]({ params: { sessionID: input["sessionID"] }, payload: { model: input["model"] } }).pipe(
       Effect.mapError(mapClientError),
+    ),
+  )
+
+const EndpointSessionRouteTargetList = (raw: RawClient["server.session"]) => (input: SessionRouteTargetListInput) =>
+  preserveEffect<SessionRouteTargetListOutput>()(
+    raw["session.routeTarget.list"]({ params: { sessionID: input["sessionID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointSessionRouteTargetSet = (raw: RawClient["server.session"]) => (input: SessionRouteTargetSetInput) =>
+  preserveEffect<SessionRouteTargetSetOutput>()(
+    raw["session.routeTarget.set"]({
+      params: { sessionID: input["sessionID"] },
+      payload: { routeID: input["routeID"], target: input["target"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
     ),
   )
 
@@ -840,6 +878,7 @@ const adaptGroupSession = (raw: RawClient["server.session"]) => ({
   fork: EndpointSessionFork(raw),
   switchAgent: EndpointSessionSwitchAgent(raw),
   switchModel: EndpointSessionSwitchModel(raw),
+  routeTarget: { list: EndpointSessionRouteTargetList(raw), set: EndpointSessionRouteTargetSet(raw) },
   update: EndpointSessionUpdate(raw),
   move: EndpointSessionMove(raw),
   prompt: EndpointSessionPrompt(raw),
@@ -945,6 +984,17 @@ const EndpointServerCompletionsEmbeddings =
       ),
     )
 
+type ServerCompletionsTranscriptionsRequest = Parameters<
+  RawClient["server.completions"]["completions.transcriptions"]
+>[0]
+const EndpointServerCompletionsTranscriptions =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsTranscriptionsInput) =>
+    preserveEffect<ServerCompletionsTranscriptionsOutput>()(
+      raw["completions.transcriptions"]({ payload: input["payload"] } as ServerCompletionsTranscriptionsRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
 type ServerCompletionsMessagesRequest = Parameters<RawClient["server.completions"]["completions.messages"]>[0]
 const EndpointServerCompletionsMessages =
   (raw: RawClient["server.completions"]) => (input: ServerCompletionsMessagesInput) =>
@@ -983,6 +1033,7 @@ const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
   chat: EndpointServerCompletionsChat(raw),
   responses: EndpointServerCompletionsResponses(raw),
   embeddings: EndpointServerCompletionsEmbeddings(raw),
+  transcriptions: EndpointServerCompletionsTranscriptions(raw),
   messages: EndpointServerCompletionsMessages(raw),
   systemone: EndpointServerCompletionsSystemone(raw),
   models: EndpointServerCompletionsModels(raw),
@@ -1228,6 +1279,51 @@ const adaptGroupCredential = (raw: RawClient["server.credential"]) => ({
   update: EndpointCredentialUpdate(raw),
   activate: EndpointCredentialActivate(raw),
   remove: EndpointCredentialRemove(raw),
+})
+
+const EndpointRouteOverrideList = (raw: RawClient["server.route"]) => () =>
+  preserveEffect<RouteOverrideListOutput>()(
+    raw["route.override.list"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteOverrideAdd = (raw: RawClient["server.route"]) => (input: RouteOverrideAddInput) =>
+  preserveEffect<RouteOverrideAddOutput>()(
+    raw["route.override.add"]({
+      payload: {
+        id: input["id"],
+        action: input["action"],
+        providers: input["providers"],
+        models: input["models"],
+        routes: input["routes"],
+        fixed: input["fixed"],
+        factor: input["factor"],
+        weight: input["weight"],
+        schedule: input["schedule"],
+        until: input["until"],
+        text: input["text"],
+        source: input["source"],
+        createdAt: input["createdAt"],
+      },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteOverrideRemove = (raw: RawClient["server.route"]) => (input: RouteOverrideRemoveInput) =>
+  preserveEffect<RouteOverrideRemoveOutput>()(
+    raw["route.override.remove"]({ params: { overrideID: input["overrideID"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const adaptGroupRoute = (raw: RawClient["server.route"]) => ({
+  override: {
+    list: EndpointRouteOverrideList(raw),
+    add: EndpointRouteOverrideAdd(raw),
+    remove: EndpointRouteOverrideRemove(raw),
+  },
 })
 
 const EndpointProjectList = (raw: RawClient["server.project"]) => (input?: ProjectListInput) =>
@@ -2009,6 +2105,7 @@ const adaptClient = (raw: RawClient) => ({
   integration: adaptGroupIntegration(raw["server.integration"]),
   mcp: adaptGroupMcp(raw["server.mcp"]),
   credential: adaptGroupCredential(raw["server.credential"]),
+  route: adaptGroupRoute(raw["server.route"]),
   project: adaptGroupProject(raw["server.project"]),
   form: adaptGroupForm(raw["server.form"]),
   permission: adaptGroupPermission(raw["server.permission"]),

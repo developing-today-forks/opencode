@@ -741,6 +741,18 @@ describe("ConfigNormalize", () => {
     ).toEqual({ policies: [{ action: "provider.use", resource: "*", effect: "deny" }] })
   })
 
+  // Oracle: the v2 provider model schema; the same keys in the legacy spelling land unchanged.
+  test("carries hidden and the default effort keys from a legacy provider model", () => {
+    expect(
+      decoded({
+        provider: {
+          custom: { models: { model: { name: "Model", hidden: true, defaultVariant: "high", lockVariant: true } } },
+        },
+      }).providers,
+    ).toMatchObject({ custom: { models: { model: { hidden: true, defaultVariant: "high", lockVariant: true } } } })
+    expect(normalized({ provider: { custom: { models: { model: { hidden: true } } } } }).diagnostics).toEqual([])
+  })
+
   test("reports unsupported legacy settings without including their values", () => {
     const secret = "do-not-log-this-value"
     const result = normalized({

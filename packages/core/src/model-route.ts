@@ -4,6 +4,7 @@ import { Model } from "@opencode/schema/model"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
+import { DEFAULT_CHUNK_TIMEOUT_MS } from "./provider.js"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { ownValue } from "./util/record.js"
@@ -21,6 +22,9 @@ export const SETTING = "opencodeRoute"
 
 const Policy = Schema.Struct({
   firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]),
+  /** How long the last target that can take a request may stay silent once firstTokenTimeoutMs has
+   * passed (see lastTargetTimeout). Optional so a policy written without it keeps decoding. */
+  lastTargetTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
   maxResponseTimeMs: PositiveInt.pipe(optional),
   minOutputTokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
   sampleWindow: PositiveInt,
@@ -170,6 +174,13 @@ const Definition = Schema.Struct({
   ).pipe(optional),
   /** Weight changes in force across every route, from experimental.routes.schedules. */
   schedules: Schema.Array(WeightRule).pipe(optional),
+  /** Parallel to `targets`, stored only for a route with `nestedTimeout: "own"`: the first-output wait of
+   * the nested route a leaf was reached through, or an empty object for the route's own leaves. */
+  targetFirstTokenTimeouts: Schema.Array(
+    Schema.Struct({
+      firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
+    }),
+  ).pipe(optional),
   nodes: Schema.Array(Node),
 })
 
@@ -197,8 +208,18 @@ export type Node = typeof Node.Type
 export type Policy = typeof Policy.Type
 export type Definition = typeof Definition.Type
 
+/** How long a target may take to produce its first output before the route fails over, when
+ * neither the route nor its nested routes name a wait. Long enough for a model that reasons
+ * before it answers; a nested route's longer wait wins by default (config plugin firstTokenTimeout). */
+export const DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000
+
+/** How long the last target that can take a request may go without output. The first-output wait only
+ * moves a request to another target; with none left, ending the attempt would only turn a slow answer
+ * into an error, so the target gets the silence the transport allows any streaming response. */
+export const DEFAULT_LAST_TARGET_TIMEOUT_MS = DEFAULT_CHUNK_TIMEOUT_MS
+
 const DEFAULT_POLICY: Policy = {
-  firstTokenTimeoutMs: 10_000,
+  firstTokenTimeoutMs: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
   sampleWindow: 5,
   slowThreshold: 3,
   cooldownMs: 60_000,
@@ -208,6 +229,7 @@ const DEFAULT_POLICY: Policy = {
 export const policy = (
   input?: {
     readonly firstTokenTimeoutMs?: number | false
+    readonly lastTargetTimeoutMs?: number | false
     readonly maxResponseTimeMs?: number
     readonly minOutputTokensPerSecond?: number
     readonly sampleWindow?: number
@@ -221,6 +243,7 @@ export const policy = (
   const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
+    lastTargetTimeoutMs: input?.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
     ...(input?.maxResponseTimeMs !== undefined ? { maxResponseTimeMs: input.maxResponseTimeMs } : {}),
     ...(input?.minOutputTokensPerSecond !== undefined
@@ -231,6 +254,22 @@ export const policy = (
     cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
     quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
+}
+
+/** How long the last target that can take a request may go without output, from the request's start.
+ * Never shorter than the first-output wait itself, so a value at or below it changes nothing. */
+export const lastTargetTimeout = (policy: Policy): number | false => {
+  const last = policy.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS
+  const first = policy.firstTokenTimeoutMs
+  if (last === false || first === false) return false
+  return Math.max(last, first)
+}
+
+/** The policy an attempt on one target runs under: the route's, with the target's own first-output
+ * wait when the route lets nested routes keep theirs (`nestedTimeout: "own"`). */
+export const targetPolicy = (definition: Definition, index: number): Policy => {
+  const wait = definition.targetFirstTokenTimeouts?.[index]?.firstTokenTimeoutMs
+  return wait === undefined ? definition.health : { ...definition.health, firstTokenTimeoutMs: wait }
 }
 
 /** The route definition a model carries. Route models under the routes provider carry one, and so
@@ -4395,6 +4434,10 @@ export const nextTarget = (
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
   location?: string,
+  /** The session's pinned leaf (#2671), passed only when the caller judged it healthy. It goes
+   * first at every node on its path while it is still ready, untried and gate-open; otherwise the
+   * normal order applies. */
+  preferred?: number,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -4423,6 +4466,7 @@ export const nextTarget = (
     )
   }
   const hasReady = (nodeIndex: number): boolean => openLeaves(nodeIndex).length > 0
+  const pinned = preferred !== undefined && openLeaves(0).includes(preferred) ? preferred : undefined
   /** Whether any gate on the path from this node down to the leaf is closed at `now`. */
   const gateClosedOnPath = (nodeIndex: number, leafIndex: number): boolean => {
     const node = definition.nodes[nodeIndex]
@@ -4642,7 +4686,20 @@ export const nextTarget = (
     const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
-    if (node.selection === "ordered" && currentPosition !== undefined) {
+    // The session's pinned member (#2671) leads while it can serve, ahead of continuity, the
+    // sticky pick and the draw — no draw is consumed, so clearing the pin resumes the session's
+    // normal selection. The rest keep their normal order as the failover tail.
+    const pinnedPosition =
+      pinned === undefined
+        ? undefined
+        : positions.find((position) => {
+            const child = node.children[position]
+            return child.leaf === pinned || (child.node !== undefined && leaves(child.node).includes(pinned))
+          })
+    if (pinnedPosition !== undefined) {
+      ordered = [pinnedPosition, ...sorted.filter((position) => position !== pinnedPosition)]
+      decisionReason = "pinned"
+    } else if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
@@ -4754,7 +4811,56 @@ export const forgetSession = (routeID: string, sessionID: string) => {
   selection.get(routeID)?.sessions.delete(sessionID)
 }
 
-export const resetSelection = () => selection.clear()
+/** A session's preferred pool member per route (#2671): the member the session uses while it is
+ * healthy, without leaving the pool, so failover and the return to the member work as usual.
+ *
+ * Kept in memory, like the sticky picks and continuity it sits beside, rather than on the session
+ * record. The pin is advice to selection, not session history: it needs no durable event, no
+ * projection column and no migration, and losing it on a restart is safe — the session is still
+ * on its pool and simply selects normally until a client sets the pin again. Clients read the
+ * current value back from the API. Bounded like the other per-session maps. */
+const pins = new Map<string, Map<string, Model.Ref>>()
+
+export const resetSelection = () => {
+  selection.clear()
+  pins.clear()
+}
+
+/** Sets or clears (`undefined`) a session's preferred member on one route. */
+export const pinTarget = (routeID: string, sessionID: string, target: Model.Ref | undefined) => {
+  const routes = new Map(pins.get(sessionID))
+  if (target === undefined) routes.delete(routeID)
+  else routes.set(routeID, target)
+  pins.delete(sessionID)
+  if (routes.size === 0) return
+  pins.set(sessionID, routes)
+  while (pins.size > SESSION_LIMIT) pins.delete(pins.keys().next().value!)
+}
+
+/** The session's pins, one per route. */
+export const pinnedTargets = (sessionID: string) =>
+  Array.from(pins.get(sessionID) ?? [], ([routeID, target]) => ({ routeID, target }))
+
+/** Drops every pin a session holds, e.g. when the session is deleted. */
+export const forgetPins = (sessionID: string) => {
+  pins.delete(sessionID)
+}
+
+/** The leaf a target names on this route: the exact member (variant included), or — for a target
+ * without a variant — the first member of that provider/model. Undefined when it is not a member. */
+export const memberIndex = (definition: Definition, target: Model.Ref) => {
+  const exact = definition.targets.findIndex((item) => key(item) === key(target) && item.variant === target.variant)
+  if (exact >= 0) return exact
+  if (target.variant !== undefined) return undefined
+  const loose = definition.targets.findIndex((item) => key(item) === key(target))
+  return loose >= 0 ? loose : undefined
+}
+
+/** The leaf the session pinned on this route, while it is still a member. */
+export const pinnedLeaf = (definition: Definition, sessionID: string) => {
+  const target = pins.get(sessionID)?.get(definition.id)
+  return target === undefined ? undefined : memberIndex(definition, target)
+}
 
 /** Where a session has been answered on a route. `origin` is the target it moved away from after a
  * failover; `away` counts requests answered since on the target it moved to. */

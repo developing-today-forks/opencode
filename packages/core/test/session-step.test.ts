@@ -1760,6 +1760,191 @@ it.live("fails over when a routed provider misses the first-output deadline", ()
   }),
 )
 
+// The first-output wait only moves a request to another target. Oracle: the rule stated on
+// Config.ModelRoute.Health.lastTargetTimeoutMs — with another target to take the request, the
+// attempt ends at firstTokenTimeoutMs; with none, the target keeps going until lastTargetTimeoutMs
+// (never shorter than the first-output wait), and output that arrives in the meantime stands.
+const lastTargetAttempt = (input: {
+  readonly slug: string
+  readonly policy: ModelRoute.Policy
+  readonly response: Stream.Stream<LLMEvent, AIError>
+  /** What the route's fallback resolves: another target, or none. */
+  readonly next: "target" | "none"
+  /** How long resolving the fallback takes, to land output inside it. */
+  readonly fallbackDelayMs?: number
+}) =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: input.slug,
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "slow-last", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const other = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "other", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("last-target"),
+        target: primary.ref,
+        attempts: 1,
+        policy: input.policy,
+        fallback: () => {
+          fallbackCalls++
+          const next = input.next === "target" ? other : undefined
+          return Effect.sleep(input.fallbackDelayMs ?? 0).pipe(Effect.as(next))
+        },
+      },
+    })
+    yield* llm.push(input.response)
+    const errors: string[] = []
+    const started = performance.now()
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Take your time" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (cause) => {
+          errors.push(cause.message)
+          return Effect.succeed({ retry: false })
+        },
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+    const elapsedMs = performance.now() - started
+    yield* llm.wait(1)
+    return { result, elapsedMs, fallbackCalls, errors, requests: (yield* llm.requests()).length }
+  })
+
+/** A response that stays silent for `ms`, then answers. */
+const answerAfter = (ms: number) =>
+  Stream.unwrap(Effect.sleep(ms).pipe(Effect.as(Stream.fromIterable(TestLLM.text("slow but valid", "late")))))
+
+it.live("the last target that can take a request keeps going past the first-output wait and answers", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-answers",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "none",
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Completed")
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(140)
+    // One request: the slow one was waited for, not restarted.
+    expect(run.requests).toBe(1)
+    expect(run.errors).toEqual([])
+  }),
+)
+
+it.live("a target with another to move to still ends at the first-output wait", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-moves-on",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "target",
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Failover")
+    expect(run.elapsedMs).toBeLessThan(140)
+  }),
+)
+
+it.live("the last target still ends at its own limit, never without one", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-limit",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20, lastTargetTimeoutMs: 90 }),
+      response: TestLLM.hangAfter(),
+      next: "none",
+    })
+    expect(Exit.isSuccess(run.result) && run.result.value._tag === "Completed").toBe(false)
+    expect(run.errors).toEqual(["No response output within 90ms"])
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(85)
+    // Asked once at the wait (nowhere to move), once more by the failover check after the end.
+    expect(run.fallbackCalls).toBe(2)
+  }),
+)
+
+it.live("a last-target limit at or below the first-output wait ends the attempt at the wait, as before", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-off",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20, lastTargetTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "none",
+    })
+    expect(run.errors).toEqual(["No response output within 20ms"])
+    expect(run.elapsedMs).toBeLessThan(140)
+    // Nothing is asked at the wait: the one lookup is the failover check after the attempt ended.
+    expect(run.fallbackCalls).toBe(1)
+  }),
+)
+
+it.live("output that arrives while the next target is being looked up keeps the attempt", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-race",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(60),
+      next: "target",
+      fallbackDelayMs: 120,
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Completed")
+    expect(run.requests).toBe(1)
+  }),
+)
+
 it.effect("records the failed attempt that fails over, with the exact error", () =>
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
