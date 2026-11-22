@@ -26,6 +26,9 @@ export type SessionActivityItem = {
   | {
       type: "subagent"
       sessionID: string
+      // How far below another listed subagent this one runs (the one that launched it, or its nearest listed
+      // ancestor); rows indent by it.
+      depth?: number
       // Running jobs in its tree, which its Stop cancels.
       jobs?: readonly string[]
     }
@@ -227,7 +230,15 @@ export function SessionActivityChips(props: {
                   <MenuScroll>
                     <For each={props.subagents}>
                       {(item) => (
-                        <Menu.Item {...row(item)}>
+                        <Menu.Item
+                          {...row(item)}
+                          data-depth={item.type === "subagent" && item.depth ? item.depth : undefined}
+                          style={
+                            item.type === "subagent" && item.depth
+                              ? { "--session-activity-depth": String(item.depth) }
+                              : undefined
+                          }
+                        >
                           <SessionProgressIndicatorV2 class="shrink-0 text-v2-icon-icon-muted" />
                           <span class="shrink-0 font-[530]">
                             <bdi>

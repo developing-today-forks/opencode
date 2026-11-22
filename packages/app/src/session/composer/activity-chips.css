@@ -65,6 +65,11 @@
     border-radius: 4px;
   }
 
+  /* A subagent launched by another listed one sits below it, one step in per level (#370). */
+  [data-component="menu-v2-item"][data-depth] {
+    padding-inline-start: calc(4px + var(--session-activity-depth) * 16px);
+  }
+
   /* A shell's command spans the agent and description columns. */
   [data-slot="menu-v2-item-content"] > span[dir="ltr"] {
     grid-column: 2 / 4;
