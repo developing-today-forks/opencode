@@ -1139,6 +1139,43 @@ describe("SessionRunnerLLM", () => {
     expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
   })
 
+  // Oracle: code#12228's first done-when criterion — the session's ordered
+  // route attempt history is the oracle: a reset-bearing 429 gets one request
+  // at the walled target, the answer is completed by the next target, and the
+  // first target remains excluded until its stated reset.
+  scenario("completes on the next target after a 429 with a one-hour reset", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    const target = ModelRoute.ref({ providerID: "fake", model: "fake-model" })
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target,
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      fallback: () => Effect.succeed(backup),
+    }
+    yield* s.admit("Say something")
+    yield* s.llm.push(
+      TestLLM.failAfter(
+        new AIError({ reason: new RateLimitError({ message: "quota exhausted", retryAfterMs: 3_600_000 }) }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[0]?.model.id)).toBe("fake-model")
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    expect(ModelRoute.coolingDown(target)).toBe(true)
+    expect(ModelRoute.cooldownUntil(target) - Date.now()).toBeGreaterThan(3_500_000)
+  })
+
   scenario("keeps walking to the next credential on repeated quota failures in one assistant message", function* (s) {
     ModelRoute.resetHealth()
     const options = {
