@@ -1211,12 +1211,11 @@ function codegenAsts(roots: ReadonlyArray<SchemaAST.AST>) {
   return roots.map(recur)
 }
 
-function opaqueFilter(check: SchemaAST.Check<unknown>) {
-  return (
-    check._tag === "Filter" &&
-    check.annotations?.toCode === undefined &&
-    check.annotations?.representation === undefined
-  )
+// A group is dropped whole when any filter inside it is opaque: toCodeDocument renders a
+// group by rendering each member, and the group never changes the type either.
+function opaqueFilter(check: SchemaAST.Check<unknown>): boolean {
+  if (check.annotations?.toCode !== undefined || check.annotations?.representation !== undefined) return false
+  return check._tag === "Filter" || check.checks.some(opaqueFilter)
 }
 
 function preserveStringSuggestions(type: string) {
