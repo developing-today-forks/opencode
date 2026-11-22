@@ -31,7 +31,7 @@
 // re-prepared (so auth re-exchanges) and retried exactly once — the
 // same shape as the antigravity protocol's transport.
 import { Effect } from "effect"
-import { LLMEvent, LLMRequest, Message, ToolChoice, ToolEntry, type ToolDefinition } from "../schema/index.js"
+import { LLMEvent, type LLMRequest, Message, ToolChoice, ToolEntry, type ToolDefinition } from "../schema/index.js"
 import { Protocol } from "../route/protocol.js"
 import { HttpTransport, type Transport, type TransportPrepareInput } from "../route/transport/index.js"
 import { MetaResponses } from "./meta-responses.js"
@@ -123,11 +123,12 @@ const aliasMessages = (messages: LLMRequest["messages"], active: Plan): LLMReque
 export const aliasRequest = (request: LLMRequest): LLMRequest => {
   const active = plan(toolNames(request.tools))
   if (!active) return request
-  return LLMRequest.update(request, {
+  return {
+    ...request,
     messages: aliasMessages(request.messages, active),
     tools: request.tools.map((entry) => aliasEntry(entry, active)),
     ...(request.toolChoice !== undefined ? { toolChoice: aliasToolChoice(request.toolChoice, active) } : {}),
-  })
+  }
 }
 
 /** The response-side transform for one streamed event: a tool event
@@ -147,8 +148,6 @@ export const unaliasEvent = (event: LLMEvent, active: Plan): LLMEvent => {
       return active.backward.has(event.name) ? LLMEvent.toolCall({ ...event, name: active.backward.get(event.name)! }) : event
     case "tool-result":
       return active.backward.has(event.name) ? LLMEvent.toolResult({ ...event, name: active.backward.get(event.name)! }) : event
-    case "tool-error":
-      return active.backward.has(event.name) ? LLMEvent.toolError({ ...event, name: active.backward.get(event.name)! }) : event
     default:
       return event
   }

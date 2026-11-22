@@ -7,7 +7,7 @@ import { Cause, Effect, Option, Result, Stream } from "effect"
 import { Headers, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
-import { awaitPlugins, locationErrors } from "../location"
+import { locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
 import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -132,7 +132,7 @@ const errorResponse = (status: number, message: string, type: string, code?: str
 // 429 with the provider's message (reset hint included) preserved;
 // selection failures are the caller's 400; everything else upstream
 // stays the generic 502.
-const serviceError = (error: Generate.Error) =>
+const serviceError = (error: Generate.CompletionError) =>
   error._tag === "Generate.ModelSelectionError"
     ? errorResponse(400, error.message, "invalid_request_error")
     : error._tag === "Generate.QuotaError"
@@ -142,7 +142,7 @@ const serviceError = (error: Generate.Error) =>
 const messagesErrorResponse = (status: number, message: string, type: string) =>
   HttpServerResponse.jsonUnsafe(Completions.messagesErrorBody(message, type), { status })
 
-const messagesServiceError = (error: Generate.Error) =>
+const messagesServiceError = (error: Generate.CompletionError) =>
   error._tag === "Generate.ModelSelectionError"
     ? messagesErrorResponse(400, error.message, "invalid_request_error")
     : error._tag === "Generate.QuotaError"
@@ -163,7 +163,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
     // reflected without a restart, and the list and the single-model
     // lookup below are built from the same set and always agree.
     const advertisedRoutes = Effect.gen(function* () {
-      yield* awaitPlugins
       const models = yield* Model.Service
       const available = yield* models.available()
       return available.filter((model) => model.providerID === ModelRoute.PROVIDER_ID).map((model) => String(model.id))
@@ -171,7 +170,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
     return handlers
       .handleRaw("completions.chat", (ctx) =>
         Effect.gen(function* () {
-          yield* awaitPlugins
           const { raw, body, tooLarge } = yield* requestBody(ctx)
           if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
           const parsed = Completions.parseChatRequest(body)
@@ -191,6 +189,8 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           const translator = new Completions.ChatStreamTranslator(meta)
           const frames = generate.stream(input).pipe(
             Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
+            // A failed stream is one error frame and then [DONE], the same
+            // framing the doors write whether or not output had started.
             Stream.catchCause((cause) =>
               Stream.make(
                 Completions.errorFrame(
@@ -199,9 +199,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
                 ),
               ),
             ),
-            Stream.concat(
-              Stream.suspend(() => (translator.failed ? Stream.empty : Stream.make(Completions.DONE_FRAME))),
-            ),
+            Stream.concat(Stream.make(Completions.DONE_FRAME)),
             Stream.provide(services),
           )
           return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {
@@ -216,7 +214,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
       )
       .handleRaw("completions.responses", (ctx) =>
         Effect.gen(function* () {
-          yield* awaitPlugins
           const { raw, body, tooLarge } = yield* requestBody(ctx)
           if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
           const parsed = Completions.parseResponsesRequest(body)
@@ -341,7 +338,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
       )
       .handleRaw("completions.embeddings", (ctx) =>
         Effect.gen(function* () {
-          yield* awaitPlugins
           const bounded = yield* readBoundedJsonBody(ctx.request)
           if (bounded.tooLarge)
             return errorResponse(413, bounded.tooLarge, "invalid_request_error", "request_too_large")
@@ -371,7 +367,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
       )
       .handleRaw("completions.systemone", (ctx) =>
         Effect.gen(function* () {
-          yield* awaitPlugins
           // The door's own error discipline (#690 in the door): a
           // malformed body is a 400 in the plain {error} envelope,
           // never a 500 from the upstream path, and an array body is
@@ -402,7 +397,6 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
       )
       .handleRaw("completions.messages", (ctx) =>
         Effect.gen(function* () {
-          yield* awaitPlugins
           const { raw, body, tooLarge } = yield* requestBody(ctx)
           if (tooLarge) return messagesErrorResponse(413, tooLarge, "invalid_request_error")
           const parsed = Completions.parseMessagesRequest(body)
@@ -420,7 +414,7 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
             Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
             Stream.catchCause((cause) =>
               Stream.make(
-                Completions.messagesErrorFrame(
+                translator.fail(
                   streamErrorMessage(cause),
                   streamIsQuota(cause) ? "rate_limit_error" : "api_error",
                 ),

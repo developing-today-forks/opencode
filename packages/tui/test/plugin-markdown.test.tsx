@@ -12,7 +12,7 @@ import { createRoot, createSignal } from "solid-js"
 import { createMarkdownRenderer } from "../src/plugin/markdown"
 
 test("unrelated plugin toggles preserve mounted Markdown blocks", async () => {
-  const output = await createTestRenderer({ width: 80, height: 12, remote: true, useThread: false })
+  const output = await createTestRenderer({ width: 80, height: 12, remote: true })
   const handler: MarkdownCodeBlockRenderer = () =>
     new TextRenderable(output.renderer, { content: "Custom fence", height: 1 })
   const [sources, setSources] = createSignal<ReadonlyArray<Readonly<Record<string, MarkdownCodeBlockRenderer>>>>([
@@ -20,14 +20,13 @@ test("unrelated plugin toggles preserve mounted Markdown blocks", async () => {
     {},
   ])
   await render(() => {
-    const renderNode = createMarkdownRenderer(sources)
+    const renderBlock = createMarkdownRenderer(sources)
     return (
       <markdown
-        syntaxStyle={SyntaxStyle.fromStyles({ default: { fg: "#ffffff" } })}
-        renderNode={renderNode()}
+        syntaxStyle={SyntaxStyle.fromStyles({ default: { fg: "#ffffff" } }, output.renderer.nativeScene)}
+        renderBlock={renderBlock()}
         content={"A plain paragraph.\n\n```example\nFence content\n```"}
         streaming={false}
-        internalBlockMode="top-level"
       />
     )
   }, output.renderer)
@@ -61,18 +60,18 @@ test("effective mappings preserve identity through reordered and shadowed contri
         { example: first },
         { example: second, other: first },
       ])
-      const renderNode = createMarkdownRenderer(sources)
-      const initial = renderNode()
+      const renderBlock = createMarkdownRenderer(sources)
+      const initial = renderBlock()
 
       setSources([{ other: first, example: second }])
-      expect(renderNode()).toBe(initial)
+      expect(renderBlock()).toBe(initial)
       setSources([{ example: first }, { other: first, example: second }])
-      expect(renderNode()).toBe(initial)
+      expect(renderBlock()).toBe(initial)
 
       setSources([{ example: first, other: first }])
-      expect(renderNode()).not.toBe(initial)
+      expect(renderBlock()).not.toBe(initial)
       setSources([])
-      expect(renderNode()).toBeUndefined()
+      expect(renderBlock()).toBeUndefined()
     } finally {
       dispose()
     }
@@ -80,7 +79,7 @@ test("effective mappings preserve identity through reordered and shadowed contri
 })
 
 test("changing and removing a Markdown handler refreshes existing messages", async () => {
-  const output = await createTestRenderer({ width: 80, height: 12, remote: true, useThread: false })
+  const output = await createTestRenderer({ width: 80, height: 12, remote: true })
   const first: MarkdownCodeBlockRenderer = () =>
     new TextRenderable(output.renderer, { content: "First renderer", height: 1 })
   const second: MarkdownCodeBlockRenderer = () =>
@@ -89,14 +88,13 @@ test("changing and removing a Markdown handler refreshes existing messages", asy
     { example: first },
   ])
   await render(() => {
-    const renderNode = createMarkdownRenderer(sources)
+    const renderBlock = createMarkdownRenderer(sources)
     return (
       <markdown
-        syntaxStyle={SyntaxStyle.fromStyles({ default: { fg: "#ffffff" } })}
-        renderNode={renderNode()}
+        syntaxStyle={SyntaxStyle.fromStyles({ default: { fg: "#ffffff" } }, output.renderer.nativeScene)}
+        renderBlock={renderBlock()}
         content={"```example\nFence content\n```"}
         streaming={false}
-        internalBlockMode="top-level"
       />
     )
   }, output.renderer)

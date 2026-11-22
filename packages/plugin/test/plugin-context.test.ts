@@ -28,6 +28,19 @@ const received: unknown[] = []
 // loudly if the test plugin touches it. The container cast keeps the stub
 // focused: full Effect Context conformance is covered by core's test host.
 const die = () => Effect.die(new Error("unused domain"))
+// The adapter wires every host method up front, so domains the stub does not
+// list resolve to `die` too; the stub keeps working as the plugin API grows.
+const unused: object = new Proxy(die, { get: () => unused })
+const withUnused = (value: object): object =>
+  new Proxy(value, {
+    get: (target, key) => {
+      if (!(key in target)) return unused
+      const found: unknown = (target as Record<PropertyKey, unknown>)[key]
+      return typeof found === "object" && found !== null && Object.getPrototypeOf(found) === Object.prototype
+        ? withUnused(found)
+        : found
+    },
+  })
 const stub = {
   app: { name: "test", version: "test", channel: "test" },
   location: new Location.Info({
@@ -41,7 +54,7 @@ const stub = {
   command: { list: die, transform: die, reload: die },
   credential: { activate: die },
   event: { subscribe: die },
-  experimental: { terminal: { read: die } },
+  experimental: { terminal: { read: die }, generate: { text: die } },
   generate: { text: die },
   model: { list: die, default: die, transform: die, reload: die },
   provider: { list: die, get: die, transform: die, reload: die },
@@ -130,7 +143,7 @@ test("plugin reads serverUrl and lists child sessions through the session domain
       await ctx.session.list()
     },
   }
-  await Effect.runPromise(Effect.scoped(fromPromise(plugin).effect(stub as never)))
+  await Effect.runPromise(Effect.scoped(fromPromise(plugin).effect(withUnused(stub) as never)))
   expect(seen.serverUrl).toBe("http://127.0.0.1:4096")
   expect(seen.childIDs).toEqual(["ses_child_1"])
   expect(seen.nextCursor).toBe(childCursor)

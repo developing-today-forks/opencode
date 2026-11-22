@@ -77,8 +77,11 @@ in the same dispatched or scheduled runs, after the basic tier.
 - `nix-eval` — full evaluation on **manual dispatch only** (there
   is no push trigger and no paths-gated PR variant, because there
   are no PR triggers).
-- `storybook` — **manual dispatch only**; unchanged apart from the
-  standard concurrency group.
+
+Workflow files were renamed by the 2026-11-22 anomalyco/opencode sync
+(`test.yml` → `check-test.yml`, `nix-eval.yml` → `check-nix.yml`); the
+workflow `name:` values above are unchanged. `storybook.yml` was
+removed by that sync along with the upstream storybook build.
 
 ## Release gate (Phase 3, code#1782 step 7)
 
@@ -89,22 +92,16 @@ workflows — `test`, `check`, `nix-eval`, the same set
 latest completed run of each on branch `main` must have conclusion
 `success`. A failed, cancelled, or missing conclusion refuses the
 publish (fail-closed). Enforcement is the reusable
-`.github/actions/main-gate` check: `publish.yml` gates its `version`
-job on it (every other job follows through `needs`), and
-`publish-vscode.yml` and `publish-github-action.yml` gate their
-`publish` jobs on it the same way, with one refinement: those
-publishers take their release from the newest `vscode-v*` /
-`github-v*` tag (by committer date), not from the run's SHA, so
-their gate jobs resolve that tag once, gate its peeled commit (for
-vscode, the checked-out code's SHA is gated as well), and pass the
-same tag to the publish script as a pinned argument — the gated
-commit is always the published one. `release-github-action.yml` only
-cuts the `github-v*` tag and publishes nothing itself; the publish it
-feeds is gated, so it carries no separate gate. Because the tier
-workflows run only on dispatch or schedule, a publish dispatch whose
-gate has not completed for that SHA is refused: dispatch the tier
-workflows, wait for a green main for that SHA, then re-run
-(dispatch) the publish workflow.
+`.github/actions/main-gate` check.
+
+Since the 2026-11-22 anomalyco/opencode sync, this repository has no
+publish workflow that can run: upstream replaced `publish.yml`,
+`publish-vscode.yml`, `publish-github-action.yml`,
+`release-github-action.yml` and `containers.yml` with `release.yml`,
+whose every job depends on a `plan` job guarded to
+`github.repository == 'anomalyco/opencode'`, so it never publishes from
+this fork. The main-gate action is kept; any publish workflow added to
+this fork must gate on it before publishing.
 
 Hotfix override: set the repository variable `MAIN_GATE_OVERRIDE=1`
 to bypass the gate for one release — the bypass is announced as a
@@ -125,9 +122,9 @@ push-triggered one.
 
 Runs on `main` are keyed by `run_id` so they are never cancelled;
 branch and dispatch runs on other refs cancel on supersede.
-`check.yml` and `test.yml` express this as a `case(...)` on
-`github.ref`; `nix-eval.yml` and `storybook.yml` still carry the
-equivalent template expression:
+`check.yml` and `check-test.yml` express this as a `case(...)` on
+`github.ref`; `check-nix.yml` still carries the equivalent template
+expression:
 
 ```yaml
 concurrency:
@@ -175,8 +172,9 @@ when the guard was extended to them on 2026-11-17; both were enabled
 the same day, with verification dispatches on `main` (runs 44011572773
 and 44011578553).
 
-- Check: `gh workflow list --all` must report `test`, `check`,
-  `nix-eval`, and `storybook` as `active`. Anything else
+- Check: `gh workflow list --all` must report `test`, `check`, and
+  `nix-eval` as `active` (`storybook` was removed by the 2026-11-22
+  sync). Anything else
   (`disabled_manually`, `disabled_inactivity`) removes the backstop
   and is a CI-health bug, not a posture.
 - The repo-health sweep for this repo verifies that state on its

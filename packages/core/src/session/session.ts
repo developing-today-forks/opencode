@@ -13,14 +13,7 @@ import { LocationServiceMap } from "../location-service-map.js"
 import { MessagingVars } from "../messaging/vars.js"
 import { ShellResult } from "../shell/result.js"
 import type { Skill } from "../skill.js"
-import {
-  BusyError,
-  CompactionConflictError,
-  InboxConflictError,
-  NotFoundError,
-  PromptConflictError,
-  SyntheticConflictError,
-} from "./error.js"
+import { BusyError, CompactionConflictError, InboxConflictError, NotFoundError, PromptConflictError } from "./error.js"
 import { SessionEvent } from "./event.js"
 import { SessionExecution } from "./execution.js"
 import { SessionInbox } from "./inbox.js"
@@ -33,6 +26,7 @@ import { ModelGovernance } from "./model-governance.js"
 import { GovernanceConfig } from "./governance-config.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
+import { SessionSynthetic } from "./synthetic.js"
 
 type PromptRequest = SessionPrompt.Input & {
   id?: SessionMessage.ID
@@ -82,6 +76,16 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     yield* bus.publish(SessionEvent.Renamed, { sessionID, title: input.title })
   })
+  const archive = Effect.fn("Session.archive")(function* (sessionID: SessionSchema.ID) {
+    const session = yield* get(sessionID)
+    if (session.time.archived) return
+    yield* bus.publish(SessionEvent.Archived, { sessionID })
+  })
+  const unarchive = Effect.fn("Session.unarchive")(function* (sessionID: SessionSchema.ID) {
+    const session = yield* get(sessionID)
+    if (!session.time.archived) return
+    yield* bus.publish(SessionEvent.Unarchived, { sessionID })
+  })
   const setMetadata = Effect.fn("Session.setMetadata")(function* (
     sessionID: SessionSchema.ID,
     input: { metadata: SessionSchema.Metadata },
@@ -110,6 +114,10 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { agent: Agent.ID; model?: Model.Ref },
   ) {
     const session = yield* get(sessionID)
+    // Without a stored agent the Session runs as its Location's default, which its last step records.
+    const current =
+      session.agent ?? (yield* store.lastAssistantAfter({ sessionID }).pipe(Effect.orElseSucceed(() => undefined)))?.agent
+    if (current === input.agent) return
     // A child session may only switch to an agent under which the model it
     // will run is allowed; top-level sessions are unchecked. The model it
     // will run is the caller-supplied upcoming model when one accompanies
@@ -200,40 +208,48 @@ export const make = Effect.fn("Session.make")(function* () {
     (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) => mutatePending(sessionID, inboxID, admission.queue),
     Effect.uninterruptible,
   )
-  const prompt = Effect.fn("Session.prompt")((sessionID: SessionSchema.ID, input: PromptRequest) =>
-    Effect.uninterruptibleMask((restore) =>
-      Effect.gen(function* () {
-        const session = yield* get(sessionID)
-        const messageID = input.id ?? SessionMessage.ID.create()
-        const admitted = yield* Effect.gen(function* () {
-          const existing = yield* admission.reconcile({
-            id: messageID,
-            sessionID: session.id,
-            type: "user",
-            delivery: input.delivery ?? "steer",
-          })
-          if (existing) return existing
-          const renderer = render(session.id)
-          const item = yield* restore(
-            SessionPrompt.prepare({ session, messageID, input, ...(renderer ? { render: renderer } : {}) }).pipe(
-              Effect.provideService(Instance.Service, instances),
+  const prompt = Effect.fn("Session.prompt")(
+    (sessionID: SessionSchema.ID, input: PromptRequest, onAccepted?: Effect.Effect<void>) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const session = yield* get(sessionID)
+          const messageID = input.id ?? SessionMessage.ID.create()
+          const admitted = yield* Effect.gen(function* () {
+            const existing = yield* admission.reconcile({
+              id: messageID,
+              sessionID: session.id,
+              type: "user",
+              delivery: input.delivery ?? "steer",
+            })
+            if (existing) return existing
+            // Preparation, the staged revert commit and admission share one acquisition of the session's location
+            // services, so projections see its config whoever called prompt.
+            return yield* Effect.gen(function* () {
+              const renderer = render(session.id)
+              const item = yield* restore(
+                SessionPrompt.prepare({ session, messageID, input, ...(renderer ? { render: renderer } : {}) }),
+              )
+              // Commit a staged revert only after preparation succeeds, before admitting new work.
+              if (session.revert) yield* SessionRevert.commit(bus, session)
+              return yield* admission.admit({
+                id: messageID,
+                sessionID: session.id,
+                item,
+              })
+            }).pipe(
+              instances.provide(session),
+              Effect.provideService(Database.Service, database),
               Effect.provideService(FSUtil.Service, fs),
-            ),
+            )
+          }).pipe(
+            Effect.catchTag("SessionInbox.LifecycleConflict", () => new PromptConflictError({ sessionID, messageID })),
           )
-          // Commit a staged revert only after preparation succeeds, before admitting new work.
-          if (session.revert) yield* SessionRevert.commit(bus, session)
-          return yield* admission.admit({
-            id: messageID,
-            sessionID: session.id,
-            item,
-          })
-        }).pipe(
-          Effect.catchTag("SessionInbox.LifecycleConflict", () => new PromptConflictError({ sessionID, messageID })),
-        )
-        if (input.resume !== false) yield* execution.wake(sessionID)
-        return admitted
-      }),
-    ),
+          if (input.resume !== false) yield* execution.wake(sessionID)
+          // Checkpoint an accepted handoff before observing cancellation. Prompt preparation above stays interruptible.
+          if (onAccepted) yield* onAccepted
+          return admitted
+        }),
+      ),
   )
   const shell = Effect.fn("Session.shell")(function* (
     sessionID: SessionSchema.ID,
@@ -330,48 +346,9 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     yield* execution.resume(sessionID)
   })
-  const synthetic = Effect.fn("Session.synthetic")(
-    (
-      sessionID: SessionSchema.ID,
-      input: {
-        id?: SessionMessage.ID
-        text: string
-        description?: string
-        metadata?: Record<string, unknown>
-        delivery?: SessionInbox.Delivery
-        resume?: boolean
-      },
-    ) =>
-      Effect.uninterruptible(
-        Effect.gen(function* () {
-          yield* get(sessionID)
-          const inputID = input.id ?? SessionMessage.ID.create()
-          const admittedInput = {
-            type: "synthetic",
-            payload: SessionInbox.SyntheticPayload.make({
-              text: input.text,
-              description: input.description,
-              metadata: input.metadata,
-            }),
-            delivery: SessionInbox.Delivery.make(input.delivery ?? "steer"),
-          } satisfies SessionInbox.Item
-          const admitted = yield* admission
-            .admit({
-              id: inputID,
-              sessionID,
-              item: admittedInput,
-            })
-            .pipe(
-              Effect.catchTag(
-                "SessionInbox.LifecycleConflict",
-                () => new SyntheticConflictError({ sessionID, inputID }),
-              ),
-            )
-          if (input.resume !== false && !(yield* get(sessionID)).revert) yield* execution.wake(sessionID)
-          return admitted
-        }),
-      ),
-  )
+  const admitSynthetic = SessionSynthetic.make(store, admission, execution.wake)
+  const synthetic = (sessionID: SessionSchema.ID, input: Omit<Parameters<typeof admitSynthetic>[0], "sessionID">) =>
+    admitSynthetic({ ...input, sessionID })
   const interrupt = Effect.fn("Session.interrupt")(
     (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean; readonly force?: boolean }) =>
       Effect.uninterruptible(
@@ -413,6 +390,8 @@ export const make = Effect.fn("Session.make")(function* () {
     message,
     view,
     rename,
+    archive,
+    unarchive,
     setMetadata,
     setPermissions,
     setSubagentPolicy,
@@ -438,6 +417,8 @@ export const make = Effect.fn("Session.make")(function* () {
     const message = operations.message.bind(undefined, sessionID)
     const view = operations.view.bind(undefined, sessionID)
     const rename = operations.rename.bind(undefined, sessionID)
+    const archive = operations.archive.bind(undefined, sessionID)
+    const unarchive = operations.unarchive.bind(undefined, sessionID)
     const setMetadata = operations.setMetadata.bind(undefined, sessionID)
     const setPermissions = operations.setPermissions.bind(undefined, sessionID)
     const setSubagentPolicy = operations.setSubagentPolicy.bind(undefined, sessionID)
@@ -466,6 +447,8 @@ export const make = Effect.fn("Session.make")(function* () {
       message,
       view,
       rename,
+      archive,
+      unarchive,
       setMetadata,
       setPermissions,
       setSubagentPolicy,

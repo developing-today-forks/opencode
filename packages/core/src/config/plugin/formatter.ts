@@ -24,7 +24,7 @@ export const Plugin = define({
     const location = yield* Location.Service
     const npm = yield* Npm.Service
     const processes = yield* AppProcess.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["formatter"], formatter.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, formatter.reload(), ["formatter"])
 
     yield* formatter.transform((editor) => {
       const configured = resolve(loaded.entries)

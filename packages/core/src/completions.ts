@@ -14,14 +14,14 @@ import {
   ToolCallPart,
   ToolResultPart,
   type ContentPart,
-  type GenerationOptions,
+  type GenerationOptionsFields,
   type LLMEvent,
   type LLMResponse,
   type ToolChoice,
   type ToolDefinition,
   type ToolEntryInput,
   type Usage,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import type { CompletionInput } from "./generate.js"
 import { Model } from "./model.js"
 import { randomBytes } from "node:crypto"
@@ -88,7 +88,7 @@ const parseToolChoice = (
   return { error: "unsupported tool_choice" }
 }
 
-const parseGeneration = (body: Record<string, unknown>): GenerationOptions.Input => {
+const parseGeneration = (body: Record<string, unknown>): GenerationOptionsFields => {
   const max = typeof body.max_tokens === "number" ? body.max_tokens : body.max_completion_tokens
   const stop =
     typeof body.stop === "string"
@@ -159,7 +159,7 @@ export const parseChatRequest = (body: unknown): ParseResult => {
           parts.push(ToolCallPart.make({ id: call.id, name: call.function.name, input }))
         }
       }
-      messages.push(Message.assistant(parts))
+      messages.push(Message.assistant(parts as Message.AssistantContentInput))
       continue
     }
     if (entry.role === "tool") {
@@ -335,7 +335,6 @@ export const errorFrame = (message: string, type = "server_error") =>
  * usage when the provider reported it); the handler appends [DONE].
  */
 export class ChatStreamTranslator {
-  failed = false
   private started = false
   private hasToolCalls = false
   private readonly toolIndex = new Map<string, number>()
@@ -411,9 +410,6 @@ export class ChatStreamTranslator {
       }
       case "finish":
         return [this.chunk({}, finishReason(event.reason.normalized, this.hasToolCalls), event.usage)]
-      case "provider-error":
-        this.failed = true
-        return [errorFrame(event.message)]
       default:
         return []
     }
@@ -1199,8 +1195,6 @@ export class ResponsesStreamTranslator {
         )
         return frames
       }
-      case "provider-error":
-        return [this.failureFrame(event.message)]
       default:
         return []
     }
@@ -1493,7 +1487,11 @@ export const parseMessagesRequest = (body: unknown): ParseMessagesResult => {
         messages.push(Message.tool(extra as ToolResultPart))
       continue
     }
-    messages.push(entry.role === "user" ? Message.user(parsedBlocks.parts) : Message.assistant(parsedBlocks.parts))
+    messages.push(
+      entry.role === "user"
+        ? Message.user(parsedBlocks.parts as Message.UserContentInput)
+        : Message.assistant(parsedBlocks.parts as Message.AssistantContentInput),
+    )
   }
 
   return {
@@ -1558,6 +1556,12 @@ export class MessagesStreamTranslator {
   private usage: Usage | undefined
 
   constructor(private readonly meta: { readonly id: string; readonly model: string }) {}
+
+  /** The error event for a stream that failed, in place of `message_stop`. */
+  fail(message: string, type?: string): string {
+    this.failed = true
+    return messagesErrorFrame(message, type)
+  }
 
   start(): string {
     return (
@@ -1694,9 +1698,6 @@ export class MessagesStreamTranslator {
         frames.push(messagesFrame("message_stop", {}))
         return frames
       }
-      case "provider-error":
-        this.failed = true
-        return [messagesErrorFrame(event.message)]
       default:
         return []
     }

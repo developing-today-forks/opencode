@@ -1,7 +1,7 @@
 export * as RouteStatsTool from "./route-stats.js"
 
 import type { ToolEditor } from "@opencode/plugin/effect/tool"
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { Effect, Option, Schema } from "effect"
 import type { Permission } from "../../permission.js"

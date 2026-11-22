@@ -33,6 +33,7 @@ export const mergeCapabilities = (config: Partial<Capabilities>, base: Capabilit
   const fallback = base ?? Capabilities.default()
   return {
     tools: config.tools ?? fallback.tools,
+    freeform: (config.freeform ?? base?.freeform)?.slice(),
     input: [...(config.input ?? fallback.input)],
     output: [...(config.output ?? fallback.output)],
     temperature: config.temperature ?? base?.temperature,
@@ -40,6 +41,9 @@ export const mergeCapabilities = (config: Partial<Capabilities>, base: Capabilit
 }
 
 export const Cost = Model.Cost
+
+export const Type = Model.Type
+export type Type = Model.Type
 
 export const Ref = Model.Ref
 export type Ref = typeof Ref.Type
@@ -77,8 +81,9 @@ export interface Editor {
 export interface Interface extends State.Transformable<Editor> {
   readonly get: (providerID: Provider.ID, modelID: ID) => Effect.Effect<Info | undefined>
   readonly all: () => Effect.Effect<readonly Info[]>
-  readonly available: () => Effect.Effect<readonly Info[]>
-  /** The execution/validity catalog (#230): enabled models including hidden
+  /** Enabled models of the given types, chat when none are given. Only chat models are offered for sessions. */
+  readonly available: (types?: readonly Model.Type[]) => Effect.Effect<readonly Info[]>
+  /** The execution/validity catalog (#230): enabled chat models including hidden
    * ones, in the picker list's preferred-free order. Execution paths —
    * explicit session selection, client validity checks — read this list;
    * only discovery/picker surfaces read `available`. */
@@ -100,6 +105,7 @@ const layer = Layer.effect(
     const providers = yield* Provider.Service
     const bus = yield* Bus.Service
     const location = yield* Location.Service
+    const disableFree = ["1", "true"].includes(process.env.OPENCODE_DISABLE_FREE_MODELS?.toLowerCase() ?? "")
     let input: Provider.Snapshot | undefined
     const state: State.Interface<Data, Editor> = State.create<Data, Editor>({
       name: "model",
@@ -149,6 +155,7 @@ const layer = Layer.effect(
             model.providerID = providerID
             const provider = input?.records.get(providerID)?.provider
             AISDKNative.rewrite(model, {
+              builtins: Provider.builtinPackages,
               specifier: model.package ?? provider?.package,
               providerID,
               canonical: model.canonical ?? provider?.canonical,
@@ -182,6 +189,7 @@ const layer = Layer.effect(
           all: readonly Info[]
           available: readonly Info[]
           catalog: readonly Info[]
+          other: ReadonlyMap<Model.Type, readonly Info[]>
           byProvider: ReadonlyMap<Provider.ID, ReadonlyMap<ID, Info>>
         }
       | undefined
@@ -230,9 +238,25 @@ const layer = Layer.effect(
             ]
           }),
         )
+        if (disableFree)
+          for (const providerID of [Provider.ID.opencode, Provider.ID.make("opencode-go")])
+            byProvider.get(providerID)?.forEach((model, id, models) => {
+              if (!model.cost.some((cost) => cost.input > 0)) models.delete(id)
+            })
+        // Non-chat models (image, decision…) only show up when listed by type, so nothing that
+        // picks or resolves a session model can reach them.
+        const other = new Map<Model.Type, Info[]>()
+        byProvider.forEach((models) =>
+          models.forEach((model, id) => {
+            if ((model.type ?? "chat") === "chat") return
+            models.delete(id)
+            if (model.enabled) other.set(model.type!, [...(other.get(model.type!) ?? []), model])
+          }),
+        )
         const all = Array.from(byProvider.values())
           .flatMap((models) => Array.from(models.values()))
           .sort((left, right) => right.time.released - left.time.released)
+        other.forEach((models) => models.sort((left, right) => right.time.released - left.time.released))
         cached = freeze(
           {
             data,
@@ -244,6 +268,7 @@ const layer = Layer.effect(
             // The execution/validity catalog (#230): every enabled model, hidden
             // included, in the same preferred-free order as the picker list.
             catalog: preferFree(all.filter((model) => model.enabled)),
+            other,
             byProvider,
           },
           true,
@@ -285,7 +310,17 @@ const layer = Layer.effect(
         read().pipe(Effect.map((value) => value.byProvider.get(providerID)?.get(modelID))),
       ),
       all: Effect.fn("Model.all")(() => read().pipe(Effect.map((value) => value.all))),
-      available: Effect.fn("Model.available")(() => read().pipe(Effect.map((value) => value.available))),
+      available: Effect.fn("Model.available")((types?: readonly Model.Type[]) =>
+        read().pipe(
+          Effect.map((value) =>
+            types === undefined || types.length === 0
+              ? value.available
+              : [...new Set(types)].flatMap((type) =>
+                  type === "chat" ? value.available : (value.other.get(type) ?? []),
+                ),
+          ),
+        ),
+      ),
       catalog: Effect.fn("Model.catalog")(() => read().pipe(Effect.map((value) => value.catalog))),
       default: Effect.fn("Model.default")(function* () {
         const value = yield* read()
@@ -317,7 +352,6 @@ export const node = makeLocationNode({ service: Service, layer, deps: [Provider.
 const PREFERRED_FREE = [
   "big-pickle",
   "deepseek-v4.1-flash-free",
-  "glm-5.3-flash-free",
   "muse-spark-1.3-contributor-free",
 ]
 

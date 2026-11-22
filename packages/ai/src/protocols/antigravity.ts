@@ -735,7 +735,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     return yield* ProviderShared.invalidRequest(
       `tool_choice names function "${request.toolChoice.name}" which is not among the declared tools`,
     )
-  const generation = request.generation
+  const generation = request
   const inner: typeof InnerRequest.Type = {
     contents,
     systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,

@@ -14,6 +14,7 @@ import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
 import { resolveOpencodePty } from "./opencode-pty"
 import { BUN_DOWNLOAD_TIMEOUT_MS, verifyAndExtractBunArchive } from "./bun-archive"
 import { NativeArch } from "../../../script/native-arch"
+import { bundledModelsSnapshot, modelsSnapshotPlugin } from "../../core/script/models-snapshot"
 
 const dir = path.resolve(import.meta.dirname, "..")
 const binary = "opencode"
@@ -28,12 +29,13 @@ await rm(outdir, { recursive: true, force: true })
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
-const requestedTarget = process.argv.find((arg) => arg.startsWith("--target="))?.slice("--target=".length)
+const requestedTarget = process.env.OPENCODE_TARGET
 const skipInstall = process.argv.includes("--skip-install")
 const skipWebUi = process.argv.includes("--skip-web-ui")
 const solidPlugin = createSolidTransformPlugin()
 const highlights = Script.preview ? undefined : embed(process.env.OPENCODE_RELEASE_NOTES)
 const releaseAssets = new Map<string, Promise<Map<string, string>>>()
+const modelsSnapshot = modelsSnapshotPlugin(await bundledModelsSnapshot())
 
 const allTargets: {
   os: string
@@ -57,7 +59,7 @@ const allTargets: {
 
 const targets =
   requestedTarget !== undefined
-    ? allTargets.filter((item) => targetName(item) === requestedTarget)
+    ? allTargets.filter((item) => targetName(item) === `${binary}-${requestedTarget}`)
     : singleFlag
       ? allTargets.filter((item) => {
           if (item.os !== process.platform || item.arch !== process.arch) return false
@@ -67,10 +69,11 @@ const targets =
       : allTargets
 if (!targets.length) throw new Error(`Unknown build target: ${requestedTarget}`)
 
+// Bun 1.4.4 skips native packages for the other libc by default, but the musl targets need them.
 if (!skipInstall)
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]} @opencode-ai/pty@${pkg.dependencies["@opencode-ai/pty"]}`
+  await $`bun install --os="*" --cpu="*" --libc="*" @opentui/core@${pkg.dependencies["@opentui/core"]} @opencode/pty@${pkg.dependencies["@opencode/pty"]}`
 const appArchive = path.join(dir, ".cache", "bun-app-archive.bin")
-await Bun.write(appArchive, await buildAppArchive(Script.channel, { skipBuild: skipWebUi }))
+await Bun.write(appArchive, await buildAppArchive(Script.channel, Script.version, { skipBuild: skipWebUi }))
 const appAssetsPlugin: BunPlugin = {
   name: "opencode-app-assets",
   setup(build) {
@@ -107,6 +110,18 @@ const pluginRuntimePlugin: BunPlugin = {
     build.onLoad({ filter: /[/\\]internal[/\\]httpApi(?:Scalar|Swagger)\.js$/ }, () => ({
       contents:
         'export const css = ""; export const javascript = \'document.body.textContent = "Scalar/Swagger UI assets are not bundled in OpenCode"\'',
+      loader: "js",
+    }))
+  },
+}
+// Bun drops `export * from "ws"` in this sideEffects-free module, leaving NodeWS.WebSocketServer undefined and
+// failing every WebSocket upgrade in the compiled binary. Bun's built-in ws has no PerMessageDeflate.
+const wsReexportPlugin: BunPlugin = {
+  name: "ws-named-reexports",
+  setup(build) {
+    build.onLoad({ filter: /platform-node-shared[/\\]dist[/\\]NodeWS\.js$/ }, () => ({
+      contents:
+        'export { createWebSocketStream, extension, Receiver, Sender, subprotocol, WebSocket, WebSocketServer } from "ws"',
       loader: "js",
     }))
   },
@@ -197,21 +212,39 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       }))
     },
   }
+  // The machine link's Iroh binding: this target's native package is embedded, and a target with none (Intel Macs)
+  // gets `undefined`, which the server takes as Iroh being unavailable.
+  const irohPackage =
+    item.os === "darwin" && item.arch === "x64"
+      ? undefined
+      : `@number0/iroh-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi === "musl" ? "musl" : "gnu"}` : item.os === "win32" ? "-msvc" : ""}`
+  const irohBindingPlugin: BunPlugin = {
+    name: "iroh-binding",
+    setup(build) {
+      build.onLoad({ filter: /machine[/\\]iroh-binding\.ts$/ }, () => ({
+        contents: `export default async () => ${irohPackage ? `require(${JSON.stringify(irohPackage)})` : "undefined"}`,
+        loader: "js",
+      }))
+    },
+  }
   const target = targetName(item)
   const name = target.replace(binary, "cli")
   const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
   const result = await Bun.build({
-    entrypoints: ["./src/index.ts"],
+    entrypoints: ["./src/index.ts", "./src/photon-worker.ts", "./src/claude-folder-worker.ts"],
     tsconfig: "./tsconfig.json",
     plugins: [
       appAssetsPlugin,
       solidPlugin,
       sharpStubPlugin,
       parcelWatcherPlugin,
+      irohBindingPlugin,
       opencodePtyPlugin,
       pluginRuntimePlugin,
+      wsReexportPlugin,
       simulationGraphPlugin,
+      modelsSnapshot,
     ],
     external: ["node-gyp"],
     format: "esm",
@@ -322,7 +355,10 @@ async function compileExecutable(item: (typeof allTargets)[number]) {
 function compileReleaseAssets(release: string) {
   const existing = releaseAssets.get(release)
   if (existing) return existing
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
+  // Beta builds each CLI in its own job; authenticated requests avoid the per-IP limit on shared runners.
   const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
     signal: AbortSignal.timeout(BUN_DOWNLOAD_TIMEOUT_MS),
   })
     .then(async (response) => {

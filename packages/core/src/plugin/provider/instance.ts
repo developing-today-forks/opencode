@@ -79,8 +79,8 @@ export const eachInstance = Effect.fnUntraced(function* <R>(
   const loaded = yield* ConfigEntryObserver.observe(
     config.value,
     event,
-    ["providers"],
     config.value.entries().pipe(Effect.flatMap(reconcile)),
+    ["providers"],
   )
   yield* reconcile(loaded.entries)
 })
@@ -96,8 +96,8 @@ export const ProviderInstancePlugin = define({
     const loaded = yield* ConfigEntryObserver.observe(
       config,
       ctx.event,
-      ["providers"],
       ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload())),
+      ["providers"],
     )
     yield* ctx.integration.transform((integrations) => {
       for (const [id, base] of configuredInstances(loaded.entries)) {

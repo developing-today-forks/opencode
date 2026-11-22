@@ -1,5 +1,5 @@
-import path from "path"
 import { createHash } from "node:crypto"
+import path from "path"
 import { Context, Effect, Layer, Stream } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { ChildProcess } from "effect/process"
@@ -18,9 +18,8 @@ export namespace RipgrepBinary {
   // generous headroom across platforms and versions while keeping a wrong/oversized body from being
   // buffered whole and handed to the extractor.
   const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
-  // sha256 pins are the upstream 15.1.0 release's own per-asset .sha256
-  // digests (https://github.com/BurntSushi/ripgrep/releases/tag/15.1.0);
-  // a version bump must update them in the same change.
+  // SHA-256 of each release asset, from the `<asset>.sha256` files published with ripgrep 15.1.0. Release assets
+  // can be replaced after publication, so a download is only written and run when it matches the pinned hash.
   export const PLATFORM = {
     "arm64-darwin": {
       platform: "aarch64-apple-darwin",
@@ -163,10 +162,7 @@ export namespace RipgrepBinary {
               Effect.scoped,
             )
             if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
-            // Integrity gate: the archive is extracted and executed, so a
-            // substituted or corrupted body must never reach the disk.
-            if (!verifyArchive(new Uint8Array(bytes), config.sha256))
-              throw new Error(`ripgrep archive integrity check failed (sha256 mismatch): ${url}`)
+            verify(new Uint8Array(bytes), filename, config.sha256)
 
             yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
             yield* extract(archive, config, target)
@@ -177,6 +173,12 @@ export namespace RipgrepBinary {
       })
     }),
   )
+
+  export function verify(bytes: Uint8Array, filename: string, expected: string) {
+    const actual = createHash("sha256").update(bytes).digest("hex")
+    if (actual !== expected)
+      throw new Error(`ripgrep download ${filename} failed SHA-256 verification: expected ${expected}, got ${actual}`)
+  }
 
   export const node = makeGlobalNode({
     service: Service,

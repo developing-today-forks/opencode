@@ -17,7 +17,7 @@ function wrap(github: ReturnType<typeof fakeGitHub>, raw: Record<string, string>
   const queries: Array<{ path: string; query: Record<string, string> }> = []
   const http = HttpClient.make((request) => {
     const url = new URL(request.url)
-    queries.push({ path: url.pathname, query: Object.fromEntries(request.urlParams.params) })
+    queries.push({ path: url.pathname, query: Object.fromEntries(request.urlParams.params.map(([key, value]) => [key, String(value)])) })
     const text = raw[`${request.method} ${url.pathname}`]
     if (text === undefined) return github.http.execute(request)
     github.requests.push({

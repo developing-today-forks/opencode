@@ -1,11 +1,11 @@
-export const normalizeModelSearch = (value: string) =>
+const normalizeModelSearch = (value: string) =>
   value
     .toLowerCase()
     .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
     .trim()
     .replace(/\s+/g, " ")
 
-export const compactModelSearch = (value: string) => normalizeModelSearch(value).replaceAll(" ", "")
+const compactModelSearch = (value: string) => normalizeModelSearch(value).replaceAll(" ", "")
 
 /** The reveal rule for picker-hidden models (#230): only a search that is the
  * model's exact full name (typed completely) reveals it. Partial matches do

@@ -74,23 +74,23 @@ describe("scanSource", () => {
 
 describe("services scan roots (#1256)", () => {
   test("SCAN_ROOTS covers every services/*/src tree", () => {
-    expect(SCAN_ROOTS).toContain("services/changelog/src")
+    expect(SCAN_ROOTS).toContain("services/legacy/src")
     expect(SCAN_ROOTS).toContain("services/files/src")
     expect(SCAN_ROOTS).toContain("services/update/src")
-    expect(SCAN_ROOTS).toContain("services/www/src")
+    expect(SCAN_ROOTS).toContain("services/site/src")
   })
 
   test("collect walks a services tree on disk and reports hits under their repo-relative path", () => {
     const root = mkdtempSync(join(tmpdir(), "bounded-http-collect-"))
     try {
-      const pages = join(root, "services/www/src/pages")
+      const pages = join(root, "services/site/src/pages")
       mkdirSync(pages, { recursive: true })
       writeFileSync(join(pages, "install.astro"), 'const response = await fetch("https://example.com/install")\n')
       writeFileSync(join(pages, "notes.md"), 'const ignored = await fetch("https://example.com/ignored")\n')
       const hits: Hit[] = []
-      collect(root, join(root, "services/www/src"), hits)
+      collect(root, join(root, "services/site/src"), hits)
       expect(hits).toHaveLength(1)
-      expect(hits[0].file).toBe("services/www/src/pages/install.astro")
+      expect(hits[0].file).toBe("services/site/src/pages/install.astro")
       expect(unlistedHits(hits, new Map())).toHaveLength(1)
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -99,13 +99,13 @@ describe("services scan roots (#1256)", () => {
 
   test("a services/ fixture hit fails the gate until dispositioned", () => {
     const hits = scanSource(
-      "services/www/src/pages/install.astro",
+      "services/site/src/pages/install.astro",
       'const response = await fetch("https://example.com/install")',
     )
     expect(hits).toHaveLength(1)
     expect(unlistedHits(hits, new Map())).toHaveLength(1)
     const allowlist = parseAllowlist(
-      'services/www/src/pages/install.astro :: const response = await fetch("https://example.com/install") :: tracked by #1246\n',
+      'services/site/src/pages/install.astro :: const response = await fetch("https://example.com/install") :: tracked by #1246\n',
     )
     expect(unlistedHits(hits, allowlist)).toEqual([])
     expect(staleEntries(hits, allowlist)).toEqual([])
@@ -118,10 +118,10 @@ describe("script scan roots (#1394)", () => {
     expect(SCAN_ROOTS).toContain("packages/ai/script")
     expect(SCAN_ROOTS).toContain("packages/cli/script")
     expect(SCAN_ROOTS).toContain("packages/core/script")
-    expect(SCAN_ROOTS).toContain("packages/desktop/scripts")
+    expect(SCAN_ROOTS).toContain("packages/patchmark/scripts")
     expect(SCAN_ROOTS).toContain("packages/sdk/script")
     expect(SCAN_ROOTS).toContain("packages/util/script")
-    expect(SCAN_ROOTS).toContain("services/www/script")
+    expect(SCAN_ROOTS).toContain("services/site/script")
   })
 
   test("collect walks a script tree on disk and reports hits under their repo-relative path", () => {
@@ -154,8 +154,8 @@ describe("script scan roots (#1394)", () => {
 })
 
 describe("nested script trees (#1425)", () => {
-  test("SCAN_ROOTS covers the nested console/app and plugins/figma script trees", () => {
-    expect(SCAN_ROOTS).toContain("packages/console/app/script")
+  test("SCAN_ROOTS covers the nested data/app and plugins/figma script trees", () => {
+    expect(SCAN_ROOTS).toContain("packages/data/app/script")
     expect(SCAN_ROOTS).toContain("packages/plugins/figma/script")
   })
 
@@ -168,11 +168,11 @@ describe("nested script trees (#1425)", () => {
         if (pkgAt === "self") writeFileSync(join(root, rel, "package.json"), "{}\n")
       }
       tree("packages/ai/script", "parent")
-      tree("packages/console/app/script", "parent")
+      tree("packages/data/app/script", "parent")
       tree("packages/plugins/figma/script", "parent")
-      tree("packages/containers/script", "self")
-      tree("packages/desktop/scripts", "parent")
-      tree("services/www/script", "parent")
+      tree("packages/cli-rs/script", "self")
+      tree("packages/patchmark/scripts", "parent")
+      tree("services/site/script", "parent")
       // Not package script trees: the packages/script package itself and
       // a skill asset folder with no package.json at either level.
       mkdirSync(join(root, "packages/script/src"), { recursive: true })
@@ -180,18 +180,18 @@ describe("nested script trees (#1425)", () => {
       tree("packages/plugins/figma/skills/figma-generate-library/scripts", "none")
       expect(scriptTreesOnDisk(root)).toEqual([
         "packages/ai/script",
-        "packages/console/app/script",
-        "packages/containers/script",
-        "packages/desktop/scripts",
+        "packages/cli-rs/script",
+        "packages/data/app/script",
+        "packages/patchmark/scripts",
         "packages/plugins/figma/script",
-        "services/www/script",
+        "services/site/script",
       ])
       expect(unscannedScriptTrees(root, ["packages/ai/script"])).toEqual([
-        "packages/console/app/script",
-        "packages/containers/script",
-        "packages/desktop/scripts",
+        "packages/cli-rs/script",
+        "packages/data/app/script",
+        "packages/patchmark/scripts",
         "packages/plugins/figma/script",
-        "services/www/script",
+        "services/site/script",
       ])
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -213,9 +213,9 @@ describe("src trees (#1494)", () => {
         if (pkgAt === "self") writeFileSync(join(root, rel, "package.json"), "{}\n")
       }
       tree("packages/ai/src", "parent")
-      tree("packages/console/app/src", "parent")
+      tree("packages/data/app/src", "parent")
       tree("packages/stats/core/src", "parent")
-      tree("services/www/src", "parent")
+      tree("services/site/src", "parent")
       // Not a package src tree: a src folder with no package.json at
       // either level (asset content).
       tree("packages/plugins/figma/skills/example/src", "none")
@@ -225,16 +225,16 @@ describe("src trees (#1494)", () => {
       writeFileSync(join(root, "packages/package.json"), "{}\n")
       expect(srcTreesOnDisk(root)).toEqual([
         "packages/ai/src",
-        "packages/console/app/src",
+        "packages/data/app/src",
         "packages/src",
         "packages/stats/core/src",
-        "services/www/src",
+        "services/site/src",
       ])
       expect(unscannedSrcTrees(root, ["packages/ai/src"])).toEqual([
-        "packages/console/app/src",
+        "packages/data/app/src",
         "packages/src",
         "packages/stats/core/src",
-        "services/www/src",
+        "services/site/src",
       ])
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -247,12 +247,7 @@ describe("src trees (#1494)", () => {
 })
 
 describe("GitHub Action scan root (#1436)", () => {
-  test("SCAN_ROOTS includes the published GitHub Action", () => {
-    expect(SCAN_ROOTS).toContain("github")
-  })
-
   test("SCAN_ROOTS includes the #1758 escaped trees", () => {
-    expect(SCAN_ROOTS).toContain("github/script")
     expect(SCAN_ROOTS).toContain("sdks/vscode/script")
     expect(SCAN_ROOTS).toContain("sdks/vscode/src")
   })

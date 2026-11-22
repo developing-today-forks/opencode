@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { Commandcode } from "../../src/providers/commandcode.js"
 import { CommandCode } from "../../src/protocols/commandcode.js"
 import { compileRequest } from "../../src/route/client.js"
@@ -38,7 +38,7 @@ it.effect("Command Code provider stays wired to the /alpha/generate protocol", (
 
 it.effect("Command Code route points at the CLI's own gateway endpoint, not the Provider API", () =>
   Effect.gen(function* () {
-    const request = LLM.request({ model, prompt: "Hello" })
+    const request = ai.request({ model, prompt: "Hello" })
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://api.commandcode.ai/alpha/generate")
@@ -51,7 +51,7 @@ it.effect("a catalog-seeded hosted Provider API baseURL never reaches the wire",
       apiKey: "user_fixturekey",
       baseURL: "https://api.commandcode.ai/provider/v1",
     })
-    const seededRequest = LLM.request({ model: seeded, prompt: "Hello" })
+    const seededRequest = ai.request({ model: seeded, prompt: "Hello" })
     const seededCompiled = yield* compileRequest(seededRequest)
     expect(
       Endpoint.render(seeded.route.endpoint, { request: seededRequest, body: seededCompiled.body }).toString(),
@@ -60,7 +60,7 @@ it.effect("a catalog-seeded hosted Provider API baseURL never reaches the wire",
       apiKey: "user_fixturekey",
       baseURL: "http://127.0.0.1:18904",
     })
-    const customRequest = LLM.request({ model: custom, prompt: "Hello" })
+    const customRequest = ai.request({ model: custom, prompt: "Hello" })
     const customCompiled = yield* compileRequest(customRequest)
     expect(
       Endpoint.render(custom.route.endpoint, { request: customRequest, body: customCompiled.body }).toString(),
@@ -71,12 +71,12 @@ it.effect("a catalog-seeded hosted Provider API baseURL never reaches the wire",
 it.effect("the request body matches the CLI bundle's createModelClient envelope", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         system: "You are a fleet agent.",
         messages: [Message.user("weather in Oslo?")],
         tools,
-        generation: { temperature: 0.4 },
+        temperature: 0.4,
         providerOptions: { reasoning_effort: "high" },
       }),
     )
@@ -139,7 +139,7 @@ it.effect("a serverConfig provider option replaces the built server config whole
       gitStatus: "Working tree clean",
       recentCommits: ["abc1234 fixture"],
     }
-    const compiled = yield* compileRequest(LLM.request({ model, prompt: "hi", providerOptions: { serverConfig } }))
+    const compiled = yield* compileRequest(ai.request({ model, prompt: "hi", providerOptions: { serverConfig } }))
     expect((compiled.body as Record<string, never>).config).toEqual(serverConfig)
   }),
 )
@@ -147,7 +147,7 @@ it.effect("a serverConfig provider option replaces the built server config whole
 it.effect("history lowers to the bundle's wire messages: tool-call parts and tool-result outputs keep their ids", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [
           Message.user("weather in Oslo?"),
@@ -191,14 +191,14 @@ it.effect("a forced tool choice fails closed: the wire has no tool_choice field 
   Effect.gen(function* () {
     for (const toolChoice of [{ type: "required" }, { type: "tool", name: "get_weather" }] as const) {
       const result = yield* compileRequest(
-        LLM.request({ model, messages: [Message.user("weather?")], tools, toolChoice }),
+        ai.request({ model, messages: [Message.user("weather?")], tools, toolChoice }),
       ).pipe(Effect.result)
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("tool_choice")
     }
     // "none" IS honored faithfully: the tools simply never reach the wire.
     const compiled = yield* compileRequest(
-      LLM.request({ model, messages: [Message.user("weather?")], tools, toolChoice: { type: "none" } }),
+      ai.request({ model, messages: [Message.user("weather?")], tools, toolChoice: { type: "none" } }),
     )
     const params = (compiled.body as Record<string, never>).params as Record<string, never>
     expect(params.tools).toBeUndefined()
@@ -209,10 +209,10 @@ it.effect("a valid UUID threadId is forwarded and an absent threadId stays absen
   Effect.gen(function* () {
     const uuid = "123e4567-e89b-42d3-a456-426614174000"
     const compiled = yield* compileRequest(
-      LLM.request({ model, prompt: "hi", providerOptions: { threadId: uuid } }),
+      ai.request({ model, prompt: "hi", providerOptions: { threadId: uuid } }),
     )
     expect((compiled.body as Record<string, never>).threadId).toBe(uuid)
-    const absent = yield* compileRequest(LLM.request({ model, prompt: "hi" }))
+    const absent = yield* compileRequest(ai.request({ model, prompt: "hi" }))
     expect((absent.body as Record<string, never>).threadId).toBeUndefined()
   }),
 )
@@ -220,7 +220,7 @@ it.effect("a valid UUID threadId is forwarded and an absent threadId stays absen
 it.effect("a non-UUID threadId is rejected locally instead of silently dropped", () =>
   Effect.gen(function* () {
     const result = yield* compileRequest(
-      LLM.request({ model, prompt: "hi", providerOptions: { threadId: "not-a-uuid" } }),
+      ai.request({ model, prompt: "hi", providerOptions: { threadId: "not-a-uuid" } }),
     ).pipe(Effect.result)
     expect(result._tag).toBe("Failure")
     if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("threadId")
@@ -230,11 +230,11 @@ it.effect("a non-UUID threadId is rejected locally instead of silently dropped",
 it.effect("valid permissionMode values are forwarded and invalid ones are rejected locally", () =>
   Effect.gen(function* () {
     for (const permissionMode of ["standard", "auto-accept", "plan"] as const) {
-      const compiled = yield* compileRequest(LLM.request({ model, prompt: "hi", providerOptions: { permissionMode } }))
+      const compiled = yield* compileRequest(ai.request({ model, prompt: "hi", providerOptions: { permissionMode } }))
       expect((compiled.body as Record<string, never>).permissionMode).toBe(permissionMode)
     }
     const result = yield* compileRequest(
-      LLM.request({ model, prompt: "hi", providerOptions: { permissionMode: "yolo" } }),
+      ai.request({ model, prompt: "hi", providerOptions: { permissionMode: "yolo" } }),
     ).pipe(Effect.result)
     expect(result._tag).toBe("Failure")
     if (result._tag === "Failure") expect(JSON.stringify(result.failure)).toContain("permissionMode")
@@ -245,7 +245,7 @@ it.effect("Command Code stream: NDJSON deltas, a tool call, and finish become a 
   Effect.gen(function* () {
     const tricky = 'A "quoted" line\nsecond line — café ☃ MARKER-ALPHA-731'
     const response = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -286,7 +286,7 @@ it.effect("Command Code stream: NDJSON deltas, a tool call, and finish become a 
 it.effect("Command Code stream: parallel tool calls in one turn both emit, with distinct ids", () =>
   Effect.gen(function* () {
     const response = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather in two cities?")], tools }),
+      ai.request({ model, messages: [Message.user("weather in two cities?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -309,7 +309,7 @@ it.effect("Command Code stream: parallel tool calls in one turn both emit, with 
 it.effect("Command Code stream: string-form tool input is parsed, not dropped", () =>
   Effect.gen(function* () {
     const response = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -327,7 +327,7 @@ it.effect("Command Code stream: string-form tool input is parsed, not dropped", 
 
 it.effect("Command Code stream: gateway-executed calls surface as provider-executed, never as client calls", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "search the web" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "search the web" })).pipe(
       Effect.provide(
         fixedResponse(
           ndjson(
@@ -367,7 +367,7 @@ it.effect(
       // a finish-step event around the tool-call — all of it must decode,
       // with the atomic tool-call carrying the assembled input.
       const response = yield* LLMClient.generate(
-        LLM.request({ model, messages: [Message.user("weather in Oslo?")], tools }),
+        ai.request({ model, messages: [Message.user("weather in Oslo?")], tools }),
       ).pipe(
         Effect.provide(
           fixedResponse(
@@ -418,7 +418,7 @@ it.effect(
 
 it.effect("Command Code stream: wire reasoningTokens and provider totalTokens reach Usage", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         fixedResponse(
           ndjson(
@@ -448,7 +448,7 @@ it.effect("Command Code stream: wire reasoningTokens and provider totalTokens re
 
 it.effect("Command Code stream: an in-stream error event fails with the upstream message", () =>
   Effect.gen(function* () {
-    const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         fixedResponse(ndjson({ type: "error", error: { message: "insufficient credits", statusCode: 402 } })),
       ),
@@ -461,7 +461,7 @@ it.effect("Command Code stream: an in-stream error event fails with the upstream
 
 it.effect("Command Code stream: a content-filter finish normalizes to content-filter, never stop (#1755)", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         fixedResponse(
           ndjson(
@@ -477,7 +477,7 @@ it.effect("Command Code stream: a content-filter finish normalizes to content-fi
 
 it.effect("Command Code stream: an error finish normalizes to error, never stop (#1755)", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(fixedResponse(ndjson({ type: "finish", finishReason: "error" }))),
     )
     expect(response.finishReason).toEqual({ normalized: "error", raw: "error" })
@@ -486,7 +486,7 @@ it.effect("Command Code stream: an error finish normalizes to error, never stop 
 
 it.effect("Command Code stream: an abort event then EOF finishes as error with raw abort, partial text kept (#1755)", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(fixedResponse(ndjson({ type: "text-delta", text: "partial" }, { type: "abort" }))),
     )
     expect(response.text).toBe("partial")
@@ -496,7 +496,7 @@ it.effect("Command Code stream: an abort event then EOF finishes as error with r
 
 it.effect("Command Code stream: an unrecognized finish reason normalizes to unknown, never stop (#1755)", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(fixedResponse(ndjson({ type: "finish", finishReason: "frobnicate" }))),
     )
     expect(response.finishReason).toEqual({ normalized: "unknown", raw: "frobnicate" })
@@ -505,7 +505,7 @@ it.effect("Command Code stream: an unrecognized finish reason normalizes to unkn
 
 it.effect("Command Code stream: a stream ending before its finish event fails loudly, never as a silent stop", () =>
   Effect.gen(function* () {
-    const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(fixedResponse(ndjson({ type: "text-delta", text: "partial" }))),
       Effect.result,
     )
@@ -517,7 +517,7 @@ it.effect("Command Code stream: a stream ending before its finish event fails lo
 it.effect("Command Code stream: a nameless tool-call fails loudly instead of vanishing (#1756)", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -537,7 +537,7 @@ it.effect("Command Code stream: a nameless tool-call fails loudly instead of van
 it.effect("Command Code stream: an id-less tool-call fails loudly instead of emitting an empty id (#1756)", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -557,7 +557,7 @@ it.effect("Command Code stream: an id-less tool-call fails loudly instead of emi
 it.effect("Command Code stream: duplicate id-less tool-calls fail on the first one (#1756)", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -578,7 +578,7 @@ it.effect("Command Code stream: duplicate id-less tool-calls fail on the first o
 it.effect("Command Code stream: a nameless tool-result fails loudly instead of emitting an empty name (#1804)", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -598,7 +598,7 @@ it.effect("Command Code stream: a nameless tool-result fails loudly instead of e
 it.effect("Command Code stream: an id-less tool-result fails loudly instead of emitting an empty id (#1804)", () =>
   Effect.gen(function* () {
     const result = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
+      ai.request({ model, messages: [Message.user("weather?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(

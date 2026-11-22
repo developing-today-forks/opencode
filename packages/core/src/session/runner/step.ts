@@ -4,13 +4,11 @@ import {
   AIError,
   InvalidProviderOutputError,
   LLMClient,
-  LLMEvent,
   isContextOverflowFailure,
   TransportError,
-  UnknownProviderError,
-  type ProviderErrorEvent,
+  type LLMEvent,
   type ToolCall,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import type { Agent } from "@opencode/schema/agent"
 import {
   Cause,
@@ -61,12 +59,12 @@ import { materializeToolResult } from "./tool-result-content.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
-  Retry: { readonly error: SessionError.Error; readonly decision: SessionRunnerRetry.Decision }
-  Failover: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
-  Continue: {
+  Retry: {
     readonly error: SessionError.Error
     readonly decision: SessionRunnerRetry.Decision
+    readonly freshAssistant?: boolean
   }
+  Failover: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
   /** A routed attempt failed after its output started and no further request was granted: the
    * turn continues in a new reply on the route's next member, which is already resolved. */
   ContinueOn: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
@@ -86,6 +84,10 @@ export type ContinuationLink = { readonly of: SessionMessage.ID; readonly index:
 
 interface Input {
   readonly isLocationClosed: () => boolean
+  /** Why the execution is being interrupted, once it is: `"user"` when someone stopped it. */
+  readonly interruption?: () => "user" | "shutdown" | undefined
+  /** Whether this server is handing its process daemon over to the next one (see `PersistentPty.handoffPrepared`). */
+  readonly handoffPrepared?: () => boolean
   readonly sessionID: SessionSchema.ID
   readonly assistantMessageID: SessionMessage.ID
   /** Set when this request continues a response that hit the output token limit: the assistant message of the
@@ -105,6 +107,8 @@ interface Input {
   /** Prompt-size estimate for budget accounting when a hedge is cancelled before provider usage arrives. */
   readonly estimatedInputTokens?: number
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
+  /** Set when this attempt runs because an earlier one in the step scheduled a retry. */
+  readonly retryAttempt?: number
   readonly retry: (
     cause: AIError,
     error: SessionError.Error,
@@ -398,7 +402,7 @@ export const make = Effect.gen(function* () {
     const directory = join(locationDirectory, PlanSuggestions.PLANS_RELATIVE_DIRECTORY)
     const entries = yield* fs.value.readDirectoryEntries(directory)
     const markdowns = yield* Effect.forEach(
-      entries.filter((entry) => entry.type === "file" && entry.name.endsWith(".md")),
+      entries.filter((entry) => entry.type === "File" && entry.name.endsWith(".md")),
       (entry) => fs.value.readFileStringSafe(join(directory, entry.name)),
       { concurrency: 4 },
     )
@@ -443,10 +447,20 @@ export const make = Effect.gen(function* () {
     // The start snapshot only has to exist before local tools run, which cannot happen before Step.Started,
     // so it is captured while the provider request is in flight instead of delaying it.
     const pendingStartSnapshot = yield* snapshots.capture().pipe(Effect.forkScoped)
+    const started = yield* Clock.currentTimeMillis
     const rateLimit = raced?.rateLimit ?? captureRateLimit(input.model.ref, input.model.routing?.credentialID)
     const requestStarted = raced?.startedAt ?? performance.now()
     const wallStarted = Date.now() - (performance.now() - requestStarted)
     const firstOutput = yield* Deferred.make<void>()
+    const modelAttributes = {
+      "gen_ai.provider.name": input.model.ref.providerID,
+      "gen_ai.request.model": input.model.ref.id,
+    }
+    yield* Effect.annotateCurrentSpan({
+      ...modelAttributes,
+      "gen_ai.agent.name": input.agent,
+      ...(input.retryAttempt === undefined ? {} : { "opencode.retry.attempt": input.retryAttempt }),
+    })
     const publisher = createLLMEventPublisher(bus, {
       sessionID: input.sessionID,
       assistantMessageID: input.assistantMessageID,
@@ -454,12 +468,13 @@ export const make = Effect.gen(function* () {
       model: input.model.ref,
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
       pendingSnapshot: Fiber.join(pendingStartSnapshot),
-      started: yield* Clock.currentTimeMillis,
+      started,
       deferStepStart: input.model.routing !== undefined,
     })
     const toolRuns: Array<{
       readonly call: ToolCall
       readonly fiber: Fiber.Fiber<void, Permission.DeclinedError | QuestionTool.CancelledError>
+      readonly cancel: Cancel
     }> = []
     const interruptTools = Effect.suspend(() => Fiber.interruptAll(toolRuns.map((run) => run.fiber)))
     // Render-card wiring (#2384): engaged only when the host render tool is
@@ -487,7 +502,18 @@ export const make = Effect.gen(function* () {
               }),
             ),
           )
-    const executeTool = (call: ToolCall) => {
+    // A user's stop asks each tool awaiting `cancel` to stop and settle its own call, and interrupts every other
+    // tool. A tool that does not settle in time is interrupted too. Teardown interrupts every tool.
+    const stopTools = Effect.suspend(() => {
+      // A reloaded Location still serves the steps that borrow it, so its tools can stop on their own too.
+      const user = input.interruption?.() === "user"
+      const immediate = toolRuns.flatMap((run) => (user && run.cancel.trigger() ? [] : [run.fiber]))
+      return Fiber.interruptAll(immediate).pipe(
+        Effect.andThen(Fiber.awaitAll(toolRuns.map((run) => run.fiber)).pipe(Effect.timeoutOption(COOPERATIVE_STOP))),
+        Effect.flatMap((settled) => (Option.isSome(settled) ? Effect.void : interruptTools)),
+      )
+    })
+    const executeTool = (call: ToolCall, cancel: Cancel) => {
       if (input.prepared.request.toolChoice?.type === "none")
         return new Tool.Error({ message: "Tools are disabled after the maximum agent steps" })
       return input.prepared
@@ -497,6 +523,7 @@ export const make = Effect.gen(function* () {
           messageID: input.assistantMessageID,
           call,
           progress: (update) => publisher.progress(call.id, update),
+          cancel: cancel.effect,
         })
         .pipe(
           Effect.flatMap((result) =>
@@ -517,45 +544,23 @@ export const make = Effect.gen(function* () {
 
     // Provider and tool fibers retain per-source order without a shared writer queue.
     // A local execution starts only after its Tool.Called publication completes.
-    let overflowFailure: ProviderErrorEvent | undefined
-    let providerFailure: ProviderErrorEvent | undefined
     let firstOutputAt = raced?.outputAt
     if (firstOutputAt !== undefined) yield* Deferred.succeed(firstOutput, undefined)
     // Read to the end, not just the finish event, so the next request can reuse this response.
+    // The span covers only the provider stream, so model time separates from tools, which run in this consumer.
+    const programs = new Map<string, string>()
     const providerStream = (
       raced?.stream ?? llm.stream(input.prepared.request, rateLimit.options(input.prepared.options))
     ).pipe(
-      Stream.runForEach((event) =>
+      Stream.withSpan("LLM.stream", { attributes: modelAttributes }),
+      Stream.runForEach((streamed) =>
         Effect.gen(function* () {
-          if (overflowFailure || providerFailure || publisher.hasProviderError()) return
+          const event = asProgram(streamed, programs, input.prepared.codeModeExpression)
+          if (event === undefined) return
+          if (publisher.record().providerFailed) return
           // Wait here, where cancellation still works, rather than inside the uninterruptible publish.
           if (!publisher.hasStarted()) yield* Fiber.join(pendingStartSnapshot)
-          if (
-            LLMEvent.is.providerError(event) &&
-            isContextOverflowFailure(event) &&
-            !publisher.record().outputStarted
-          ) {
-            overflowFailure = event
-            return
-          }
           const outputAlreadyStarted = publisher.record().outputStarted
-          if (LLMEvent.is.providerError(event) && input.model.routing) {
-            if (!outputAlreadyStarted) {
-              providerFailure = event
-              return
-            }
-            if (!event.classification)
-              ModelRoute.failed(
-                input.model.routing.target,
-                input.model.routing.policy,
-                undefined,
-                undefined,
-                undefined,
-                locationDirectory,
-                input.model.routing.probeClaim,
-                input.model.ref.variant,
-              )
-          }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
           if (!outputAlreadyStarted && publisher.record().outputStarted && firstOutputAt === undefined) {
@@ -563,10 +568,12 @@ export const make = Effect.gen(function* () {
             yield* Deferred.succeed(firstOutput, undefined)
           }
           if (event.type !== "tool-call" || event.providerExecuted) return
+          const cancel = makeCancel()
           toolRuns.push({
             call: event,
+            cancel,
             fiber: yield* Effect.uninterruptibleMask((restore) =>
-              restore(executeTool(event)).pipe(
+              restore(executeTool(event, cancel)).pipe(
                 Effect.flatMap(toolOutput.truncate),
                 Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
                 Effect.catchTag("Tool.Error", (error) =>
@@ -652,24 +659,41 @@ export const make = Effect.gen(function* () {
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
         // Cancelled before the start snapshot existed: record nothing, as when the capture preceded the request.
-        if (Exit.hasInterrupts(stream) && !publisher.hasStarted() && !pendingStartSnapshot.pollUnsafe())
+        if (
+          Exit.isFailure(stream) &&
+          streamInterrupted &&
+          !publisher.hasStarted() &&
+          !pendingStartSnapshot.pollUnsafe()
+        )
           return yield* Effect.failCause(stream.cause)
-        if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
-        if (streamInterrupted) yield* interruptTools
-        const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
-        if (Exit.isFailure(joined)) yield* interruptTools
-        const tools = classifyToolExits(joined, toolRuns)
+        if (publisher.hasStarted()) yield* publisher.streamed()
+        if (streamInterrupted) yield* stopTools
+        const fibers = toolRuns.map((run) => run.fiber)
+        const joined = yield* restore(Fiber.awaitAll(fibers)).pipe(Effect.exit)
+        if (!streamInterrupted && Exit.isFailure(joined)) yield* stopTools
+        // Read each tool's exit once all have ended, so what they raised while stopping (a decline, a defect) counts.
+        const exits = Exit.isSuccess(joined) ? joined.value : yield* Fiber.awaitAll(fibers)
+        const tools = classifyToolExits(exits, toolRuns, Exit.hasInterrupts(joined))
+        // A server handing its process daemon over leaves the step as a crash would: unsettled calls and no step end.
+        // The next server settles them when the Session resumes, and takes over the shell commands still running for
+        // them. Any other interrupt settles the calls here.
+        if (
+          (streamInterrupted || tools.interrupted) &&
+          tools.declines.length === 0 &&
+          input.interruption?.() !== "user" &&
+          input.handoffPrepared?.() === true
+        )
+          return yield* Effect.interrupt
 
-        const overflow = overflowFailure ?? streamFailure
         if (
           !publisher.record().outputStarted &&
-          isContextOverflowFailure(overflow) &&
+          isContextOverflowFailure(streamFailure) &&
           (yield* restore(input.recoverOverflow))
         ) {
           yield* Effect.logWarning("provider rejected the request as too long; compacting", {
             sessionID: input.sessionID,
             model: input.model.ref,
-            message: overflow?.message,
+            message: streamFailure?.message,
           })
           ModelRouteLog.record({
             kind: "attempt",
@@ -685,7 +709,7 @@ export const make = Effect.gen(function* () {
               credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
               outcome: "failure",
               error_tag: "ContextOverflow",
-              error_message: overflow?.message,
+              error_message: streamFailure?.message,
               retryable: false,
               output_started: false,
               response_ms: streamedAt - requestStarted,
@@ -696,8 +720,7 @@ export const make = Effect.gen(function* () {
           return Outcome.Compacted()
         }
 
-        if (overflowFailure) yield* publisher.publish(overflowFailure)
-        let recorded = publisher.record()
+        const recorded = publisher.record()
         const unknownFinish =
           Exit.isSuccess(stream) && recorded.finish?.finish === "unknown"
             ? new AIError({
@@ -707,12 +730,7 @@ export const make = Effect.gen(function* () {
                 }),
               })
             : undefined
-        const llmFailure =
-          streamFailure instanceof AIError
-            ? streamFailure
-            : providerFailure
-              ? new AIError({ reason: new UnknownProviderError({ message: providerFailure.message }) })
-              : unknownFinish
+        const llmFailure = streamFailure instanceof AIError ? streamFailure : unknownFinish
         const failureError = llmFailure
           ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID, model: input.model.ref })
           : undefined
@@ -724,7 +742,7 @@ export const make = Effect.gen(function* () {
         // other — and an interruption during the retry hook records it too (see recordAttempt).
         const failed = llmFailure !== undefined
         const timedOut = failed && llmFailure.reason._tag === "Transport" && llmFailure.reason.code === "Timeout"
-        const tokens = recorded.finish?.tokens
+        const tokens = recorded.finish ? SessionUsage.tokens(recorded.finish.usage) : undefined
         ModelRoute.recordRequest(input.model.ref, tokens)
         const failureLog = failed ? ModelRouteLog.failureFields(llmFailure.reason) : undefined
         if (failed)
@@ -799,7 +817,6 @@ export const make = Effect.gen(function* () {
           llmFailure !== undefined &&
           (llmFailure.reason._tag === "Timeout" ||
             llmFailure.reason._tag === "UnsupportedOperation" ||
-            llmFailure.reason._tag === "NoRoute" ||
             (llmFailure.reason._tag === "InvalidRequest" &&
               (llmFailure.reason.classification === undefined ||
                 // An InvalidRequest whose text carries the provider's own
@@ -821,7 +838,7 @@ export const make = Effect.gen(function* () {
         // the target is benched, and the turn fails over or ends with a visible error instead
         // of another silent "success".
         const emptyKey = `${input.sessionID ?? input.assistantMessageID}|${input.model.ref.providerID}/${input.model.ref.id}`
-        const emptyOutput = recorded.finish ? recorded.finish.tokens.output + recorded.finish.tokens.reasoning : 0
+        const emptyOutput = tokens ? tokens.output + tokens.reasoning : 0
         const emptyCompletion =
           !failed &&
           !policyFinish &&
@@ -1105,6 +1122,20 @@ export const make = Effect.gen(function* () {
           }
         }
         recordAttempt()
+        const usage = recorded.finish?.usage
+        yield* Effect.annotateCurrentSpan({
+          ...(firstOutputAt === undefined ? {} : { "opencode.llm.first_output_ms": firstOutputAt - requestStarted }),
+          ...(recorded.finish === undefined ? {} : { "gen_ai.response.finish_reasons": [recorded.finish.finish] }),
+          ...(usage?.inputTokens === undefined ? {} : { "gen_ai.usage.input_tokens": usage.inputTokens }),
+          ...(usage?.outputTokens === undefined ? {} : { "gen_ai.usage.output_tokens": usage.outputTokens }),
+          ...(usage?.cacheReadInputTokens === undefined
+            ? {}
+            : { "gen_ai.usage.cache_read.input_tokens": usage.cacheReadInputTokens }),
+          ...(usage?.cacheWriteInputTokens === undefined
+            ? {}
+            : { "gen_ai.usage.cache_creation.input_tokens": usage.cacheWriteInputTokens }),
+          ...(llmFailure === undefined ? {} : { "error.type": llmFailure.reason._tag }),
+        })
         if (
           input.recoverContinuation &&
           llmFailure?.reason._tag === "Transport" &&
@@ -1115,10 +1146,6 @@ export const make = Effect.gen(function* () {
         if (failover && failureError) return Outcome.Failover({ model: failover.model, error: failureError })
         if (failover && emptyError) return Outcome.Failover({ model: failover.model, error: emptyError })
         if (failover && policyFinishError) return Outcome.Failover({ model: failover.model, error: policyFinishError })
-        if (providerFailure) {
-          yield* publisher.publish(providerFailure)
-          recorded = publisher.record()
-        }
         if (llmFailure && llmError && retry?.retry && !recorded.outputStarted) {
           const decision = SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt)
           // Wall ending (#12228): a wall-class failure (RateLimit /
@@ -1194,7 +1221,7 @@ export const make = Effect.gen(function* () {
               firstTokenMs: firstOutputAt - requestStarted,
               responseMs: streamedAt - requestStarted,
               tokensPerSecond:
-                ((record.finish.tokens.output + record.finish.tokens.reasoning) * 1_000) / outputDuration,
+                (tokens ? (tokens.output + tokens.reasoning) * 1_000 : 0) / outputDuration,
             },
             Date.now(),
             input.model.routing.credentialID,
@@ -1221,9 +1248,8 @@ export const make = Effect.gen(function* () {
                     .files({ from: startSnapshot, to: snapshot })
                     .pipe(Effect.orElseSucceed(() => undefined))
               : undefined
-          const usage = record.finish
-            ? { cost: SessionUsage.calculateCost(input.model.cost, record.finish.tokens), tokens: record.finish.tokens }
-            : undefined
+          const usage = record.finish ? SessionUsage.record(record.finish.usage, input.model.cost) : undefined
+          if (usage) yield* Effect.annotateCurrentSpan("opencode.usage.cost_usd", usage.cost)
           const notices =
             record.finish && usage && !record.failure && files?.length
               ? yield* planNotices({ from: startSnapshot, to: snapshot }).pipe(Effect.orElseSucceed(() => undefined))
@@ -1235,7 +1261,7 @@ export const make = Effect.gen(function* () {
               assistantMessageID: yield* publisher.startAssistant(),
               finish: record.finish.finish,
               rawFinish: record.finish.rawFinish,
-              providerState: record.finish.providerState,
+              native: record.finish.native,
               ...usage,
               snapshot,
               files,
@@ -1243,15 +1269,9 @@ export const make = Effect.gen(function* () {
             })
         }
 
-        if (
-          llmFailure &&
-          llmError &&
-          retry?.retry &&
-          record.outputStarted &&
-          tools.declines.length === 0 &&
-          !tools.interrupted
-        )
-          return Outcome.Continue({ error: llmError, decision: retry })
+        // Output already started: the retry continues on a fresh assistant message.
+        if (llmError && retry?.retry && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
+          return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
         if (continueOn && llmError && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
           return Outcome.ContinueOn({ model: continueOn.model, error: llmError })
 
@@ -1522,12 +1542,49 @@ const isInterruptedStream = (failure: AIError) => {
   return false
 }
 
+/**
+ * Weaker models sometimes call a Code Mode tool at the top level. Rewrite that call into the `execute` program it should
+ * have been, so it is recorded, run and replayed as one. Its input streams as JSON rather than code, so the deltas are
+ * held back until the call completes.
+ */
+const asProgram = (
+  event: LLMEvent,
+  programs: Map<string, string>,
+  expressionFor: ((name: string) => string | undefined) | undefined,
+): LLMEvent | undefined => {
+  if (expressionFor === undefined) return event
+  if (event.type === "tool-input-start" && !event.providerExecuted) {
+    const expression = expressionFor(event.name)
+    if (expression === undefined) return event
+    programs.set(event.id, expression)
+    return { ...event, name: "execute", namespace: undefined }
+  }
+  if (event.type === "tool-input-delta") return programs.has(event.id) ? undefined : event
+  if (event.type === "tool-input-end")
+    return programs.has(event.id) ? { ...event, name: "execute", namespace: undefined } : event
+  if (event.type === "tool-input-error") {
+    if (!programs.delete(event.id)) return event
+    return { ...event, name: "execute", namespace: undefined }
+  }
+  if (event.type !== "tool-call" || event.providerExecuted) return event
+  const expression = programs.get(event.id) ?? expressionFor(event.name)
+  if (expression === undefined) return event
+  programs.delete(event.id)
+  return {
+    ...event,
+    name: "execute",
+    namespace: undefined,
+    input: { code: `return await ${expression}(${JSON.stringify(event.input ?? {})})` },
+  }
+}
+
 /** Tool.Error settles in each fiber; only user declines remain in the typed error channel. */
 const classifyToolExits = (
-  settled: Exit.Exit<Array<Exit.Exit<void, Permission.DeclinedError | QuestionTool.CancelledError>>>,
+  exits: ReadonlyArray<Exit.Exit<void, Permission.DeclinedError | QuestionTool.CancelledError>>,
   runs: ReadonlyArray<{ readonly call: ToolCall }>,
+  // The step was interrupted while it waited for its tools.
+  interruptedWhileWaiting: boolean,
 ) => {
-  const exits = Exit.isSuccess(settled) ? settled.value : []
   const declines = exits.flatMap((exit, index) =>
     Exit.isFailure(exit)
       ? exit.cause.reasons.flatMap((reason) =>
@@ -1535,9 +1592,7 @@ const classifyToolExits = (
         )
       : [],
   )
-  const causes = Exit.isFailure(settled)
-    ? [settled.cause]
-    : exits.flatMap((exit) => (Exit.isFailure(exit) ? [exit.cause] : []))
+  const causes = exits.flatMap((exit) => (Exit.isFailure(exit) ? [exit.cause] : []))
   const failure = causes
     .flatMap((cause) => {
       if (Cause.hasInterrupts(cause)) return []
@@ -1545,5 +1600,39 @@ const classifyToolExits = (
       return reasons.length > 0 ? [Cause.fromReasons<never>(reasons)] : []
     })
     .at(0)
-  return { interrupted: causes.some(Cause.hasInterrupts), declines, failure }
+  return { interrupted: interruptedWhileWaiting || causes.some(Cause.hasInterrupts), declines, failure }
+}
+
+// How long a user's stop waits for the tools it asked to stop before interrupting them.
+const COOPERATIVE_STOP = "5 seconds"
+
+type Cancel = ReturnType<typeof makeCancel>
+
+/**
+ * A tool call's `cancel`. `trigger` completes it, and reports whether the tool was awaiting it, so would stop on its
+ * own; a tool that was not is interrupted instead.
+ */
+export const makeCancel = () => {
+  let listeners = 0
+  let cancelled = false
+  const gate = Deferred.makeUnsafe<void>()
+  return {
+    effect: Effect.suspend(() => {
+      if (cancelled) return Effect.void
+      listeners++
+      return Deferred.await(gate).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            listeners--
+          }),
+        ),
+      )
+    }),
+    trigger: () => {
+      cancelled = true
+      if (listeners === 0) return false
+      Deferred.doneUnsafe(gate, Exit.void)
+      return true
+    },
+  }
 }

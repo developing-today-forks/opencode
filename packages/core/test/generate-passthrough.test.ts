@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { LanguageModel, LLMClient, Message } from "@opencode/ai"
+import { LanguageModel, LLMClient, Message } from "@opencode/ai/effect"
 import { RequestExecutor } from "@opencode/ai/route"
 import { AnthropicMessages, CohereChat, OpenAIChat, OpenAIResponses } from "@opencode/ai/protocols"
 import { AISDK } from "@opencode/core/aisdk"
@@ -106,7 +106,7 @@ const setup = (runtime: LanguageModel, respond: (body: string, index: number) =>
     model: () => Effect.succeed(runtime),
   })
   const resolver = ModelResolver.layer.pipe(Layer.provide(Layer.mergeAll(providers, models, integrations, npm, aisdk)))
-  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.merge(resolver, native))))
+  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.mergeAll(resolver, native, Layer.mock(Model.Service, {}), RequestExecutor.fetchLayer))))
   return { it, bodies }
 }
 

@@ -54,12 +54,10 @@ import {
   ProviderID,
   QuotaExceededError,
   RateLimitError,
-  Transcription,
-  TranscriptionClient,
-  TranscriptionResponse,
   UnsupportedOperationError,
-} from "@opencode/ai"
-import type { TranscriptionEvent, TranscriptionModel } from "@opencode/ai"
+} from "@opencode/ai/effect"
+import { Transcription, TranscriptionClient, TranscriptionResponse } from "@opencode/ai/experimental"
+import type { TranscriptionEvent, TranscriptionModel } from "@opencode/ai/experimental"
 import { configure } from "@opencode/ai/providers/openai"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
@@ -573,7 +571,7 @@ export const transcriptionBody = (
         }
       : {}),
     ...(response.usage !== undefined ? { usage: response.usage } : {}),
-    notices: response.notices ?? [],
+    notices: [],
     provider_metadata: {
       provider: registration.providerID,
       model: registration.modelID,

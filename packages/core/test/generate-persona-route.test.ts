@@ -13,7 +13,7 @@
  * fails the first leaf it is asked for and answers the second.
  */
 import { expect } from "bun:test"
-import { LanguageModel, LLMClient } from "@opencode/ai"
+import { LanguageModel, LLMClient } from "@opencode/ai/effect"
 import { RequestExecutor } from "@opencode/ai/route"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { AISDK } from "@opencode/core/aisdk"
@@ -131,7 +131,7 @@ const setup = () => {
   )
   const native = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(http))))
   const resolver = ModelResolver.layer.pipe(Layer.provide(Layer.mergeAll(providers, models, integrations, npm, aisdk)))
-  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.merge(resolver, native))))
+  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.mergeAll(resolver, native, Layer.mock(Model.Service, {}), RequestExecutor.fetchLayer))))
   return { it, bodies }
 }
 

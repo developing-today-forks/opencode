@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { AIError, isRetryable } from "@opencode/ai"
+import { AIError, isRetryable } from "@opencode/ai/effect"
 import { ModelRoute } from "@opencode/core/model-route"
 import { SessionStep } from "@opencode/core/session/runner/step"
 import { MockProvider, MockScenarios } from "./fixture/mock-provider"

@@ -199,7 +199,7 @@ const applyProviderConfig = Effect.fn(function* (entries: Entry[]) {
     })
   })
   const config = Config.testLayer(entries)
-  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin)).pipe(Effect.provide(config))
+  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin, ConfigProviderPlugin.Plugin.id)).pipe(Effect.provide(config))
 })
 
 describe("provider transform package seating (#2202)", () => {

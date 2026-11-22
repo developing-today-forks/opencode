@@ -1,7 +1,7 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
 import { Headers } from "effect/http"
-import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { ClaudeCode } from "../../src/providers/claude-code.js"
 import {
   ClaudeCodeMessages,
@@ -50,7 +50,7 @@ it.effect("Claude Code provider stays wired to the Claude Code Messages protocol
 
 it.effect("Claude Code route points at the Anthropic Messages endpoint the CLI calls", () =>
   Effect.gen(function* () {
-    const request = LLM.request({ model, prompt: "Hello" })
+    const request = ai.request({ model, prompt: "Hello" })
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://api.anthropic.com/v1/messages")
@@ -59,7 +59,7 @@ it.effect("Claude Code route points at the Anthropic Messages endpoint the CLI c
 
 it.effect("Claude Code route carries the OAuth beta flags and the CLI's client headers", () =>
   Effect.gen(function* () {
-    const request = LLM.request({ model, prompt: "Hello" })
+    const request = ai.request({ model, prompt: "Hello" })
     const headers = model.route.headers?.({ request }) ?? {}
     expect(headers["anthropic-version"]).toBe("2023-06-01")
     expect(headers["anthropic-beta"]).toBe(OAUTH_BETA_HEADER)
@@ -82,14 +82,14 @@ it.effect("Claude Code route carries the OAuth beta flags and the CLI's client h
 
 it.effect("the Claude Code identity block leads the system array, ahead of the caller's system prompt", () =>
   Effect.gen(function* () {
-    const compiled = yield* compileRequest(LLM.request({ model, system: "You are a fleet agent.", prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model, system: "You are a fleet agent.", prompt: "hi" }))
     const body = compiled.body as Record<string, never>
     const system = body.system as Array<Record<string, unknown>>
     expect(system[0]).toMatchObject({ type: "text", text: IDENTITY_SYSTEM_TEXT })
     expect(system[1]).toMatchObject({ type: "text", text: "You are a fleet agent." })
     // No caller system at all still yields exactly the identity block:
     // an OAuth request without it is rejected upstream.
-    const bare = yield* compileRequest(LLM.request({ model, prompt: "hi" }))
+    const bare = yield* compileRequest(ai.request({ model, prompt: "hi" }))
     const bareSystem = (bare.body as Record<string, never>).system as Array<Record<string, unknown>>
     expect(bareSystem).toHaveLength(1)
     expect(bareSystem[0]).toMatchObject({ type: "text", text: IDENTITY_SYSTEM_TEXT })
@@ -99,7 +99,7 @@ it.effect("the Claude Code identity block leads the system array, ahead of the c
 it.effect("tools lower to real Anthropic tool_use shapes — the #6117 defect, inverted", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [Message.user("weather?")],
         tools,
@@ -123,7 +123,7 @@ it.effect("tools lower to real Anthropic tool_use shapes — the #6117 defect, i
 it.effect("history tool calls and results replay as tool_use / tool_result blocks with their ids intact", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [
           Message.user("weather in Oslo?"),
@@ -158,7 +158,7 @@ it.effect("history tool calls and results replay as tool_use / tool_result block
 it.effect("Claude Code stream: a streamed tool_use block becomes a real client tool call", () =>
   Effect.gen(function* () {
     const response = yield* LLMClient.generate(
-      LLM.request({ model, messages: [Message.user("weather in Oslo?")], tools }),
+      ai.request({ model, messages: [Message.user("weather in Oslo?")], tools }),
     ).pipe(
       Effect.provide(
         fixedResponse(
@@ -226,7 +226,7 @@ it.effect("the git-repo env line never reaches Anthropic on the claude-code rout
   Effect.gen(function* () {
     for (const git of ["yes", "no"] as const) {
       const compiled = yield* compileRequest(
-        LLM.request({
+        ai.request({
           model,
           system: [SystemPart.make("You are a fleet agent."), SystemPart.make(envBlock(git))],
           prompt: "hi",
@@ -246,7 +246,7 @@ it.effect("the git-repo env line never reaches Anthropic on the claude-code rout
 it.effect("a system prompt without the git-repo line compiles byte-identical (#1819)", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({ model, system: [SystemPart.make(envBlockStripped)], prompt: "hi" }),
+      ai.request({ model, system: [SystemPart.make(envBlockStripped)], prompt: "hi" }),
     )
     const system = (compiled.body as Record<string, never>).system as Array<Record<string, unknown>>
     expect(system[1]).toMatchObject({ type: "text", text: envBlockStripped })
@@ -259,7 +259,7 @@ it.effect("the strip is scoped to the claude-code route: the API-key Anthropic r
       .with({ endpoint: { baseURL: "https://api.anthropic.test/v1/" }, auth: Auth.header("x-api-key", "test") })
       .model({ id: "claude-sonnet-4-5" })
     const compiled = yield* compileRequest(
-      LLM.request({ model: anthropic, system: [SystemPart.make(envBlock("yes"))], prompt: "hi" }),
+      ai.request({ model: anthropic, system: [SystemPart.make(envBlock("yes"))], prompt: "hi" }),
     )
     const system = (compiled.body as Record<string, never>).system as Array<Record<string, unknown>>
     const texts = system.map((part) => part.text as string)

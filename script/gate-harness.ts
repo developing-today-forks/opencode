@@ -272,29 +272,28 @@ export interface RegisteredGate {
 }
 
 export const GATE_REGISTRY: readonly RegisteredGate[] = [
-  { name: "check:doc-env-vars", script: "check:doc-env-vars", packagePath: ".", workflow: "test.yml" },
-  { name: "check:proto-reads", script: "check:proto-reads", packagePath: ".", workflow: "test.yml" },
-  { name: "check:bounded-http", script: "check:bounded-http", packagePath: ".", workflow: "test.yml" },
-  { name: "check:numeric-boundaries", script: "check:numeric-boundaries", packagePath: ".", workflow: "test.yml" },
-  { name: "check:workflows", script: "check:workflows", packagePath: ".", workflow: "test.yml" },
-  { name: "check:gates", script: "check:gates", packagePath: ".", workflow: "test.yml" },
+  { name: "check:doc-env-vars", script: "check:doc-env-vars", packagePath: ".", workflow: "check-test.yml" },
+  { name: "check:proto-reads", script: "check:proto-reads", packagePath: ".", workflow: "check-test.yml" },
+  { name: "check:bounded-http", script: "check:bounded-http", packagePath: ".", workflow: "check-test.yml" },
+  { name: "check:numeric-boundaries", script: "check:numeric-boundaries", packagePath: ".", workflow: "check-test.yml" },
+  { name: "check:workflows", script: "check:workflows", packagePath: ".", workflow: "check-test.yml" },
+  { name: "check:gates", script: "check:gates", packagePath: ".", workflow: "check-test.yml" },
   { name: "lint:changed", script: "lint:changed", packagePath: ".", workflow: "check.yml" },
-  { name: "lint:effect-patterns", script: "lint:effect-patterns", packagePath: ".", workflow: "test.yml" },
+  { name: "lint:effect-patterns", script: "lint:effect-patterns", packagePath: ".", workflow: "check-test.yml" },
   {
     name: "lint:effect-simplifications",
     script: "lint:effect-simplifications",
     packagePath: ".",
-    workflow: "test.yml",
+    workflow: "check-test.yml",
   },
-  { name: "test:lint-rules", script: "test:lint-rules", packagePath: ".", workflow: "test.yml" },
-  { name: "client check:generated", script: "check:generated", packagePath: "packages/client", workflow: "test.yml" },
+  { name: "test:lint-rules", script: "test:lint-rules", packagePath: ".", workflow: "check-test.yml" },
+  { name: "client check:generated", script: "check:generated", packagePath: "packages/client", workflow: "check-test.yml" },
   {
     name: "protocol check:generated",
     script: "check:generated",
     packagePath: "packages/protocol",
-    workflow: "test.yml",
+    workflow: "check-test.yml",
   },
-  { name: "www check:generated", script: "check:generated", packagePath: "services/www", workflow: "test.yml" },
 ]
 
 /** Root script names that must be registered: every `check:*` and `lint:*` script, plus `test:lint-rules`. */

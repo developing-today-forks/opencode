@@ -42,11 +42,12 @@ const seated: ReadonlyArray<{
   { model: "deepseek-v4.1-flash", package: "@opencode/ai/providers/openai-compatible", api: "openai-chat" },
   { model: "deepseek-v4-pro", package: "@opencode/ai/providers/openai-compatible", api: "openai-chat" },
   { model: "gemini-4-argon", package: "@opencode/ai/providers/google", api: "google" },
-  { model: "gpt-6-luna", package: "@opencode/ai/providers/openai", api: "openai-chat" },
+  // Upstream's catalog seats OpenAI-family Go models on the Responses entrypoint (2026-11-22 sync).
+  { model: "gpt-6-luna", package: "@opencode/ai/providers/openai/responses", api: "openai-chat" },
   { model: "mimo-v2.6-flash", package: "@opencode/ai/providers/openai-compatible", api: "openai-chat" },
   {
     model: "muse-spark-1.3-contributor",
-    package: "@opencode/ai/providers/openai",
+    package: "@opencode/ai/providers/openai/responses",
     api: "openai-chat",
   },
 ]

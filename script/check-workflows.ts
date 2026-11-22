@@ -108,17 +108,19 @@ export const WRITE_PERMITTED_SCOPES = new Set(["contents"])
  * scope (#1503 baseline). Each is load-bearing today — OIDC publishing
  * and sync jobs — and each is expected to disappear, never to be joined
  * by new entries: new write grants beyond `contents` need a policy
- * change, not a baseline edit.
+ * change, not a baseline edit. The release.yml, release-process-daemon.yml,
+ * deploy-*.yml and nightly-beta.yml entries came in with the 2026-11-22
+ * anomalyco/opencode dev sync, which replaced publish.yml, containers.yml
+ * and the single-job deploys with split build/deploy jobs; those jobs are
+ * all guarded to anomalyco/opencode and do not run in this fork.
  */
 export const PERMISSION_WRITE_EXCEPTIONS: Record<string, ReadonlySet<string>> = {
   "agents.yml": new Set(["id-token"]),
-  "containers.yml": new Set(["packages"]),
-  "deploy.yml": new Set(["id-token"]),
-  "jules-daily-upstream-sync.yml": new Set(["issues", "pull-requests"]),
+  "check-test.yml": new Set(["checks"]),
+  "jules-daily-upstream-sync.yml": new Set(["pull-requests", "issues"]),
   "main-broken.yml": new Set(["issues"]),
-  "publish.yml": new Set(["id-token", "packages"]),
+  "nightly-beta.yml": new Set(["actions"]),
   "repo-sweeper.yml": new Set(["issues", "pull-requests"]),
-  "test.yml": new Set(["checks"]),
 }
 
 /**
@@ -128,24 +130,63 @@ export const PERMISSION_WRITE_EXCEPTIONS: Record<string, ReadonlySet<string>> = 
  * instead, and existing blocks may only shrink within these grants.
  */
 export const JOB_PERMISSION_EXCEPTIONS: JobPermissionExceptions = {
-  "agents.yml": { scheduled: { "id-token": "write", contents: "read" } },
-  "docs-locale-sync.yml": { "sync-locales": { contents: "write" } },
-  "docs-update.yml": { "update-docs": { "id-token": "write", contents: "write", "pull-requests": "write" } },
+  "agents.yml": {
+    scheduled: { "id-token": "write", contents: "read" },
+  },
+  "check-test.yml": {
+    "ci-fix": { "id-token": "write", issues: "read", contents: "read" },
+  },
+  "deploy-files.yml": {
+    "files-deploy": { contents: "read", "id-token": "write" },
+  },
+  "deploy-site.yml": {
+    "site-deploy": { contents: "read", "id-token": "write" },
+  },
+  "deploy-update.yml": {
+    "update-deploy": { contents: "read", "id-token": "write" },
+  },
+  "deploy.yml": {
+    "legacy-deploy": { contents: "read", "id-token": "write" },
+    "data-deploy": { contents: "read", "id-token": "write" },
+  },
   "jules-daily-upstream-sync.yml": {
     "daily-upstream-sync": { "id-token": "write", contents: "write", "pull-requests": "write", issues: "write" },
   },
-  "main-broken.yml": { watch: { "id-token": "write", contents: "read", actions: "read", issues: "write" } },
-  "opencode.yml": { opencode: { "id-token": "write", contents: "read", "pull-requests": "read", issues: "read" } },
-  "pr-standards.yml": {
-    "check-compliance": { contents: "read", "pull-requests": "write" },
-    "check-standards": { contents: "read", "pull-requests": "write" },
+  "main-broken.yml": {
+    watch: { "id-token": "write", contents: "read", actions: "read", issues: "write" },
   },
-  "publish-github-action.yml": { "main-gate": { actions: "read", contents: "read" } },
-  "publish-vscode.yml": { "main-gate": { actions: "read", contents: "read" } },
-  "publish.yml": { "main-gate": { actions: "read", contents: "read" } },
-  "review.yml": { "check-guidelines": { contents: "read", "pull-requests": "write" } },
-  "stats.yml": { stats: { contents: "write" } },
-  "test.yml": { "ci-fix": { "id-token": "write", issues: "read", contents: "read" } },
+  "opencode.yml": {
+    opencode: { "id-token": "write", contents: "read", "pull-requests": "read", issues: "read" },
+  },
+  "release-process-daemon.yml": {
+    release: { contents: "write", "id-token": "write", attestations: "write" },
+  },
+  "release.yml": {
+    plan: { contents: "read" },
+    verify: { contents: "read", checks: "write" },
+    tag: { contents: "read", "id-token": "write" },
+    "build-desktop": { contents: "read" },
+    "sign-macos": { contents: "read", "id-token": "write" },
+    "sign-windows": { contents: "read", "id-token": "write" },
+    "sign-desktop-windows-installer": { contents: "read", "id-token": "write" },
+    "publish-attestations": { contents: "read", "id-token": "write", attestations: "write" },
+    "publish-npm": { contents: "read", "id-token": "write", attestations: "read" },
+    "publish-cli": { contents: "read", "id-token": "write" },
+    "publish-desktop": { contents: "read", "id-token": "write" },
+    "publish-docker": { contents: "read", packages: "write" },
+    "publish-homebrew": { contents: "read", "id-token": "write" },
+    "publish-aur": { contents: "read", "id-token": "write" },
+    "publish-github-release": { contents: "write" },
+    "publish-discord": { contents: "read", "id-token": "write" },
+    "publish-version-pr": { contents: "write", "pull-requests": "write" },
+  },
+  "review.yml": {
+    "check-guidelines": { contents: "read", "pull-requests": "write" },
+  },
+  "triage-pr-standards.yml": {
+    "check-standards": { contents: "read", "pull-requests": "write" },
+    "check-compliance": { contents: "read", "pull-requests": "write" },
+  },
 }
 
 export interface Violation {

@@ -1,6 +1,6 @@
 export * as OptimizePlugin from "./optimize.js"
 
-import { define } from "@opencode/plugin/effect/plugin"
+import { define, type Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { Effect } from "effect"
@@ -29,25 +29,6 @@ export const AnthropicPlugin = make(
   },
   "append",
 )
-
-// Both OpenAIToolsPlugin and AnthropicToolsPlugin are disabled intentionally until we can figure out a good ux for displaying
-// heavy grep/glob usage done via shell or other mechanisms
-
-export const OpenAIToolsPlugin = make("opencode.optimize.openai.tools", (model, tools) => {
-  const ids = [model.id, model.modelID, model.family].join(" ").toLowerCase()
-  if (!ids.includes("gpt")) return undefined
-  delete tools.grep
-  delete tools.glob
-  return undefined
-})
-
-export const AnthropicToolsPlugin = make("opencode.optimize.anthropic.tools", (model, tools) => {
-  const ids = [model.id, model.modelID, model.family].join(" ").toLowerCase()
-  if (!ids.includes("claude")) return undefined
-  delete tools.grep
-  delete tools.glob
-  return undefined
-})
 
 export const KimiPlugin = make("opencode.prompt.kimi", (model) =>
   model.id.toLowerCase().includes("kimi") ? PROMPT_KIMI : undefined,
@@ -88,9 +69,23 @@ export const FallbackPlugin = make(
 
 export const Plugins = [OpenAIPlugin, AnthropicPlugin, KimiPlugin, ArceePlugin, MetaPlugin, DeepSeekPlugin, FallbackPlugin] as const
 
+const models = new WeakMap<SessionHooks["context"], Model.Info>()
+
+export const resolveModel = (ctx: Context, event: SessionHooks["context"]) =>
+  Effect.gen(function* () {
+    const cached = models.get(event)
+    if (cached?.providerID === event.model.providerID && cached.id === event.model.id) return cached
+    const model: Model.Info =
+      (yield* ctx.model.list()).data.find(
+        (model) => model.providerID === event.model.providerID && model.id === event.model.id,
+      ) ?? Model.Info.default(event.model.providerID, event.model.id)
+    models.set(event, model)
+    return model
+  })
+
 function make(
   id: string,
-  optimize: (model: Model.Info, tools: SessionHooks["context"]["tools"]) => string | undefined,
+  optimize: (model: Model.Info) => string | undefined,
   mode: "override" | "append" = "override",
 ) {
   return define({
@@ -98,12 +93,8 @@ function make(
     effect: Effect.fn(`OptimizePlugin.${id}`)(function* (ctx) {
       const hook = (event: SessionHooks["context"]) =>
         Effect.gen(function* () {
-          const model =
-            (yield* ctx.model.list()).data.find(
-              (model) => model.providerID === event.model.providerID && model.id === event.model.id,
-            ) ?? Model.Info.default(event.model.providerID, event.model.id)
-          // Curate tools before rendering their guidance, including for agents with a custom system prompt.
-          const template = optimize(model, event.tools)
+          const model = yield* resolveModel(ctx, event)
+          const template = optimize(model)
           if (!template) return
           if ((yield* ctx.agent.get({ agentID: event.agent })).data.system) return
           const system = event.system[0]

@@ -7,7 +7,7 @@ import { InvalidRequestError, UnauthorizedError } from "@opencode/protocol/error
 import { OpenCodeEvent } from "@opencode/protocol/groups/event"
 import { SharedEvents } from "../shared-events.js"
 import { ClientError, OpenCode } from "./generated/index.js"
-import type { EventSubscribeInput } from "./api/api.js"
+import type { EventSubscribeInput } from "./api.js"
 import { RpcClientRuntime } from "./rpc.js"
 import type { RpcCallOptions } from "../promise/rpc.js"
 
@@ -20,6 +20,7 @@ const declaredEventErrors = [
 ] as const
 type DeclaredEventError = (typeof declaredEventErrors)[number]["schema"]["Type"]
 type EventFrameError = ClientError | DeclaredEventError
+type EventType = NonNullable<EventSubscribeInput["types"]>[number]
 
 const CurrentHeaders = Context.Reference<RpcCallOptions["headers"]>("@opencode/client/effect/rpc/headers", {
   defaultValue: () => undefined,
@@ -107,10 +108,14 @@ export const make = Effect.fn("OpenCode.make")(function* (options?: { readonly b
     // with bounded backoff (#2321); terminal failures complete subscribers.
     { reconnect: { shouldRetry: eventErrorRetryable, delay: eventReconnectDelay } },
   )
-  const subscribe = (input?: EventSubscribeInput) => {
+  const subscribe = <Type extends EventType = EventType>(input?: {
+    readonly types?: ReadonlyArray<Type>
+    readonly "last-event-id"?: string
+  }) => {
     lastEventID = input?.["last-event-id"] ?? lastEventID
     return Stream.fromAsyncIterable(
       shared.subscribe({
+        types: input?.types,
         lastEventID,
         onEventId: (id) => {
           lastEventID = id

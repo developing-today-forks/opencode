@@ -82,7 +82,7 @@ export function entries(
           "compaction",
           message.status === "failed"
             ? `[compaction failed: ${message.error.message}]`
-            : [message.summary, message.recent].filter(Boolean).join("\n\n"),
+            : message.summary,
         )
       case "agent-switched":
         return entry(0, "events", `[agent ${message.previous ? `${message.previous} → ` : ""}${message.agent}]`)

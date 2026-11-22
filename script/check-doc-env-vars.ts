@@ -17,11 +17,11 @@
  * never pose as a reader.
  *
  * Locale handling: translations under
- * packages/web/src/content/docs/<locale>/ follow the usual
+ * services/site/src/docs/v1/content/<locale>/ follow the usual
  * docs-locale-sync flow and are not scanned; DOCS_LOCALES mirrors
- * `docsLocale` in packages/web/src/i18n/locales.ts, and only directories
+ * the docs locales the site ships, and only directories
  * with those names are skipped — any other subdirectory of either docs
- * tree is English content and is scanned. services/www/src/docs/content
+ * tree is English content and is scanned. services/site/src/docs/content
  * has no locale subdirectories.
  *
  * Allowlist entries go stale: an entry whose name is no longer documented
@@ -35,7 +35,10 @@
 import { readdirSync } from "node:fs"
 import { join } from "node:path"
 
-export const DOCS_TREES = ["packages/web/src/content/docs", "services/www/src/docs/content"] as const
+// Since the 2026-11-22 upstream sync the V1 docs live in services/site/src/docs/v1/content as an
+// archive of the previous product; it documents variables V2 no longer reads, so only the current
+// tree is scanned (#2677).
+export const DOCS_TREES = ["services/site/src/docs/content"] as const
 
 /** Locale directory names under the web docs tree; mirrors `docsLocale`. */
 export const DOCS_LOCALES = [
@@ -67,24 +70,19 @@ export const DOCS_LOCALES = [
  */
 export const ALLOWLIST = [
   {
-    name: "OPENCODE_AUTH_JSON",
-    reason:
-      "gitlab.mdx names the GitLab CI variable handed to the external GitLab CI component as its auth_json input; the component, not this repo's code, consumes it.",
-  },
-  {
-    name: "OPENCODE_MODEL",
-    reason:
-      "config.mdx uses it only as a {env:OPENCODE_MODEL} substitution example; any variable name works in that slot and this repo reads the substituted value, never this name.",
-  },
-  {
-    name: "OPENCODE_CONSOLE_TOKEN",
-    reason:
-      "console/api docs use it as the example env name in a provider config ({env:OPENCODE_CONSOLE_TOKEN}); the name is chosen by the console operator, not read by this repo's code.",
-  },
-  {
     name: "OPENCODE_TOKEN",
     reason:
       "build/client docs read process.env.OPENCODE_TOKEN in sample SDK client code that users copy into their own projects; it is not a variable this repo's own code reads.",
+  },
+  {
+    name: "OPENCODE_ZEN_API_KEY",
+    reason:
+      "console/harnesses/hermes.mdx names the variable the third-party Hermes harness reads for its opencode-zen provider; Hermes, not this repo, consumes it.",
+  },
+  {
+    name: "OPENCODE_GO_API_KEY",
+    reason:
+      "console/harnesses/hermes.mdx names the variable the third-party Hermes harness reads for its opencode-go provider; Hermes, not this repo, consumes it.",
   },
 ] as const
 
@@ -147,8 +145,8 @@ export function gitHasReader(root: string, name: string): boolean {
       name,
       "--",
       ".",
-      ":(exclude)packages/web/src/content/docs",
-      ":(exclude)services/www/src/docs/content",
+      ":(exclude)services/site/src/docs/v1/content",
+      ":(exclude)services/site/src/docs/content",
       ":(exclude)script/check-doc-env-vars.ts",
       ":(exclude)script/check-doc-env-vars.test.ts",
     ],

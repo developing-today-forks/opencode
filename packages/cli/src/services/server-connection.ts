@@ -1,30 +1,40 @@
 import { Service, type Endpoint, type EnsureOptions } from "@opencode/client/effect/service"
 import { ClientError, isUnauthorizedError, OpenCode } from "@opencode/client/promise"
 import { OPENCODE_VERSION } from "../version"
-import { Cause, Clock, Effect, Exit, Redacted } from "effect"
+import { Cause, Clock, Effect, Exit, Option, Redacted } from "effect"
+import { CommandFlags } from "../commands/commands"
 import { Env } from "../env"
 import { ServiceConfig } from "./service-config"
 import { Standalone } from "./standalone"
+import { errorMessage } from "../util/error"
 
 export type Args = {
   readonly server?: string
   readonly standalone?: boolean
   readonly mismatch?: "replace" | "ignore" | "error"
+  /** Start the background service when none is running. When false, use a standalone server instead. */
+  readonly autostart?: boolean
   readonly onStart?: EnsureOptions["onStart"]
 }
 
 export type Resolved = {
   readonly endpoint: Endpoint
   readonly service?: ReturnType<typeof managedService>
+  /** A private server started for this command alone. */
+  readonly standalone?: boolean
 }
 
 export const resolve = Effect.fn("cli.server-connection.resolve")(function* (args: Args = {}) {
-  if (args.server !== undefined && args.standalone)
+  const serverFlag = yield* Effect.serviceOption(CommandFlags.Server).pipe(Effect.map(Option.flatten))
+  const standaloneFlag = yield* Effect.serviceOption(CommandFlags.Standalone)
+  const server = args.server ?? Option.getOrUndefined(serverFlag)
+  const standalone = args.standalone ?? Option.getOrElse(standaloneFlag, () => false)
+  if (server !== undefined && standalone)
     return yield* Effect.fail(new Error("--server and --standalone cannot be combined"))
-  if (args.server !== undefined) {
+  if (server !== undefined) {
     const password = yield* Env.password
     const endpoint = {
-      url: args.server,
+      url: server,
       auth: password ? { type: "basic" as const, username: "opencode", password: Redacted.value(password) } : undefined,
     } satisfies Endpoint
     const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
@@ -35,12 +45,17 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
       )
     return { endpoint } satisfies Resolved
   }
-  if (args.standalone || (yield* ServiceConfig.read()).disabled === true) {
-    return { endpoint: yield* Standalone.start() } satisfies Resolved
+  if (standalone || (yield* ServiceConfig.read()).disabled === true) {
+    return { endpoint: yield* Standalone.start(), standalone: true } satisfies Resolved
   }
 
   const mismatch = args.mismatch ?? "ignore"
   const options = yield* ServiceConfig.options({ checkVersion: mismatch !== "ignore" })
+  if (args.autostart === false) {
+    const endpoint = yield* Service.discover({ ...options, version: undefined })
+    if (!endpoint) return { endpoint: yield* Standalone.start(), standalone: true } satisfies Resolved
+    return { endpoint, service: managedService(options) } satisfies Resolved
+  }
   return {
     endpoint: yield* resolveManaged({ ...options, onStart: args.onStart }, mismatch),
     service: managedService(options),
@@ -126,8 +141,11 @@ function connectError(endpoint: Endpoint, cause: unknown) {
     )
   }
   if (cause instanceof ClientError && cause.reason === "Transport")
-    return new Error(`Could not reach server at ${endpoint.url}`, { cause })
-  return new Error(`Server at ${endpoint.url} did not provide a compatible V2 health response`, { cause })
+    return new Error(`Could not reach server at ${endpoint.url}: ${errorMessage(cause.cause ?? cause)}`, { cause })
+  return new Error(
+    `Server at ${endpoint.url} did not provide a compatible V2 health response: ${errorMessage(cause)}`,
+    { cause },
+  )
 }
 
 export * as ServerConnection from "./server-connection"

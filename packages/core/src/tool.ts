@@ -1,21 +1,32 @@
 export * as Tool from "./tool.js"
 export { CallID, Content, Error, FileContent, TextContent } from "@opencode/schema/tool"
-export type { Context, Metadata, Namespace, Options, Result } from "@opencode/schema/tool"
+export type { Context, Info, Metadata, Namespace, Options, Result } from "@opencode/schema/tool"
 
-import { ToolDefinition, type ToolCall } from "@opencode/ai"
+import { ToolDefinition, type ToolCall } from "@opencode/ai/effect"
+import { toolExpression, type CodeMode } from "@opencode/codemode"
 import { Tool } from "@opencode/schema/tool"
-import { Context, Effect, Layer, Result, Schema, SchemaIssue, Types } from "effect"
+import { isRecord } from "@opencode/util/record"
+import { Context, Effect, Layer, Ref, Result, Schema, SchemaIssue, Types } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import type { Agent } from "./agent.js"
 import { CodeModeCatalog } from "./codemode/catalog.js"
+import { CodeModeJob } from "./codemode/job.js"
 import { CodeModeTool } from "./codemode/tool.js"
+import { Flag } from "./flag.js"
 import { Image } from "./image.js"
 import { Permission } from "./permission.js"
 import { PluginHooks } from "./plugin/hooks.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
 import { State } from "./state.js"
-import { definition, effectiveName, execute, normalizedName, normalizeContent } from "./tool/runtime.js"
+import {
+  defaultCodeMode,
+  definition,
+  effectiveName,
+  execute,
+  normalizedName,
+  normalizeContent,
+} from "./tool/runtime.js"
 import { Wildcard } from "./util/wildcard.js"
 
 export class RegistrationError extends Schema.TaggedError<RegistrationError>()("Tool.RegistrationError", {
@@ -23,32 +34,70 @@ export class RegistrationError extends Schema.TaggedError<RegistrationError>()("
   message: Schema.String,
 }) {}
 
+type RegisteredTool = Tool.Info & { readonly id: string }
+
 export interface Editor {
-  readonly list: () => readonly (Tool.Info & { readonly id: string })[]
-  readonly get: (id: string) => (Tool.Info & { readonly id: string }) | undefined
+  readonly list: () => readonly RegisteredTool[]
+  readonly get: (id: string) => RegisteredTool | undefined
   readonly namespace: (namespace: Tool.Namespace) => void
-  readonly add: (tool: Tool.Info) => void
+  readonly add: <
+    Input extends Tool.ValueSchema<any> = Tool.ValueSchema<any>,
+    Output extends Tool.ValueSchema<any> | undefined = undefined,
+    CMInput extends Tool.ValueSchema<any> = Input,
+    CMOutput extends Tool.ValueSchema<any> | undefined = Output,
+  >(
+    tool: Tool.Info<Input, Output, CMInput, CMOutput>,
+  ) => void
   readonly update: (id: string, update: (tool: Types.Mutable<Tool.Info>) => void) => void
   readonly remove: (id: string) => void
 }
 
-type Entry = Tool.Info & { readonly id: string }
-
 // Each face keeps one entry per effective name. A native tool is called directly by its model name; a Code Mode
-// tool is called through the catalog. A projected tool registers one entry in each face, so they never collide.
+// tool is called through the catalog. A projected tool registers one entry in each face, so they never collide: a
+// namespaced Code Mode entry (tools.neon.run_sql) has the same effective name as its native counterpart (neon_run_sql).
+type Face = "native" | "codeMode"
 type Data = {
-  native: Map<string, Entry>
-  codeMode: Map<string, Entry>
+  native: Map<string, RegisteredTool>
+  codeMode: Map<string, RegisteredTool>
+  // Converted once at registration; schemas cannot change without re-registering the tool.
+  definitions: { native: Map<string, ToolDefinition>; codeMode: Map<string, ToolDefinition> }
   namespaces: Map<string, Tool.Namespace>
   errors: { kind: "tool" | "namespace"; name: string; namespace?: string; error: RegistrationError }[]
 }
 
+export interface Policy {
+  readonly hidden?: ReadonlySet<string>
+  readonly direct?: ReadonlySet<string>
+}
+
+export interface SnapshotOptions {
+  /**
+   * With `full_codemode`, Code Mode gets the experimental `path` and `Bun` globals, which act through `services`: the
+   * session's Location and file services.
+   */
+  readonly services?: Context.Context<CodeModeTool.Services>
+  readonly tools?: Policy
+}
+
 export interface Interface extends State.Transformable<Editor> {
-  readonly list: () => Effect.Effect<ReadonlyArray<Tool.Info & { readonly id: string }>>
-  readonly snapshot: (
-    permissions?: Permission.Ruleset,
-    disabledTools?: ReadonlySet<string>,
-  ) => Effect.Effect<Snapshot>
+  readonly list: () => Effect.Effect<ReadonlyArray<RegisteredTool>>
+  readonly codeModeTools: (paths: ReadonlyArray<string>) => Effect.Effect<ReadonlyMap<string, RegisteredTool>>
+  readonly snapshot: (permissions?: Permission.Ruleset, options?: SnapshotOptions) => Effect.Effect<Snapshot>
+  /**
+   * Runs a Code Mode program with no model step over only the Code Mode tools named in `tools` (still subject to
+   * whole-tool permission filtering and each tool's own executor policy).
+   */
+  readonly check: (input: CheckInput) => Effect.Effect<CodeMode.Result>
+}
+
+export interface CheckInput {
+  readonly code: string
+  readonly tools: ReadonlyArray<string>
+  readonly bindings: Readonly<Record<string, CodeMode.DataValue>>
+  readonly permissions: Permission.Ruleset
+  readonly limits: CodeMode.ExecutionLimits
+  readonly services?: Context.Context<CodeModeTool.Services>
+  readonly context: Omit<Tool.Context, "id">
 }
 
 /** A local execution result after hooks and content normalization. */
@@ -65,9 +114,16 @@ export interface Snapshot {
     readonly messageID: SessionMessage.ID
     readonly call: ToolCall
     readonly progress?: (update: Tool.Metadata) => Effect.Effect<void>
+    /** Completes when the user asks the call to stop; see `Tool.Context.cancel`. */
+    readonly cancel?: Effect.Effect<void>
     /** Surviving request definitions, keyed by the names advertised after session context hooks. */
     readonly definitions?: ReadonlyMap<string, ToolDefinition>
   }) => Effect.Effect<NormalizedResult, Tool.Error>
+  /**
+   * The expression a Code Mode program calls a tool by (`tools.opencode.session.search`), when `name` is the path or
+   * registry ID of one of this snapshot's Code Mode tools.
+   */
+  readonly codeModeExpression?: (name: string) => string | undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Tool") {}
@@ -77,6 +133,8 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const hooks = yield* PluginHooks.Service
     const image = yield* Image.Service
+    const permission = yield* Permission.Service
+    const flags = yield* Flag.Service
 
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
@@ -108,9 +166,11 @@ const layer = Layer.effect(
       ]
     })
 
-    const beforeExecute = (name: string, input: unknown, context: Tool.Context) =>
+    const beforeExecute = (name: string, info: Tool.Info | undefined, input: unknown, context: Tool.Context) =>
       hooks.trigger("tool", "execute.before", {
         tool: name,
+        ...(info === undefined ? {} : { info }),
+        codemode: context.codemode === true,
         sessionID: context.sessionID,
         agent: context.agent,
         messageID: context.messageID,
@@ -124,12 +184,20 @@ const layer = Layer.effect(
       input: unknown,
       context: Tool.Context,
     ) {
+      yield* Effect.annotateCurrentSpan({
+        "gen_ai.tool.name": name,
+        "gen_ai.tool.call.id": context.id,
+        "session.id": context.sessionID,
+        "gen_ai.agent.name": context.agent,
+      })
       const execution = yield* execute(tool, input, context).pipe(
         Effect.map((value) => ({ value })),
         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
       )
       const base = {
         tool: name,
+        info: tool,
+        codemode: context.codemode === true,
         sessionID: context.sessionID,
         agent: context.agent,
         messageID: context.messageID,
@@ -163,12 +231,33 @@ const layer = Layer.effect(
       }
     })
 
-    let catalog: { data: Data; names: string; value: CodeModeCatalog.Inventory } | undefined
+    // A plugin may rename a call in a Code Mode program, as it may a direct call, to another of the program's tools.
+    const run = Effect.fnUntraced(function* (
+      tools: ReadonlyMap<string, Tool.Info>,
+      tool: Tool.Info,
+      name: string,
+      input: unknown,
+      context: Tool.Context,
+    ) {
+      const event = yield* beforeExecute(name, tool, input, context)
+      const selected = event.tool === name ? tool : tools.get(event.tool)
+      if (!selected) return yield* new Tool.Error({ message: `Tool is not available for this request: ${event.tool}` })
+      return yield* executeTool(selected, event.tool, event.input, context)
+    })
+
+    type CachedCatalog = {
+      readonly inventory: CodeModeTool.Inventory
+      readonly value: CodeModeCatalog.Inventory
+      readonly definition: ToolDefinition
+    }
+    let catalogData: Data | undefined
+    const catalogs = new Map<string, CachedCatalog>()
     const state = State.create<Data, Editor>({
       name: "tool",
       initial: () => ({
         native: new Map(),
         codeMode: new Map(),
+        definitions: { native: new Map(), codeMode: new Map() },
         namespaces: new Map(),
         errors: [],
       }),
@@ -184,44 +273,42 @@ const layer = Layer.effect(
           editor.namespaces.set(namespace.name, { ...namespace })
         },
         add: (tool) => {
-          const error = registrationError(tool)
-          if (error) {
-            editor.errors.push({ kind: "tool", name: tool.name, namespace: tool.options?.namespace, error })
-            return
-          }
           const id = effectiveName(tool)
-          face(editor, tool).set(id, { ...tool, id, options: tool.options && { ...tool.options } })
+          commit(editor, id, { ...tool, id })
         },
         update: (id, update) => {
-          const updated: Entry[] = []
-          for (const current of [editor.native.get(id), editor.codeMode.get(id)]) {
-            if (!current) continue
-            const tool = { ...current, options: current.options && { ...current.options } }
-            update(tool)
-            tool.name = current.name
-            tool.id = id
-            if (tool.options?.namespace !== current.options?.namespace)
-              tool.options = { ...tool.options, namespace: current.options?.namespace }
-            const error = registrationError(tool)
-            if (error) {
-              editor.errors.push({ kind: "tool", name: tool.name, namespace: tool.options?.namespace, error })
-              updated.push(current)
-              continue
+          const drafts = faces.flatMap((name) => {
+            const current = editor[name].get(id)
+            if (!current) return []
+            const draft: Types.Mutable<RegisteredTool> = {
+              ...current,
+              options: cloneOptions(current.options),
             }
-            updated.push(tool)
+            update(draft)
+            draft.name = current.name
+            draft.id = id
+            if (draft.options?.namespace !== current.options?.namespace)
+              draft.options = { ...draft.options, namespace: current.options?.namespace }
+            return [{ face: name, current, draft }]
+          })
+          // An update can move an entry to the other face, so both are cleared before the copies are filed again. A
+          // copy that no longer registers keeps its previous entry.
+          for (const { face: name } of drafts) {
+            editor[name].delete(id)
+            editor.definitions[name].delete(id)
           }
-          // An update can move an entry to the other face, so both are cleared before the copies are filed again.
-          editor.native.delete(id)
-          editor.codeMode.delete(id)
-          for (const tool of updated) face(editor, tool).set(id, tool)
+          for (const { current, draft } of drafts) if (!commit(editor, id, draft)) commit(editor, id, current)
         },
         remove: (id) => {
-          editor.native.delete(id)
-          editor.codeMode.delete(id)
+          for (const name of faces) {
+            editor[name].delete(id)
+            editor.definitions[name].delete(id)
+          }
         },
       }),
       notify: (value) => {
-        catalog = undefined
+        catalogData = undefined
+        catalogs.clear()
         return Effect.forEach(
           value.errors,
           ({ kind, name, namespace, error }) =>
@@ -239,71 +326,122 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => visibleTools(state.get())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions, disabledTools) =>
-        Effect.sync(() => {
-          const data = state.get()
+      codeModeTools: (paths) => Effect.sync(() => new Map(codeModeTools(state.get().codeMode, paths))),
+      snapshot: Effect.fn("Tool.snapshot")((permissions, options) =>
+        Effect.gen(function* () {
           const rules = permissions ?? []
-          const enabled = (entries: ReadonlyMap<string, Entry>) =>
-            new Map(
-              Array.from(entries).filter(
-                ([name, tool]) =>
-                  !disabledTools?.has(name) && !whollyDisabled(tool.options?.permission ?? name, rules),
-              ),
-            )
-          const direct = enabled(data.native)
-          const codeModeTools = enabled(data.codeMode)
-          const namespaces = data.namespaces
-          const codeModeInventory = { tools: codeModeTools, namespaces }
-          const codeModeEnabled = !whollyDisabled("execute", rules)
-          const codeModeTool = codeModeEnabled
-            ? CodeModeTool.create(codeModeInventory, (name, tool, input, context) =>
-                beforeExecute(name, input, context).pipe(
-                  Effect.flatMap((event) => executeTool(tool, name, event.input, context)),
-                ),
-              )
-            : undefined
-          const names = Array.from(codeModeTools.keys()).join("\0")
-          // Discovery is immutable for a registry revision and visible tool set. Keep request
-          // definitions/executors fresh, but share the much larger rendered catalog across steps.
-          const codeModeCatalog = !codeModeEnabled
+          // Without Code Mode its tools would be unreachable, so expose them as direct tools instead.
+          const codeModeEnabled = codeModeAvailable(rules)
+          const full = codeModeEnabled && options?.services !== undefined && (yield* flags.enabled("full_codemode"))
+          const data = state.get()
+          if (catalogData !== data) {
+            catalogData = data
+            catalogs.clear()
+          }
+          const hidden = options?.tools?.hidden
+          const keepDirect = options?.tools?.direct
+          const direct = new Map<string, Tool.Info>()
+          const directDefinitions = new Map<string, ToolDefinition>()
+          const codemodeEntries: Array<[string, Tool.Info]> = []
+          const usable = (name: string, tool: Tool.Info) =>
+            !hidden?.has(name) && !whollyDisabled(tool.options?.permission ?? name, rules)
+          for (const [name, tool] of data.native) {
+            if (!usable(name, tool)) continue
+            direct.set(name, tool)
+            directDefinitions.set(name, data.definitions.native.get(name)!)
+          }
+          for (const [name, tool] of data.codeMode) {
+            if (!usable(name, tool)) continue
+            if (codeModeEnabled && defaultCodeMode(tool) && !keepDirect?.has(name)) {
+              codemodeEntries.push([name, tool])
+              continue
+            }
+            // The native face's entry is the direct one when both faces hold the name.
+            if (direct.has(name)) continue
+            direct.set(name, tool)
+            directDefinitions.set(name, data.definitions.codeMode.get(name)!)
+          }
+          const codemode = !codeModeEnabled
             ? undefined
-            : catalog?.data === data && catalog.names === names
-              ? catalog.value
-              : CodeModeTool.catalog(codeModeInventory)
-          if (codeModeCatalog) catalog = { data, names, value: codeModeCatalog }
+            : (() => {
+                const key = `${full ? "1" : "0"}\0${codemodeEntries.map(([name]) => name).join("\0")}`
+                // Discovery is immutable for a registry revision and visible tool set. Keep executors
+                // fresh, but share the inventory, whose prepared runtime and much larger rendered catalog
+                // are cached by identity, and the execute tool's definition across steps.
+                const cached = catalogs.get(key)
+                if (cached) {
+                  catalogs.delete(key)
+                  catalogs.set(key, cached)
+                }
+                const inventory = cached?.inventory ?? {
+                  tools: new Map(codemodeEntries),
+                  namespaces: data.namespaces,
+                }
+                const tool = CodeModeTool.create(
+                  inventory,
+                  (name, item, input, context) => run(inventory.tools, item, name, input, context),
+                  permission,
+                  full ? options.services : undefined,
+                )
+                const entry = cached ?? {
+                  inventory,
+                  value: CodeModeTool.catalog(inventory),
+                  definition: definition(tool),
+                }
+                if (!cached) {
+                  if (catalogs.size >= CATALOG_CACHE_LIMIT) {
+                    const oldest = catalogs.keys().next().value
+                    if (oldest !== undefined) catalogs.delete(oldest)
+                  }
+                  catalogs.set(key, entry)
+                }
+                return { tool, inventory, catalog: entry.value, definition: entry.definition }
+              })()
           return {
-            ...(codeModeCatalog === undefined ? {} : { codeModeCatalog }),
+            ...(codemode === undefined
+              ? {}
+              : {
+                  codeModeCatalog: codemode.catalog,
+                  codeModeExpression: (name: string) => {
+                    const found = CodeModeTool.find(codemode.inventory, name)
+                    return found && toolExpression(CodeModeTool.qualifiedName(found.registration))
+                  },
+                }),
             definitions: [
               ...Array.from(direct)
                 .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-                .map(([, tool]) => definition(tool)),
-              ...(codeModeTool ? [definition(codeModeTool)] : []),
+                .map(([name]) => directDefinitions.get(name)!),
+              ...(codemode ? [codemode.definition] : []),
             ],
             execute: Effect.fnUntraced(function* (input: Parameters<Snapshot["execute"]>[0]) {
-              if (disabledTools?.has(input.call.name))
-                return yield* new Tool.Error({
-                  message:
-                    input.call.name === "question"
-                      ? Permission.DETACHED_QUESTION_MESSAGE
-                      : `Tool is disabled for this session: ${input.call.name}`,
-                })
               const context: Tool.Context = {
                 sessionID: input.sessionID,
                 agent: input.agent,
                 messageID: input.messageID,
                 id: Tool.CallID.make(input.call.id),
                 progress: input.progress ?? (() => Effect.void),
+                cancel: input.cancel,
               }
-              const event = yield* beforeExecute(input.call.name, input.call.input, context)
+              const initialName = input.definitions?.get(input.call.name)?.name ?? input.call.name
+              const initial = initialName === "execute" && codemode ? codemode.tool : direct.get(initialName)
+              const event = yield* beforeExecute(input.call.name, initial, input.call.input, context)
               const requested = input.definitions?.get(event.tool)
               // Preserve session context removal and alias resolution, now after the repair hook.
-              if (!requested && input.definitions && (direct.has(event.tool) || codeModeTool?.name === event.tool))
+              if (!requested && input.definitions && (direct.has(event.tool) || codemode?.tool.name === event.tool))
                 return yield* new Tool.Error({ message: `Tool is not available for this request: ${event.tool}` })
               const name = requested?.name ?? event.tool
-              if (name === "execute" && codeModeTool)
-                return yield* executeTool(codeModeTool, name, event.input, context)
+              if (name === "execute" && codemode) {
+                const run = (ctx: Tool.Context) => executeTool(codemode.tool, name, event.input, ctx)
+                const background = yield* CodeModeJob.Current
+                return yield* background
+                  ? background(context, run, full ? executeOptions(event.input) : undefined)
+                  : run(context)
+              }
               const tool = direct.get(name)
               if (tool) return yield* executeTool(tool, name, event.input, context)
+              // Only a detached session hides `question`; a stale call gets the same guidance as a denied one.
+              if (name === "question" && hidden?.has(name))
+                return yield* new Tool.Error({ message: Permission.DETACHED_QUESTION_MESSAGE })
               return yield* new Tool.Error({
                 message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
               })
@@ -311,23 +449,101 @@ const layer = Layer.effect(
           }
         }),
       ),
+      check: Effect.fn("Tool.check")(function* (input) {
+        if (whollyDisabled("execute", input.permissions)) {
+          return {
+            ok: false,
+            error: { kind: "ExecutionFailure", message: "Code Mode is disabled for this agent" },
+            toolCalls: [],
+          } satisfies CodeMode.Result
+        }
+        const data = state.get()
+        const tools = new Map(
+          codeModeTools(data.codeMode, input.tools)
+            .filter(([, tool]) => !whollyDisabled(tool.options?.permission ?? tool.id, input.permissions))
+            .map(([, tool]) => [tool.id, tool] as const),
+        )
+        const callSeq = yield* Ref.make(0)
+        const full = input.services !== undefined && (yield* flags.enabled("full_codemode"))
+        return yield* CodeModeTool.check(
+          { tools, namespaces: data.namespaces },
+          {
+            ...input,
+            context: { ...input.context, id: Tool.CallID.make(`call_${input.context.messageID}_execute`) },
+            permission,
+            services: full ? input.services : undefined,
+          },
+          (name, tool, toolInput) =>
+            Effect.gen(function* () {
+              const index = yield* Ref.getAndUpdate(callSeq, (value) => value + 1)
+              const context: Tool.Context = {
+                ...input.context,
+                id: Tool.CallID.make(`call_${input.context.messageID}_${index}`),
+                codemode: true,
+              }
+              return yield* run(tools, tool, name, toolInput, context)
+            }),
+        )
+      }),
     })
   }),
 )
+
+const cloneOptions = (options: Tool.Options | undefined): Tool.Options | undefined =>
+  options && {
+    ...options,
+    ...(isRecord(options.codemode) ? { codemode: { ...options.codemode } } : {}),
+  }
+
+const faces: ReadonlyArray<Face> = ["native", "codeMode"]
+
+const face = (tool: Tool.Info): Face => (tool.options?.codemode === false ? "native" : "codeMode")
+
+// One entry per effective name. When both faces hold a name, the native entry is the one listed.
+const visibleTools = (data: Pick<Data, "native" | "codeMode">): RegisteredTool[] => [
+  ...data.native.values(),
+  ...Array.from(data.codeMode.values()).filter((tool) => !data.native.has(tool.id)),
+]
+
+/** Store a valid tool under its effective name in its face, or record why it was skipped. */
+function commit(editor: Data, id: string, input: RegisteredTool) {
+  // JavaScript plugins may leave out `input` for a tool that takes none.
+  const tool = {
+    ...input,
+    input: input.input === undefined || input.input === null ? {} : input.input,
+    options: cloneOptions(input.options),
+  }
+  const registered = register(id, tool)
+  if (Result.isFailure(registered)) {
+    editor.errors.push({
+      kind: "tool",
+      name: tool.name,
+      namespace: tool.options?.namespace,
+      error: registered.failure,
+    })
+    return false
+  }
+  editor[face(tool)].set(id, tool)
+  editor.definitions[face(tool)].set(id, registered.success)
+  return true
+}
+
+function* codeModeTools(registered: Data["codeMode"], paths: ReadonlyArray<string>) {
+  for (const path of paths) {
+    const tool = registered.get(path.replaceAll(".", "_"))
+    if (tool && defaultCodeMode(tool) && CodeModeTool.qualifiedName(tool) === path) yield [path, tool] as const
+  }
+}
 
 const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
 }
 
-const face = (data: Pick<Data, "native" | "codeMode">, tool: Tool.Info) =>
-  tool.options?.codemode === false ? data.native : data.codeMode
+/** Whether the rules leave Code Mode's `execute` reachable, as `snapshot` decides it. */
+export const codeModeAvailable = (rules: Permission.Ruleset) => !whollyDisabled("execute", rules)
 
-// One entry per effective name. When both faces hold a name, the native entry is the one listed.
-const visibleTools = (data: Pick<Data, "native" | "codeMode">): Entry[] => [
-  ...data.native.values(),
-  ...Array.from(data.codeMode.values()).filter((tool) => !data.native.has(tool.id)),
-]
+const CATALOG_CACHE_LIMIT = 5
 
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault()
 
@@ -336,23 +552,50 @@ function schemaMakeError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function registrationError(tool: Tool.Info) {
+const isSchemaValue = (value: unknown) => (typeof value === "object" && value !== null) || typeof value === "function"
+
+function register(id: string, tool: Tool.Info): Result.Result<ToolDefinition, RegistrationError> {
   const namespace = tool.options?.namespace
   if (namespace !== undefined) {
     const error = namespaceError(namespace)
-    if (error) return error
+    if (error) return Result.fail(error)
   }
   const name = normalizedName(tool)
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) return new RegistrationError({ name, message: `Invalid tool name: ${name}` })
-  const id = effectiveName(tool)
-  if (tool.options?.codemode === false && id === "execute")
-    return new RegistrationError({ name: id, message: 'Tool name "execute" is reserved for CodeMode' })
-  const result = Result.try({
+  if (!/^[A-Za-z0-9_-]+$/.test(name))
+    return Result.fail(new RegistrationError({ name, message: `Invalid tool name: ${name}` }))
+  if (!defaultCodeMode(tool) && id === "execute")
+    return Result.fail(new RegistrationError({ name: id, message: 'Tool name "execute" is reserved for CodeMode' }))
+  // Standard Schema libraries such as ArkType make schemas that are functions.
+  if (!isSchemaValue(tool.input))
+    return Result.fail(
+      new RegistrationError({ name: id, message: `Invalid tool definition ${id}: input must be a schema` }),
+    )
+  const direct = Result.try({
     try: () => ToolDefinition.make(definition(tool)),
     catch: (error) =>
       new RegistrationError({ name: id, message: `Invalid tool definition ${id}: ${schemaMakeError(error)}` }),
   })
-  return Result.isFailure(result) ? result.failure : undefined
+  if (Result.isFailure(direct)) return Result.fail(direct.failure)
+  const codemode = tool.options?.codemode
+  if (codemode === undefined || typeof codemode === "boolean") return direct
+  if (!isRecord(codemode))
+    return Result.fail(
+      new RegistrationError({
+        name: id,
+        message: `Invalid tool definition ${id}: options.codemode must be a boolean or object`,
+      }),
+    )
+  if (codemode.input !== undefined && !isSchemaValue(codemode.input))
+    return Result.fail(
+      new RegistrationError({ name: id, message: `Invalid tool definition ${id}: input must be a schema` }),
+    )
+  const overridden = Result.try({
+    try: () => ToolDefinition.make(definition(tool, true)),
+    catch: (error) =>
+      new RegistrationError({ name: id, message: `Invalid tool definition ${id}: ${schemaMakeError(error)}` }),
+  })
+  if (Result.isFailure(overridden)) return Result.fail(overridden.failure)
+  return direct
 }
 
 function namespaceError(name: string) {
@@ -363,5 +606,15 @@ function namespaceError(name: string) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, Image.node],
+  deps: [PluginHooks.node, Image.node, Permission.node, Flag.node],
 })
+
+// Only read once the input has the shape the full_codemode schema accepts; the tool still validates it when it runs.
+const executeOptions = (input: unknown): CodeModeJob.Options | undefined => {
+  if (typeof input !== "object" || input === null) return undefined
+  const { timeout, background } = input as Record<string, unknown>
+  return {
+    ...(typeof timeout === "number" && Number.isInteger(timeout) && timeout > 0 ? { timeout } : {}),
+    ...(background === true ? { background } : {}),
+  }
+}

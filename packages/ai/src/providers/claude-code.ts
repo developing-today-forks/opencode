@@ -39,7 +39,7 @@ import type { ProviderPackage } from "../provider-package.js"
 import { AnthropicMessages } from "../protocols/anthropic-messages.js"
 import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
 import { Auth } from "../route/auth.js"
-import type { RouteDefaultsInput } from "../route/client.js"
+import type { RequestOptions } from "../schema/index.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { ClaudeCodeAuth, type CredentialSources } from "./claude-code-auth.js"
 
@@ -48,7 +48,7 @@ export const id = ProviderID.make("_claude")
 export type ProviderOptionsInput = ClaudeCodeMessages.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput
 
-export type Config = Omit<RouteDefaultsInput, "providerOptions"> & {
+export type Config = Omit<RequestOptions, "providerOptions"> & {
   readonly baseURL?: string
   /** Explicit auth override (tests, embedding hosts). Wins over every credential tier. */
   readonly auth?: Auth.Definition

@@ -1,4 +1,5 @@
 import type { FormInfo, PermissionRequest, SessionInfo } from "@opencode/client/promise"
+import type { Data } from "@opencode/client/solid"
 
 function sessionTreeRequest<T>(
   session: SessionInfo[],
@@ -9,7 +10,7 @@ function sessionTreeRequest<T>(
   const ids = sessionTreeIDs(session, sessionID)
 
   if (!ids.length) return
-  const list = (id: string) => (typeof request === "function" ? request(id) : request[id])
+  const list = (id: string) => (request instanceof Function ? request(id) : request[id])
   const id = ids.find((id) => list(id)?.some(include))
 
   if (!id) return
@@ -49,6 +50,17 @@ export function sessionTreeIDs(session: SessionInfo[], sessionID?: string) {
   return ids
 }
 
+// Only a running Session can hold a pending permission or form, and events keep loaded requests current, so idle
+// subagents are never read. One that still has cached requests is read too, so a reconnect clears requests answered
+// while the client was offline.
+export function sessionMayHoldRequests(data: Data, sessionID: string) {
+  return (
+    data.session.status(sessionID) === "running" ||
+    !!data.session.permission.list(sessionID)?.length ||
+    !!data.session.form.list(sessionID)?.length
+  )
+}
+
 export function sessionPermissionRequest(
   session: SessionInfo[],
   request: Record<string, PermissionRequest[] | undefined> | ((sessionID: string) => PermissionRequest[] | undefined),
@@ -67,6 +79,9 @@ export function sessionFormRequest(
     session,
     request,
     sessionID,
-    (item) => item.metadata?.kind === "question" || item.metadata?.kind === "websearch.provider",
+    (item) =>
+      item.metadata?.kind === "question" ||
+      item.metadata?.kind === "websearch.provider" ||
+      item.metadata?.kind === "mcp-elicitation",
   )
 }

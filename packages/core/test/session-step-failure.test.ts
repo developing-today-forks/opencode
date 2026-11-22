@@ -7,7 +7,7 @@ import {
   RateLimitError,
   TransportError,
   UnknownProviderError,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import { ModelRoute } from "@opencode/core/model-route"
 import { SessionStep } from "@opencode/core/session/runner/step"
 

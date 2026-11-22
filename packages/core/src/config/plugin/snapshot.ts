@@ -11,7 +11,7 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const snapshot = yield* Snapshot.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["snapshots"], snapshot.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, snapshot.reload(), ["snapshots"])
     yield* snapshot.transform((editor) => {
       const configured = Config.latest(loaded.entries, "snapshots")
       if (configured === undefined) return

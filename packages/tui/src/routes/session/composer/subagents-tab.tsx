@@ -1,6 +1,7 @@
 import { createMemo, For, Show, createEffect, onMount, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import { TextAttributes, ScrollBoxRenderable } from "@opentui/core"
+import { useRenderer } from "@opentui/solid"
 import type { SessionInfo } from "@opencode/client"
 import { useRoute, useRouteData } from "../../../context/route"
 import { useData } from "../../../context/data"
@@ -11,18 +12,21 @@ import { Locale } from "../../../util/locale"
 import { Keymap } from "../../../context/keymap"
 import { useComposerTab } from "./context"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
-import { sessionFamily } from "../../../util/session"
+import { ownedJobs, sessionFamily } from "../../../util/session"
 
 interface SubagentEntry {
   sessionID: string
   agent: string
   title: string
   status: string
+  // Running jobs in its tree. A subagent stays active while any of them runs.
+  jobs: string[]
   current: boolean
   prefix: string
 }
 
 export function SubagentsTab(props: { sessionID: string }) {
+  const renderer = useRenderer()
   const route = useRouteData("session")
   const data = useData()
   const client = useClient()
@@ -40,12 +44,15 @@ export function SubagentsTab(props: { sessionID: string }) {
     const current = session()
     if (!current) return []
 
+    const jobs = data.job.list(data.session.root(current.id))
+    const owned = (sessionID: string) =>
+      ownedJobs(jobs, sessionID, (id) => data.session.get(id)?.parentID).map((job) => job.id)
     // Filter while building the tree, so a match under a filtered-out subagent keeps that parent as context instead
     // of drawing a connector to a missing row.
     return sessionFamily<SessionInfo>(
       data.session.list(),
       current.id,
-      (session) => (data.session.status(session.id) === "running") === filter.active,
+      (session) => (data.session.status(session.id) === "running" || owned(session.id).length > 0) === filter.active,
     ).map(({ session, prefix }): SubagentEntry => {
       const title = withTimestampedFallback(session)
       const agentMatch = title.match(/@(\w+) subagent/)
@@ -58,6 +65,7 @@ export function SubagentsTab(props: { sessionID: string }) {
             : "Subagent",
         title: agentMatch ? title.replace(agentMatch[0], "").trim() || title : title,
         status: data.session.status(session.id),
+        jobs: owned(session.id),
         current: session.id === route.sessionID,
         prefix,
       }
@@ -89,7 +97,7 @@ export function SubagentsTab(props: { sessionID: string }) {
       const scrollCurrentIntoView = () => scrollToIndex(next, true)
       scrollCurrentIntoView()
       // The remounted scrollbox finishes layout on the next frame and resets its scroll position.
-      requestAnimationFrame(() => requestAnimationFrame(scrollCurrentIntoView))
+      renderer.requestAnimationFrame(() => renderer.requestAnimationFrame(scrollCurrentIntoView))
     }
     wasActive = true
     if (store.selected >= list.length) moveTo(Math.max(0, list.length - 1))
@@ -122,7 +130,7 @@ export function SubagentsTab(props: { sessionID: string }) {
       hints: () => {
         const entry = selectedEntry()
         return [
-          ...(entry?.status === "running"
+          ...(entry && (entry.status === "running" || entry.jobs.length > 0)
             ? [{ label: "interrupt", shortcut: shortcuts.get("composer.subagent.interrupt") ?? "" }]
             : []),
           {
@@ -188,8 +196,9 @@ export function SubagentsTab(props: { sessionID: string }) {
         group: "Composer",
         run() {
           const entry = selectedEntry()
-          if (!entry || entry.status !== "running") return
-          void client.api.session.interrupt({ sessionID: entry.sessionID })
+          if (!entry) return
+          if (entry.status === "running") void client.api.session.interrupt({ sessionID: entry.sessionID })
+          entry.jobs.forEach((id) => void client.api.experimental.job.cancel({ id }))
         },
       },
     ],
