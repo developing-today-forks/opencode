@@ -2749,7 +2749,7 @@ describe("OpencodePlugin instances", () => {
       const integrations = yield* Integration.Service
       const state = {
         failing: false,
-        policies: { org_strict: [{ action: "tool.use", resource: "shell:sudo *", effect: "deny" as const }] },
+        policies: { org_strict: [{ action: "tool.use" as const, resource: "shell:sudo *", effect: "deny" as const }] },
       }
       yield* instanceCopy
       yield* account(work, "org_strict", "Strict")

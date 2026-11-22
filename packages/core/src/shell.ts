@@ -964,7 +964,18 @@ const layer = () =>
           const maxLines = limits?.max_lines ?? ToolOutput.MAX_LINES
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const command = yield* require(info.id)
-          const { size, truncated: overCap } = yield* captureOf(command)
+          // The result reads a bounded tail of the whole file. Only the spawner's capture stops at the cap, so only it
+          // says later output was discarded; a daemon file still holds everything up to its tail.
+          const size =
+            command.kind === "spawned"
+              ? command.size
+              : yield* Effect.promise(() =>
+                  stat(command.info.file).then(
+                    (info) => info.size,
+                    () => 0,
+                  ),
+                )
+          const overCap = command.kind === "spawned" && command.truncated
           const start = Math.max(0, size - maxBytes)
           // Read the byte before the window too, to tell whether the window starts on a line boundary.
           const before = Math.max(0, start - 1)
