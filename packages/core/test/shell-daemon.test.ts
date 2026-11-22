@@ -211,11 +211,12 @@ describe("Shell on the process daemon", () => {
       const env = yield* daemonShells()
       yield* env.withShell(env.directory, (shell) =>
         Effect.gen(function* () {
-          // Still running, so the daemon has not reported a line count, and the file is too big to count quickly.
+          // Output past MAX_OUTPUT_BYTES is discarded (#2486): the capture ends inside the first, 17 MiB line, and the
+          // ten lines after it are never read.
           const big = yield* shell.create({ shell: "/bin/sh", command: "big" })
           env.daemon.output(1, `${"y".repeat(17 * 1024 * 1024)}\n${lines(10)}`)
           expect((yield* shell.result(big, { wait: 0 })).capture?.output).toEndWith(
-            `line 10\n\n[showing the last 10 lines; full output saved to ${big.file}]`,
+            `\n\n[showing the last 50 KB of line 1 (over 1024 KB); full output saved to ${big.file}]`,
           )
 
           // A cut-off line that started too far back to look for.
@@ -231,6 +232,31 @@ describe("Shell on the process daemon", () => {
           expect((yield* shell.result(ended, { wait: 0 })).capture?.output).toEndWith(
             `\n\n[showing the last 50 KB of line 2 (over 1024 KB); full output saved to ${ended.file}]`,
           )
+        }),
+      )
+    }),
+  )
+
+  // Oracle: #2486's cap, MAX_OUTPUT_BYTES. The daemon writes everything it is given, so the server cuts the file on
+  // disk back to the cap, and keeps doing so as the command writes more.
+  it.live("keeps a daemon command's output file on disk at the cap", () =>
+    Effect.gen(function* () {
+      const env = yield* daemonShells()
+      yield* env.withShell(env.directory, (shell) =>
+        Effect.gen(function* () {
+          const info = yield* shell.create({ shell: "/bin/sh", command: "loud" })
+          const size = () => Bun.file(info.file).size
+          env.daemon.output(1, "z".repeat(Shell.MAX_OUTPUT_BYTES + 1024))
+          yield* until(() => size() === Shell.MAX_OUTPUT_BYTES)
+          // More output appends past the cut; it is cut back again.
+          env.daemon.output(1, "w".repeat(4096))
+          yield* until(() => size() === Shell.MAX_OUTPUT_BYTES)
+          expect(yield* shell.output(info.id, { cursor: Shell.MAX_OUTPUT_BYTES - 4 })).toEqual({
+            output: "zzzz",
+            cursor: Shell.MAX_OUTPUT_BYTES,
+            size: Shell.MAX_OUTPUT_BYTES,
+            truncated: true,
+          })
         }),
       )
     }),
