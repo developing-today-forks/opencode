@@ -2,7 +2,7 @@ import { Service, type Endpoint, type EnsureOptions } from "@opencode/client/eff
 import { ClientError, isUnauthorizedError, OpenCode } from "@opencode/client/promise"
 import { OPENCODE_VERSION } from "../version"
 import { Cause, Clock, Effect, Exit, Option, Redacted } from "effect"
-import { Server as ServerFlag, Standalone as StandaloneFlag } from "../commands/commands"
+import { CommandFlags } from "../commands/commands"
 import { Env } from "../env"
 import { ServiceConfig } from "./service-config"
 import { Standalone } from "./standalone"
@@ -25,8 +25,8 @@ export type Resolved = {
 }
 
 export const resolve = Effect.fn("cli.server-connection.resolve")(function* (args: Args = {}) {
-  const serverFlag = yield* Effect.serviceOption(ServerFlag).pipe(Effect.map(Option.flatten))
-  const standaloneFlag = yield* Effect.serviceOption(StandaloneFlag)
+  const serverFlag = yield* Effect.serviceOption(CommandFlags.Server).pipe(Effect.map(Option.flatten))
+  const standaloneFlag = yield* Effect.serviceOption(CommandFlags.Standalone)
   const server = args.server ?? Option.getOrUndefined(serverFlag)
   const standalone = args.standalone ?? Option.getOrElse(standaloneFlag, () => false)
   if (server !== undefined && standalone)

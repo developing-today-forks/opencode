@@ -1,3 +1,5 @@
+export * as CommandFlags from "./commands"
+
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
 import { CliFlag } from "../framework/flag"

@@ -17,7 +17,8 @@ import {
   SynchronizedRef,
 } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { Job as JobSchema } from "@opencode/schema/job"
+import { Event } from "@opencode/schema/job"
+import type { Job as JobSchema } from "@opencode/schema/job"
 import { Bus } from "./bus.js"
 import { Database } from "./database/database.js"
 import { JobList } from "./job/list.js"
@@ -257,7 +258,7 @@ export const make = Effect.gen(function* () {
 
   // Clients follow listed jobs through this instead of polling the list.
   const updated = (listed: JobSchema.Info | undefined) =>
-    bus && listed ? bus.publish(JobSchema.Event.Updated, { info: listed }).pipe(Effect.asVoid) : Effect.void
+    bus && listed ? bus.publish(Event.Updated, { info: listed }).pipe(Effect.asVoid) : Effect.void
   const listed = (info: Info, recovery: Recovery | undefined) => (recovery ? JobList.item(info, recovery) : undefined)
 
   const consume = (id: string, generation: Scope.Closeable) =>
