@@ -1636,6 +1636,7 @@ describe("ShellTool", () => {
               },
             ])
             expect((yield* shell.list()).map((info) => info.id)).toContain(id)
+            expect(info.metadata).toMatchObject({ sessionID, timeout: 50 })
             expect((yield* shell.wait(id)).status).toBe("timeout")
             expect((yield* Fiber.join(admitted)).valueOrUndefined?.data.item.payload).toMatchObject({
               text: expect.stringContaining("Timed out before completion"),
