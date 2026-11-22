@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
   AIError,
+  AuthenticationError,
+  HttpContext,
   CompactionPart,
   CompactionCheckpointResponse,
   LLMEvent,
@@ -1102,6 +1104,59 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(1)
     expect(started).toBe(0)
     expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the primary")
+  })
+
+  // Oracle: the ordered requests show immediate failover, while route health shows
+  // the 403 door remains benched rather than returning to ordinary candidacy.
+  scenario("completes on the next target after a 403 and benches the dead door", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    const target = ModelRoute.ref({ providerID: "fake", model: "fake-model" })
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target,
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 1,
+      fallback: () => Effect.succeed(backup),
+    }
+    yield* s.admit("Say something")
+    yield* s.llm.push(
+      TestLLM.failAfter(
+        new AIError({
+          reason: new AuthenticationError({
+            message: "account disabled",
+            http: new HttpContext({ url: "https://provider.test", status: 403, headers: {} }),
+          }),
+        }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[0]?.model.id)).toBe("fake-model")
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    expect(ModelRoute.coolingDown(target)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined)).toBe(false)
+
+    const probeAt = ModelRoute.cooldownUntil(target)
+    expect(ModelRoute.probeDue(target, undefined, probeAt)).toBe(true)
+    expect(ModelRoute.claimBenchProbe(target, undefined, probeAt)).toBe(true)
+    expect(ModelRoute.probeInFlight(target, undefined, probeAt)).toBe(true)
+    ModelRoute.completed(
+      target,
+      s.routing.policy,
+      { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 },
+      probeAt + 1,
+    )
+    expect(ModelRoute.probeDue(target, undefined, probeAt + 1)).toBe(false)
+    expect(ModelRoute.coolingDown(target, probeAt + 1)).toBe(false)
   })
 
   scenario("switches to the next credential on a quota failure before failing over to another target", function* (s) {
