@@ -24,7 +24,7 @@ import {
   SkillNotFoundError,
 } from "@opencode/protocol/errors"
 import { AbsolutePath } from "@opencode/core/schema"
-import { locationErrors } from "../location"
+import { awaitPlugins, locationErrors } from "../location"
 import { failedMessageDecode, failedSnapshot, missingMessage, missingSession } from "./session-error"
 
 const DefaultSessionsLimit = 50
@@ -341,6 +341,38 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
             ),
           )
           return HttpApiSchema.NoContent.make()
+        }),
+      )
+      .handle(
+        "session.routeTarget.list",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session
+              .routeTargets(ctx.params.sessionID)
+              .pipe(Effect.catchTag("Session.NotFoundError", missingSession)),
+          }
+        }),
+      )
+      .handle(
+        "session.routeTarget.set",
+        Effect.fn(function* (ctx) {
+          // Pools are registered by the model-routes config plugin; validate against them
+          // only once the location's plugins have activated.
+          yield* awaitPlugins
+          yield* session
+            .routeTarget({ sessionID: ctx.params.sessionID, routeID: ctx.payload.routeID, target: ctx.payload.target })
+            .pipe(
+              Effect.catchTag("Session.NotFoundError", missingSession),
+              Effect.catchTag(
+                "Session.RouteTargetError",
+                (error) => new InvalidRequestError({ message: error.message }),
+              ),
+            )
+          return {
+            data: yield* session
+              .routeTargets(ctx.params.sessionID)
+              .pipe(Effect.catchTag("Session.NotFoundError", missingSession)),
+          }
         }),
       )
       .handle(

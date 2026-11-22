@@ -108,7 +108,14 @@ export type ToolTextContent = { type: "text"; text: string }
 
 export type ToolFileContent = { type: "file"; uri: string; mime: string; name?: string | null }
 
-export type SessionStructuredError = { type: string; message: string; status?: number; response?: { body: string } }
+export type SessionStructuredError = {
+  type: string
+  message: string
+  status?: number
+  provider?: string
+  model?: string
+  response?: { body: string }
+}
 
 export type SessionActive = { type: "running" }
 
@@ -230,6 +237,21 @@ export type McpResourceTemplate = {
   uriTemplate: string
   description?: string
   mimeType?: string
+}
+
+export type RouteOverrideAction = "avoid" | "prefer" | "allow-over-budget"
+
+export type RouteOverrideWindow = {
+  daysOfWeek?: Array<number | "Infinity" | "-Infinity" | "NaN">
+  daysOfMonth?: Array<number | "Infinity" | "-Infinity" | "NaN">
+  start?: string
+  end?: string
+  timezone?: string
+  dates?: Array<string>
+  excludeDates?: Array<string>
+  excludeWindows?: Array<string>
+  from?: number | "Infinity" | "-Infinity" | "NaN"
+  until?: number | "Infinity" | "-Infinity" | "NaN"
 }
 
 export type ProjectVcs = string
@@ -400,8 +422,9 @@ export type ConfigModelRouteProviderRoutes = {
               | "sat"
               | "saturday"
               | number
+              | string
             >
-            daysOfMonth?: Array<-1 | number>
+            daysOfMonth?: Array<-1 | number | string>
             dates?: Array<string>
             excludeDates?: Array<string>
             excludeWindows?: Array<string>
@@ -440,8 +463,9 @@ export type ConfigModelRouteWindows = {
       | "sat"
       | "saturday"
       | number
+      | string
     >
-    daysOfMonth?: Array<-1 | number>
+    daysOfMonth?: Array<-1 | number | string>
     dates?: Array<string>
     excludeDates?: Array<string>
     excludeWindows?: Array<string>
@@ -526,6 +550,7 @@ export type SessionMessageSynthetic = {
   id: SessionMessageID
   metadata?: { [x: string]: JsonValue }
   time: { created: number }
+  delivery?: "steer" | "queue"
   text: string
   description?: string
   type: "synthetic"
@@ -550,6 +575,8 @@ export type SessionMessageCompactionRunning = {
   summary: string
   recent: string
 }
+
+export type SessionAuthoritativeCost = { cost: MoneyUSD; cacheSavings: MoneyUSD; tokens: TokenUsageInfo }
 
 export type FileSystemEntry = { path: RelativePath; type: "file" | "directory" }
 
@@ -816,7 +843,7 @@ export type ConfigModelRouteTarget =
       model: string | { providerID: string; model: string; variant?: string }
       exclude?: Array<string>
       defaultVariant?: string
-      variants?: { [x: string]: string }
+      variants?: { [x: string]: string | false }
       until?: number
       limit?: { context: number }
       cache_format?: ModelCacheFormat
@@ -880,6 +907,22 @@ export type McpServer = {
 }
 
 export type McpResourceCatalog = { resources: Array<McpResource>; templates: Array<McpResourceTemplate> }
+
+export type RouteOverrideInfo = {
+  id: string
+  action: RouteOverrideAction
+  providers: Array<string>
+  models: Array<string>
+  routes: Array<string>
+  fixed: boolean
+  factor?: number | "Infinity" | "-Infinity" | "NaN"
+  weight?: number | "Infinity" | "-Infinity" | "NaN"
+  schedule?: RouteOverrideWindow
+  until?: number | "Infinity" | "-Infinity" | "NaN"
+  text: string
+  source: "user" | "interpreter"
+  createdAt: number | "Infinity" | "-Infinity" | "NaN"
+}
 
 export type Project = {
   id: ProjectID
@@ -1148,6 +1191,8 @@ export type SessionMessageModelSelected = {
   previous?: ModelRef
 }
 
+export type SessionRouteTarget = { routeID: string; target: ModelRef }
+
 export type SessionProviderContext = { version: 1; provenance: SessionProviderContextProvenance; messages: JsonValue }
 
 export type ProviderRequest = {
@@ -1169,6 +1214,7 @@ export type SessionMessageUser = {
   id: SessionMessageID
   metadata?: { [x: string]: JsonValue }
   time: { created: number }
+  delivery?: "steer" | "queue"
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
@@ -1463,6 +1509,7 @@ export type SessionStepEnded = {
     tokens: TokenUsageInfo
     snapshot?: SnapshotID
     files?: Array<RelativePath>
+    planNotices?: Array<string>
   }
 }
 
@@ -2211,7 +2258,14 @@ export type ConfigModelRoutes = {
   [x: string]: {
     name?: string
     system?: string
-    targets: Array<ConfigModelRouteTarget>
+    targets?: Array<ConfigModelRouteTarget>
+    include?: Array<string>
+    exclude?: Array<string>
+    contains?: Array<string>
+    notContains?: Array<string>
+    match?: string
+    levels?: Array<string>
+    variantRules?: Array<{ match: string; map: { [x: string]: string | false } }>
     cache_format?: ModelCacheFormat
     health?: {
       firstTokenTimeoutMs?: number | false
@@ -2260,8 +2314,9 @@ export type ConfigModelRoutes = {
               | "sat"
               | "saturday"
               | number
+              | string
             >
-            daysOfMonth?: Array<-1 | number>
+            daysOfMonth?: Array<-1 | number | string>
             dates?: Array<string>
             excludeDates?: Array<string>
             excludeWindows?: Array<string>
@@ -2825,8 +2880,9 @@ export type ConfigEntry =
                       | "sat"
                       | "saturday"
                       | number
+                      | string
                     >
-                    daysOfMonth?: Array<-1 | number>
+                    daysOfMonth?: Array<-1 | number | string>
                     dates?: Array<string>
                     excludeDates?: Array<string>
                     excludeWindows?: Array<string>
@@ -2854,9 +2910,17 @@ export type ConfigEntry =
                 quotaCooldownCapMs?: number
               }
               demotion?: { after?: number; windowMs?: number; factor?: number }
-              quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
+              quotaGate?: {
+                maxMs?: number
+                fallbackMs?: number
+                feedTtlMs?: number
+                balanceDeadThreshold?: number
+                rootStartMaxPct?: number
+                rootStartEnabled?: boolean
+              }
               escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
               network?: { windowMs?: number; providers?: number; providerModels?: number }
+              membership?: { waitMs?: number }
               continuity?: { hedgeRequests?: number }
               overrides?: { preferredFactor?: number }
             }
@@ -2890,8 +2954,9 @@ export type ConfigEntry =
                     | "sat"
                     | "saturday"
                     | number
+                    | string
                   >
-                  daysOfMonth?: Array<-1 | number>
+                  daysOfMonth?: Array<-1 | number | string>
                   dates?: Array<string>
                   excludeDates?: Array<string>
                   excludeWindows?: Array<string>
@@ -2924,9 +2989,17 @@ export type ConfigEntry =
               quotaCooldownCapMs?: number
             }
             demotion?: { after?: number; windowMs?: number; factor?: number }
-            quotaGate?: { maxMs?: number; fallbackMs?: number; feedTtlMs?: number; balanceDeadThreshold?: number }
+            quotaGate?: {
+              maxMs?: number
+              fallbackMs?: number
+              feedTtlMs?: number
+              balanceDeadThreshold?: number
+              rootStartMaxPct?: number
+              rootStartEnabled?: boolean
+            }
             escalation?: { enabled?: boolean; afterGiveUps?: number; outcomeWindow?: number }
             network?: { windowMs?: number; providers?: number; providerModels?: number }
+            membership?: { waitMs?: number }
             continuity?: { hedgeRequests?: number }
             overrides?: { preferredFactor?: number }
           }
@@ -2951,7 +3024,7 @@ export type SessionInfo = {
   agent?: AgentID
   model?: ModelRef
   cost: MoneyUSD
-  costAuthoritative?: { cost: MoneyUSD; cacheSavings: MoneyUSD; tokens: TokenUsageInfo }
+  costAuthoritative?: SessionAuthoritativeCost
   tokens: TokenUsageInfo
   outcome?: "succeeded" | "failed" | "interrupted"
   time: { created: number; updated: number; idle?: number; viewed?: number; archived?: number }
@@ -3409,6 +3482,14 @@ export const isInstructionEntryValueTooLargeError = (value: unknown): value is I
   "_tag" in value &&
   value["_tag"] === "InstructionEntryValueTooLargeError"
 
+export type InstructionEntryNotFoundError = {
+  readonly _tag: "InstructionEntryNotFoundError"
+  readonly key: string
+  readonly message: string
+}
+export const isInstructionEntryNotFoundError = (value: unknown): value is InstructionEntryNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "InstructionEntryNotFoundError"
+
 export type FormNotFoundError = { readonly _tag: "FormNotFoundError"; readonly id: string; readonly message: string }
 export const isFormNotFoundError = (value: unknown): value is FormNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "FormNotFoundError"
@@ -3471,6 +3552,14 @@ export type McpServerNotFoundError = {
 export const isMcpServerNotFoundError = (value: unknown): value is McpServerNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "McpServerNotFoundError"
 
+export type CredentialNotFoundError = {
+  readonly _tag: "CredentialNotFoundError"
+  readonly credentialID: string
+  readonly message: string
+}
+export const isCredentialNotFoundError = (value: unknown): value is CredentialNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "CredentialNotFoundError"
+
 export type ProjectNotFoundError = {
   readonly _tag: "ProjectNotFoundError"
   readonly projectID: string
@@ -3478,6 +3567,14 @@ export type ProjectNotFoundError = {
 }
 export const isProjectNotFoundError = (value: unknown): value is ProjectNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProjectNotFoundError"
+
+export type PermissionSavedNotFoundError = {
+  readonly _tag: "PermissionSavedNotFoundError"
+  readonly id: string
+  readonly message: string
+}
+export const isPermissionSavedNotFoundError = (value: unknown): value is PermissionSavedNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "PermissionSavedNotFoundError"
 
 export type PermissionNotFoundError = {
   readonly _tag: "PermissionNotFoundError"
@@ -3490,6 +3587,10 @@ export const isPermissionNotFoundError = (value: unknown): value is PermissionNo
 export type FileNotFoundError = { readonly _tag: "FileNotFoundError"; readonly path: string; readonly message: string }
 export const isFileNotFoundError = (value: unknown): value is FileNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "FileNotFoundError"
+
+export type FileTooLargeError = { readonly _tag: "FileTooLargeError"; readonly path: string; readonly message: string }
+export const isFileTooLargeError = (value: unknown): value is FileTooLargeError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "FileTooLargeError"
 
 export type RpcError = {
   readonly _tag: "RpcError"
@@ -3544,6 +3645,10 @@ export const isVcsInitNotSupportedError = (value: unknown): value is VcsInitNotS
 export type ServerInfoOutput = ServerInfo
 
 export type ServerPairOutput = PairingCode
+
+export type ServerRedeemInput = { readonly code: { readonly code: string }["code"] }
+
+export type ServerRedeemOutput = PairingSession
 
 export type ServerConnectInput = { readonly code: { readonly code: string }["code"] }
 
@@ -4026,6 +4131,16 @@ export type SessionImportInput = {
       readonly agent?: string
       readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
       readonly cost: number
+      readonly costAuthoritative?: {
+        readonly cost: number
+        readonly cacheSavings: number
+        readonly tokens: {
+          readonly input: number
+          readonly output: number
+          readonly reasoning: number
+          readonly cache: { readonly read: number; readonly write: number }
+        }
+      }
       readonly tokens: {
         readonly input: number
         readonly output: number
@@ -4112,6 +4227,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -4137,6 +4253,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -4235,6 +4352,8 @@ export type SessionImportInput = {
                         readonly type: string
                         readonly message: string
                         readonly status?: number
+                        readonly provider?: string
+                        readonly model?: string
                         readonly response?: { readonly body: string }
                       }
                       readonly content?: readonly [
@@ -4277,6 +4396,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
           readonly retry?: {
@@ -4286,6 +4407,8 @@ export type SessionImportInput = {
               readonly type: string
               readonly message: string
               readonly status?: number
+              readonly provider?: string
+              readonly model?: string
               readonly response?: { readonly body: string }
             }
           }
@@ -4343,6 +4466,8 @@ export type SessionImportInput = {
                 readonly type: string
                 readonly message: string
                 readonly status?: number
+                readonly provider?: string
+                readonly model?: string
                 readonly response?: { readonly body: string }
               }
               readonly cost?: number
@@ -4364,6 +4489,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
         }
@@ -4384,6 +4511,16 @@ export type SessionImportInput = {
       readonly agent?: string
       readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
       readonly cost: number
+      readonly costAuthoritative?: {
+        readonly cost: number
+        readonly cacheSavings: number
+        readonly tokens: {
+          readonly input: number
+          readonly output: number
+          readonly reasoning: number
+          readonly cache: { readonly read: number; readonly write: number }
+        }
+      }
       readonly tokens: {
         readonly input: number
         readonly output: number
@@ -4470,6 +4607,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -4495,6 +4633,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -4593,6 +4732,8 @@ export type SessionImportInput = {
                         readonly type: string
                         readonly message: string
                         readonly status?: number
+                        readonly provider?: string
+                        readonly model?: string
                         readonly response?: { readonly body: string }
                       }
                       readonly content?: readonly [
@@ -4635,6 +4776,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
           readonly retry?: {
@@ -4644,6 +4787,8 @@ export type SessionImportInput = {
               readonly type: string
               readonly message: string
               readonly status?: number
+              readonly provider?: string
+              readonly model?: string
               readonly response?: { readonly body: string }
             }
           }
@@ -4701,6 +4846,8 @@ export type SessionImportInput = {
                 readonly type: string
                 readonly message: string
                 readonly status?: number
+                readonly provider?: string
+                readonly model?: string
                 readonly response?: { readonly body: string }
               }
               readonly cost?: number
@@ -4722,6 +4869,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
         }
@@ -4742,6 +4891,16 @@ export type SessionImportInput = {
       readonly agent?: string
       readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
       readonly cost: number
+      readonly costAuthoritative?: {
+        readonly cost: number
+        readonly cacheSavings: number
+        readonly tokens: {
+          readonly input: number
+          readonly output: number
+          readonly reasoning: number
+          readonly cache: { readonly read: number; readonly write: number }
+        }
+      }
       readonly tokens: {
         readonly input: number
         readonly output: number
@@ -4828,6 +4987,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -4853,6 +5013,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly delivery?: "steer" | "queue"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -4951,6 +5112,8 @@ export type SessionImportInput = {
                         readonly type: string
                         readonly message: string
                         readonly status?: number
+                        readonly provider?: string
+                        readonly model?: string
                         readonly response?: { readonly body: string }
                       }
                       readonly content?: readonly [
@@ -4993,6 +5156,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
           readonly retry?: {
@@ -5002,6 +5167,8 @@ export type SessionImportInput = {
               readonly type: string
               readonly message: string
               readonly status?: number
+              readonly provider?: string
+              readonly model?: string
               readonly response?: { readonly body: string }
             }
           }
@@ -5059,6 +5226,8 @@ export type SessionImportInput = {
                 readonly type: string
                 readonly message: string
                 readonly status?: number
+                readonly provider?: string
+                readonly model?: string
                 readonly response?: { readonly body: string }
               }
               readonly cost?: number
@@ -5080,6 +5249,8 @@ export type SessionImportInput = {
             readonly type: string
             readonly message: string
             readonly status?: number
+            readonly provider?: string
+            readonly model?: string
             readonly response?: { readonly body: string }
           }
         }
@@ -5129,6 +5300,24 @@ export type SessionSwitchModelInput = {
 }
 
 export type SessionSwitchModelOutput = void
+
+export type SessionRouteTargetListInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionRouteTargetListOutput = { data: Array<SessionRouteTarget> }["data"]
+
+export type SessionRouteTargetSetInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly routeID: {
+    readonly routeID: string
+    readonly target: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+  }["routeID"]
+  readonly target: {
+    readonly routeID: string
+    readonly target: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+  }["target"]
+}
+
+export type SessionRouteTargetSetOutput = { data: Array<SessionRouteTarget> }["data"]
 
 export type SessionUpdateInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
@@ -6732,6 +6921,10 @@ export type ServerCompletionsEmbeddingsInput = { readonly payload: { readonly [x
 
 export type ServerCompletionsEmbeddingsOutput = any
 
+export type ServerCompletionsTranscriptionsInput = { readonly payload: { readonly [x: string]: unknown } }
+
+export type ServerCompletionsTranscriptionsOutput = any
+
 export type ServerCompletionsMessagesInput = { readonly payload: { readonly [x: string]: unknown } }
 
 export type ServerCompletionsMessagesOutput = any
@@ -7135,6 +7328,355 @@ export type CredentialActivateOutput = void
 export type CredentialRemoveInput = { readonly credentialID: { readonly credentialID: string }["credentialID"] }
 
 export type CredentialRemoveOutput = void
+
+export type RouteOverrideListOutput = { data: Array<RouteOverrideInfo> }["data"]
+
+export type RouteOverrideAddInput = {
+  readonly id: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["id"]
+  readonly action: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["action"]
+  readonly providers: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["providers"]
+  readonly models: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["models"]
+  readonly routes: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["routes"]
+  readonly fixed: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["fixed"]
+  readonly factor?: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["factor"]
+  readonly weight?: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["weight"]
+  readonly schedule?: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["schedule"]
+  readonly until?: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["until"]
+  readonly text: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["text"]
+  readonly source: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["source"]
+  readonly createdAt: {
+    readonly id: string
+    readonly action: "avoid" | "prefer" | "allow-over-budget"
+    readonly providers: ReadonlyArray<string>
+    readonly models: ReadonlyArray<string>
+    readonly routes: ReadonlyArray<string>
+    readonly fixed: boolean
+    readonly factor?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly weight?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly schedule?: {
+      readonly daysOfWeek?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly daysOfMonth?: ReadonlyArray<number | "Infinity" | "-Infinity" | "NaN">
+      readonly start?: string
+      readonly end?: string
+      readonly timezone?: string
+      readonly dates?: ReadonlyArray<string>
+      readonly excludeDates?: ReadonlyArray<string>
+      readonly excludeWindows?: ReadonlyArray<string>
+      readonly from?: number | "Infinity" | "-Infinity" | "NaN"
+      readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    }
+    readonly until?: number | "Infinity" | "-Infinity" | "NaN"
+    readonly text: string
+    readonly source: "user" | "interpreter"
+    readonly createdAt: number | "Infinity" | "-Infinity" | "NaN"
+  }["createdAt"]
+}
+
+export type RouteOverrideAddOutput = { data: Array<RouteOverrideInfo> }["data"]
+
+export type RouteOverrideRemoveInput = { readonly overrideID: { readonly overrideID: string }["overrideID"] }
+
+export type RouteOverrideRemoveOutput = void
 
 export type ProjectListInput = { readonly archived?: { readonly archived?: boolean | undefined }["archived"] }
 
