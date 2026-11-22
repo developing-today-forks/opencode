@@ -56,6 +56,11 @@ export const Model = Schema.Struct({
   ),
   experimental: Schema.optional(Schema.Boolean),
   status: Schema.optional(ModelStatus),
+  // The v2 model overlay keys, accepted in this spelling too so an entry that already lives under
+  // `provider` can carry them: a `providers` entry for the same id would replace it whole.
+  hidden: Schema.optional(Schema.Boolean),
+  defaultVariant: Schema.optional(Schema.String),
+  lockVariant: Schema.optional(Schema.Boolean),
   provider: Schema.optional(
     Schema.Struct({ npm: Schema.optional(Schema.String), api: Schema.optional(Schema.String) }),
   ),

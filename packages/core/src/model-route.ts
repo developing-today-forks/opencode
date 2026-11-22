@@ -170,6 +170,13 @@ const Definition = Schema.Struct({
   ).pipe(optional),
   /** Weight changes in force across every route, from experimental.routes.schedules. */
   schedules: Schema.Array(WeightRule).pipe(optional),
+  /** Parallel to `targets`, stored only for a route with `nestedTimeout: "own"`: the first-output wait of
+   * the nested route a leaf was reached through, or an empty object for the route's own leaves. */
+  targetFirstTokenTimeouts: Schema.Array(
+    Schema.Struct({
+      firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
+    }),
+  ).pipe(optional),
   nodes: Schema.Array(Node),
 })
 
@@ -197,8 +204,13 @@ export type Node = typeof Node.Type
 export type Policy = typeof Policy.Type
 export type Definition = typeof Definition.Type
 
+/** How long a target may take to produce its first output before the route fails over, when
+ * neither the route nor its nested routes name a wait. Long enough for a model that reasons
+ * before it answers; a nested route's longer wait wins by default (config plugin firstTokenTimeout). */
+export const DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000
+
 const DEFAULT_POLICY: Policy = {
-  firstTokenTimeoutMs: 10_000,
+  firstTokenTimeoutMs: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
   sampleWindow: 5,
   slowThreshold: 3,
   cooldownMs: 60_000,
@@ -231,6 +243,13 @@ export const policy = (
     cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
     quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
+}
+
+/** The policy an attempt on one target runs under: the route's, with the target's own first-output
+ * wait when the route lets nested routes keep theirs (`nestedTimeout: "own"`). */
+export const targetPolicy = (definition: Definition, index: number): Policy => {
+  const wait = definition.targetFirstTokenTimeouts?.[index]?.firstTokenTimeoutMs
+  return wait === undefined ? definition.health : { ...definition.health, firstTokenTimeoutMs: wait }
 }
 
 /** The route definition a model carries. Route models under the routes provider carry one, and so

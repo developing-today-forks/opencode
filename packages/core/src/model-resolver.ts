@@ -248,7 +248,7 @@ export const withVariant = (
   model: Info,
   variantID: VariantID | undefined,
 ): Effect.Effect<Info, VariantUnavailableError> => {
-  const id = variantID === "default" ? undefined : variantID
+  const id = chosenVariant(model, variantID)
   const variant = model.variants?.find((item) => item.id === id)
   if (!variant && id !== undefined)
     return Effect.fail(
@@ -268,6 +268,20 @@ export const withVariant = (
         }
       : model,
   )
+}
+
+// The model's configured default effort (provider model config `defaultVariant`) applies when a
+// request names no variant or asks for the default, which is what clients send when the user picked
+// none; `lockVariant` applies it to every request. Without one, the default is the provider's own.
+// A configured variant the model does not offer is ignored rather than failing every request.
+const chosenVariant = (model: Info, requested: VariantID | undefined) => {
+  const configured =
+    model.defaultVariant !== undefined && model.variants?.some((item) => item.id === model.defaultVariant)
+      ? model.defaultVariant
+      : undefined
+  if (configured !== undefined && (model.lockVariant || requested === undefined || requested === "default"))
+    return configured
+  return requested === "default" ? undefined : requested
 }
 
 export interface Dependencies {
@@ -811,6 +825,8 @@ export const layer = Layer.effect(
         }
         const makeResolved = (
           current: Resolved,
+          // The target `current` resolved, whose own first-output wait applies under nestedTimeout own.
+          targetIndex: number,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
           credentialFallback: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
           // The credential load() actually served this resolution with (#6), authoritative
@@ -861,7 +877,7 @@ export const layer = Layer.effect(
               routeID: definition.id,
               target: current.ref,
               ...(definition.system ? { system: definition.system } : {}),
-              policy: definition.health,
+              policy: ModelRoute.targetPolicy(definition, targetIndex),
               // Two requests by default: a single transient failure on a steady target is retried before the
               // route moves on. Rate limits skip the retry (see the runner). Set 1 to fail over at once.
               attempts: definition.attempts ?? 2,
@@ -1388,6 +1404,7 @@ export const layer = Layer.effect(
                     nextTried.add(retried.success.servingCredentialID)
                   return makeResolved(
                     retried.success.resolved,
+                    index,
                     undefined,
                     credentialFallback(retried.success.servingCredentialID, nextTried),
                     retried.success.servingCredentialID,
@@ -1416,6 +1433,7 @@ export const layer = Layer.effect(
               : undefined
           return makeResolved(
             current,
+            index,
             origin,
             credentialFallback(servingCredentialID),
             servingCredentialID,
@@ -1583,7 +1601,7 @@ export const layer = Layer.effect(
         const first = containing[0]
         if (!first) return loaded.resolved
         const { candidate, route, index } = first
-        const requestedVariant = variant === "default" ? undefined : variant
+        const requestedVariant = chosenVariant(selected, variant)
         const cascade: CascadeState = {
           kind: sessionID === undefined ? undefined : ModelRoute.sessionKind(parentID),
           triedRefs: new Set([cascadeRefKey(route.targets[index])]),
@@ -1598,7 +1616,7 @@ export const layer = Layer.effect(
             routeID: route.id,
             target: loaded.resolved.ref,
             ...(route.system ? { system: route.system } : {}),
-            policy: route.health,
+            policy: ModelRoute.targetPolicy(route, index),
             attempts: route.attempts ?? 2,
             ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
             autonomy: route.autonomy,
@@ -1684,7 +1702,8 @@ export const layer = Layer.effect(
         return attachDirectRoute(selected, variant, sessionID, requestTokens, parentID)
       if (!definition || definition.targets.length === 0)
         return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
-      const requestedVariant = variant === "default" ? undefined : variant
+      // A pool's own configured default or locked effort (providers.opencode-route.models.<id>) applies here.
+      const requestedVariant = chosenVariant(selected, variant)
       if (requestedVariant && !selected.variants.some((item) => item.id === requestedVariant))
         return Effect.fail(
           new VariantUnavailableError({
