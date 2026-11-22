@@ -119,6 +119,12 @@ export class Health extends Schema.Class<Health>("Config.ModelRoute.Health")({
         "Fail over if the target produces no response output within this many milliseconds. Defaults to 30000; a route that nests other routes defaults to the longest wait among them (see nestedTimeout). false waits without a limit.",
     })
     .pipe(optional),
+  lastTargetTimeoutMs: Schema.Union([BoundedPositiveInt, Schema.Literal(false)])
+    .annotate({
+      description:
+        "How long the last target that can take the request may go without response output. firstTokenTimeoutMs only moves a request to another target, so once it passes with no other target left, the target keeps going until this many milliseconds instead of failing. Defaults to 900000 (15 minutes), the silence OpenCode allows any streaming response. A value at or below firstTokenTimeoutMs ends the last target at firstTokenTimeoutMs; false waits without a limit.",
+    })
+    .pipe(optional),
   maxResponseTimeMs: BoundedPositiveInt.annotate({
     description:
       "Count a completed response as slow when it exceeds this many milliseconds, measured to the end of the model's response. Tools that the step runs afterwards do not count.",

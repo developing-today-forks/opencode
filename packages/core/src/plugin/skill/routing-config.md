@@ -159,6 +159,10 @@ model `opencode-route/<id>`.
   waits for first output. Unset, a pool with no `health.firstTokenTimeoutMs` of its
   own waits as long as the slowest pool inside it; `own` keeps the pool's wait for its
   own targets and lets each nested pool's targets wait as long as that pool would.
+- `health.lastTargetTimeoutMs`: the first-output wait only moves a request on, so the
+  last target that can take it keeps going past it until this (900000, 15 minutes,
+  by default). At or below `firstTokenTimeoutMs` it ends at the wait; `false` waits
+  without a limit.
 
 A malformed pattern, regular expression or expression skips the whole pool, and a
 pool with none of `targets`, `include`, `contains` and `match` is skipped too. A

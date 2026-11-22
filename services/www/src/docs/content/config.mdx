@@ -342,6 +342,13 @@ deadline, degradation after 3 slow completions in a rolling window of 5, and a
 60-second in-memory cooldown. Set `firstTokenTimeoutMs` to `false` to disable
 that deadline.
 
+The deadline only moves a request to another target. When no other target can
+take it, the target it is on keeps going instead of failing, until
+`lastTargetTimeoutMs` (15 minutes by default, the silence OpenCode allows any
+streaming response). Set `lastTargetTimeoutMs` at or below `firstTokenTimeoutMs`
+to end the last target at the deadline too, or to `false` to wait without a
+limit.
+
 Only the route a session picked applies its deadline. A route that nests other
 routes, as `opencode-route/<id>` targets or by name in `include` or `match`, and
 names no deadline of its own waits as long as the slowest of them, so a slow

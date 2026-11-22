@@ -51,7 +51,7 @@ configured `targets` as members until the history has offered the matched ones.
   while it works; failover moves it.
 - `weights`: per target, default 1 — ratios in `weighted` pools, priority tiers in
   `round-robin` pools, failover rank in `ordered` pools.
-- `health`: `firstTokenTimeoutMs` (default 30000; a pool that nests pools waits as long as the slowest of them, see `nestedTimeout`), `maxResponseTimeMs`,
+- `health`: `firstTokenTimeoutMs` (default 30000; a pool that nests pools waits as long as the slowest of them, see `nestedTimeout`), `lastTargetTimeoutMs` (default 900000: once `firstTokenTimeoutMs` passes with no other target to move to, the target keeps going until this instead of failing), `maxResponseTimeMs`,
   `minOutputTokensPerSecond`, `sampleWindow` (5), `slowThreshold` (3), `cooldownMs`
   (60000), `quotaCooldownMs` (900000). A target that fails goes on cooldown.
 - `budgets`: per target, `requestsPerMinute`, `requestsPerDay`, `tokensPerMinute`,
