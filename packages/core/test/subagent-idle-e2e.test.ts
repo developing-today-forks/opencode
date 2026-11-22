@@ -264,7 +264,7 @@ const harness = Effect.fnUntraced(function* (input?: HarnessInput) {
         type: "tool-call" as const,
         id,
         name: SubagentTool.name,
-        input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+        input: { agent: "reviewer", description: "review", prompt: "review this", ...input, background: true },
       },
     })
   return { ...base, ...app, registry, parent, call }
@@ -562,6 +562,7 @@ describe("subagent idle reports end to end", () => {
           script({
             reviewer: [
               TestLLM.toolCall("call-grandchild", SubagentTool.name, {
+                background: true,
                 agent: "fallback",
                 description: "grandchild review",
                 prompt: "review the grandchild fixture",
@@ -711,7 +712,7 @@ describe("subagent idle reports end to end", () => {
             type: "tool-call",
             id: "call-launch",
             name: SubagentTool.name,
-            input: { agent: "reviewer", description: "restart review", prompt: "review this" },
+            input: { agent: "reviewer", description: "restart review", prompt: "review this", background: true },
           },
         })
         const childID = outputSessionID(launched.metadata)

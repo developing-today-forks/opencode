@@ -189,7 +189,9 @@ describe("ReadToolFileSystem", () => {
         const result = yield* ReadToolFileSystem.read(current.environment, absolute(file), `${item.name}.bin`)
         const base64 = item.bytes.toString("base64")
 
-        expect(result).toMatchObject({ type: "file", encoding: "base64", content: base64, mime: item.mime })
+        expect(result).toMatchObject({ type: "media", mime: item.mime })
+        expect(result.type === "media" && Buffer.from(result.bytes).equals(item.bytes)).toBe(true)
+        if (result.type !== "media") return
         expect(ReadTool.toModelContent(`${item.name}.bin`, undefined, result)).toMatchObject([
           { type: "text", text: item.label },
           { type: "file", uri: `data:${item.mime};base64,${base64}`, mime: item.mime },

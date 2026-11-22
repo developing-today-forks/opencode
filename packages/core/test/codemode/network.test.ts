@@ -25,8 +25,12 @@ const allowAll = permissionService({ assert: () => Effect.void, assertNotDenied:
 const program = async (code: string) => {
   const codeMode = CodeModeTool.create({ tools: new Map() }, (_, tool, input, ctx) => execute(tool, input, ctx), allowAll)
   const result = await Effect.runPromise(
-    codeMode.execute({ code: `try { ${code} } catch (e) { return "error: " + e.message }` }, context),
+    codeMode.execute(
+      { code: `try { return JSON.stringify(await (async () => { ${code} })()) } catch (e) { return JSON.stringify("error: " + e.message) }` },
+      context,
+    ),
   )
+  // Code Mode returns a string result as is, so the program serializes its own value.
   return JSON.parse(result.output.output) as unknown
 }
 

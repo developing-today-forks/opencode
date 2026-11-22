@@ -1291,7 +1291,8 @@ describe("ConfigProviderPlugin.Plugin", () => {
                   name: "Configured",
                   canonical: "anthropic",
                   env: ["CUSTOM_API_KEY"],
-                  package: "native",
+                  // No package here: this fork seats the first document that names one (#1858), and the
+                  // later document's package must be the one that seats for its overrides to apply.
                   headers: { first: "first", shared: "first" },
                   models: {
                     chat: {

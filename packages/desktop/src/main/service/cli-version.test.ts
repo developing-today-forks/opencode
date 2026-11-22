@@ -29,8 +29,8 @@ describe("cli-version", () => {
     { version: "2.0.32", message: "Background service failed to start", expected: false },
   ])("shouldRetryEnsure($version, $message) -> $expected", (input) => {
     expect(shouldRetryEnsure(input.version, input.message)).toBe(input.expected)
-
-
+  })
+})
 
 describe("parseCliVersion", () => {
   test.each([

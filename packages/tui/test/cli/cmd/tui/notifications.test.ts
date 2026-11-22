@@ -18,7 +18,6 @@ async function setup(route: Route = { type: "session", sessionID: "session" }) {
     session: session("session", "Demo session"),
     subagent: session("subagent", "Subagent session", "session"),
     second: session("second", "Second subagent session", "session"),
-    nested: session("nested", "Nested subagent session", "subagent"),
     abort: session("abort", "Abort session"),
     timeout: session("timeout", "Timeout session"),
   }

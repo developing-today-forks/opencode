@@ -264,7 +264,8 @@ describe("SessionRunnerLLM recorded", () => {
       expect(turn.filter((span) => span.attributes.get("session.id") !== sessionID).map((span) => span.name)).toEqual(
         [],
       )
-      const attempt = turn.find((span) => span.name === "SessionStep.attempt")
+      // In this fork SessionStep.attempt wraps the membership gate and hedging; the request itself is SessionStep.run.
+      const attempt = turn.find((span) => span.name === "SessionStep.run")
       expect(Object.fromEntries(attempt?.attributes ?? [])).toMatchObject({
         "gen_ai.agent.name": "build",
         "gen_ai.provider.name": "openai",

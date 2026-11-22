@@ -262,7 +262,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-completion-replay",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "background review", prompt: "review" },
+              input: { agent: "reviewer", description: "background review", prompt: "review", background: true },
             },
           })
           const marker = yield* Deferred.await(admitted)
@@ -333,7 +333,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-primary",
                 name: SubagentTool.name,
-                input: { agent: "primary", description: "primary", prompt: "should fail" },
+                input: { agent: "primary", description: "primary", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -404,7 +404,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-too-deep-subagent",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "too deep", prompt: "should fail" },
+                input: { agent: "reviewer", description: "too deep", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -452,7 +452,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-cycle-subagent",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "cycle", prompt: "should fail" },
+                input: { agent: "reviewer", description: "cycle", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -498,7 +498,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-self-parent-subagent",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "self parent", prompt: "should fail" },
+                input: { agent: "reviewer", description: "self parent", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -540,7 +540,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-configured-limit",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "nested", prompt: "should fail" },
+                input: { agent: "reviewer", description: "nested", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -578,7 +578,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-zero-limit",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "top level", prompt: "should fail" },
+                input: { agent: "reviewer", description: "top level", prompt: "should fail", background: true },
               },
             }),
           ).toEqual({
@@ -620,7 +620,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-governance-denied",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "denied", prompt: "should fail", model: "test/override" },
+                input: { agent: "reviewer", description: "denied", prompt: "should fail", model: "test/override", background: true },
               },
             }),
           ).toEqual({
@@ -666,7 +666,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-force-denied",
                 name: SubagentTool.name,
-                input: { agent: "locked", description: "locked", prompt: "should fail", model: "test/override" },
+                input: { agent: "locked", description: "locked", prompt: "should fail", model: "test/override", background: true },
               },
             }),
           ).toEqual({
@@ -685,6 +685,7 @@ describe("SubagentTool", () => {
               id: "call-force-allowed",
               name: SubagentTool.name,
               input: {
+                background: true,
                 agent: "locked",
                 description: "forced",
                 prompt: "run",
@@ -700,6 +701,42 @@ describe("SubagentTool", () => {
             agent: "locked",
             model: { id: "override", providerID: "test" },
           })
+        }),
+      ),
+    ),
+  )
+
+  // This fork keeps foreground subagents (upstream made every subagent background): without `background: true`
+  // the call blocks until the child finishes and returns its final text.
+  it.live("runs a foreground child session and returns the final assistant text", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+
+          const settled = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-subagent",
+              name: SubagentTool.name,
+              input: { agent: "reviewer", description: "review", prompt: "review this" },
+            },
+          })
+
+          expect(settled).toMatchObject({
+            status: "completed",
+            metadata: { status: "completed" },
+            output: { status: "completed", output: childText },
+          })
+          const child = yield* sessions.get(outputSessionID(settled.metadata))
+          expect(child).toMatchObject({ parentID: parent.id, agent: "reviewer", model: childModel })
         }),
       ),
     ),
@@ -725,7 +762,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "review", prompt: "review this", model: "", sessionID: "" },
+              input: { agent: "reviewer", description: "review", prompt: "review this", model: "", sessionID: "", background: true },
             },
           })
 
@@ -757,7 +794,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent-fallback",
               name: SubagentTool.name,
-              input: { agent: "fallback", description: "fallback", prompt: "fallback" },
+              input: { agent: "fallback", description: "fallback", prompt: "fallback", background: true },
             },
           })
           const fallbackChild = yield* sessions.get(outputSessionID(fallback.metadata))
@@ -789,7 +826,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id,
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "review", prompt: "review this" },
+                input: { agent: "reviewer", description: "review", prompt: "review this", background: true },
               },
             }).pipe(Effect.flatMap((settled) => sessions.get(outputSessionID(settled.metadata))))
 
@@ -818,7 +855,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent-first",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "review", prompt: "review this" },
+              input: { agent: "reviewer", description: "review", prompt: "review this", background: true },
             },
           })
           const childID = outputSessionID(first.metadata)
@@ -830,6 +867,7 @@ describe("SubagentTool", () => {
               id: "call-subagent-second",
               name: SubagentTool.name,
               input: {
+                background: true,
                 agent: "reviewer",
                 description: "follow up",
                 prompt: "continue this",
@@ -884,6 +922,7 @@ describe("SubagentTool", () => {
               id: "call-running-subagent",
               name: SubagentTool.name,
               input: {
+                background: true,
                 agent: "reviewer",
                 description: "follow up",
                 prompt: "continue while running",
@@ -935,7 +974,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id,
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "review", prompt: id, ...input },
+                input: { agent: "reviewer", description: "review", prompt: id, ...input, background: true },
               },
             }).pipe(Effect.timeout("2 seconds"))
 
@@ -994,7 +1033,7 @@ describe("SubagentTool", () => {
                 type: "tool-call" as const,
                 id,
                 name: SubagentTool.name,
-                input: { agent, description: "follow up", prompt: "continue", sessionID },
+                input: { agent, description: "follow up", prompt: "continue", sessionID, background: true },
               },
             })
 
@@ -1014,7 +1053,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id: "call-malformed-child-id",
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "follow up", prompt: "continue", sessionID: "placeholder" },
+                input: { agent: "reviewer", description: "follow up", prompt: "continue", sessionID: "placeholder", background: true },
               },
             }),
           ).toMatchObject({
@@ -1077,7 +1116,7 @@ describe("SubagentTool", () => {
                 type: "tool-call" as const,
                 id,
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+                input: { agent: "reviewer", description: "review", prompt: "review this", ...input, background: true },
               },
             })
 
@@ -1161,7 +1200,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-background-subagent",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "background review", prompt: "review" },
+              input: { agent: "reviewer", description: "background review", prompt: "review", background: true },
             },
           })
           const childID = outputSessionID(settled.metadata)
@@ -1219,7 +1258,7 @@ const reportingFixture = () =>
           type: "tool-call" as const,
           id,
           name: SubagentTool.name,
-          input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+          input: { agent: "reviewer", description: "review", prompt: "review this", ...input, background: true },
         },
       })
     // A notice is either still queued or already delivered to the parent; count both.

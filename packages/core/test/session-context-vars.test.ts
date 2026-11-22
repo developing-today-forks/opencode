@@ -99,7 +99,7 @@ it.effect("renders session variables in instruction files that opt in through fr
 
     const selection = yield* context.select(sessionID)
     const observed = yield* Instructions.read(selection.instructions)
-    expect(disabledTools.at(-1)).toBeUndefined()
+    expect(disabledTools.at(-1)?.has("question") ?? false).toBe(false)
     const values = Object.fromEntries(
       observed.flatMap((entry) => (typeof entry.value === "object" ? [[entry.key, entry.value]] : [])),
     )

@@ -2735,8 +2735,16 @@ const withShellTimeout = <A, E, R>(shellTimeout: number, body: (registry: Tool.I
     (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
   )
 
-const contentText = (settled: { content?: ReadonlyArray<{ type: string; text?: string }> }) =>
-  (settled.content ?? []).map((item) => (item.type === "text" ? (item.text ?? "") : "")).join("\n")
+const expectMovedToBackground = Effect.fnUntraced(function* (settled: {
+  status: string
+  metadata?: Record<string, unknown>
+}) {
+  expect(settled.status).toBe("completed")
+  expect(settled.metadata).toMatchObject({ status: "running" })
+  const shellID = typeof settled.metadata?.shellID === "string" ? settled.metadata.shellID : ""
+  expect(shellID).toStartWith("sh_")
+  yield* (yield* Shell.Service).remove(ID.make(shellID))
+})
 
 describe("ShellTool configured default timeout", () => {
   it.live("times out a foreground command at the configured default and renders it in the timeout description", () =>
@@ -2746,12 +2754,11 @@ describe("ShellTool configured default timeout", () => {
         const definitions = yield* toolDefinitions(registry)
         const definition = definitions.find((tool) => tool.name === "shell")
         expect(definition?.inputSchema).toMatchObject({
-          properties: { timeout: { description: expect.stringContaining("Defaults to 100 for foreground commands") } },
+          properties: { timeout: { description: expect.stringContaining("(default 100)") } },
         })
+        // A foreground timeout moves the command to the background instead of stopping it.
         const settled = yield* executeTool(registry, call({ command: idleCommand }))
-        expect(settled.status).toBe("completed")
-        expect(settled.metadata).toMatchObject({ timeout: true })
-        expect(contentText(settled)).toContain("Command exceeded timeout of 100 ms")
+        yield* expectMovedToBackground(settled)
       }),
     ),
   )
@@ -2761,9 +2768,7 @@ describe("ShellTool configured default timeout", () => {
       Effect.gen(function* () {
         reset()
         const settled = yield* executeTool(registry, call({ command: idleCommand, timeout: 100 }))
-        expect(settled.status).toBe("completed")
-        expect(settled.metadata).toMatchObject({ timeout: true })
-        expect(contentText(settled)).toContain("Command exceeded timeout of 100 ms")
+        yield* expectMovedToBackground(settled)
       }),
     ),
   )

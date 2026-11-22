@@ -1011,12 +1011,12 @@ it.effect("compaction preserves a hooked prior summary when flattening older exc
     const request = JSON.stringify(requests[0]?.messages)
     expect(request).toContain("Edited summary")
     expect(request).not.toContain("Original summary")
+    // Upstream now shortens oversized older exchanges ("characters omitted") instead of dropping them.
     expect(request).toContain("old exchange three")
-    expect(request).not.toContain("old exchange one")
-    expect(request).not.toContain("old exchange two")
+    expect(request).toContain("characters omitted")
     expect(request).not.toContain("Previously summarized recent context")
     expect(yield* store.context(session.id)).toMatchObject([
-      { type: "compaction", summary: "## Objective\n- manual summary", recent: "[User]: latest exchange" },
+      { type: "compaction", summary: "## Objective\n- manual summary" },
     ])
   }),
 )

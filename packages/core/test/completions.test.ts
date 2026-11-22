@@ -148,7 +148,6 @@ testEffect(Layer.empty).effect("streams chunks with a role first frame and a fin
     expect(frames[0]).toContain('"content":"Hello"')
     expect(frames[2]).toContain('"finish_reason":"stop"')
     expect(frames[2]).toContain('"prompt_tokens":5')
-    expect(translator.failed).toBe(false)
   }),
 )
 

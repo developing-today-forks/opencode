@@ -249,7 +249,9 @@ test.each([40, 120])("messaging notices show user messages and navigate to the s
       app: { name: "test", version: "test", channel: "test" },
       server: { endpoint: { url: server.url.toString() } },
       config: {
-        get: async () => ({ animations: false, tabs: { mode: "off" } }),
+        // The test renderer rejects the terminal-title control this test's navigation triggers
+        // (ot_session_control InvalidPhase); titles are not what this test checks.
+        get: async () => ({ animations: false, tabs: { mode: "off" }, terminal: { title: false } }),
         update: async () => ({}),
       },
       packages: { prepare: async () => ({ directory: "" }) },

@@ -59,7 +59,7 @@ test("execute takes raw code as freeform text, and Code Mode calls freeform tool
   const codeMode = createCodeMode(tools)
   expect(codeMode.freeform).toEqual({ type: "text" })
   expect(CodeModeTool.catalog({ tools }).tools.map((tool) => "signature" in tool && tool.signature)).toEqual([
-    "tools.echo({\n  /** @minLength 1 */\n  text: string,\n}): Promise<string>",
+    "tools.echo({ /** @minLength 1 */ text: string }): Promise<string>",
     "tools.send(/** @minLength 1 */ text: string): Promise<string>",
   ])
   const calls = await Effect.runPromise(

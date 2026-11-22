@@ -75,7 +75,12 @@ describe("Host.resolve", () => {
       "package.json": JSON.stringify({ name: "local-only", type: "module", exports: { ".": "./index.js" } }),
       "index.js": source,
     })
-    assert.deepEqual(Host.resolve(plugin.target), { server: plugin.url("index.js"), tui: undefined, rpc: undefined })
+    assert.deepEqual(Host.resolve(plugin.target), {
+      server: plugin.url("index.js"),
+      tui: undefined,
+      rpc: undefined,
+      gui: undefined,
+    })
   })
 
   it("resolves local conventional entrypoints with package.json but no exports", async () => {

@@ -92,9 +92,11 @@ import { LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { applyRouteSystem } from "@opencode/core/generate"
 import {
   ChatStreamTranslator,
+  DONE_FRAME,
   ResponsesStreamTranslator,
   completionBody,
   errorBody,
+  errorFrame,
   modelBody,
   modelsBody,
   parseChatRequest,
@@ -192,14 +194,12 @@ const chatFramesOf = (frames: ReadonlyArray<string>) =>
   })
 
 /** Façade chat stream for a canonical event sequence. The handler
- * appends Completions.DONE_FRAME after a non-failed stream
+ * appends Completions.DONE_FRAME after every stream
  * (packages/server/src/handlers/completions.ts), so it is part of the
  * recorded façade grammar here. */
 const facadeChatFrames = (events: ReadonlyArray<LLMEvent>, model = "workhorse") => {
   const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: 1700000000, model })
-  const frames = events.flatMap((event) => translator.push(event))
-  if (!translator.failed) frames.push("data: [DONE]\n\n")
-  return chatFramesOf(frames)
+  return chatFramesOf([...events.flatMap((event) => translator.push(event)), DONE_FRAME])
 }
 
 /** Façade responses stream: the event-type sequence, the sequence
@@ -1518,25 +1518,18 @@ describe("door: claude-code (bin/claude-code-proxy.mjs :18749)", () => {
     expect(facade.status).toBe(502)
   })
 
-  test("CLI failure, streaming after first content: door frames the error then [DONE]; façade ends without [DONE]", () => {
+  test("CLI failure, streaming after first content: door frames the error then [DONE]; façade frames the same", () => {
     // Door recording (trySessionChat catch, headed branch): once
     // deltas are on the wire the turn cannot be retried, so the
     // door writes one `data: {error: {message: "Claude Code
     // execution failed: <detail>"}}` event, then `data: [DONE]`.
     const door = { frames: [{ error: { message: "Claude Code execution failed: claude turn failed: stub failure" } }, "[DONE]"] }
-    // Façade: a failed provider stream becomes the same-shaped error
-    // frame (with the façade's type), and the handler appends NO
-    // [DONE] after a failed stream (translator.failed rule).
-    const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: CREATED, model: MODEL })
-    const frames = [translator.fail("claude turn failed: stub failure")]
-    if (!translator.failed) throw new Error("expected the translator to mark the stream failed")
-    const facade = { frames: chatFramesOf(frames) }
+    // Façade: a provider failure fails the Generate stream (there is no
+    // provider-error event any more), and the handler frames it as the
+    // same-shaped error frame (with the façade's type) and then [DONE];
+    // the server suite pins the handler side.
+    const facade = { frames: chatFramesOf([errorFrame("claude turn failed: stub failure"), DONE_FRAME]) }
     expectDiffs(door, facade, [
-      {
-        path: "frames.length",
-        classification: "real-gap",
-        note: "On the mid-stream provider-error path the door closes with [DONE] after the error frame while the façade translator marks the stream failed and the handler appends no [DONE] (minor: a client reading to close sees the error either way). A whole-stream failure — the Generate stream failing before any event — is error frame + [DONE] on BOTH sides; the server suite pins that case.",
-      },
       {
         path: "frames[0].error.message",
         classification: "real-gap",
@@ -1897,25 +1890,18 @@ describe("door: commandcode (bin/commandcode-proxy.mjs :18748)", () => {
     ])
   })
 
-  test("CLI failure, streaming: door frames the error then [DONE]; façade ends without [DONE]", () => {
+  test("CLI failure, streaming: door frames the error then [DONE]; façade frames the same", () => {
     // Door recording: streaming writes 200 + SSE headers BEFORE the
     // turn runs, so a failure can only be framed on the wire: one
     // `data: {error: {message: "CommandCode execution failed: …"}}`
     // event, then `data: [DONE]`.
     const door = { frames: [{ error: { message: `CommandCode execution failed: ${CREDIT_DETAIL}` } }, "[DONE]"] }
-    // Façade: a failed provider stream becomes the same-shaped error
-    // frame (with the façade's type), and the handler appends NO
-    // [DONE] after a failed stream (translator.failed rule).
-    const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: CREATED, model: MODEL })
-    const frames = [translator.fail(`CommandCode execution failed: ${CREDIT_DETAIL}`)]
-    if (!translator.failed) throw new Error("expected the translator to mark the stream failed")
-    const facade = { frames: chatFramesOf(frames) }
+    // Façade: a provider failure fails the Generate stream (there is no
+    // provider-error event any more), and the handler frames it as the
+    // same-shaped error frame (with the façade's type) and then [DONE];
+    // the server suite pins the handler side.
+    const facade = { frames: chatFramesOf([errorFrame(`CommandCode execution failed: ${CREDIT_DETAIL}`), DONE_FRAME]) }
     expectDiffs(door, facade, [
-      {
-        path: "frames.length",
-        classification: "real-gap",
-        note: "On the mid-stream provider-error path the door closes with [DONE] after the error frame while the façade translator marks the stream failed and the handler appends no [DONE] (minor: a client reading to close sees the error either way). A whole-stream failure — the Generate stream failing before any event — is error frame + [DONE] on BOTH sides; the server suite pins that case.",
-      },
       {
         path: "frames[0].error.type",
         classification: "real-gap",

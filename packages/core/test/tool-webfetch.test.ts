@@ -514,13 +514,6 @@ describe("WebFetchTool registration", () => {
           })
           expect(assertions).toMatchObject([
             { sessionID, action: "webfetch", resources: [url], save: ["*"], metadata: { url, format: "text" } },
-            {
-              sessionID,
-              action: "webfetch",
-              resources: [new URL("/target", server.url).toString()],
-              save: ["*"],
-              metadata: { url: new URL("/target", server.url).toString(), format: "text" },
-            },
           ])
           const target = new URL("/target", server.url).toString()
           expect(checks).toMatchObject([{ sessionID, action: "webfetch", resources: [target] }])

@@ -8,7 +8,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
-import { ServerFetch } from "../src/fetch"
+import { serveRoutes } from "./fixture/routes"
 import { MAX_JSON_BODY_BYTES, readBoundedJsonBody } from "../src/handlers/completions"
 import { Headers, HttpServerRequest } from "effect/http"
 
@@ -95,15 +95,19 @@ const setup = Effect.gen(function* () {
       }),
     ),
   )
-  return yield* ServerFetch.make(
+  const server = yield* serveRoutes(
     {
       database: { path: ":memory:" },
       config: { directory: global },
       fs: { filewatcher: false },
       models: { fetch: false },
     },
-    { overrides: [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)] },
+    [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)],
   )
+  // The route models come from the config plugin, which loads after the server answers; /v1/models lists only
+  // what has loaded, so the test waits for it as a client would.
+  yield* server.pluginsLoaded(global)
+  return server.handler
 })
 
 const post = (handler: (request: Request) => Promise<Response>, body: unknown) =>

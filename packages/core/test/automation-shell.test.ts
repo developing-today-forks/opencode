@@ -1,5 +1,6 @@
 import { expect } from "bun:test"
 import { Agent } from "@opencode/core/agent"
+import { CodeModeNetwork } from "@opencode/core/codemode/network"
 import { Automation } from "@opencode/core/automation"
 import { AutomationTable } from "@opencode/core/automation/sql"
 import { Bus } from "@opencode/core/bus"
@@ -211,6 +212,15 @@ it.live("rejects a shell action that changes to a denied external directory", ()
 
 it.live("scheduled code uses session capabilities after one-time approval", () =>
   Effect.gen(function* () {
+    // The fixture server is on loopback, which this fork's Code Mode fetch refuses unless the host operator opts in (#2310).
+    const previous = process.env[CodeModeNetwork.ALLOW_PRIVATE_NETWORK_ENV]
+    process.env[CodeModeNetwork.ALLOW_PRIVATE_NETWORK_ENV] = "1"
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env[CodeModeNetwork.ALLOW_PRIVATE_NETWORK_ENV]
+        else process.env[CodeModeNetwork.ALLOW_PRIVATE_NETWORK_ENV] = previous
+      }),
+    )
     const server = yield* Effect.acquireRelease(
       Effect.sync(() => Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ready") })),
       (server) => Effect.promise(() => server.stop(true)),

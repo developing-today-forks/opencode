@@ -175,10 +175,15 @@ function holdingCompletion() {
   }
 }
 
+// Recognised by the title prompt's user message (packages/core/src/session/title.ts); this fork's title system
+// prompt differs from upstream's.
 function isTitleRequest(request: unknown) {
-  const system = (request as { readonly messages?: ReadonlyArray<{ readonly content?: unknown }> } | undefined)?.messages?.[0]
+  const user = (request as { readonly messages?: ReadonlyArray<{ readonly content?: unknown }> } | undefined)?.messages?.[1]
     ?.content
-  return typeof system === "string" && system.startsWith("You are a title generator")
+  return (
+    typeof user === "string" &&
+    (user.startsWith("Here is the first message of the conversation") || user.startsWith("Here is the conversation so far"))
+  )
 }
 
 function completion(text: string) {

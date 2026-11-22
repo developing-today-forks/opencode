@@ -54,6 +54,8 @@ describe("OptimizePlugin", () => {
       "opencode.prompt.kimi",
       "opencode.prompt.arcee",
       "opencode.prompt.meta",
+      "opencode.prompt.deepseek",
+      "opencode.prompt.fallback",
     ])
   })
 

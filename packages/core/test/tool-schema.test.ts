@@ -6,9 +6,14 @@ import { Effect, Schema, SchemaGetter } from "effect"
 import { z } from "zod"
 import { convertSchema } from "@opencode/ai/protocols/antigravity"
 import { emptyInputJsonSchema } from "@opencode/ai/effect"
+import { Automation } from "@opencode/core/automation"
+import { ArtifactTools } from "@opencode/core/tool/plugin/artifact"
+import { AutomationTools } from "@opencode/core/tool/plugin/automation"
 import { EditTool } from "@opencode/core/tool/plugin/edit"
 import { GlobTool } from "@opencode/core/tool/plugin/glob"
 import { GrepTool } from "@opencode/core/tool/plugin/grep"
+import { ImageGenerateTool } from "@opencode/core/tool/plugin/image-generate"
+import { McpEventTools } from "@opencode/core/tool/plugin/mcp-events"
 import { McpResourceTools } from "@opencode/core/tool/plugin/mcp-resource"
 import { McpxTool } from "@opencode/core/tool/plugin/mcpx"
 import { MessagingTools } from "@opencode/core/tool/plugin/messaging"
@@ -21,9 +26,12 @@ import { ReadTool } from "@opencode/core/tool/plugin/read"
 import { RouteAdjustTool } from "@opencode/core/tool/plugin/route-adjust"
 import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
 import { RouteUsageTool } from "@opencode/core/tool/plugin/route-usage"
+import { SessionSearchTools } from "@opencode/core/tool/plugin/session-search"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { SkillTool } from "@opencode/core/tool/plugin/skill"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
+import { TodoTool } from "@opencode/core/tool/plugin/todo"
+import { VideoGenerateTool } from "@opencode/core/tool/plugin/video-generate"
 import { WebFetchTool } from "@opencode/core/tool/plugin/webfetch"
 import { WebSearchTool } from "@opencode/core/tool/plugin/websearch"
 import { WriteTool } from "@opencode/core/tool/plugin/write"
@@ -50,6 +58,22 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "comms_sessions", input: MessagingTools.SessionsInput },
   { name: "opencode_session_rename", input: OpenCodeTools.RenameInput },
   { name: "opencode_session_move", input: OpenCodeTools.MoveInput },
+  { name: "opencode_session_read", input: SessionSearchTools.ReadInput },
+  { name: "opencode_session_search", input: SessionSearchTools.SearchInput },
+  { name: "opencode_list_mcp_events", input: McpEventTools.ListInput },
+  { name: "opencode_artifact_create", input: ArtifactTools.CreateToolInput },
+  { name: "opencode_artifact_read", input: ArtifactTools.ReadToolInput },
+  { name: "opencode_artifact_update", input: ArtifactTools.UpdateToolInput },
+  { name: "opencode_artifact_delete", input: ArtifactTools.DeleteToolInput },
+  { name: "automation_create", input: Automation.Request },
+  { name: "automation_list", input: Schema.Struct({}) },
+  { name: "automation_pause", input: AutomationTools.IDInput },
+  { name: "automation_resume", input: AutomationTools.IDInput },
+  { name: "automation_delete", input: AutomationTools.IDInput },
+  { name: "machine_list", input: Schema.Struct({}) },
+  { name: ImageGenerateTool.name, input: ImageGenerateTool.Input },
+  { name: VideoGenerateTool.name, input: VideoGenerateTool.Input },
+  { name: TodoTool.name, input: TodoTool.Input },
   { name: "opencode_session_switch_model", input: OpenCodeTools.SwitchModelInput },
   { name: "opencode_worktree_create", input: OpenCodeTools.WorktreeCreateInput },
   { name: "opencode_worktree_list", input: OpenCodeTools.WorktreeListInput },
@@ -99,11 +123,14 @@ const namesFromModule = (rel: string): string[] => {
     const end = rest.indexOf("execute:")
     if (end === -1) continue
     const segment = rest.slice(0, end)
+    // A command registration (`ctx.command`) has no input; only tools do.
+    if (!/\binput\b/.test(segment)) continue
     const literal = segment.match(/name:\s*"([^"]+)"/)?.[1]
     const name = literal ?? (/(^|\n)\s*name,\s*\n/.test(segment) ? own : undefined)
     if (!name) continue
     const namespace = segment.match(/namespace:\s*"([^"]+)"/)?.[1]
-    names.push(namespace ? `${namespace}_${name}` : name)
+    // The native name joins a dotted namespace with underscores (opencode.session -> opencode_session_read).
+    names.push(namespace ? `${namespace.replaceAll(".", "_")}_${name}` : name)
   }
   return names
 }

@@ -342,7 +342,8 @@ it.live("removes credentials through the HttpApi", () =>
     const response = yield* Effect.promise(() =>
       handler(new Request("http://opencode.local/api/credential/cred_missing", { method: "DELETE" })),
     )
-    expect(response.status).toBe(204)
+    // A missing credential answers 404 rather than a 204 that looks like a successful revoke (#2527).
+    expect(response.status).toBe(404)
   }),
 )
 

@@ -103,6 +103,7 @@ describe("subagent observer lifetime", () => {
               id: "call-review",
               name: "subagent",
               input: {
+                background: true,
                 agent: "reviewer",
                 sessionID: child.id,
                 description: "Review fixture",

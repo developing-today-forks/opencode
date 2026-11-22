@@ -132,7 +132,9 @@ describe("Shell on the process daemon", () => {
             expect(tail.output).toBe("\uFEFFz")
             expect(tail.cursor).toBe(page.size)
           }
-          expect(yield* shell.output(info.id, { cursor: 65536, limit: 0 })).toMatchObject({ output: "", cursor: 65536 })
+          // This fork clamps limit 0 up to a one-byte page so a reader never stalls (#964): from inside the last
+          // character it skips to the end of that character instead of returning a non-advancing empty page.
+          expect(yield* shell.output(info.id, { cursor: 65536, limit: 0 })).toMatchObject({ output: "", cursor: 65539 })
         }),
       )
     }),

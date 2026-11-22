@@ -100,7 +100,7 @@ describe("write-behind", () => {
     expect(batches).toEqual([])
   })
 
-  test("a failed flush re-arms and persists the batch without another set", async () => {
+  test("a failed flush re-arms and persists the batch without another set", () => {
     const batches: Map<string, number>[] = []
     const errors: unknown[] = []
     let calls = 0
@@ -114,7 +114,7 @@ describe("write-behind", () => {
       onError: (error) => errors.push(error),
     })
     writer.set("a", 1)
-    await wait(150)
+    jest.advanceTimersByTime(150)
     expect(errors).toHaveLength(1)
     expect(batches).toHaveLength(1)
     expect([...batches[0]!]).toEqual([["a", 1]])
@@ -143,7 +143,7 @@ describe("write-behind", () => {
     expect([...batches[0]!]).toEqual([["a", 1]])
   })
 
-  test("writes after a failed flush take precedence over the requeued batch", async () => {
+  test("writes after a failed flush take precedence over the requeued batch", () => {
     const batches: Map<string, number>[] = []
     let calls = 0
     const writer = createWriteBehind<number>({
@@ -158,7 +158,7 @@ describe("write-behind", () => {
     writer.set("a", 1)
     writer.flush()
     writer.set("a", 2)
-    await wait(150)
+    jest.advanceTimersByTime(150)
     expect(batches).toHaveLength(1)
     expect([...batches[0]!]).toEqual([["a", 2]])
     writer.close()

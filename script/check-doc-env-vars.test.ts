@@ -76,17 +76,19 @@ describe("deadVars", () => {
 })
 
 describe("englishDocsFiles", () => {
-  test("scans non-cli pages in both trees and skips locale directories (#931)", () => {
+  test("scans non-cli pages in the current docs tree and skips locale directories (#931)", () => {
     const root = mkdtempSync(join(tmpdir(), "check-doc-env-vars-docs-"))
     scratchRepos.push(root)
     const write = (path: string, contents: string) => {
       mkdirSync(join(root, path, ".."), { recursive: true })
       writeFileSync(join(root, path), contents)
     }
-    write("packages/web/src/content/docs/cli.mdx", "`OPENCODE_ON_CLI`\n")
-    write("packages/web/src/content/docs/config.mdx", "`OPENCODE_DEAD_PLANTED`\n")
-    write("packages/web/src/content/docs/fr/config.mdx", "`OPENCODE_LOCALE_ONLY`\n")
-    write("services/www/src/docs/content/console/api/index.mdx", "`OPENCODE_ON_WWW`\n")
+    write("services/site/src/docs/content/cli.mdx", "`OPENCODE_ON_CLI`\n")
+    write("services/site/src/docs/content/config.mdx", "`OPENCODE_DEAD_PLANTED`\n")
+    write("services/site/src/docs/content/fr/config.mdx", "`OPENCODE_LOCALE_ONLY`\n")
+    write("services/site/src/docs/content/console/api/index.mdx", "`OPENCODE_ON_WWW`\n")
+    // The V1 archive is not scanned.
+    write("services/site/src/docs/v1/content/config.mdx", "`OPENCODE_V1_ONLY`\n")
     const files = englishDocsFiles(root)
     const vars = [...new Set(files.flatMap((file) => documentedVars(readFileSync(join(root, file), "utf8"))))].sort()
     expect(vars).toEqual(["OPENCODE_DEAD_PLANTED", "OPENCODE_ON_CLI", "OPENCODE_ON_WWW"])

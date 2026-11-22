@@ -2950,7 +2950,7 @@ describe("SessionRunnerLLM", () => {
     const updates = (request: LLMRequest | undefined) =>
       request ? systemTexts(request).filter((text) => text.startsWith("The Code Mode tool catalog has changed")) : []
     const signature = (name: string, index: number) =>
-      `  - tools.${name}.${name}_${index}({\n  id: string,\n}): Promise<string> // ${name} tool ${index}`
+      `  - tools.${name}.${name}_${index}({ id: string }): Promise<string> // ${name} tool ${index}`
 
     yield* register("alpha", 12)
     yield* s.runPrompt("First")
@@ -5720,14 +5720,14 @@ describe("SessionRunnerLLM", () => {
         sessionID,
         assistantMessageID: crashed,
         id: "call-streaming",
-        error: { type: "aborted", message: "Tool execution interrupted: read" },
+        error: { type: "aborted", message: "Tool execution interrupted, the server was restarted: read" },
         executed: false,
       },
       {
         sessionID,
         assistantMessageID: crashed,
         id: "call-running",
-        error: { type: "aborted", message: "Tool execution interrupted: subagent (sessionID: ses_child)" },
+        error: { type: "aborted", message: "Tool execution interrupted, the server was restarted: subagent (sessionID: ses_child)" },
         metadata: { sessionID: "ses_child" },
         executed: true,
       },
@@ -6907,7 +6907,8 @@ describe("SessionRunnerLLM", () => {
       expect(s.requests).toHaveLength(2)
       expect(
         s.spans
-          .filter((span) => span.name === "SessionStep.attempt")
+          // This fork's SessionStep.attempt wraps the membership gate and hedging; each request is a SessionStep.run.
+          .filter((span) => span.name === "SessionStep.run")
           .map((span) => ({
             error: span.attributes.get("error.type"),
             attempt: span.attributes.get("opencode.retry.attempt"),

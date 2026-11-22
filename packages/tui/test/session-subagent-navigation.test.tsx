@@ -31,6 +31,12 @@ test("Home and End navigate a subagent transcript", async () => {
       if (url.pathname === `/api/session/${session.id}/message`)
         return json({ data: messages.toReversed(), cursor: {} })
       if (url.pathname === `/api/session/${session.id}/inbox`) return json({ data: [] })
+      // A subagent view walks up to its root (routes/session/family.ts), so the fixture serves the parent too;
+      // a failed read would keep retrying after this test ends.
+      const parent = { ...session, id: session.parentID, parentID: undefined, title: "Parent" }
+      if (url.pathname === `/api/session/${parent.id}`) return json({ data: parent })
+      if (url.pathname === "/api/session" && url.searchParams.get("parentID") === parent.id)
+        return json({ data: [session], cursor: {} })
     },
   })
   await setup.ready

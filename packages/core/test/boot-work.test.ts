@@ -53,7 +53,7 @@ const countingSpawner = CrossSpawnSpawner.node.replace(
 const isAzure = (provider: Provider.Info) =>
   provider.id === Provider.ID.azure || provider.package.startsWith("@opencode/ai/providers/azure/")
 
-// `ctx.model.list()` reads `Model.available()`. Every editor list/get/update clones the models it touches.
+// `ctx.model.list()` reads `Model.catalog()` (chat) or `Model.available()` (by type). Every editor list/get/update clones the models it touches.
 const countingModels = Model.node.replace(
   Model.node.mapLayer((base) =>
     Layer.effect(
@@ -61,10 +61,16 @@ const countingModels = Model.node.replace(
       Effect.map(Model.Service, (models) =>
         Model.Service.of({
           ...models,
-          available: () =>
+          available: (...args: Parameters<typeof models.available>) =>
             Effect.suspend(() => {
               counters.catalogLookups++
-              return models.available()
+              return models.available(...args)
+            }),
+          // This fork's `ctx.model.list()` reads the catalog for chat models (#230).
+          catalog: () =>
+            Effect.suspend(() => {
+              counters.catalogLookups++
+              return models.catalog()
             }),
           transform: (update) =>
             models.transform((editor) => {

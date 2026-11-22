@@ -420,7 +420,7 @@ describe("PluginSupervisor shell tool timeout description", () => {
               JSON.stringify(snapshot.definitions.find((tool) => tool.name === "shell")?.inputSchema ?? {}),
             ),
           )
-        expect(yield* description).toContain("Defaults to 100 for foreground commands")
+        expect(yield* description).toContain("(default 100)")
         yield* Effect.promise(() =>
           Bun.write(configuration, JSON.stringify({ experimental: { shell_timeout: 60000 } })),
         )
@@ -429,7 +429,7 @@ describe("PluginSupervisor shell tool timeout description", () => {
         yield* config.reload()
         yield* description.pipe(
           Effect.flatMap((text) =>
-            text.includes("Defaults to 60000 for foreground commands") ? Effect.void : Effect.fail("pending" as const),
+            text.includes("(default 60000)") ? Effect.void : Effect.fail("pending" as const),
           ),
           Effect.retry({ times: 200, schedule: Schedule.spaced("10 millis") }),
         )

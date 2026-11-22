@@ -143,7 +143,7 @@ describe("MessagingLog.entries", () => {
     ])
   })
 
-  test("keeps the summary and retained recent context searchable in a compaction entry", () => {
+  test("keeps the summary searchable in a compaction entry", () => {
     const entries = MessagingLog.entries(
       "ses_a",
       decode([
@@ -154,7 +154,6 @@ describe("MessagingLog.entries", () => {
           reason: "auto",
           time: { created: 9_000 },
           summary: "Earlier work",
-          recent: "Retained recent needle",
         },
         {
           id: "msg_10",
@@ -163,12 +162,12 @@ describe("MessagingLog.entries", () => {
           reason: "auto",
           time: { created: 10_000 },
           summary: "Only the summary",
-          recent: "",
         },
       ]),
       new Set(["compaction"]),
     )
-    expect(entries.map((entry) => entry.text)).toEqual(["Earlier work\n\nRetained recent needle", "Only the summary"])
+    // Compaction messages no longer carry the retained recent text (upstream moved it out of the message).
+    expect(entries.map((entry) => entry.text)).toEqual(["Earlier work", "Only the summary"])
   })
 
   test("clips long entries around an omission marker", () => {

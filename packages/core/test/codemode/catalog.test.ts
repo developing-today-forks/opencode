@@ -80,7 +80,7 @@ describe("CodeModeCatalog.summarize", () => {
     expect(catalog.namespaces).toHaveLength(400)
     expect(catalog.namespaces.find((namespace) => namespace.name === "namespace399")?.tools).toHaveLength(1)
     expect(rendered).toContain("The catalog is partial.")
-    expect(rendered).toContain("use `search(...)")
+    expect(rendered).toContain("the global `search(...)` function")
     expect(rendered).not.toContain("- namespace399 (1 tool)")
 
     const runtime = CodeMode.make({
@@ -419,11 +419,12 @@ describe("CodeModeInstructions.update", () => {
 
 describe("CodeModeCatalog surrogate-pair guard (#1973)", () => {
   test("a pair straddling the description cut is dropped whole", () => {
-    const description = "a".repeat(116) + "\u{1F600}" + "b".repeat(10)
+    // The cut is at DESCRIPTION_LIMIT - 3 (2_000), so the pair starts one code unit before it.
+    const description = "a".repeat(1_996) + "\u{1F600}" + "b".repeat(10)
     const catalog = CodeModeCatalog.summarize({ tools: [entry("alpha.tool", description)] })
     const line = catalog.namespaces[0]?.entries[0]?.line ?? ""
     expect(line.isWellFormed()).toBe(true)
-    expect(line).toContain("a".repeat(116) + "...")
+    expect(line).toContain("a".repeat(1_996) + "...")
     expect(line).not.toContain("\u{1F600}")
   })
 })

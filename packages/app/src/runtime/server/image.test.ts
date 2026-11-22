@@ -54,7 +54,6 @@ describe("readLocalImage", () => {
     expect(requests[0].init?.signal).not.toBe(signal)
     expect(requests[0].init?.signal?.aborted).toBe(false)
     expect(new Headers(requests[0].init?.headers).has("x-opencode-capabilities")).toBe(false)
-    expect(requests[0].init?.signal).toBe(signal)
   })
 
   test("preserves literal percent escapes and encodes the supplied relative location", async () => {
