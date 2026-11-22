@@ -240,7 +240,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
     retryAfterMs?: number
-    rateLimit?: { retryAfterMs?: number }
+    rateLimit?: ModelRouteLimits.Details
     http?: { status?: number }
     code?: string
     message?: string
@@ -267,10 +267,27 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   // `message ?? body` instead would discard the body whenever a message
   // exists, even when the message states no reset at all.
   const quotaResetAtMs = quota ? ModelRouteLimits.resetAtFromMessage(text, Date.now()) : undefined
+  // A rate-limit failure's headers may state the wall's reset without stating
+  // a retry-after (the reset headers the executor parses into the rate-limit
+  // details, #12228): the reset is the same statement in absolute form, so it
+  // feeds the retry-after below — bench() believes a stated retry-after
+  // as-is, which benches the door until its reset on the first failure
+  // instead of the short ladder a bare 429 earns until its failures prove
+  // sustained. A stated retry-after header still wins: it is the more
+  // direct instruction.
+  const hintNow = Date.now()
+  const rateLimitSnapshot =
+    reason._tag === "RateLimit" && reason.rateLimit
+      ? ModelRouteLimits.snapshot(reason.rateLimit, hintNow)
+      : undefined
+  const rateLimitResetAtMs = rateLimitSnapshot
+    ? ModelRouteLimits.statedResetAt(rateLimitSnapshot, hintNow)
+    : undefined
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
+      (rateLimitResetAtMs !== undefined ? Math.max(0, rateLimitResetAtMs - hintNow) : undefined) ??
       (clientTimeoutMessage ? undefined : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
     // The rate-limit class itself, stated wait or not: bench() counts these, and
