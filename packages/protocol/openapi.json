@@ -17189,6 +17189,14 @@
           "hidden": {
             "type": "boolean"
           },
+          "defaultVariant": {
+            "type": "string",
+            "description": "The variant (effort) a request runs at when it names none, e.g. high. A request that names a variant, or the explicit default, still runs as asked unless lockVariant is set. Ignored when the model does not offer the variant."
+          },
+          "lockVariant": {
+            "type": "boolean",
+            "description": "Run every request at defaultVariant, whatever variant it names, including inside model routes. Has no effect without defaultVariant."
+          },
           "limit": {
             "type": "object",
             "properties": {
@@ -17456,7 +17464,7 @@
                     "enum": [false]
                   }
                 ],
-                "description": "Fail over if the target produces no response output within this many milliseconds. Defaults to 10000."
+                "description": "Fail over if the target produces no response output within this many milliseconds. Defaults to 30000; a route that nests other routes defaults to the longest wait among them (see nestedTimeout). false waits without a limit."
               },
               "maxResponseTimeMs": {
                 "type": "integer",
@@ -17495,6 +17503,11 @@
               }
             },
             "additionalProperties": false
+          },
+          "nestedTimeout": {
+            "type": "string",
+            "enum": ["longest", "shortest", "own"],
+            "description": "How a route that nests other routes (as opencode-route/<id> targets, or by name in include or match) waits for first output. longest (the default when health.firstTokenTimeoutMs is unset) and shortest take the longest or shortest wait of the nested routes and apply it to every target, replacing health.firstTokenTimeoutMs. own keeps health.firstTokenTimeoutMs for the route's own targets and lets each nested route's targets wait as long as that nested route would. Has no effect on a route that nests none."
           },
           "budgets": {
             "type": "object",
@@ -21926,6 +21939,12 @@
             "type": "boolean"
           },
           "hidden": {
+            "type": "boolean"
+          },
+          "defaultVariant": {
+            "type": "string"
+          },
+          "lockVariant": {
             "type": "boolean"
           },
           "limit": {

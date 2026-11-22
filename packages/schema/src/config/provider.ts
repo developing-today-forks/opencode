@@ -114,6 +114,14 @@ class Model extends Schema.Class<Model>("Config.Model")({
    * `disabled`, a hidden model stays enabled for route pools and direct
    * resolution; it is only absent from the picker list. */
   hidden: Schema.Boolean.pipe(optional),
+  defaultVariant: VariantID.annotate({
+    description:
+      "The variant (effort) a request runs at when it names none, e.g. high. A request that names a variant, or the explicit default, still runs as asked unless lockVariant is set. Ignored when the model does not offer the variant.",
+  }).pipe(optional),
+  lockVariant: Schema.Boolean.annotate({
+    description:
+      "Run every request at defaultVariant, whatever variant it names, including inside model routes. Has no effect without defaultVariant.",
+  }).pipe(optional),
   limit: Limit.pipe(optional),
 }) {}
 

@@ -193,6 +193,10 @@ export const Info = Schema.Struct({
   /** Picker-hidden but still routable (#230): set from the config overlay's
    * `hidden` flag. Absent means listed normally. */
   hidden: Schema.Boolean.pipe(optional),
+  /** The variant a request runs at when it names none, from the config overlay's `defaultVariant`. */
+  defaultVariant: VariantID.pipe(optional),
+  /** Every request runs at `defaultVariant`, from the config overlay's `lockVariant`. */
+  lockVariant: Schema.Boolean.pipe(optional),
   limit: Schema.Struct({
     context: Schema.Int,
     input: Schema.Int.pipe(optional),

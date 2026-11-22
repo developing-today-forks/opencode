@@ -269,6 +269,8 @@ export function applyModelConfig(
           }
           if (config.disabled !== undefined) model.enabled = !config.disabled
           if (config.hidden !== undefined) model.hidden = config.hidden
+          if (config.defaultVariant !== undefined) model.defaultVariant = config.defaultVariant
+          if (config.lockVariant !== undefined) model.lockVariant = config.lockVariant
         })
         // Inherited variants are spelled for the base model's package, so a package override needs fresh ones.
         // A base without variants has no reasoning support to respell.
