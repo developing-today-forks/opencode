@@ -48,7 +48,10 @@ const setup = Effect.gen(function* () {
       )
       return { status: response.status, body: (await response.json()) as unknown }
     })
-  const created = yield* request("/api/session", { location: { directory: tmp.path } })
+  // The session lives in the config directory, like the completions tests' location: a fresh
+  // project directory under the isolated test HOME takes longer than the handler's 5s wait for
+  // plugin activation (it answers 503 then), which is the test environment, not the endpoint.
+  const created = yield* request("/api/session", { location: { directory: global } })
   expect(created.status).toBe(200)
   return { request, sessionID: Schema.decodeUnknownSync(SessionResponse)(created.body).data.id }
 })
