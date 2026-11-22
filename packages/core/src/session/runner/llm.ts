@@ -326,9 +326,13 @@ const layer = Layer.effect(
       }
       let recoverOverflow = true
       let recoverContinuation = true
+      // The route member a ContinueOn outcome chose: the next step loads on it rather than resolving again.
+      let continueOn: SessionContext.Loaded["model"] | undefined
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
-        const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
+        const loaded =
+          initial ??
+          (yield* prepareContext(sessionID).pipe(Effect.flatMap((selection) => context.load(selection, continueOn))))
         initial = undefined
         const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
@@ -338,6 +342,7 @@ const layer = Layer.effect(
           continuationIndex = 0
           continue
         }
+        continueOn = undefined
         const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
         // The request depends on the model (system prompt, provider options), so a hedge to another
         // target of the route is prepared separately rather than reusing this one.
@@ -440,6 +445,15 @@ const layer = Layer.effect(
             assistantMessageID = SessionMessage.ID.create()
             continuationOf = undefined
             continuationIndex = 0
+          }),
+          ContinueOn: Effect.fnUntraced(function* (outcome) {
+            // A different member answers next, so no wait: the failed one is not asked again.
+            yield* modelTransport.close(sessionID)
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
+            assistantMessageID = SessionMessage.ID.create()
+            continuationOf = undefined
+            continuationIndex = 0
+            continueOn = outcome.model
           }),
           OutputLimit: Effect.fn("SessionRunner.continueOutputLimit")(function* (outcome) {
             // The current response is included. User input or any other finish breaks the streak.

@@ -229,8 +229,10 @@ files, and Console-managed policy.
 
 Define ordered provider/model pools under `experimental.routes.models`. Select
 a route like any other model using `opencode-route/<route-id>`. If a target
-fails before producing output, OpenCode tries the next healthy target. It never
-replays a turn after answer or tool output has started.
+fails before producing output, OpenCode tries the next healthy target. If it
+fails after answer or tool output has started, the partial reply is kept and the
+next target continues it in a new reply; a turn is never replayed. A turn ends
+with an error only when every target has failed.
 
 The canonical shape is `experimental.routes`, which has seven keys:
 
@@ -757,7 +759,9 @@ moves on. The default is 2, so one transient failure is retried on the same targ
 before the route moves on; set 1 to fail over at once. Retries only happen before
 any output, so a tool call never runs twice. A rate limit or quota error never
 retries the same target: the turn moves on at once. A target that fails is not
-penalized until its attempts are used up.
+penalized until its attempts are used up. `attempts` only limits how often one
+target is asked: once it is used up, or the error cannot be retried, the turn
+still moves on to the next target, before or after output.
 
 When a target has two give-ups among its last five requests, the route stops
 retrying it and starts its next target at once, as a hedge would: the first to

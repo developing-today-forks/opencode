@@ -58,8 +58,13 @@ export interface Loaded {
 export interface Interface {
   /** Selects the Session, agent, instructions, and tools used by subsequent work. */
   readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
-  /** Resolves the model and active history for that selection. */
-  readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
+  /** Resolves the model and active history for that selection. `chosen` is a route member a
+   * turn already continues on (the next member after a failure with output): it is used as
+   * is, since resolving again could choose a different member or claim a probe. */
+  readonly load: (
+    selection: Selection,
+    chosen?: SessionRunnerModel.Resolved,
+  ) => Effect.Effect<Loaded, SessionRunnerModel.Error>
   readonly resolveModel: (
     session: SessionSchema.Info,
     requestTokens?: number,
@@ -193,7 +198,26 @@ const layer = Layer.effect(
       }))
     })
 
-    const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
+    const load = Effect.fn("SessionContext.load")(function* (
+      selection: Selection,
+      chosen?: SessionRunnerModel.Resolved,
+    ) {
+      if (chosen) {
+        const history = yield* SessionHistory.entriesForRunner(
+          db,
+          selection.session.id,
+          selection.instructions,
+          SessionProviderContext.provenance(chosen) ?? "local",
+        )
+        return {
+          session: selection.session,
+          agent: selection.agent,
+          model: chosen,
+          initial: history.initial,
+          messages: history.entries.map((entry) => entry.message),
+          tools: selection.tools,
+        }
+      }
       // A routed model resolves to a leaf whose per-target context ceiling can only filter
       // live turns if resolution knows the request size (#891). Routed sessions always read
       // the local transcript (a routed model's provenance is undefined), so for a route the
