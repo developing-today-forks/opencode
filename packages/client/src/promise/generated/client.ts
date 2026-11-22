@@ -1,6 +1,8 @@
 import type {
   ServerInfoOutput,
   ServerPairOutput,
+  ServerRedeemInput,
+  ServerRedeemOutput,
   ServerConnectInput,
   ServerConnectOutput,
   LocationGetInput,
@@ -37,6 +39,10 @@ import type {
   SessionSwitchAgentOutput,
   SessionSwitchModelInput,
   SessionSwitchModelOutput,
+  SessionRouteTargetListInput,
+  SessionRouteTargetListOutput,
+  SessionRouteTargetSetInput,
+  SessionRouteTargetSetOutput,
   SessionUpdateInput,
   SessionUpdateOutput,
   SessionMoveInput,
@@ -115,6 +121,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsTranscriptionsInput,
+  ServerCompletionsTranscriptionsOutput,
   ServerCompletionsMessagesInput,
   ServerCompletionsMessagesOutput,
   ServerCompletionsSystemoneInput,
@@ -173,6 +181,11 @@ import type {
   CredentialActivateOutput,
   CredentialRemoveInput,
   CredentialRemoveOutput,
+  RouteOverrideListOutput,
+  RouteOverrideAddInput,
+  RouteOverrideAddOutput,
+  RouteOverrideRemoveInput,
+  RouteOverrideRemoveOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -513,6 +526,17 @@ export function make(options: ClientOptions) {
           { method: "POST", path: `/api/pair`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
           requestOptions,
         ),
+      redeem: (input: ServerRedeemInput, requestOptions?: RequestOptions) =>
+        request<ServerRedeemOutput>(
+          {
+            method: "POST",
+            path: `/auth/connect/${encodeURIComponent(input.code)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
       connect: (input: ServerConnectInput, requestOptions?: RequestOptions) =>
         request<ServerConnectOutput>(
           {
@@ -773,6 +797,31 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      routeTarget: {
+        list: (input: SessionRouteTargetListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: SessionRouteTargetListOutput }>(
+            {
+              method: "GET",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/route-target`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        set: (input: SessionRouteTargetSetInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: SessionRouteTargetSetOutput }>(
+            {
+              method: "POST",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/route-target`,
+              body: { routeID: input["routeID"], target: input["target"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404, 503],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
       update: (input: SessionUpdateInput, requestOptions?: RequestOptions) =>
         request<SessionUpdateOutput>(
           {
@@ -985,7 +1034,7 @@ export function make(options: ClientOptions) {
               method: "DELETE",
               path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}`,
               successStatus: 204,
-              declaredStatuses: [400, 401, 404],
+              declaredStatuses: [400, 401, 404, 409],
               empty: true,
             },
             requestOptions,
@@ -1270,6 +1319,18 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/v1/embeddings`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      transcriptions: (input: ServerCompletionsTranscriptionsInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsTranscriptionsOutput>(
+          {
+            method: "POST",
+            path: `/v1/audio/transcriptions`,
             body: input["payload"],
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 503],
@@ -1629,7 +1690,7 @@ export function make(options: ClientOptions) {
             path: `/api/credential/${encodeURIComponent(input.credentialID)}`,
             body: { label: input["label"] },
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
@@ -1640,7 +1701,7 @@ export function make(options: ClientOptions) {
             method: "POST",
             path: `/api/credential/${encodeURIComponent(input.credentialID)}/activate`,
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
@@ -1651,11 +1712,63 @@ export function make(options: ClientOptions) {
             method: "DELETE",
             path: `/api/credential/${encodeURIComponent(input.credentialID)}`,
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
         ),
+    },
+    route: {
+      override: {
+        list: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteOverrideListOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/overrides`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        add: (input: RouteOverrideAddInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteOverrideAddOutput }>(
+            {
+              method: "POST",
+              path: `/api/route/overrides`,
+              body: {
+                id: input["id"],
+                action: input["action"],
+                providers: input["providers"],
+                models: input["models"],
+                routes: input["routes"],
+                fixed: input["fixed"],
+                factor: input["factor"],
+                weight: input["weight"],
+                schedule: input["schedule"],
+                until: input["until"],
+                text: input["text"],
+                source: input["source"],
+                createdAt: input["createdAt"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        remove: (input: RouteOverrideRemoveInput, requestOptions?: RequestOptions) =>
+          request<RouteOverrideRemoveOutput>(
+            {
+              method: "DELETE",
+              path: `/api/route/overrides/${encodeURIComponent(input.overrideID)}`,
+              successStatus: 204,
+              declaredStatuses: [400, 401],
+              empty: true,
+            },
+            requestOptions,
+          ),
+      },
     },
     project: {
       list: (input?: ProjectListInput, requestOptions?: RequestOptions) =>
@@ -1843,7 +1956,7 @@ export function make(options: ClientOptions) {
             query: { location: input["location"], path: input["path"] },
             body: input["payload"],
             successStatus: 200,
-            declaredStatuses: [400, 401, 404],
+            declaredStatuses: [400, 401, 404, 413],
             empty: false,
             binaryBody: true,
           },

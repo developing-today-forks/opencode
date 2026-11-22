@@ -1180,6 +1180,21 @@ export const layer = Layer.effect(
                   return earliest === undefined || instant < earliest ? instant : earliest
                 }, undefined)
               : undefined
+          // The session's pinned member (#2671) leads only while it is healthy: ready (not benched,
+          // held, avoided or over budget) and not quota-demoted. Anything less — including the
+          // last-resort pass, where nothing is ready — falls back to the pool's normal order.
+          const pinned = sessionID === undefined ? undefined : ModelRoute.pinnedLeaf(definition, sessionID)
+          const preferred =
+            pinned !== undefined &&
+            ready.includes(pinned) &&
+            !ModelRoute.demoted(
+              definition.targets[pinned],
+              now,
+              effectiveCredential(definition.targets[pinned], now)?.id,
+              locationDirectory,
+            )
+              ? pinned
+              : undefined
           const index = ModelRoute.nextTarget(
             definition,
             new Set(eligible),
@@ -1191,6 +1206,7 @@ export const layer = Layer.effect(
             Math.random,
             (index) => effectiveCredential(definition.targets[index], now)?.id,
             locationDirectory,
+            preferred,
           )
           if (index === undefined) break
           triedTargets.add(index)

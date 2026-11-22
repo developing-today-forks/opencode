@@ -4395,6 +4395,10 @@ export const nextTarget = (
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
   location?: string,
+  /** The session's pinned leaf (#2671), passed only when the caller judged it healthy. It goes
+   * first at every node on its path while it is still ready, untried and gate-open; otherwise the
+   * normal order applies. */
+  preferred?: number,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -4423,6 +4427,7 @@ export const nextTarget = (
     )
   }
   const hasReady = (nodeIndex: number): boolean => openLeaves(nodeIndex).length > 0
+  const pinned = preferred !== undefined && openLeaves(0).includes(preferred) ? preferred : undefined
   /** Whether any gate on the path from this node down to the leaf is closed at `now`. */
   const gateClosedOnPath = (nodeIndex: number, leafIndex: number): boolean => {
     const node = definition.nodes[nodeIndex]
@@ -4642,7 +4647,20 @@ export const nextTarget = (
     const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
-    if (node.selection === "ordered" && currentPosition !== undefined) {
+    // The session's pinned member (#2671) leads while it can serve, ahead of continuity, the
+    // sticky pick and the draw — no draw is consumed, so clearing the pin resumes the session's
+    // normal selection. The rest keep their normal order as the failover tail.
+    const pinnedPosition =
+      pinned === undefined
+        ? undefined
+        : positions.find((position) => {
+            const child = node.children[position]
+            return child.leaf === pinned || (child.node !== undefined && leaves(child.node).includes(pinned))
+          })
+    if (pinnedPosition !== undefined) {
+      ordered = [pinnedPosition, ...sorted.filter((position) => position !== pinnedPosition)]
+      decisionReason = "pinned"
+    } else if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
@@ -4754,7 +4772,56 @@ export const forgetSession = (routeID: string, sessionID: string) => {
   selection.get(routeID)?.sessions.delete(sessionID)
 }
 
-export const resetSelection = () => selection.clear()
+/** A session's preferred pool member per route (#2671): the member the session uses while it is
+ * healthy, without leaving the pool, so failover and the return to the member work as usual.
+ *
+ * Kept in memory, like the sticky picks and continuity it sits beside, rather than on the session
+ * record. The pin is advice to selection, not session history: it needs no durable event, no
+ * projection column and no migration, and losing it on a restart is safe — the session is still
+ * on its pool and simply selects normally until a client sets the pin again. Clients read the
+ * current value back from the API. Bounded like the other per-session maps. */
+const pins = new Map<string, Map<string, Model.Ref>>()
+
+export const resetSelection = () => {
+  selection.clear()
+  pins.clear()
+}
+
+/** Sets or clears (`undefined`) a session's preferred member on one route. */
+export const pinTarget = (routeID: string, sessionID: string, target: Model.Ref | undefined) => {
+  const routes = new Map(pins.get(sessionID))
+  if (target === undefined) routes.delete(routeID)
+  else routes.set(routeID, target)
+  pins.delete(sessionID)
+  if (routes.size === 0) return
+  pins.set(sessionID, routes)
+  while (pins.size > SESSION_LIMIT) pins.delete(pins.keys().next().value!)
+}
+
+/** The session's pins, one per route. */
+export const pinnedTargets = (sessionID: string) =>
+  Array.from(pins.get(sessionID) ?? [], ([routeID, target]) => ({ routeID, target }))
+
+/** Drops every pin a session holds, e.g. when the session is deleted. */
+export const forgetPins = (sessionID: string) => {
+  pins.delete(sessionID)
+}
+
+/** The leaf a target names on this route: the exact member (variant included), or — for a target
+ * without a variant — the first member of that provider/model. Undefined when it is not a member. */
+export const memberIndex = (definition: Definition, target: Model.Ref) => {
+  const exact = definition.targets.findIndex((item) => key(item) === key(target) && item.variant === target.variant)
+  if (exact >= 0) return exact
+  if (target.variant !== undefined) return undefined
+  const loose = definition.targets.findIndex((item) => key(item) === key(target))
+  return loose >= 0 ? loose : undefined
+}
+
+/** The leaf the session pinned on this route, while it is still a member. */
+export const pinnedLeaf = (definition: Definition, sessionID: string) => {
+  const target = pins.get(sessionID)?.get(definition.id)
+  return target === undefined ? undefined : memberIndex(definition, target)
+}
 
 /** Where a session has been answered on a route. `origin` is the target it moved away from after a
  * failover; `away` counts requests answered since on the target it moved to. */
