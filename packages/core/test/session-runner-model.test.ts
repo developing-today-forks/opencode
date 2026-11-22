@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { LanguageModel } from "@opencode/ai"
+import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { AISDK } from "@opencode/core/aisdk"
+import { Agent } from "@opencode/core/agent"
+import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Config } from "@opencode/core/config"
 import { ConfigNormalize } from "@opencode/core/config/normalize"
 import { Integration } from "@opencode/core/integration"
@@ -57,7 +59,12 @@ const resolver = ModelResolver.layer.pipe(
     ),
   ),
 )
-const it = testEffect(SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(resolver, config))))
+const agents = Layer.mock(Agent.Service, { select: () => Effect.succeed({ info: undefined }) } as never)
+const hooks = Layer.mock(PluginHooks.Service, {
+  trigger: (_scope: unknown, _name: unknown, event: unknown) => Effect.succeed(event),
+} as never)
+const it = testEffect(SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(resolver, config, agents, hooks))))
+const request = { kind: "primary" as const, agent: Agent.ID.make("build") }
 
 const session = (model: Ref) =>
   // The runner only reads the session's id and model selection.
@@ -71,6 +78,7 @@ describe("SessionRunnerModel bare aliases", () => {
       const resolved = yield* models.resolve(
         session(Ref.make({ providerID: Provider.ID.make("flash"), id: ID.make("") })),
         () => Effect.succeed([catalog]),
+        request,
       )
       expect(resolved.ref).toEqual(
         Ref.make({
@@ -91,6 +99,7 @@ describe("SessionRunnerModel bare aliases", () => {
       const resolved = yield* models.resolve(
         session(Ref.make({ providerID: Provider.ID.make("flash"), id: ID.make(""), variant: VariantID.make("low") })),
         () => Effect.succeed([catalog]),
+        request,
       )
       expect(resolved.ref).toEqual(
         Ref.make({
@@ -107,7 +116,7 @@ describe("SessionRunnerModel bare aliases", () => {
       const models = yield* SessionRunnerModel.Service
       const error = yield* models
         .resolve(session(Ref.make({ providerID: Provider.ID.make("nope"), id: ID.make("") })), () =>
-          Effect.succeed([catalog]),
+          Effect.succeed([catalog]), request,
         )
         .pipe(Effect.flip)
       expect(error).toBeInstanceOf(SessionRunnerModel.ModelUnavailableError)
@@ -128,7 +137,7 @@ const routedInfo = (() => {
 const routedConfig = Layer.mock(Config.Service)({
   entries: () => Effect.succeed([{ type: "document", info: routedInfo }]),
 })
-const itRouted = testEffect(SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(resolver, routedConfig))))
+const itRouted = testEffect(SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(resolver, routedConfig, agents, hooks))))
 
 describe("SessionRunnerModel provider-route diagnostics (#1720)", () => {
   const declared = new Set(["mistral-plan", "openai-plan"])
@@ -168,7 +177,7 @@ describe("SessionRunnerModel provider-route diagnostics (#1720)", () => {
       const models = yield* SessionRunnerModel.Service
       const error = yield* models
         .resolve(session(Ref.make({ providerID: Provider.ID.make("mistral-plan"), id: ID.make("m") })), () =>
-          Effect.succeed([catalog]),
+          Effect.succeed([catalog]), request,
         )
         .pipe(Effect.flip)
       expect(error).toBeInstanceOf(SessionRunnerModel.ModelUnavailableError)
@@ -237,15 +246,17 @@ describe("SessionRunnerModel requestTokens threading (#891)", () => {
       return Effect.succeed(stub)
     },
   })
-  const itThreading = testEffect(SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(mockResolver, config))))
+  const itThreading = testEffect(
+    SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(mockResolver, config, agents, hooks))),
+  )
 
   itThreading.effect("passes the live request size through to the resolver, and undefined when unknown", () =>
     Effect.gen(function* () {
       const models = yield* SessionRunnerModel.Service
       const ref = Ref.make({ providerID: Provider.ID.make("deepseek"), id: ID.make("deepseek-chat") })
-      const sized = yield* models.resolve(session(ref), () => Effect.succeed([catalog]), 123_456)
+      const sized = yield* models.resolve(session(ref), () => Effect.succeed([catalog]), request, 123_456)
       expect(sized).toBe(stub)
-      const unsized = yield* models.resolve(session(ref), () => Effect.succeed([catalog]))
+      const unsized = yield* models.resolve(session(ref), () => Effect.succeed([catalog]), request)
       expect(unsized).toBe(stub)
       // The known size reaches route resolution, where per-target ceilings can skip
       // over-limit leaves; an unknown size stays undefined so it never filters.
@@ -263,6 +274,7 @@ describe("SessionRunnerModel requestTokens threading (#891)", () => {
         // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
         { id: SessionSchema.ID.make("ses_runner_model_test") } as unknown as SessionSchema.Info,
         () => Effect.succeed([catalog]),
+        request,
         98_765,
       )
       expect(sized).toBe(stub)

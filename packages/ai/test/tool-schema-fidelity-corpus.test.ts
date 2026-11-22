@@ -1047,10 +1047,6 @@ describe("tool-schema fidelity corpus (oracle: the disposition tables above, des
     }
     // ToolSchemaProjection members with no disposition table, and why.
     const passthrough: Record<string, string> = {
-      // openAI/responses are the identity projection: no keyword changes
-      // meaning, so there is nothing to disposition.
-      "ToolSchemaProjection.openAI": "identity projection",
-      "ToolSchemaProjection.responses": "identity projection",
       // tools is the pipeline (objectRoot + model routing), pinned by
       // tool-schema-projection.test.ts rather than a disposition table.
       "ToolSchemaProjection.tools": "pipeline",

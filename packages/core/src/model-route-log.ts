@@ -2,7 +2,7 @@ export * as ModelRouteLog from "./model-route-log.js"
 
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
-import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
+import { AIError, isRetryable, type HttpContext } from "@opencode/ai/effect"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { ModelRouteLimits } from "./model-route-limits.js"

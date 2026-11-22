@@ -49,6 +49,8 @@ export type RunFooterTheme = {
 export type RunBlockTheme = {
   text: ColorInput
   muted: ColorInput
+  faint: ColorInput
+  warning: ColorInput
   syntax?: SyntaxStyle
   diffRemoved: ColorInput
   diffAddedBg: ColorInput
@@ -142,13 +144,13 @@ function map(
       formfieldFocusedBg: exact(theme.background.formfield.focused),
       formfieldFocusedText: exact(theme.text.formfield.focused),
       selection: exact(theme.text.formfield.selected),
-      running: exact(theme.hue.interactive[200]),
-      question: exact(theme.hue.accent[200]),
-      permission: exact(theme.hue.accent[200]),
+      running: exact(theme.hue.interactive[400]),
+      question: exact(theme.hue.accent[400]),
+      permission: exact(theme.hue.accent[400]),
       success: exact(theme.text.feedback.success.base),
       link: exact(theme.markdown.link),
       categorical: dedupeWith(
-        theme.categorical.map((scale) => exact(scale[200])),
+        theme.categorical.map((scale) => exact(scale[400])),
         (a, b) => a.equals(b),
       ),
       warning: exact(theme.text.feedback.warning.base),
@@ -177,6 +179,8 @@ function map(
     block: {
       text: scrollback(theme.text.base),
       muted: scrollback(theme.text.muted),
+      faint: scrollback(theme.text.faint),
+      warning: scrollback(theme.text.feedback.warning.base),
       syntax,
       diffRemoved: scrollback(theme.diff.text.removed),
       diffAddedBg: scrollback(theme.diff.background.added),
@@ -241,6 +245,8 @@ function monoTheme(mode: "dark" | "light"): RunTheme {
     block: {
       text: foreground,
       muted: foreground,
+      faint: foreground,
+      warning: foreground,
       diffRemoved: foreground,
       diffAddedBg: background,
       diffRemovedBg: background,
@@ -297,7 +303,12 @@ export async function resolveRunTheme(
     ? ansiPalette.map((color, index) => (colors.palette[index] ? RGBA.fromIndex(index, colors.palette[index]!) : color))
     : ansiPalette
   return {
-    ...map(theme, indexed, generateSyntax(theme), name === "system" && resolved !== undefined),
+    ...map(
+      theme,
+      indexed,
+      renderer.isDestroyed ? undefined : generateSyntax(theme, renderer.nativeScene),
+      name === "system" && resolved !== undefined,
+    ),
     background: RGBA.defaultBackground(colors?.defaultBackground ?? theme.background.base),
   }
 }

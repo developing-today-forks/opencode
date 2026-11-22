@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { AIError } from "@opencode/ai"
+import { AIError } from "@opencode/ai/effect"
 import { ModelRoute } from "@opencode/core/model-route"
 import { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 import { SessionStep } from "@opencode/core/session/runner/step"

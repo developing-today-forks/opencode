@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMEvent, LLMRequest, Message, ToolRuntime, toDefinitions } from "../../src/index.js"
+import { ai, LLMEvent, Message, ToolRuntime, toDefinitions } from "../../src/effect.js"
 import * as OpenAICompatible from "../../src/providers/openai-compatible.js"
 import { LLMClient } from "../../src/route.js"
 import { compileRequest } from "../../src/route/client.js"
@@ -28,11 +28,11 @@ const recorded = recordedTests({
 
 const parallelRequest = (id: string) => {
   const target = model(id)
-  const tools = { [weatherToolName]: weatherRuntimeTool }
+  const tools = [weatherRuntimeTool]
   return {
     target,
     tools,
-    request: LLM.request({
+    request: ai.request({
       model: target,
       system: "Call get_weather for every requested city in parallel, then answer in one short sentence.",
       prompt: "What is the weather in Paris and in Tokyo?",
@@ -56,7 +56,8 @@ for (const item of [
         expect(calls.map((call) => call.input)).toEqual([{ city: "Paris" }, { city: "Tokyo" }])
 
         const results = yield* Effect.forEach(calls, (call) => ToolRuntime.dispatch(tools, call))
-        const continuation = LLMRequest.update(request, {
+        const continuation = {
+          ...request,
           messages: [
             ...request.messages,
             first.message,
@@ -64,7 +65,7 @@ for (const item of [
               Message.tool({ id: call.id, name: call.name, result: results[index]!.result }),
             ),
           ],
-        })
+        }
         const prepared = yield* compileRequest(continuation)
         const assistant = prepared.body.messages.find((message) => message.role === "assistant")
         // Tool-call association must survive the continuation: every recorded

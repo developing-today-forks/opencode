@@ -42,12 +42,7 @@ test.each([
   20_000,
 )
 
-test.each([
-  "./playwright.config.ts",
-  "./e2e/performance/playwright.config.ts",
-  "./e2e/performance/playwright.uncapped.config.ts",
-  "./e2e/performance/timeline-stability/playwright.config.ts",
-])(
+test.each(["./playwright.config.ts", "./e2e/stability/playwright.config.ts"])(
   "%s leaves an explicit external app unmanaged",
   (file) => {
     const result = Bun.spawnSync({

@@ -1,7 +1,7 @@
 export * as ConfigNormalize from "./normalize.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { isRecord } from "@opencode/ai/utils/record"
+import { isRecord } from "@opencode/util/record"
 import { Option, Result, Schema } from "effect"
 import { Info } from "@opencode/schema/config"
 import { ConfigAgent } from "@opencode/schema/config/agent"
@@ -32,7 +32,7 @@ import { ModelRouteMatch } from "../model-route-match.js"
 import { ModelRouteSchedule } from "../model-route-schedule.js"
 
 export interface Diagnostic {
-  readonly kind: "conflict" | "invalid" | "unsupported"
+  readonly kind: "conflict" | "invalid" | "removed" | "unsupported"
   readonly path: readonly string[]
   readonly message: string
 }
@@ -223,6 +223,8 @@ export function normalize(input: unknown): Result {
     share: Info.fields.share,
     enterprise: Info.fields.enterprise,
     username: Info.fields.username,
+    timezone: Info.fields.timezone,
+    automations: Info.fields.automations,
     snapshots: Info.fields.snapshots,
     media: Info.fields.media,
     tool_output: Info.fields.tool_output,
@@ -369,14 +371,15 @@ function normalizeCompaction(
   unsupportedIfPresent(input.compaction, "tail_turns", ["compaction", "tail_turns"], diagnostics)
   unsupportedIfPresent(input.compaction, "prune", ["compaction", "prune"], diagnostics)
   const result: Record<string, unknown> = {}
-  if (own(input.compaction, "auto")) {
+  for (const key of ["auto", "background"] as const) {
+    if (!own(input.compaction, key)) continue
     const value = decodeEncoded(
-      ConfigCompaction.Info.fields.auto,
-      input.compaction.auto,
-      ["compaction", "auto"],
+      ConfigCompaction.Info.fields[key],
+      input.compaction[key],
+      ["compaction", key],
       diagnostics,
     )
-    if (value !== undefined) result.auto = value
+    if (value !== undefined) result[key] = value
   }
   const legacyTokens = own(input.compaction, "preserve_recent_tokens")
     ? decodeEncoded(
@@ -462,6 +465,20 @@ function normalizePolicies(
     encoded.policies = [...generated, ...experimental, ...native]
 }
 
+// Experimental keys normalizeExperimental folds itself: the routing keys (flat and nested) into `routes`, and
+// `aliases` into the top-level aliases.
+const foldedExperimental = new Set([
+  "aliases",
+  "routes",
+  "model_routes",
+  "provider_routes",
+  "model_route_schedules",
+  "model_route_windows",
+  "model_route_tuning",
+  "model_route_log",
+  "model_route_settings",
+])
+
 function normalizeExperimental(
   input: Record<string, unknown>,
   encoded: Record<string, unknown>,
@@ -476,42 +493,20 @@ function normalizeExperimental(
       unsupportedExperimental.forEach((key) =>
         unsupportedIfPresent(experimental, key, ["experimental", key], diagnostics),
       )
-      if (own(experimental, "portable_shell_scanner")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.portable_shell_scanner,
-          experimental.portable_shell_scanner,
-          ["experimental", "portable_shell_scanner"],
-          diagnostics,
-        )
-        if (value !== undefined) result.portable_shell_scanner = value
+      for (const key of ["automations", "schedules"]) {
+        if (!own(experimental, key)) continue
+        diagnostics.push({
+          kind: "removed",
+          path: ["experimental", key],
+          message: "Use the top-level automations setting. Automations are enabled by default.",
+        })
       }
-      if (own(experimental, "subagent_depth")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.subagent_depth,
-          experimental.subagent_depth,
-          ["experimental", "subagent_depth"],
-          diagnostics,
-        )
-        if (value !== undefined) result.subagent_depth = value
-      }
-      if (own(experimental, "shell_timeout")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.shell_timeout,
-          experimental.shell_timeout,
-          ["experimental", "shell_timeout"],
-          diagnostics,
-        )
-        if (value !== undefined) result.shell_timeout = value
-      }
-      if (own(experimental, "model_route_demotion")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.model_route_demotion,
-          experimental.model_route_demotion,
-          ["experimental", "model_route_demotion"],
-          diagnostics,
-        )
-        if (value !== undefined) result.model_route_demotion = value
-      }
+      // `policies` merges into top-level `policies` in normalizePolicies; routing keys and aliases fold below.
+      Object.entries(ConfigExperimental.Info.fields).forEach(([key, schema]) => {
+        if (key === "policies" || foldedExperimental.has(key) || !own(experimental, key)) return
+        const value = decodeEncoded(schema, experimental[key], ["experimental", key], diagnostics)
+        if (value !== undefined) result[key] = value
+      })
       // Routing config (#1140): the canonical shape is `experimental.routes.*`; the flat
       // `experimental.model_routes` / `provider_routes` / `model_route_*` keys are the
       // deprecated spellings of the same keys and fold into the nested shape here, so
@@ -851,7 +846,7 @@ function diagnoseSelection(
       modelStr = ModelAlias.resolve(aliases, modelStr)
     } catch {}
   }
-  const modelValid = typeof modelStr === "string" && /^[^/#]+\/[^#]+$/.test(modelStr)
+  const modelValid = typeof modelStr === "string" && ConfigMigrateV1.modelSelection(modelStr) !== undefined
   if (own(value, "model") && typeof value.model === "string" && !modelValid)
     diagnostics.push({
       kind: "unsupported",

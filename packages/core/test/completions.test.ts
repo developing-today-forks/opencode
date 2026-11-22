@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai"
+import { LanguageModel, LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
+import { RequestExecutor } from "@opencode/ai/route"
 import { AISDK } from "@opencode/core/aisdk"
 import { ChatStreamTranslator, MessagesStreamTranslator, ResponsesStreamTranslator, completionBody, errorFrame, messagesBody, messagesErrorBody, messagesErrorFrame, chainResponsesInput, parseChatRequest, parseMessagesRequest, parseResponsesRequest, responsesBody } from "@opencode/core/completions"
 import { Generate } from "@opencode/core/generate"
@@ -203,7 +204,7 @@ const aisdk = Layer.mock(AISDK.Service, {
 const client = TestLLM.testLayer({ fallback: TestLLM.text("OK", "generate") })
 
 const resolver = ModelResolver.layer.pipe(Layer.provide(Layer.mergeAll(providers, models, integrations, npm, aisdk)))
-const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.merge(resolver, client))))
+const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.mergeAll(resolver, client, Layer.mock(Model.Service, {}), RequestExecutor.fetchLayer))))
 
 it.effect("complete runs a stateless chat completion through the resolver", () =>
   Effect.gen(function* () {
@@ -720,7 +721,7 @@ describe("messages door translation", () => {
 
   test("messages stream translator terminates a provider failure with an error event, not message_stop", () => {
     const translator = new MessagesStreamTranslator({ id: "msg_s", model: "workhorse" })
-    const frames = [translator.start(), ...translator.push(LLMEvent.providerError({ message: "boom" }))]
+    const frames = [translator.start(), translator.fail("boom")]
     const text = frames.join("")
     expect(text).toContain("event: error")
     expect(text).toContain("boom")

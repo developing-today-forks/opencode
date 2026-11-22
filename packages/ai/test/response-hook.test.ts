@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Stream } from "effect"
 import { Headers } from "effect/http"
-import { HttpContext, LLM } from "../src/index.js"
+import { HttpContext, ai } from "../src/effect.js"
 import { LLMClient, RequestExecutor, WebSocketTransport } from "../src/route.js"
 import { configure } from "../src/providers/openai.js"
 import { dynamicResponse } from "./lib/http.js"
@@ -10,7 +10,7 @@ import { sseEvents } from "./lib/sse.js"
 import { it } from "./lib/effect.js"
 
 const model = configure({ baseURL: "https://api.openai.test/v1/", apiKey: "test" }).chat("gpt-4.1-mini")
-const request = LLM.request({ model, prompt: "Hello" })
+const request = ai.request({ model, prompt: "Hello" })
 
 const limited = dynamicResponse((input) =>
   Effect.succeed(

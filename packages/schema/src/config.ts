@@ -54,6 +54,13 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   username: Schema.String.annotate({
     description: "Username displayed in conversations and used for telemetry identity",
   }).pipe(optional),
+  timezone: Schema.String.annotate({
+    description: "IANA time zone for schedules, e.g. America/Los_Angeles. Defaults to the server's local zone",
+  }).pipe(optional),
+  automations: Schema.Boolean.annotate({
+    description:
+      "Run prompts, shell commands or Code Mode actions on a timer, on a cron schedule, or on push events from connected MCP servers. Defaults to true; set false to disable.",
+  }).pipe(optional),
   permissions: Permission.Ruleset.annotate({
     description: "Ordered tool permission rules applied to agent tool use",
   }).pipe(optional),

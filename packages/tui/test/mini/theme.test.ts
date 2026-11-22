@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import path from "node:path"
 import { RGBA, type CliRenderer, type TerminalColors } from "@opentui/core"
+import { createTestRenderer } from "@opentui/core/testing"
 import { resolveThemeDocument, selectTheme, type ResolvedTheme } from "@opencode/theme/tui"
 import {
   RUN_THEME_MONO,
@@ -14,6 +15,11 @@ import { generateSystem } from "../../src/theme/system"
 import { tmpdir } from "../fixture/fixture"
 
 const tmp = await tmpdir()
+const resources = await createTestRenderer({})
+afterAll(async () => {
+  resources.renderer.destroy()
+  await resources.renderer.closed
+})
 const previousConfig = process.env.OPENCODE_CONFIG_DIR
 beforeAll(() => {
   process.env.OPENCODE_CONFIG_DIR = tmp.path
@@ -51,6 +57,17 @@ const emptyColors = terminalColors({
   highlightForeground: null,
 })
 
+test("theme lookup does not allocate resources after renderer shutdown", async () => {
+  const setup = await createTestRenderer({})
+  const palette = Promise.withResolvers<TerminalColors>()
+  setup.renderer.getPalette = () => palette.promise
+  const pending = resolveRunTheme(setup.renderer)
+  setup.renderer.destroy()
+  await setup.renderer.closed
+  palette.resolve(terminalColors())
+  expect((await pending).block.syntax).toBeUndefined()
+})
+
 function renderer(
   input: {
     themeMode?: "dark" | "light"
@@ -60,6 +77,7 @@ function renderer(
   } = {},
 ) {
   return {
+    nativeScene: resources.renderer.nativeScene,
     get themeMode() {
       return input.themeMode
     },
@@ -90,9 +108,9 @@ function expectFooter(actual: RunTheme, theme: ResolvedTheme) {
     formfieldFocusedBg: theme.background.formfield.focused,
     formfieldFocusedText: theme.text.formfield.focused,
     selection: theme.text.formfield.selected,
-    running: theme.hue.interactive[200],
-    question: theme.hue.accent[200],
-    permission: theme.hue.accent[200],
+    running: theme.hue.interactive[400],
+    question: theme.hue.accent[400],
+    permission: theme.hue.accent[400],
     success: theme.text.feedback.success.base,
     link: theme.markdown.link,
     shade: theme.background.raised.base,
@@ -144,7 +162,7 @@ test.each(["light", "dark"] as const)("uses shared %s defaults and named built-i
       expectFooter(theme, expected)
       expect(rgba(theme.background).toInts()).toEqual(RGBA.fromHex(colors.defaultBackground!).toInts())
       expect(theme.footer.categorical.map((color) => rgba(color).toInts())).toEqual(
-        expected.categorical.map((scale) => scale[200].toInts()),
+        expected.categorical.map((scale) => scale[400].toInts()),
       )
       expect(theme.block.syntax?.getAllStyles().size).toBeGreaterThan(0)
       for (const color of [

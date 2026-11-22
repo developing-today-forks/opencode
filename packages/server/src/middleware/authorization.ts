@@ -5,6 +5,8 @@ import { Authorization } from "@opencode/protocol/middleware/authorization"
 export { Authorization } from "@opencode/protocol/middleware/authorization"
 import { PTY_CONNECT_PATH, PTY_CONNECT_TICKET_QUERY } from "@opencode/protocol/groups/pty"
 import { PERSISTENT_PTY_CONNECT_PATH } from "@opencode/protocol/groups/persistent-pty"
+import { MCP_CLIENT_PATH } from "@opencode/protocol/groups/mcp"
+import { isWebSocketUpgrade, MACHINE_LINK_PATH } from "@opencode/protocol/groups/machine"
 import { PAIRING_CONNECT_PATH } from "@opencode/protocol/groups/server"
 import { TLSSocket } from "node:tls"
 import { Effect, Layer, Redacted } from "effect"
@@ -91,16 +93,24 @@ export const authorizationLayer = Layer.effect(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
         const route = yield* HttpRouter.RouteContext
-        // Ticketed PTY connects (browsers cannot set headers on WebSocket upgrades) and pairing links
+        // Ticketed PTY and client MCP connects (browsers cannot set headers on WebSocket upgrades) and pairing links
         // skip credential checks here; their handlers consume and validate the ticket or code. Use the
         // route selected by Effect so authorization and dispatch cannot disagree about the request path.
         const url = new URL(request.url, "http://localhost")
         if (
-          ((route.route.path === PTY_CONNECT_PATH || route.route.path === PERSISTENT_PTY_CONNECT_PATH) &&
+          ((route.route.path === PTY_CONNECT_PATH ||
+            route.route.path === PERSISTENT_PTY_CONNECT_PATH ||
+            route.route.path === MCP_CLIENT_PATH) &&
             !!url.searchParams.get(PTY_CONNECT_TICKET_QUERY)) ||
           route.route.path === PAIRING_CONNECT_PATH
         )
           return yield* effect
+        // A machine's link takes no server password: a worker holding it could call the whole API. Only a WebSocket
+        // upgrade to the route Effect selected passes here, and that is safe because the socket carries nothing until
+        // the link's own handshake has proved a paired key or a valid join secret, as an SSH port does. Any other
+        // request to the route is checked like the rest, and with machines off the handler answers the upgrade as an
+        // unknown route.
+        if (route.route.path === MACHINE_LINK_PATH && isWebSocketUpgrade(request)) return yield* effect
         if (yield* authorizedRequest(request, config)) return yield* effect
         if (challengeRequest(request))
           yield* HttpEffect.appendPreResponseHandler((_request, response) =>

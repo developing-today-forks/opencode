@@ -89,7 +89,7 @@ export const Event = Worktree.Event
 
 interface StoredInput {
   readonly directory: AbsolutePath
-  readonly strategy?: string
+  readonly strategy?: StrategyID
   readonly replace?: boolean
 }
 
@@ -287,7 +287,7 @@ const layer = Layer.effect(
       const stored = yield* ops.find(input.projectID, worktreeDirectory)
       if (!stored?.strategy) return yield* new InvalidDirectoryError({ directory: worktreeDirectory })
       const settings = yield* load(row.worktree, current)
-      const strategy = yield* getStrategy(StrategyID.make(stored.strategy), settings.strategies)
+      const strategy = yield* getStrategy(stored.strategy, settings.strategies)
       yield* strategy
         .remove({
           directory: worktreeDirectory,

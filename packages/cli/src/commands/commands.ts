@@ -1,6 +1,8 @@
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
+import { CliFlag } from "../framework/flag"
 import { Spec } from "../framework/spec"
+import { parseServerURL } from "../services/service-urls"
 import { Updater } from "../services/updater"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
@@ -10,17 +12,27 @@ export const PrintLogs = GlobalFlag.Setting("print-logs")({
   ),
 })
 
-declare const OPENCODE_CLI_NAME: string | undefined
-
-const ServerParams = {
-  standalone: Flag.Boolean("standalone").pipe(
+export const Standalone = GlobalFlag.Setting("standalone")({
+  flag: Flag.Boolean("standalone").pipe(
     Flag.withDescription("Run with a private server instead of the background service"),
     Flag.withDefault(false),
   ),
-  server: Flag.String("server").pipe(
+})
+
+export const Server = GlobalFlag.Setting("server")({
+  flag: Flag.String("server").pipe(
     Flag.withDescription("Connect to a server URL instead of the background service"),
     Flag.optional,
   ),
+})
+
+const ServerFlags = [Standalone, Server] as const
+
+declare const OPENCODE_CLI_NAME: string | undefined
+
+const ServerParams = {
+  standalone: Standalone.flag,
+  server: Server.flag,
 }
 
 const TableFormat = Flag.Literals("format", ["table", "json"]).pipe(
@@ -39,6 +51,16 @@ const Topics = Flag.String("topic").pipe(
   Flag.atLeast(0),
 )
 
+const serverURLFlag = (description: string) =>
+  Flag.String("url").pipe(
+    Flag.withDescription(description),
+    Flag.mapTryCatch(
+      parseServerURL,
+      () => "Expected an HTTP(S) server URL without credentials, query parameters, or a fragment",
+    ),
+    Flag.optional,
+  )
+
 const PermissionParams = {
   auto: Flag.Boolean("auto").pipe(
     Flag.withDescription("Auto-approve permissions that are not explicitly denied"),
@@ -48,6 +70,18 @@ const PermissionParams = {
   dangerouslySkipPermissions: Flag.Boolean("dangerously-skip-permissions").pipe(
     Flag.withDefault(false),
     Flag.withHidden,
+  ),
+}
+
+const LoginParams = {
+  target: Argument.String("target").pipe(
+    Argument.withDescription("Integration ID, name, or well-known provider URL"),
+    Argument.optional,
+  ),
+  method: Flag.String("method").pipe(Flag.withDescription("Authentication method ID"), Flag.optional),
+  answer: Flag.String("answer").pipe(
+    Flag.withDescription("Provider form answer (key=value; repeat for multiple fields)"),
+    Flag.atMost(100),
   ),
 }
 
@@ -113,8 +147,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("api", {
       description: "Make a request to the running server",
+      globalFlags: ServerFlags,
       params: {
-        ...ServerParams,
         request: Argument.String("operation | method path").pipe(
           Argument.withDescription("OpenAPI operation ID, or an HTTP method followed by a path"),
           Argument.variadic({ min: 1, max: 2 }),
@@ -131,8 +165,18 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     Spec.make("debug", {
       description: "Debugging and troubleshooting tools",
       commands: [
-        Spec.make("agents", { description: "List all agents" }),
-        Spec.make("config", { description: "List configuration sources" }),
+        Spec.make("agents", { description: "List all agents", globalFlags: ServerFlags }),
+        Spec.make("config", { description: "List configuration sources", globalFlags: ServerFlags }),
+        Spec.make("heap-dump", {
+          description: "Write a heap snapshot of the running server and print its path",
+          globalFlags: [Server],
+          params: {
+            directory: Flag.String("directory").pipe(
+              Flag.withDescription("Directory to write the snapshot into instead of the server's log directory"),
+              Flag.optional,
+            ),
+          },
+        }),
         Spec.make("paths", {
           description: "Show global paths (data, config, cache, state)",
           params: {
@@ -159,11 +203,11 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("auth", {
       description: "manage integrations and credentials",
+      globalFlags: ServerFlags,
       commands: [
         Spec.make("list", {
           description: "list integrations and credentials",
           params: {
-            ...ServerParams,
             format: Flag.Literals("format", ["default", "json"]).pipe(
               Flag.withDescription("Output format"),
               Flag.withDefault("default"),
@@ -172,23 +216,11 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         }),
         Spec.make("login", {
           description: "connect an integration",
-          params: {
-            ...ServerParams,
-            target: Argument.String("target").pipe(
-              Argument.withDescription("Integration ID, name, or well-known provider URL"),
-              Argument.optional,
-            ),
-            method: Flag.String("method").pipe(Flag.withDescription("Authentication method ID"), Flag.optional),
-            answer: Flag.String("answer").pipe(
-              Flag.withDescription("Provider form answer (key=value; repeat for multiple fields)"),
-              Flag.atMost(100),
-            ),
-          },
+          params: LoginParams,
         }),
         Spec.make("logout", {
           description: "log out of a saved account",
           params: {
-            ...ServerParams,
             target: Argument.String("target").pipe(
               Argument.withDescription("Integration ID or name"),
               Argument.optional,
@@ -202,7 +234,6 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         Spec.make("export", {
           description: "print stored credentials, including secrets, as JSON",
           params: {
-            ...ServerParams,
             target: Argument.String("target").pipe(
               Argument.withDescription("Integration ID or name (exports every integration when omitted)"),
               Argument.optional,
@@ -212,7 +243,6 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         Spec.make("import", {
           description: "import credentials exported by auth export",
           params: {
-            ...ServerParams,
             file: Argument.String("file").pipe(
               Argument.withDescription("JSON file to import (reads stdin when omitted)"),
               Argument.optional,
@@ -222,7 +252,6 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         Spec.make("switch", {
           description: "switch the active account for an integration",
           params: {
-            ...ServerParams,
             target: Argument.String("target").pipe(
               Argument.withDescription("Integration ID or name"),
               Argument.optional,
@@ -235,10 +264,19 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         }),
       ],
     }),
+    Spec.make("login", {
+      description: "Connect an integration (alias for auth login)",
+      hidden: true,
+      globalFlags: ServerFlags,
+      params: LoginParams,
+    }),
     Spec.make("mcp", {
       description: "Manage MCP (Model Context Protocol) servers",
       commands: [
-        Spec.make("list", { description: "List configured MCP servers and their status" }),
+        Spec.make("list", {
+          description: "List configured MCP servers and their status",
+          globalFlags: ServerFlags,
+        }),
         Spec.make("add", {
           description: "Add an MCP server to your configuration",
           params: {
@@ -264,12 +302,14 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         }),
         Spec.make("auth", {
           description: "Authenticate with an OAuth-capable remote MCP server",
+          globalFlags: ServerFlags,
           params: {
             name: Argument.String("name").pipe(Argument.withDescription("Name of the MCP server"), Argument.optional),
           },
         }),
         Spec.make("logout", {
           description: "Remove stored OAuth credentials for an MCP server",
+          globalFlags: ServerFlags,
           params: { name: Argument.String("name").pipe(Argument.withDescription("Name of the MCP server")) },
         }),
       ],
@@ -279,6 +319,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       commands: [
         Spec.make("list", {
           description: "List plugins",
+          globalFlags: ServerFlags,
           params: {
             builtin: Flag.Boolean("builtin").pipe(
               Flag.withDescription("Include built-in server plugins"),
@@ -294,6 +335,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         }),
         Spec.make("check", {
           description: "Check package plugins for updates",
+          globalFlags: ServerFlags,
           params: {
             target: Argument.String("target").pipe(
               Argument.withDescription("Configured package target"),
@@ -303,6 +345,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         }),
         Spec.make("update", {
           description: "Update package plugins",
+          globalFlags: ServerFlags,
           params: {
             target: Argument.String("target").pipe(
               Argument.withDescription("Configured package target; omit to update all outdated plugins"),
@@ -320,12 +363,12 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("models", {
       description: "List all available models",
-      params: ServerParams,
+      globalFlags: ServerFlags,
     }),
     Spec.make("stats", {
       description: "Show shareable usage statistics",
+      globalFlags: ServerFlags,
       params: {
-        ...ServerParams,
         days: Flag.Int("days").pipe(
           // 3720 is the stats service's maximum span (core SessionStats
           // MaxSpan: 120 x 31-day windows, #959); a larger --days could
@@ -374,8 +417,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("mini", {
       description: "Start the minimal interactive interface",
+      globalFlags: ServerFlags,
       params: {
-        ...ServerParams,
         continue: Flag.Boolean("continue").pipe(
           Flag.withAlias("c"),
           Flag.withDescription("Continue the last session"),
@@ -410,8 +453,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("run", {
       description: "Run OpenCode with a message",
+      globalFlags: ServerFlags,
       params: {
-        ...ServerParams,
         message: Argument.String("message").pipe(
           Argument.withDescription("Message to send"),
           Argument.variadic({ min: 0 }),
@@ -430,6 +473,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDescription("Fork the session before continuing"),
           Flag.withDefault(false),
         ),
+        worktree: CliFlag.optionalValue("worktree", "name").pipe(
+          Flag.withAlias("w"),
+          Flag.withDescription("Start a new session in a new git worktree, optionally with this name"),
+        ),
         model: Flag.String("model").pipe(
           Flag.withAlias("m"),
           Flag.withDescription("Model to use in the format provider/model#variant"),
@@ -446,17 +493,23 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.atMost(100),
         ),
         title: Flag.String("title").pipe(Flag.withDescription("Session title"), Flag.optional),
+        archived: Flag.Boolean("archived").pipe(
+          Flag.withDescription(
+            "Create the session archived so it stays out of session lists (useful for scripted or CI runs)",
+          ),
+          Flag.withDefault(false),
+        ),
         thinking: Flag.Boolean("thinking").pipe(Flag.withDescription("Show thinking blocks"), Flag.withDefault(false)),
         ...PermissionParams,
       },
     }),
     Spec.make("session", {
       description: "Manage sessions",
+      globalFlags: ServerFlags,
       commands: [
         Spec.make("list", {
           description: "List top-level sessions in the current project, newest first",
           params: {
-            ...ServerParams,
             maxCount: Flag.Int("max-count").pipe(
               Flag.withAlias("n"),
               Flag.withSchema(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
@@ -472,14 +525,12 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         Spec.make("delete", {
           description: "Delete a session and its child sessions",
           params: {
-            ...ServerParams,
             sessionID: Argument.String("sessionID").pipe(Argument.withDescription("Session ID to delete")),
           },
         }),
         Spec.make("export", {
           description: "Export session data as JSON",
           params: {
-            ...ServerParams,
             session: Argument.String("session").pipe(
               Argument.withDescription("Session ID to export"),
               Argument.optional,
@@ -493,7 +544,6 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         Spec.make("import", {
           description: "Import session data from a JSON file or URL",
           params: {
-            ...ServerParams,
             file: Argument.String("file").pipe(Argument.withDescription("JSON file or URL to import")),
             directory: Flag.String("directory").pipe(
               Flag.withDescription("Directory in which to import the session"),
@@ -659,26 +709,38 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     }),
     Spec.make("reload", {
       description: "Reload configuration",
-      params: {
-        ...ServerParams,
-      },
+      globalFlags: ServerFlags,
+    }),
+    Spec.make("machine", {
+      description: "Manage remote machines",
+      globalFlags: ServerFlags,
+      commands: [
+        Spec.make("add", {
+          description: "Add a machine and print a one-time join string",
+          params: {
+            name: Argument.String("name").pipe(Argument.withDescription("Name of the machine")),
+            url: serverURLFlag("Use an external HTTP(S) server URL in the join string"),
+            replace: Flag.Boolean("replace").pipe(
+              Flag.withDescription("Replace the key of an already-paired machine"),
+              Flag.withDefault(false),
+            ),
+          },
+        }),
+        Spec.make("list", {
+          description: "List machines",
+        }),
+        Spec.make("remove", {
+          description: "Remove a machine",
+          params: {
+            name: Argument.String("name").pipe(Argument.withDescription("Name of the machine")),
+          },
+        }),
+      ],
     }),
     Spec.make("pair", {
       description: "Print one-time links to connect a browser or app",
       params: {
-        url: Flag.String("url").pipe(
-          Flag.withDescription("Use an external HTTP(S) server URL in pairing links"),
-          Flag.mapTryCatch(
-            (value) => {
-              const url = new URL(value)
-              if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash)
-                throw new Error("Invalid pairing URL")
-              return url.href.replace(/\/+$/, "")
-            },
-            () => "Expected an HTTP(S) server URL without credentials, query parameters, or a fragment",
-          ),
-          Flag.optional,
-        ),
+        url: serverURLFlag("Use an external HTTP(S) server URL in pairing links"),
         remote: Flag.Boolean("remote").pipe(
           Flag.withDescription(
             "Pair through the OpenTunnel remote address, enabling remote access if needed (exposes the server to the internet)",

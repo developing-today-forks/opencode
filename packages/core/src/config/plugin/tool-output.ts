@@ -11,7 +11,7 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const output = yield* ToolOutput.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["tool_output"], output.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, output.reload(), ["tool_output"])
     yield* output.transform((editor) => {
       const configured = Config.latest(loaded.entries, "tool_output")
       if (!configured) return

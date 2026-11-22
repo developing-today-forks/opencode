@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
-import { LLM, LanguageModel, Message } from "@opencode/ai"
+import { ai, LanguageModel, Message } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
-import { compileRequest } from "@opencode/ai/route/client"
+import { compileRequest } from "@opencode/ai/testing"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { Headers } from "effect/http"
 import { AISDKNative } from "@opencode/core/aisdk-native"
@@ -27,10 +27,11 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { it, testEffect } from "./lib/effect"
 import { withTempDir } from "./fixture/tmpdir"
+import { withEnv } from "./fixture/env"
 
 const itWithRouteLog = testEffect(LayerNode.compile(LayerNode.group([ModelRouteLog.node, Database.node])))
 
-interface ModelOptions {
+interface RequestOptions {
   readonly providerID?: Provider.ID
   readonly canonical?: Provider.ID
   readonly modelID?: string
@@ -42,7 +43,7 @@ interface ModelOptions {
   readonly limit?: Info["limit"]
 }
 
-function model(packageName: string | undefined, options: ModelOptions = {}) {
+function model(packageName: string | undefined, options: RequestOptions = {}) {
   const info: Model.MutableInfo = {
     id: ID.make("test-model"),
     modelID: ID.make(options.modelID ?? "api-test-model"),
@@ -63,33 +64,13 @@ function model(packageName: string | undefined, options: ModelOptions = {}) {
     limit: options.limit ?? { context: 100, output: 20 },
   }
   AISDKNative.rewrite(info, {
+    builtins: Provider.builtinPackages,
     specifier: packageName,
     providerID: info.providerID,
     canonical: info.canonical,
     modelID: info.modelID,
   })
   return Info.make(info)
-}
-
-function withEnv<A, E, R>(variables: Record<string, string | undefined>, effect: () => Effect.Effect<A, E, R>) {
-  return Effect.acquireUseRelease(
-    Effect.sync(() => {
-      const previous = Object.fromEntries(Object.keys(variables).map((key) => [key, process.env[key]]))
-      Object.entries(variables).forEach(([key, value]) => {
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-      })
-      return previous
-    }),
-    effect,
-    (previous) =>
-      Effect.sync(() => {
-        Object.entries(previous).forEach(([key, value]) => {
-          if (value === undefined) delete process.env[key]
-          else process.env[key] = value
-        })
-      }),
-  )
 }
 
 function withConfigEnv<A, E, R>(env: Record<string, string>, effect: () => Effect.Effect<A, E, R>) {
@@ -181,7 +162,7 @@ describe("ModelResolver", () => {
         expect(String(selected.provider)).toBe(providerID)
         expect(selected.route.id).toBe(route)
         expect(selected.route.endpoint.baseURL).toBe("https://provider.example/v1/openai")
-        const prepared = yield* compileRequest(LLM.request({ model: selected, prompt: "Hello" }))
+        const prepared = yield* compileRequest(ai.request({ model: selected, prompt: "Hello" }))
         expect(prepared.body.messages).toEqual([{ role: "user", content: "Hello" }])
         expect(prepared.body).not.toHaveProperty("apiKey")
       }
@@ -257,6 +238,24 @@ describe("ModelResolver", () => {
     ),
   )
 
+  it.effect("fills Mantle catalog URLs from the provider region", () =>
+    withEnv({ AWS_REGION: undefined, AWS_DEFAULT_REGION: undefined }, () =>
+      Effect.gen(function* () {
+        const catalog = model(Provider.aisdk("@ai-sdk/amazon-bedrock/mantle"), {
+          providerID: Provider.ID.amazonBedrock,
+          modelID: "openai.gpt-5.5",
+          settings: { baseURL: "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1" },
+        })
+        const resolved = yield* ModelResolver.fromCatalogModel({
+          ...catalog,
+          settings: Provider.mergeOverlay({ region: "us-west-2" }, catalog.settings),
+        })
+
+        expect(resolved.route.endpoint.baseURL).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1")
+      }),
+    ),
+  )
+
   it.effect("prefers the configured Mantle region over the environment", () =>
     withEnv({ AWS_REGION: "us-east-1" }, () =>
       Effect.gen(function* () {
@@ -292,12 +291,12 @@ describe("ModelResolver", () => {
         id: "openai-responses",
         providerMetadataKey: "openai",
         endpoint: { baseURL: "https://openai.example/v1" },
-        defaults: {
-          headers: { "x-test": "header" },
-          http: { body: { custom_extension: { enabled: true } } },
-        },
       })
-      const prepared = yield* compileRequest(LLM.request({ model: resolved, prompt: "Hello" }))
+      expect(resolved.options).toMatchObject({
+        headers: { "x-test": "header" },
+        http: { body: { custom_extension: { enabled: true } } },
+      })
+      const prepared = yield* compileRequest(ai.request({ model: resolved, prompt: "Hello" }))
       expect(prepared.body.max_output_tokens).toBeUndefined()
       expect(JSON.stringify(prepared.body)).not.toContain("max_output_tokens")
     }),
@@ -310,7 +309,7 @@ describe("ModelResolver", () => {
           settings: { apiKey: "secret", baseURL: "https://openai.example/v1" },
         }),
       )
-      const prepared = yield* compileRequest(LLM.request({ model: resolved, prompt: "Hello" }))
+      const prepared = yield* compileRequest(ai.request({ model: resolved, prompt: "Hello" }))
 
       expect(JSON.stringify(prepared.body)).not.toContain("apiKey")
       expect(JSON.stringify(prepared.body)).not.toContain("secret")
@@ -326,7 +325,7 @@ describe("ModelResolver", () => {
           }),
         )
         const headers = yield* resolved.route.auth.apply({
-          request: LLM.request({ model: resolved, prompt: "Hello" }),
+          request: ai.request({ model: resolved, prompt: "Hello" }),
           method: "POST",
           url: "https://openai.example/v1/responses",
           body: "{}",
@@ -425,11 +424,11 @@ describe("ModelResolver", () => {
           Effect.gen(function* () {
             const resolved = yield* resolver.resolveModel(selection)
             const headers = yield* resolved.model.route.auth.apply({
-              request: LLM.request({ model: resolved.model, prompt: "Hello" }),
+              request: ai.request({ model: resolved.model, prompt: "Hello" }),
               method: "POST",
               url: resolved.model.route.endpoint.baseURL ?? "",
               body: "{}",
-              headers: Headers.fromInput(resolved.model.route.defaults.headers),
+              headers: Headers.fromInput(resolved.model.options?.headers),
             })
 
             expect(resolved.limit).toEqual(selection.limit)
@@ -454,7 +453,7 @@ describe("ModelResolver", () => {
         )
         const exit = yield* Effect.exit(
           resolved.route.auth.apply({
-            request: LLM.request({ model: resolved, prompt: "Hello" }),
+            request: ai.request({ model: resolved, prompt: "Hello" }),
             method: "POST",
             url: "https://google.example.com/v1",
             body: "{}",
@@ -488,7 +487,7 @@ describe("ModelResolver", () => {
           body: {},
         }),
       )
-      const request = LLM.request({ model: resolved, prompt: "Hello", generation: { maxTokens: 10 } })
+      const request = ai.request({ model: resolved, prompt: "Hello", maxTokens: 10 })
       const prepared = yield* compileRequest(request)
       const headers = yield* resolved.route.auth.apply({
         request,
@@ -510,7 +509,7 @@ describe("ModelResolver", () => {
       expect(prepared.body).toMatchObject({ max_completion_tokens: 10 })
       expect(prepared.body).not.toHaveProperty("max_tokens")
       expect(resolved.route.endpoint.baseURL).toBe("https://compatible.example/v1")
-      expect(resolved.route.defaults.http?.body).toEqual({})
+      expect(resolved.options?.http?.body).toBeUndefined()
     }),
   )
 
@@ -577,20 +576,20 @@ describe("ModelResolver", () => {
         Credential.Key.make({ type: "key", key: "secret" }),
       )
 
-      expect(resolved.route.defaults.headers).toMatchObject({ "x-test": "header", "x-variant": "high" })
-      expect(resolved.route.defaults.http?.body).toEqual({
+      expect(resolved.options?.headers).toMatchObject({ "x-test": "header", "x-variant": "high" })
+      expect(resolved.options?.http?.body).toEqual({
         custom_extension: { enabled: true },
         store: false,
         service_tier: "priority",
         temperature: 0.2,
       })
-      expect(resolved.route.defaults.providerOptions).toEqual({
+      expect(resolved.options?.providerOptions).toEqual({
         store: false,
         reasoningEffort: "xhigh",
         reasoningSummary: "auto",
         include: ["reasoning.encrypted_content"],
       })
-      const prepared = yield* compileRequest(LLM.request({ model: resolved, prompt: "Hello" }))
+      const prepared = yield* compileRequest(ai.request({ model: resolved, prompt: "Hello" }))
       expect(prepared.body).toMatchObject({
         include: ["reasoning.encrypted_content"],
         reasoning: { effort: "xhigh", summary: "auto" },
@@ -610,7 +609,7 @@ describe("ModelResolver", () => {
         VariantID.make("high"),
         Credential.Key.make({ type: "key", key: "secret" }),
       )
-      const prepared = yield* compileRequest(LLM.request({ model: resolved, prompt: "Hello" }))
+      const prepared = yield* compileRequest(ai.request({ model: resolved, prompt: "Hello" }))
 
       expect(resolved.route.id).toBe("xai-responses")
       expect(prepared.body).toMatchObject({
@@ -636,7 +635,7 @@ describe("ModelResolver", () => {
       })
       const resolved = yield* ModelResolver.resolveModel(catalog, VariantID.make("high"))
 
-      expect(resolved.route.defaults.http?.body).toEqual({
+      expect(resolved.options?.http?.body).toEqual({
         custom_extension: { enabled: true },
         store: false,
         reasoning_effort: "high",
@@ -676,10 +675,10 @@ describe("ModelResolver", () => {
       })
       const resolved = yield* ModelResolver.resolveModel(catalog, VariantID.make("high"))
 
-      expect(resolved.route.defaults.http?.body).toEqual({
+      expect(resolved.options?.http?.body).toEqual({
         custom_extension: { enabled: true },
       })
-      expect(resolved.route.defaults.providerOptions).toEqual({
+      expect(resolved.options?.providerOptions).toEqual({
         thinking: { type: "enabled", budgetTokens: 12000 },
       })
     }),
@@ -711,7 +710,7 @@ describe("ModelResolver", () => {
         }),
         Credential.Key.make({ type: "key", key: "secret" }),
       )
-      const request = LLM.request({ model: resolved, prompt: "Hello" })
+      const request = ai.request({ model: resolved, prompt: "Hello" })
       const headers = yield* resolved.route.auth.apply({
         request,
         method: "POST",
@@ -736,7 +735,7 @@ describe("ModelResolver", () => {
         credential,
       )
       const headers = yield* resolved.route.auth.apply({
-        request: LLM.request({ model: resolved, prompt: "Hello" }),
+        request: ai.request({ model: resolved, prompt: "Hello" }),
         method: "POST",
         url: "https://openai.example/v1/responses",
         body: "{}",
@@ -755,8 +754,14 @@ describe("ModelResolver", () => {
           methodID: Integration.MethodID.make("azure-cli"),
           metadata: { resourceName: "cli-resource" },
         })
+        // The Azure plugin projects the credential's resource into provider settings.
         const azure = yield* ModelResolver.fromCatalogModel(
-          model(Provider.aisdk("@ai-sdk/azure"), { providerID: Provider.ID.azure, headers: {}, body: {} }),
+          model(Provider.aisdk("@ai-sdk/azure"), {
+            providerID: Provider.ID.azure,
+            settings: { resourceName: "cli-resource" },
+            headers: {},
+            body: {},
+          }),
           credential,
         )
         const foundry = yield* ModelResolver.fromCatalogModel(
@@ -770,7 +775,7 @@ describe("ModelResolver", () => {
         )
         const authorize = (resolved: LanguageModel) =>
           resolved.route.auth.apply({
-            request: LLM.request({ model: resolved, prompt: "Hello" }),
+            request: ai.request({ model: resolved, prompt: "Hello" }),
             method: "POST",
             url: "https://cli-resource.openai.azure.com/openai/v1/responses",
             body: "{}",
@@ -784,10 +789,10 @@ describe("ModelResolver", () => {
     ),
   )
 
-  it.effect("does not project API key metadata into the request body", () =>
+  it.effect("does not project API key metadata into settings or the request body", () =>
     Effect.gen(function* () {
       // V1 auth.json stored connect-form answers as API key metadata, and the legacy import preserves them there.
-      const resolved = yield* ModelResolver.fromCatalogModel(
+      const failure = yield* ModelResolver.fromCatalogModel(
         model(Provider.aisdk("@ai-sdk/azure"), {
           providerID: Provider.ID.azure,
           modelID: "responses-deployment",
@@ -796,10 +801,21 @@ describe("ModelResolver", () => {
           body: {},
         }),
         Credential.Key.make({ type: "key", key: "secret", metadata: { resourceName: "migrated-resource" } }),
+      ).pipe(Effect.flip)
+      const resolved = yield* ModelResolver.fromCatalogModel(
+        model(Provider.aisdk("@ai-sdk/azure"), {
+          providerID: Provider.ID.azure,
+          modelID: "responses-deployment",
+          settings: { apiVersion: "2025-01-01-preview", resourceName: "configured-resource" },
+          headers: {},
+          body: {},
+        }),
+        Credential.Key.make({ type: "key", key: "secret", metadata: { resourceName: "migrated-resource" } }),
       )
 
-      expect(resolved.route.endpoint.baseURL).toBe("https://migrated-resource.openai.azure.com/openai/v1")
-      expect(resolved.route.defaults.http?.body).toEqual({})
+      expect(failure).toBeInstanceOf(ModelResolver.ModelConfigurationError)
+      expect(resolved.route.endpoint.baseURL).toBe("https://configured-resource.openai.azure.com/openai/v1")
+      expect(resolved.options?.http?.body).toBeUndefined()
     }),
   )
 
@@ -821,7 +837,7 @@ describe("ModelResolver", () => {
         }),
       )
 
-      expect(resolved.route.defaults.http?.body).toEqual({})
+      expect(resolved.options?.http?.body).toBeUndefined()
     }),
   )
 
@@ -842,7 +858,7 @@ describe("ModelResolver", () => {
           metadata: { accountID: "acct_123" },
         }),
       )
-      const request = LLM.request({
+      const request = ai.request({
         model: resolved,
         system: [
           { type: "text", text: "Base instructions." },
@@ -863,11 +879,12 @@ describe("ModelResolver", () => {
         id: "openai-responses",
         endpoint: { baseURL: "https://chatgpt.com/backend-api/codex" },
       })
-      expect(resolved.route.defaults.headers).toMatchObject({ "chatgpt-account-id": "acct_123" })
+      expect(resolved.options?.headers).toMatchObject({ "chatgpt-account-id": "acct_123" })
       expect(headers.authorization).toBe("Bearer chatgpt-token")
+      expect(prepared.body).not.toHaveProperty("instructions")
       expect(prepared.body).toMatchObject({
-        instructions: "Base instructions.\nProject instructions.",
         input: [
+          { role: "developer", content: "Base instructions.\nProject instructions." },
           { role: "user", content: [{ type: "input_text", text: "Hello" }] },
           { role: "developer", content: "Updated instructions." },
         ],
@@ -904,7 +921,7 @@ describe("ModelResolver", () => {
         }),
       )
 
-      expect(resolved.route.defaults.headers).toMatchObject({
+      expect(resolved.options?.headers).toMatchObject({
         "OpenAI-Organization": "org_123",
         "OpenAI-Project": "proj_123",
       })
@@ -928,7 +945,7 @@ describe("ModelResolver", () => {
           metadata: { accountID: "acct_123" },
         }),
       )
-      const request = LLM.request({ model: resolved, prompt: "Hello" })
+      const request = ai.request({ model: resolved, prompt: "Hello" })
       const headers = yield* resolved.route.auth.apply({
         request,
         method: "POST",
@@ -979,7 +996,7 @@ describe("ModelResolver", () => {
     }),
   )
 
-  it.effect("maps OAuth credentials to native provider auth settings", () =>
+  it.effect("maps OAuth credentials to native provider auth settings without their metadata", () =>
     Effect.gen(function* () {
       const native = yield* ModelResolver.fromCatalogModel(
         model(Provider.aisdk("@ai-sdk/openai"), {
@@ -992,6 +1009,7 @@ describe("ModelResolver", () => {
         access: "oauth-token",
         refresh: "refresh",
         expires: Date.now() + 60_000,
+        metadata: { server: "https://console.example", orgID: "org_123", orgName: "Acme" },
       })
       const packages = [
         ["@opencode/ai/providers/google-vertex", "accessToken"],
@@ -1011,6 +1029,9 @@ describe("ModelResolver", () => {
               model: (modelID, settings) => {
                 expect(settings).toMatchObject({ [key]: "oauth-token" })
                 expect(settings).not.toHaveProperty("apiKey")
+                expect(settings).not.toHaveProperty("server")
+                expect(settings).not.toHaveProperty("orgID")
+                expect(settings).not.toHaveProperty("orgName")
                 return LanguageModel.make({ id: modelID, provider: "package-provider", route: native.route })
               },
             }),
@@ -1347,50 +1368,47 @@ describe("ModelResolver", () => {
       const workers = yield* ModelResolver.fromCatalogModel(
         model("@opencode/ai/providers/cloudflare-workers-ai", {
           modelID: "@cf/meta/llama-3.1-8b-instruct",
+          settings: { accountId: "account" },
         }),
-        Credential.Key.make({
-          type: "key",
-          key: "workers-secret",
-          configuration: { accountId: "account" },
-        }),
+        Credential.Key.make({ type: "key", key: "workers-secret" }),
       )
 
       expect(google.route.id).toBe("gemini")
-      expect(google.route.defaults.providerOptions).toEqual({ thinkingConfig: { thinkingBudget: 1_024 } })
+      expect(google.options?.providerOptions).toEqual({ thinkingConfig: { thinkingBudget: 1_024 } })
       expect(openrouter.route.id).toBe("openrouter")
-      expect(openrouter.route.defaults.providerOptions).toEqual({ reasoning: { effort: "high" } })
+      expect(openrouter.options?.providerOptions).toEqual({ reasoning: { effort: "high" } })
       expect(cerebras.route.id).toBe("cerebras-chat")
-      expect(cerebras.route.defaults.providerOptions).toEqual({ reasoningEffort: "high" })
+      expect(cerebras.options?.providerOptions).toEqual({ reasoningEffort: "high" })
       expect(String(cerebras.provider)).toBe("test-provider")
       expect(deepinfra.route.id).toBe("deepinfra-chat")
       expect(deepinfra.route.endpoint.baseURL).toBe("https://deepinfra.example/provider-root/openai")
-      expect(deepinfra.route.defaults.providerOptions).toEqual({ reasoningEffort: "none" })
+      expect(deepinfra.options?.providerOptions).toEqual({ reasoningEffort: "none" })
       expect(String(deepinfra.provider)).toBe("test-provider")
       expect(togetherai.route.id).toBe("togetherai-chat")
-      expect(togetherai.route.defaults.providerOptions).toEqual({ reasoningEffort: "high" })
+      expect(togetherai.options?.providerOptions).toEqual({ reasoningEffort: "high" })
       expect(String(togetherai.provider)).toBe("test-provider")
       expect(groq.route.id).toBe("groq-chat")
       expect(groq.route.protocol).toBe("groq-chat")
-      expect(groq.route.defaults.providerOptions).toEqual({ reasoningEffort: "high", parallelToolCalls: false })
+      expect(groq.options?.providerOptions).toEqual({ reasoningEffort: "high", parallelToolCalls: false })
       expect(String(groq.provider)).toBe("test-provider")
       expect(mistral.route.id).toBe("mistral-chat")
-      expect(mistral.route.defaults.providerOptions).toEqual({
+      expect(mistral.options?.providerOptions).toEqual({
         safePrompt: true,
         promptCacheKey: "session-123",
         reasoningEffort: "high",
       })
       expect(String(mistral.provider)).toBe("test-provider")
       expect(xai.route.id).toBe("xai-responses")
-      expect(xai.route.defaults.providerOptions).toEqual({
+      expect(xai.options?.providerOptions).toEqual({
         reasoningEffort: "high",
         store: false,
         include: ["reasoning.encrypted_content"],
       })
       expect(bedrock.route.id).toBe("bedrock-converse")
-      expect(bedrock.route.defaults.generation).toEqual({ topP: 0.8 })
-      expect(bedrock.route.defaults.http?.body).toEqual({ serviceTier: { type: "priority" } })
+      expect(bedrock.options?.topP).toBe(0.8)
+      expect(bedrock.options?.http?.body).toEqual({ serviceTier: { type: "priority" } })
       expect(mantle.route.id).toBe("bedrock-mantle-chat")
-      expect(mantle.route.defaults.generation).toEqual({ topP: 0.6 })
+      expect(mantle.options?.topP).toBe(0.6)
       expect(workers.route.endpoint.baseURL).toBe("https://api.cloudflare.com/client/v4/accounts/account/ai/v1")
     }),
   )
@@ -1412,7 +1430,7 @@ describe("ModelResolver", () => {
         Credential.Key.make({
           type: "key",
           key: "fallback-secret",
-          configuration: { accountId: "account" },
+          metadata: { accountId: "account" },
         }),
         {
           loadAISDK: (runtime) =>
@@ -1422,10 +1440,11 @@ describe("ModelResolver", () => {
                 modelID: "perplexity-api-model",
                 providerID: "test-provider",
                 package: Provider.aisdk("@ai-sdk/perplexity"),
-                settings: { project: "test", apiKey: "fallback-secret", accountId: "account" },
+                settings: { project: "test", apiKey: "fallback-secret" },
                 headers: { "x-aisdk": "header" },
                 body: { custom: true },
               })
+              expect(runtime.settings).not.toHaveProperty("accountId")
               return LanguageModel.make({
                 id: runtime.modelID ?? runtime.id,
                 provider: runtime.providerID,
@@ -1609,6 +1628,86 @@ describe("ModelResolver", () => {
             }),
         },
       )
+    }),
+  )
+
+  it.effect("applies provider timeouts to resolved image, video, and decision models", () =>
+    Effect.gen(function* () {
+      const settings = { apiKey: "secret", timeout: 12_000, headerTimeout: 3_000, chunkTimeout: 4_000 }
+      const providerID = Provider.ID.make("timed")
+      const entries = [
+        model("@opencode/ai/providers/openai/images", { providerID, modelID: "gpt-image-2", settings }),
+        model("@opencode/ai/providers/xai/videos", { providerID, modelID: "grok-imagine-video-1.5", settings }),
+        model("@opencode/ai/providers/google/decisions", { providerID, modelID: "gemini-2.5-flash", settings }),
+      ].map((entry, index) =>
+        Info.make({
+          ...entry,
+          id: ID.make(["img", "vid", "dec"][index]!),
+          type: (["image", "video", "decision"] as const)[index],
+        }),
+      )
+      const provider = Provider.Info.make({
+        ...Provider.Info.empty(providerID),
+        activation: "enabled",
+        settings,
+      })
+      const resolverLayer = ModelResolver.layer.pipe(
+        Layer.provide(Layer.mock(Provider.Service, { get: () => Effect.succeed(provider) })),
+        Layer.provide(
+          Layer.mock(Model.Service, {
+            available: (types) =>
+              Effect.succeed(entries.filter((entry) => !types || types.includes(entry.type ?? "chat"))),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(Integration.Service, {
+            revision: () => 0,
+            connection: {
+              active: () => Effect.undefined,
+              resolve: () => Effect.die("unused"),
+              key: () => Effect.die("unused"),
+              external: () => Effect.die("unused"),
+              activate: () => Effect.die("unused"),
+              update: () => Effect.die("unused"),
+              remove: () => Effect.die("unused"),
+              status: () => Effect.die("unused"),
+            },
+            oauth: {
+              connect: () => Effect.die("unused"),
+              status: () => Effect.die("unused"),
+              complete: () => Effect.die("unused"),
+              cancel: () => Effect.die("unused"),
+            },
+            command: {
+              connect: () => Effect.die("unused"),
+              status: () => Effect.die("unused"),
+              cancel: () => Effect.die("unused"),
+            },
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(AISDK.Service, {
+            hook: {
+              sdk: () => Effect.die("unused"),
+              language: () => Effect.die("unused"),
+            },
+            model: () => Effect.die("unused"),
+          }),
+        ),
+        Layer.provide(Layer.mock(Npm.Service, {})),
+      )
+
+      const resolver = yield* ModelResolver.Service.pipe(Effect.provide(resolverLayer))
+      const [image, video, decision] = yield* Effect.all([
+        resolver.resolveImage({ providerID, id: ID.make("img") }),
+        resolver.resolveVideo({ providerID, id: ID.make("vid") }),
+        resolver.resolveDecision({ providerID, id: ID.make("dec") }),
+      ])
+
+      const expected = { total: 12_000, headers: 3_000, chunk: 4_000 }
+      expect(image?.transport?.timeout).toEqual(expected)
+      expect(video?.transport?.timeout).toEqual(expected)
+      expect(decision?.transport?.timeout).toEqual(expected)
     }),
   )
 
@@ -3237,12 +3336,12 @@ describe("ModelResolver routes", () => {
         Effect.gen(function* () {
           const resolved = yield* resolver.resolveModel(route)
           expect(String(resolved.routing?.credentialID)).toBe("cred-a")
-          expect(resolved.model.route.defaults.headers).toMatchObject({ "chatgpt-account-id": "acct-a" })
+          expect(resolved.model.route.options?.headers).toMatchObject({ "chatgpt-account-id": "acct-a" })
           const switched = yield* resolved.routing!.credentialFallback!()
           expect(String(switched?.routing?.credentialID)).toBe("cred-b")
           // The retry is built on cred-b's token AND cred-b's account header: the catalog
           // source's stale acct-a header must not survive the switch (#870).
-          expect(switched!.model.route.defaults.headers).toMatchObject({ "chatgpt-account-id": "acct-b" })
+          expect(switched!.model.route.options?.headers).toMatchObject({ "chatgpt-account-id": "acct-b" })
         }),
       integration,
     )
@@ -3291,7 +3390,7 @@ describe("ModelResolver routes", () => {
           // The leaf's catalog has no chatgpt-account-id (its credentials are key fixtures in
           // other tests, but the header rule is provider-agnostic): the switch must not invent
           // one from cred-b's accountID metadata.
-          expect(switched!.model.route.defaults.headers).not.toHaveProperty("chatgpt-account-id")
+          expect(switched!.model.route.options?.headers).not.toHaveProperty("chatgpt-account-id")
         }),
       integration,
     )

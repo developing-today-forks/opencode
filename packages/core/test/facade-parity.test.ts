@@ -88,7 +88,7 @@
  * test/facade-parity.test.ts -t "route proxy"` (or "codex" / "muse").
  */
 import { describe, expect, test } from "bun:test"
-import { LLMEvent, LLMResponse } from "@opencode/ai"
+import { LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { applyRouteSystem } from "@opencode/core/generate"
 import {
   ChatStreamTranslator,
@@ -1524,11 +1524,11 @@ describe("door: claude-code (bin/claude-code-proxy.mjs :18749)", () => {
     // door writes one `data: {error: {message: "Claude Code
     // execution failed: <detail>"}}` event, then `data: [DONE]`.
     const door = { frames: [{ error: { message: "Claude Code execution failed: claude turn failed: stub failure" } }, "[DONE]"] }
-    // Façade: a provider-error event becomes the same-shaped error
+    // Façade: a failed provider stream becomes the same-shaped error
     // frame (with the façade's type), and the handler appends NO
     // [DONE] after a failed stream (translator.failed rule).
     const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: CREATED, model: MODEL })
-    const frames = translator.push(LLMEvent.providerError({ message: "claude turn failed: stub failure" }))
+    const frames = [translator.fail("claude turn failed: stub failure")]
     if (!translator.failed) throw new Error("expected the translator to mark the stream failed")
     const facade = { frames: chatFramesOf(frames) }
     expectDiffs(door, facade, [
@@ -1903,11 +1903,11 @@ describe("door: commandcode (bin/commandcode-proxy.mjs :18748)", () => {
     // `data: {error: {message: "CommandCode execution failed: …"}}`
     // event, then `data: [DONE]`.
     const door = { frames: [{ error: { message: `CommandCode execution failed: ${CREDIT_DETAIL}` } }, "[DONE]"] }
-    // Façade: a provider-error event becomes the same-shaped error
+    // Façade: a failed provider stream becomes the same-shaped error
     // frame (with the façade's type), and the handler appends NO
     // [DONE] after a failed stream (translator.failed rule).
     const translator = new ChatStreamTranslator({ id: "chatcmpl-facade", created: CREATED, model: MODEL })
-    const frames = translator.push(LLMEvent.providerError({ message: `CommandCode execution failed: ${CREDIT_DETAIL}` }))
+    const frames = [translator.fail(`CommandCode execution failed: ${CREDIT_DETAIL}`)]
     if (!translator.failed) throw new Error("expected the translator to mark the stream failed")
     const facade = { frames: chatFramesOf(frames) }
     expectDiffs(door, facade, [

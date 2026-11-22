@@ -1,13 +1,14 @@
 export * as SessionTitle from "./title.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { AIError, isContextOverflowFailure, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai"
+import { AIError, isContextOverflowFailure, LLMClient, LLMEvent, Message, SystemPart } from "@opencode/ai/effect"
 import type { Agent } from "@opencode/schema/agent"
 import { Context, DateTime, Effect, Layer, Stream } from "effect"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { isExactRootFallback } from "@opencode/util/session-title-fallback"
+import { TextBoundary } from "@opencode/util/text-boundary"
 import { llmClient } from "../effect/app-node-platform.js"
 import { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
@@ -18,7 +19,6 @@ import { SessionSchema } from "./schema.js"
 import { ModelRoute } from "../model-route.js"
 import { ModelRouteLog } from "../model-route-log.js"
 import { SessionUsage } from "./usage.js"
-import { Text } from "../util/text.js"
 import { SessionStore } from "./store.js"
 
 const MAX_LENGTH = 100
@@ -34,13 +34,18 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
 
 const truncate = (value: string) =>
-  value.length <= MAX_LENGTH ? value : `${Text.truncate(value, MAX_LENGTH - 3)}...`
-
+  value.length <= MAX_LENGTH ? value : `${TextBoundary.head(value, MAX_LENGTH - 3)}...`
 /** Head cut for the title prompt's first user message (#1977): never splits a surrogate pair. */
-export const truncateFirstMessageText = (text: string) => Text.truncate(text, MAX_FIRST_MESSAGE_LENGTH)
+export const truncateFirstMessageText = (text: string) => TextBoundary.head(text, MAX_FIRST_MESSAGE_LENGTH)
 
 /** Tail cut for the title prompt's recent-context window (#1977): never splits a surrogate pair. */
-export const truncateRecentContextText = (recent: string, budget: number) => Text.truncateTail(recent, budget)
+export const truncateRecentContextText = (recent: string, budget: number) => TextBoundary.tail(recent, budget)
+
+// Framing the input as text to name keeps models from answering or carrying out the request instead.
+const messagePrompt = (text: string) =>
+  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
+const conversationPrompt = (text: string) =>
+  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
 export const isUntitled = (session: SessionSchema.Info) =>
   isExactRootFallback({
     title: session.title,
@@ -65,7 +70,8 @@ export const layer = Layer.effect(
       const claim = model.routing?.probeClaim
       if (!claim || !model.routing) return
       ModelRoute.releaseBenchProbe(model.routing.target, undefined, claim.claimedAt, claim.token)
-      if (claim.credentialID) ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+      if (claim.credentialID)
+        ModelRoute.releaseBenchProbe(model.routing.target, claim.credentialID, claim.claimedAt, claim.token)
     }
 
     const attempt = Effect.fn("SessionTitle.attempt")(function* (input: {
@@ -74,7 +80,8 @@ export const layer = Layer.effect(
       readonly text: string
       readonly model: SessionRunnerModel.Resolved
     }) {
-      const chunks: string[] = []
+      const chunks: Array<{ id: string; text: string }> = []
+      const commentary = new Set<string>()
       let failed = false
       let firstTextAt: number | undefined
       let usage: SessionUsage.Recorded | undefined
@@ -83,7 +90,6 @@ export const layer = Layer.effect(
       const promptText = [input.agent.system ?? "", input.text].join("\n")
       const estimate = Math.ceil(promptText.length / 4) || undefined
       let error: unknown
-      let failureSource: unknown
       let interrupted = false
       const recordUsage = Effect.suspend(() =>
         usage
@@ -96,25 +102,28 @@ export const layer = Layer.effect(
       )
       // Request preparation runs plugin hooks and can outlive the attempt: an interruption
       // here never reaches the stream below, so the claim is handed back here (#1486).
-      const prepared = yield* context.request.title({
-        session: input.session,
-        agent: input.agent.id,
-        model: input.model,
-        system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
-        messages: [Message.user(input.text)],
-      }).pipe(
-        // Interruption is not the only way preparation dies: a defect skips onInterrupt,
-        // so the claim is handed back on any failed exit (#1486, review follow-up).
-        Effect.onExit((exit) =>
-          exit._tag === "Failure" ? Effect.sync(() => releaseProbeClaim(input.model)) : Effect.void,
-        ),
-      )
+      const prepared = yield* context.request
+        .title({
+          session: input.session,
+          agent: input.agent.id,
+          model: input.model,
+          system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
+          messages: [Message.user(input.text)],
+        })
+        .pipe(
+          // Interruption is not the only way preparation dies: a defect skips onInterrupt,
+          // so the claim is handed back on any failed exit (#1486, review follow-up).
+          Effect.onExit((exit) =>
+            exit._tag === "Failure" ? Effect.sync(() => releaseProbeClaim(input.model)) : Effect.void,
+          ),
+        )
       if (prepared.event.result !== undefined) {
         // A hook supplied the title: no request executed on this model, so its probe
         // claim (if any) goes back instead of settling.
         releaseProbeClaim(input.model)
         return prepared.event.result
       }
+      const metadataKey = prepared.request.model.route.providerMetadataKey ?? prepared.request.model.provider
       // The attempt clock starts when the request is ready to send, so preparation time
       // (plugin hooks) never lands in the health samples (#1486), mirroring the runner.
       const startedAt = Date.now()
@@ -129,17 +138,20 @@ export const layer = Layer.effect(
           startedAt,
           inputTokens: estimate,
         },
-        (snapshot) => ModelRoute.observeRateLimit(input.model.ref, snapshot, Date.now(), input.model.routing?.credentialID),
+        (snapshot) =>
+          ModelRoute.observeRateLimit(input.model.ref, snapshot, Date.now(), input.model.routing?.credentialID),
       )
       yield* llm.stream(prepared.request, observed.options(prepared.options)).pipe(
         Stream.runForEach((event) => {
-          if (LLMEvent.is.providerError(event)) {
-            failed = true
-            failureSource = event
+          // Responses can classify a text block only when it ends; filter after the stream completes.
+          if (LLMEvent.is.textStart(event) || LLMEvent.is.textDelta(event) || LLMEvent.is.textEnd(event)) {
+            const phase = event.providerMetadata?.[metadataKey]?.phase
+            if (phase === "commentary") commentary.add(event.id)
+            if (phase === "final_answer" || phase === null) commentary.delete(event.id)
           }
           if (LLMEvent.is.textDelta(event)) {
             if (firstTextAt === undefined) firstTextAt = Date.now()
-            chunks.push(event.text)
+            chunks.push({ id: event.id, text: event.text })
           }
           if (LLMEvent.is.stepFinish(event)) {
             const step = SessionUsage.record(event.usage, input.model.cost)
@@ -151,7 +163,6 @@ export const layer = Layer.effect(
           Effect.sync(() => {
             failed = true
             error = cause
-            failureSource = cause
           }),
         ),
         Effect.onInterrupt(() =>
@@ -184,7 +195,7 @@ export const layer = Layer.effect(
         // A context-overflow rejection is request-specific, not model ill-health: the
         // runner excludes it from health accounting (runner/step.ts), so the title path
         // does too — the claim is released below instead of benching a healthy target.
-        if (!interrupted && failed && !isContextOverflowFailure(failureSource))
+        if (!interrupted && failed && !isContextOverflowFailure(error))
           ModelRoute.failed(
             routing.target,
             routing.policy,
@@ -215,6 +226,8 @@ export const layer = Layer.effect(
       }
       if (failed) return
       return chunks
+        .filter((chunk) => !commentary.has(chunk.id))
+        .map((chunk) => chunk.text)
         .join("")
         .split("\n")
         .map((line) => line.trim())
@@ -241,13 +254,14 @@ export const layer = Layer.effect(
                   return text ? [`Assistant: ${text}`] : []
                 })
                 .join("\n\n")
-              if (!recent) return original
+              if (!recent) return conversationPrompt(original)
               const prefix = `${original}\n\nRecent conversation:\n`
-              return `${prefix}${truncateRecentContextText(recent, MAX_CONTEXT_LENGTH - prefix.length)}`
+              const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
+              return conversationPrompt(`${prefix}${truncateRecentContextText(recent, budget)}`)
             }),
-            Effect.orElseSucceed(() => firstUser.text),
+            Effect.orElseSucceed(() => messagePrompt(firstUser.text)),
           )
-        : firstUser.text
+        : messagePrompt(firstUser.text)
       const selection = yield* context.selectTitle(session)
       if (!selection) return
       const title =

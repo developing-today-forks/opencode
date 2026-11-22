@@ -1,7 +1,7 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
-import { LLM } from "../src/index.js"
+import { ai } from "../src/effect.js"
 import { LLMClient } from "../src/route/client.js"
 import { ClaudeCode } from "../src/providers/claude-code.js"
 import { ClaudeCodeMessages } from "../src/protocols/claude-code-messages.js"
@@ -66,7 +66,7 @@ testEffect(runtimeLayer(FetchHttpClient.layer)).live(
         baseURL: `http://127.0.0.1:${server.port}`,
       }).model("claude-haiku-5-5")
       const response = yield* LLMClient.generate(
-        LLM.request({
+        ai.request({
           model,
           prompt: "Hello",
           // The harness/session UA, exactly as session requests carry it:

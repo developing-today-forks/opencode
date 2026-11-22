@@ -55,14 +55,28 @@ import m52 from "./migration/20261007190000_azure_cli_external_credential.js"
 import m53 from "./migration/20261010180456_project_time_archived.js"
 import m54 from "./migration/20261014094820_route_attempt_cost_usd.js"
 import m55 from "./migration/20261016221426_messaging.js"
-import m56 from "./migration/20261025175023_session_subagent_policy.js"
-import m57 from "./migration/20261028203055_route_attempt_continuation.js"
-import m58 from "./migration/20261030055406_blushing_adam_destine.js"
-import m59 from "./migration/20261031054328_route_health_credential.js"
-import m60 from "./migration/20261031233710_route_attempt_credential.js"
-import m61 from "./migration/20261102215234_openai_facade_response.js"
-import m62 from "./migration/20261105070500_workspace_safety_snapshots.js"
-import m63 from "./migration/20261107011629_session_detached.js"
+import m56 from "./migration/20261024002554_session_allowance.js"
+import m57 from "./migration/20261024175301_drop_session_allowance.js"
+import m58 from "./migration/20261025123711_blob.js"
+import m59 from "./migration/20261025154125_drop_session_pending.js"
+import m60 from "./migration/20261025175023_session_subagent_policy.js"
+import m61 from "./migration/20261026223005_schedule.js"
+import m62 from "./migration/20261028203055_route_attempt_continuation.js"
+import m63 from "./migration/20261029002625_session_part.js"
+import m64 from "./migration/20261029073502_session_time_busy.js"
+import m65 from "./migration/20261029165540_schedule_checks.js"
+import m66 from "./migration/20261030054400_job.js"
+import m67 from "./migration/20261030055406_blushing_adam_destine.js"
+import m68 from "./migration/20261031054328_route_health_credential.js"
+import m69 from "./migration/20261031233710_route_attempt_credential.js"
+import m70 from "./migration/20261102215234_openai_facade_response.js"
+import m71 from "./migration/20261105070500_workspace_safety_snapshots.js"
+import m72 from "./migration/20261107011629_session_detached.js"
+import m73 from "./migration/20261116043204_automation.js"
+import m74 from "./migration/20261116181958_automation_event_position.js"
+import m75 from "./migration/20261116213417_automation_active_index.js"
+import m76 from "./migration/20261119211416_machine.js"
+import m77 from "./migration/20261120004954_machine-key.js"
 
 export const migrations = [
   m00,
@@ -129,4 +143,18 @@ export const migrations = [
   m61,
   m62,
   m63,
+  m64,
+  m65,
+  m66,
+  m67,
+  m68,
+  m69,
+  m70,
+  m71,
+  m72,
+  m73,
+  m74,
+  m75,
+  m76,
+  m77,
 ] satisfies DatabaseMigration.Migration[]

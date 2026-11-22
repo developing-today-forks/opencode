@@ -876,27 +876,22 @@ describe("Messaging sessions", () => {
     }),
   )
 
-  it.live("searches retained recent text after a completed compaction in the active context", () =>
+  it.live("searches the compaction summary in the active context", () =>
     Effect.gen(function* () {
       const tree = yield* family
       const bus = yield* Bus.Service
       const messaging = yield* Messaging.Service
       yield* bus.publish(SessionEvent.Synthetic, { sessionID: tree.child.id, text: "older discarded input" })
-      yield* bus.publish(SessionEvent.Compaction.Started, {
-        sessionID: tree.child.id,
-        reason: "auto",
-        recent: "retained needle",
-      })
+      yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: tree.child.id, reason: "auto" })
       yield* bus.publish(SessionEvent.Compaction.Ended, {
         sessionID: tree.child.id,
         reason: "auto",
-        text: "Summary of earlier work",
-        recent: "retained needle",
+        text: "Summary of earlier work with the retained needle",
       })
       const request = { sessions: [tree.child.id], scope: "context" as const, include: ["compaction" as const] }
       expect(
         (yield* messaging.log({ ...request, op: "grep", query: "retained" })).entries.map((entry) => entry.text),
-      ).toEqual(["Summary of earlier work\n\nretained needle"])
+      ).toEqual(["Summary of earlier work with the retained needle"])
       expect((yield* messaging.log({ ...request, query: "retained", match: "exact" })).total).toBe(1)
       expect(yield* messaging.log({ ...request, op: "grep", query: "x".repeat(513) }).pipe(Effect.flip)).toBeInstanceOf(
         Messaging.InvalidError,

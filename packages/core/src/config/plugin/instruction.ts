@@ -60,6 +60,10 @@ export const Plugin = define({
       const project = discovery.project && FSUtil.contains(root, start)
       const stop = FSUtil.contains(home, start) ? home : root
       const globalFile = yield* fs.resolve(join(global.config, "AGENTS.md"))
+      // ~/.claude/CLAUDE.md stands in for the global AGENTS.md when it is missing.
+      const claudeGlobalFile = yield* fs.resolve(join(home, ".claude", "CLAUDE.md"))
+      const names = InstructionDiscovery.filenames(discovery)
+      const globalFiles = discovery.claude ? [globalFile, claudeGlobalFile] : [globalFile]
       const loaded: { current: Loaded } = { current: { type: "available", files: [] } }
       const configured: { sources: string[]; remote: Map<string, InstructionDiscovery.File> } = {
         sources: [],
@@ -70,11 +74,11 @@ export const Plugin = define({
       // The ancestor walk can reach the global file when the location sits
       // beneath the global config dir; global: false excludes it there too.
       const candidates = [
-        ...(discovery.global ? [globalFile] : []),
+        ...(discovery.global ? globalFiles : []),
         ...(project
           ? ancestorDirectories(start, stop)
-              .map((directory) => join(directory, "AGENTS.md"))
-              .filter((file) => discovery.global || file !== globalFile)
+              .flatMap((directory) => names.map((name) => join(directory, name)))
+              .filter((file) => discovery.global || !globalFiles.includes(file))
           : []),
       ]
       for (const file of new Set(candidates)) {
@@ -82,28 +86,38 @@ export const Plugin = define({
         yield* updates.pipe(Stream.runForEach(publish), Effect.forkScoped({ startImmediately: true }))
       }
 
+      // A missing file may be mid-save and is transient; a denied file (e.g. outside a sandbox grant) stays absent.
       const read = Effect.fn("ConfigInstructionPlugin.read")(function* (filepath: string) {
-        const content = yield* fs.readFileStringSafe(filepath)
-        if (content !== undefined) return new InstructionDiscovery.File({ path: filepath, content })
-        yield* Effect.logDebug("instruction file skipped", { path: filepath, reason: "unavailable" })
+        return yield* fs.readFileString(filepath).pipe(
+          Effect.map((content) => new InstructionDiscovery.File({ path: filepath, content })),
+          Effect.catchIf(
+            (error) => error.reason._tag === "NotFound" || FSUtil.isAccessDenied(error),
+            (error) =>
+              Effect.logDebug("instruction file skipped", { path: filepath, reason: error.reason._tag }).pipe(
+                Effect.as(error.reason._tag === "NotFound" ? undefined : ("denied" as const)),
+              ),
+          ),
+        )
       })
 
       const globalSource = Effect.fn("ConfigInstructionPlugin.globalSource")(function* () {
-        if (!discovery.global || !(yield* fs.isFile(globalFile))) return []
-        const file = yield* read(globalFile)
-        return file ? [file] : []
+        if (!discovery.global) return []
+        for (const candidate of globalFiles) {
+          if (!(yield* fs.isFile(candidate))) continue
+          const file = yield* read(candidate)
+          return file instanceof InstructionDiscovery.File ? [file] : []
+        }
+        return []
       })
 
       const projectSource = Effect.fn("ConfigInstructionPlugin.projectSource")(function* () {
         if (!project) return []
-        const walked = yield* Effect.forEach(
-          yield* fs.up({ targets: ["AGENTS.md"], start, stop, type: "file" }),
-          fs.resolve,
-        )
-        const discovered = new Set(walked.filter((file) => discovery.global || file !== globalFile))
+        const found = yield* fs.up({ targets: names, start, stop, type: "file" })
+        const walked = yield* Effect.forEach(InstructionDiscovery.preferAgents(found), fs.resolve)
+        const discovered = new Set(walked.filter((file) => discovery.global || !globalFiles.includes(file)))
         const files = yield* Effect.forEach(discovered, read, { concurrency: "unbounded" })
         if (files.some((file) => file === undefined)) return Instructions.unavailable
-        return files.filter((file): file is InstructionDiscovery.File => file !== undefined)
+        return files.filter((file) => file instanceof InstructionDiscovery.File)
       })
 
       // Relative patterns search upward from the location to the project root. Without
@@ -111,10 +125,18 @@ export const Plugin = define({
       const match = Effect.fn("ConfigInstructionPlugin.match")(function* (source: string) {
         const expanded = source.startsWith("~/") ? path.join(global.home, source.slice(2)) : source
         const options = { absolute: true, include: "file", dot: true } as const
-        if (path.isAbsolute(expanded))
+        if (path.isAbsolute(expanded)) {
+          // Keep literal directories working as before. When no literal parent exists, treat
+          // the whole source as a glob (`~/notes/**/*.md`) with `/` separators.
+          const directory = path.dirname(expanded)
+          const hasLiteralParent = yield* fs.isDir(directory)
           return yield* fs
-            .scan(path.basename(expanded), { ...options, cwd: path.dirname(expanded) })
+            .scan(hasLiteralParent ? path.basename(expanded) : expanded.replaceAll(path.sep, "/"), {
+              ...options,
+              ...(hasLiteralParent ? { cwd: directory } : {}),
+            })
             .pipe(Effect.orElseSucceed(() => [] as string[]))
+        }
         if (project) return yield* fs.globUp(expanded, start, root)
         if (!discovery.global) return []
         return yield* fs
@@ -136,7 +158,7 @@ export const Plugin = define({
             if (watched.has(resolved)) continue
             watched.add(resolved)
             const file = yield* read(resolved)
-            if (file) files.push(file)
+            if (file instanceof InstructionDiscovery.File) files.push(file)
           }
         }
         for (const [key] of Array.from(watches)) if (!watched.has(key)) yield* FiberMap.remove(watches, key)
@@ -257,8 +279,7 @@ export const Plugin = define({
         Effect.forkScoped({ startImmediately: true }),
       )
       // Subscribe before the first config read so an update in between still triggers a reload.
-      yield* ctx.event.subscribe().pipe(
-        Stream.filter((event) => event.type === "config.updated"),
+      yield* ctx.event.subscribe({ types: ["config.updated"] }).pipe(
         Stream.runForEach(() => reconfigure().pipe(Effect.andThen(refresh()), Effect.andThen(discovery.reload()))),
         Effect.forkScoped({ startImmediately: true }),
       )

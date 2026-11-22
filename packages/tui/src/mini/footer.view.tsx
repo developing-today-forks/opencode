@@ -9,7 +9,7 @@
 // The view itself is stateless except for derived memos.
 /** @jsxImportSource @opentui/solid */
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
-import { TextBuffer, TextBufferView } from "@opentui/core"
+import { RGBA, TextBuffer, TextBufferView } from "@opentui/core"
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { OneCellSpinner } from "../component/one-cell-spinner"
 import { WORK_SPINNERS, SEED_LAUNCH, SEED_MONO } from "../ui/one-cell-motion"
@@ -28,7 +28,6 @@ import { FOOTER_MENU_ROWS, RunFooterMenu } from "./footer.menu"
 import { RunFooterSubagentBody } from "./footer.subagent"
 import { RunPromptBody, createPromptState } from "./footer.prompt"
 import { promptAppend } from "./prompt.shared"
-import { promptOffsetWidth } from "../prompt/display"
 import { RunPermissionBody } from "./footer.permission"
 import { RunFormBody } from "./footer.form"
 import { createFormBodyState, type FormBodyState } from "./form.shared"
@@ -109,7 +108,6 @@ type RunFooterViewProps = {
   onFormCancel: (input: FormCancel) => void | Promise<void>
   onCycle: () => void
   onInterrupt: () => boolean
-  onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
@@ -186,7 +184,6 @@ export function RunFooterView(props: RunFooterViewProps) {
 
     return tabs().findIndex((item) => item.sessionID === sessionID) + 1
   })
-  const foregroundSubagents = createMemo(() => activeTabs().some((item) => !item.background))
   const model = createMemo(() => {
     const current = props.currentModel()
     return current ? modelInfo(props.providers(), current) : undefined
@@ -200,7 +197,6 @@ export function RunFooterView(props: RunFooterViewProps) {
   const command = () => shortcut("command.palette.show")
   const subagentShortcut = () => shortcut("session.child.first")
   const queuedShortcut = () => shortcut("session.queued_prompts")
-  const backgroundShortcut = () => shortcut("session.background")
   const subagentInterruptShortcut = () => shortcut("composer.subagent.interrupt")
   const interrupt = () => shortcut("session.interrupt")
   const variantCycle = () => monoShortcut(shortcuts.all("variant.cycle") ?? "", props.mono)
@@ -229,10 +225,10 @@ export function RunFooterView(props: RunFooterViewProps) {
   const theme = createMemo(() => runTheme().footer)
   const agentColor = createMemo(() => {
     const colors = theme().categorical
-    const index = props
-      .agents()
-      .filter((agent) => !agent.hidden)
-      .findIndex((agent) => agent.id === props.currentAgentID())
+    const agents = props.agents().filter((agent) => !agent.hidden)
+    const index = agents.findIndex((agent) => agent.id === props.currentAgentID())
+    const color = agents[index]?.color
+    if (!props.mono && color) return RGBA.fromHex(color)
     return colors[Math.max(0, index) % colors.length]!
   })
   const block = createMemo(() => runTheme().block)
@@ -460,8 +456,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       return []
     }
 
-    const items: Array<{ id: "queued" | "subagents" | "background"; key: string; label: string; expanded?: string }> =
-      []
+    const items: Array<{ id: "queued" | "subagents"; key: string; label: string; expanded?: string }> = []
     if (queuedPrompts().length > 0 && queuedShortcut()) {
       items.push({ id: "queued", key: queuedShortcut(), label: `${queuedPrompts().length} pending` })
     }
@@ -472,9 +467,6 @@ export function RunFooterView(props: RunFooterViewProps) {
         label: `${activeTabs().length} sub`,
         expanded: `${activeTabs().length} subagent${activeTabs().length === 1 ? "" : "s"}`,
       })
-    }
-    if (foregroundSubagents() && backgroundShortcut()) {
-      items.push({ id: "background", key: backgroundShortcut(), label: "bg", expanded: "background" })
     }
     return items
   })
@@ -523,7 +515,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       .join(props.mono ? " - " : " \u00b7 ")
     if (stringWidth(text) <= statusWidth() && !text.includes("\n")) return 1
     // Measure outside the clipped footer so wrapped required controls can grow it.
-    const buffer = TextBuffer.create(renderer.widthMethod)
+    const buffer = TextBuffer.create(renderer.widthMethod, renderer.nativeScene)
     const view = TextBufferView.create(buffer)
     buffer.setText(text)
     view.setWrapMode("word")
@@ -579,19 +571,6 @@ export function RunFooterView(props: RunFooterViewProps) {
         title: "Cycle model variant",
         group: "Model",
         run: props.onCycle,
-      },
-    ],
-  }))
-
-  Keymap.createLayer(() => ({
-    enabled: active().type === "prompt" && route().type === "composer" && foregroundSubagents() && !!props.onBackground,
-    priority: 1,
-    commands: [
-      {
-        id: "session.background",
-        title: "Background subagents",
-        group: "Session",
-        run: () => props.onBackground?.(),
       },
     ],
   }))
@@ -814,8 +793,9 @@ export function RunFooterView(props: RunFooterViewProps) {
                               }
                               if (!(await queuedPromptAction("cancel", item.messageID, "undo"))) return
                               closePanel()
-                              const next = promptAppend(composer.current(), item.prompt)
-                              composer.replacePrompt(next, promptOffsetWidth(next.text))
+                              composer.replacePrompt(
+                                promptAppend(composer.current(), item.prompt, renderer.widthMethod),
+                              )
                             }}
                             onDelete={(item) => {
                               void queuedPromptAction("cancel", item.messageID)
@@ -1041,6 +1021,7 @@ export function RunFooterView(props: RunFooterViewProps) {
             interrupt={() => subagentInterruptShortcut() || undefined}
             shellOutput={() => props.miniSettings().shell_output === "show"}
             mono={props.mono}
+            markdown={props.tuiConfig.session?.markdown}
           />
         </box>
       </Show>

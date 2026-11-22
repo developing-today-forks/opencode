@@ -1,6 +1,6 @@
 export * as SessionHedge from "./hedge.js"
 
-import { AIError, LLMEvent, ProviderInternalError } from "@opencode/ai"
+import { AIError, LLMEvent, ProviderInternalError } from "@opencode/ai/effect"
 import { type Cause, Deferred, Effect, Exit, Fiber, Option, Queue, type Scope, Stream } from "effect"
 
 /** Events that mean the model has started answering. Nothing is published, and no tool runs, before
@@ -82,10 +82,6 @@ const startLeg = (
                   Effect.asVoid,
                 )
               }
-              if (LLMEvent.is.providerError(event))
-                return Deferred.succeed(settled, { status: "failed" as const, at: performance.now() }).pipe(
-                  Effect.asVoid,
-                )
               return Effect.void
             }),
           )

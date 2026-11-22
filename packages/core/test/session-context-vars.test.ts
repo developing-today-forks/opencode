@@ -50,9 +50,9 @@ const it = testEffect(
       PluginSupervisor.node.replace(Layer.empty),
       Tool.node.replace(
         Layer.mock(Tool.Service, {
-          snapshot: (_permissions, disabled) =>
+          snapshot: (_permissions, options) =>
             Effect.sync(() => {
-              disabledTools.push(disabled)
+              disabledTools.push(options?.tools?.hidden)
               return { definitions: [], execute: () => Effect.die(new Error("unused")) }
             }),
         }),
@@ -103,7 +103,7 @@ it.effect("renders session variables in instruction files that opt in through fr
     const values = Object.fromEntries(
       observed.flatMap((entry) => (typeof entry.value === "object" ? [[entry.key, entry.value]] : [])),
     )
-    expect(Instructions.renderInitial(selection.instructions, values)).toBe(
+    expect(Instructions.join(Instructions.renderInitial(selection.instructions, values))).toBe(
       [
         `Instructions from: /project/AGENTS.md\nYou are Context vars (${sessionID}); keep {unknown}.`,
         "Instructions from: /project/PLAIN.md\nLiteral {session_id}.",

@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { MuseDirect } from "../../src/providers/index.js"
 import { MuseDirectAuth } from "../../src/providers/muse-direct-auth.js"
 import { MuseDirectResponses } from "../../src/protocols/muse-direct-responses.js"
@@ -64,7 +64,7 @@ type Handler = Parameters<typeof dynamicResponse>[0]
 type HandlerInput = Parameters<Handler>[0]
 
 const generate = (model: Parameters<typeof LLM.request>[0]["model"], request: Record<string, unknown>, handler: Handler) =>
-  LLMClient.generate(LLM.request({ model, ...request } as Parameters<typeof LLM.request>[0]), {}).pipe(
+  LLMClient.generate(ai.request({ model, ...request } as Parameters<typeof LLM.request>[0]), {}).pipe(
     Effect.provide(dynamicResponse(handler)),
   )
 
@@ -79,7 +79,7 @@ it.effect("MuseDirect composes the native Meta Responses route under its own pro
     expect(MuseDirectResponses.protocol.id).toBe("muse-direct-responses")
     expect(model.route.body).toBe(MuseDirectResponses.protocol.body)
     expect(MuseDirectResponses.protocol.stream.event).toBe(MetaResponses.protocol.stream.event)
-    const compiled = yield* compileRequest(LLM.request({ model, prompt: "Hello" }))
+    const compiled = yield* compileRequest(ai.request({ model, prompt: "Hello" }))
     expect(compiled.protocol).toBe("muse-direct-responses")
     expect(compiled.body).toMatchObject({ store: false, include: ["reasoning.encrypted_content"] })
     expect(MuseDirect.MODELS.map((preset) => preset.id)).toEqual([
@@ -247,7 +247,7 @@ it.effect("collision guard is per alias target: shell stays when run_command is 
   Effect.gen(function* () {
     const direct = MuseDirect.configure(keySettings(MINTED_KEY))
     const guarded = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model: direct.model("muse-spark-1.3-contributor"),
         prompt: "Hi",
         tools: [
@@ -263,7 +263,7 @@ it.effect("collision guard is per alias target: shell stays when run_command is 
     // bash's own target (terminal) is free, so bash still aliases even
     // though run_command is taken by the genuine tool.
     const partial = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model: direct.model("muse-spark-1.3-contributor"),
         prompt: "Hi",
         tools: [
@@ -505,7 +505,7 @@ it.effect("v1-dialect effort settings normalize to reasoningEffort on the wire",
     const expected = ["xhigh", "high", "low", "medium"]
     for (const [index, settings] of shapes.entries()) {
       const compiled = yield* compileRequest(
-        LLM.request({
+        ai.request({
           // A fixture apiKey keeps compilation off the real Muse auth file (absent on CI runners).
           model: MuseDirect.model("muse-spark-1.3-contributor", { ...settings, apiKey: MINTED_KEY }),
           prompt: "Hi",

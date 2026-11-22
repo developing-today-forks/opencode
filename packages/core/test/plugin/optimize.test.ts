@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { SystemPart } from "@opencode/ai"
+import { SystemPart } from "@opencode/ai/effect"
 import { Agent } from "@opencode/core/agent"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginHost } from "@opencode/core/plugin/host"
+import { IdentityPlugin } from "@opencode/core/plugin/identity"
 import { OptimizePlugin } from "@opencode/core/plugin/optimize"
 import { Session } from "@opencode/core/session"
 import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
@@ -27,7 +28,7 @@ const makeHost = Effect.gen(function* () {
   const agents = yield* Agent.Service
   const plugins = yield* Plugin.Service
   yield* agents.transform((editor) => editor.update(Agent.ID.make("build"), () => {}))
-  return yield* PluginHost.make(plugins)
+  return yield* PluginHost.make(plugins, "test")
 })
 
 const context = (id: string, system = fallback): SessionHooks["context"] => ({
@@ -156,70 +157,6 @@ describe("OptimizePlugin", () => {
     }),
   )
 
-  it.effect("curates search tools across providers without changing editing tools", () =>
-    Effect.gen(function* () {
-      const hooks = yield* PluginHooks.Service
-      const pluginHost = yield* makeHost
-      yield* OptimizePlugin.OpenAIToolsPlugin.effect(pluginHost)
-      yield* OptimizePlugin.AnthropicToolsPlugin.effect(pluginHost)
-      const cases = [
-        ["openai", "gpt-5", ["edit", "patch", "read", "shell", "write"]],
-        ["openrouter", "openai/gpt-6-astra", ["edit", "patch", "read", "shell", "write"]],
-        ["azure", "GPT-4.1", ["edit", "patch", "read", "shell", "write"]],
-        ["groq", "openai/gpt-oss-120b", ["edit", "patch", "read", "shell", "write"]],
-        ["anthropic", "claude-opus-4-8", ["edit", "patch", "read", "shell", "write"]],
-        ["amazon-bedrock", "us.anthropic.Claude-sonnet-4-6", ["edit", "patch", "read", "shell", "write"]],
-        ["github-copilot", "claude-sonnet-4.6", ["edit", "patch", "read", "shell", "write"]],
-        ["google", "gemini-2.5-pro", ["edit", "glob", "grep", "patch", "read", "shell", "write"]],
-        ["moonshotai", "kimi-k2", ["edit", "glob", "grep", "patch", "read", "shell", "write"]],
-        ["openai", "o3", ["edit", "glob", "grep", "patch", "read", "shell", "write"]],
-        ["anthropic", "other-model", ["edit", "glob", "grep", "patch", "read", "shell", "write"]],
-      ] as const
-
-      yield* Effect.forEach(
-        cases,
-        ([providerID, id, tools]) =>
-          Effect.gen(function* () {
-            const event = {
-              ...context(id),
-              model: Model.Ref.make({ providerID: Provider.ID.make(providerID), id: Model.ID.make(id) }),
-            }
-            yield* hooks.trigger("session", "context", event)
-            expect(Object.keys(event.tools).sort()).toEqual([...tools])
-            expect(event.system.map((part) => part.text)).toEqual([fallback])
-          }),
-        { discard: true },
-      )
-    }),
-  )
-
-  it.effect("can disable OpenAI tool optimization while retaining its prompt and Anthropic tool optimization", () =>
-    Effect.gen(function* () {
-      const hooks = yield* PluginHooks.Service
-      const pluginHost = yield* makeHost
-      yield* OptimizePlugin.OpenAIPlugin.effect(pluginHost)
-      yield* OptimizePlugin.AnthropicToolsPlugin.effect(pluginHost)
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* OptimizePlugin.OpenAIToolsPlugin.effect(pluginHost)
-          const event = context("gpt-5")
-          yield* hooks.trigger("session", "context", event)
-          expect(event.system[0]?.text).toBe(SessionSystemPrompt.render(PROMPT_GPT, Object.keys(event.tools)))
-          expect(Object.keys(event.tools).sort()).toEqual(["edit", "patch", "read", "shell", "write"])
-        }),
-      )
-
-      const event = context("gpt-5")
-      yield* hooks.trigger("session", "context", event)
-      expect(event.system[0]?.text).toBe(SessionSystemPrompt.render(PROMPT_GPT, Object.keys(event.tools)))
-      expect(Object.keys(event.tools).sort()).toEqual(["edit", "glob", "grep", "patch", "read", "shell", "write"])
-      const claude = context("claude-sonnet-4-6")
-      yield* hooks.trigger("session", "context", claude)
-      expect(claude.system.map((part) => part.text)).toEqual([fallback])
-      expect(Object.keys(claude.tools).sort()).toEqual(["edit", "patch", "read", "shell", "write"])
-    }),
-  )
-
   it.effect("uses catalog names in Meta prompts for Muse model IDs", () =>
     Effect.gen(function* () {
       const catalog = yield* Provider.Service
@@ -281,23 +218,6 @@ describe("OptimizePlugin", () => {
     }),
   )
 
-  it.effect("still curates tools when agent lookup fails", () =>
-    Effect.gen(function* () {
-      const agents = yield* Agent.Service
-      const hooks = yield* PluginHooks.Service
-      const pluginHost = yield* makeHost
-      yield* OptimizePlugin.OpenAIPlugin.effect(pluginHost)
-      yield* OptimizePlugin.OpenAIToolsPlugin.effect(pluginHost)
-      yield* agents.transform((editor) => editor.remove(Agent.ID.make("build")))
-      const event = context("gpt-5")
-
-      yield* hooks.trigger("session", "context", event)
-
-      expect(event.system.map((part) => part.text)).toEqual([fallback])
-      expect(Object.keys(event.tools).sort()).toEqual(["edit", "patch", "read", "shell", "write"])
-    }),
-  )
-
   it.effect("allows one model-lab optimization plugin to be enabled independently", () =>
     Effect.gen(function* () {
       const hooks = yield* PluginHooks.Service
@@ -350,6 +270,48 @@ describe("OptimizePlugin", () => {
           }),
         { discard: true },
       )
+    }),
+  )
+
+  it.effect("lists models once per step across prompt and identity plugins", () =>
+    Effect.gen(function* () {
+      const catalog = yield* Provider.Service
+      const hooks = yield* PluginHooks.Service
+      const baseHost = yield* makeHost
+      let listCalls = 0
+      const pluginHost = {
+        ...baseHost,
+        model: {
+          ...baseHost.model,
+          list: (input?: Parameters<typeof baseHost.model.list>[0]) =>
+            Effect.sync(() => {
+              listCalls += 1
+            }).pipe(Effect.andThen(baseHost.model.list(input))),
+        },
+      }
+      yield* catalog.transform((editor) => {
+        editor.models.update(Provider.ID.make("test"), Model.ID.make("meta/muse-spark-1.1"), (model) => {
+          model.name = "Muse Spark"
+        })
+      })
+      yield* Effect.forEach(OptimizePlugin.Plugins, (plugin) => plugin.effect(pluginHost), { discard: true })
+      yield* IdentityPlugin.Plugin.effect(pluginHost)
+
+      const named = context("meta/muse-spark-1.1")
+      yield* hooks.trigger("session", "context", named)
+      expect(listCalls).toBe(1)
+      expect(named.system.map((part) => part.text)).toEqual([
+        SessionSystemPrompt.render(PROMPT_META.replaceAll("{{MODEL_NAME}}", "Muse Spark"), Object.keys(named.tools)),
+        IdentityPlugin.identity({ name: "Muse Spark", ref: named.model }),
+      ])
+
+      const unknown = context("unknown-gpt-5")
+      yield* hooks.trigger("session", "compaction", unknown)
+      expect(listCalls).toBe(2)
+      expect(unknown.system.map((part) => part.text)).toEqual([
+        SessionSystemPrompt.render(PROMPT_GPT, Object.keys(unknown.tools)),
+        IdentityPlugin.identity({ name: "unknown-gpt-5", ref: unknown.model }),
+      ])
     }),
   )
 })

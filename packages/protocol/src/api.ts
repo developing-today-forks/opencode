@@ -3,6 +3,8 @@ import { HttpApi, HttpApiGroup, HttpApiMiddleware, OpenApi } from "effect/http-a
 import { SchemaErrorMiddleware } from "./middleware/schema-error.js"
 import { GenerateGroup } from "./groups/generate.js"
 import { CompletionsGroup } from "./groups/completions.js"
+import { ExperimentalGroup } from "./groups/experimental.js"
+import { VoiceGroup } from "./groups/voice.js"
 import { MessageGroup } from "./groups/message.js"
 import { ModelGroup } from "./groups/model.js"
 import { ProviderGroup } from "./groups/provider.js"
@@ -20,14 +22,14 @@ import { PluginGroup } from "./groups/plugin.js"
 import { ServerGroup } from "./groups/server.js"
 import { DebugGroup } from "./groups/debug.js"
 import { makePtyGroup } from "./groups/pty.js"
-import { PersistentPtyGroup } from "./groups/persistent-pty.js"
 import { ShellGroup } from "./groups/shell.js"
 import { ReferenceGroup } from "./groups/reference.js"
 import { Authorization } from "./middleware/authorization.js"
 import { makeLocationGroup } from "./groups/location.js"
 import { IntegrationGroup } from "./groups/integration.js"
 import { WebSearchGroup } from "./groups/websearch.js"
-import { McpGroup } from "./groups/mcp.js"
+import { UsageGroup } from "./groups/usage.js"
+import { makeMcpGroup } from "./groups/mcp.js"
 import { CredentialGroup } from "./groups/credential.js"
 import { RouteGroup } from "./groups/route.js"
 import { ProjectGroup } from "./groups/project.js"
@@ -44,8 +46,7 @@ type LocationGroups<LocationId extends HttpApiMiddleware.AnyId> =
   | HttpApiGroup.AddMiddleware<typeof ProviderGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof IntegrationGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof WebSearchGroup, LocationId>
-  | HttpApiGroup.AddMiddleware<typeof McpGroup, LocationId>
-  | HttpApiGroup.AddMiddleware<typeof ProjectGroup, LocationId>
+  | HttpApiGroup.AddMiddleware<typeof UsageGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof FileSystemGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof CommandGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof SkillGroup, LocationId>
@@ -57,6 +58,10 @@ type LocationGroups<LocationId extends HttpApiMiddleware.AnyId> =
 
 type PtyGroups<LocationId extends HttpApiMiddleware.AnyId, LocationService> = ReturnType<
   typeof makePtyGroup<LocationId, LocationService>
+>
+
+type McpGroups<LocationId extends HttpApiMiddleware.AnyId, LocationService> = ReturnType<
+  typeof makeMcpGroup<LocationId, LocationService>
 >
 
 type SessionGroups<
@@ -99,12 +104,15 @@ type ApiGroups<
   | typeof MessagingGroup
   | typeof GenerateGroup
   | typeof CompletionsGroup
-  | typeof PersistentPtyGroup
+  | typeof VoiceGroup
+  | typeof ExperimentalGroup
   | typeof CredentialGroup
   | typeof RouteGroup
+  | typeof ProjectGroup
   | LocationGroups<LocationId>
   | LocationGroup<LocationId, LocationService>
   | PtyGroups<LocationId, LocationService>
+  | McpGroups<LocationId, LocationService>
   | FormGroups<LocationId, LocationService>
   | SessionGroups<SessionLocationId, SessionLocationService, FormLocationId, FormLocationService>
   | MixedMiddlewareGroups<LocationId, LocationService, SessionLocationId, SessionLocationService>
@@ -172,12 +180,13 @@ const makeApiFromGroup = <
     .add(ModelGroup.middleware(locationMiddleware))
     .add(GenerateGroup)
     .add(CompletionsGroup)
+    .add(VoiceGroup)
     .add(ProviderGroup.middleware(locationMiddleware))
     .add(IntegrationGroup.middleware(locationMiddleware))
-    .add(McpGroup.middleware(locationMiddleware))
+    .add(makeMcpGroup(locationMiddleware))
     .add(CredentialGroup)
     .add(RouteGroup)
-    .add(ProjectGroup.middleware(locationMiddleware))
+    .add(ProjectGroup)
     .add(makeFormGroup(locationMiddleware))
     .add(makePermissionGroup(locationMiddleware, sessionLocationMiddleware))
     .add(FileSystemGroup.middleware(locationMiddleware))
@@ -186,7 +195,7 @@ const makeApiFromGroup = <
     .add(RpcGroup.middleware(locationMiddleware))
     .add(eventGroup)
     .add(makePtyGroup(locationMiddleware))
-    .add(PersistentPtyGroup)
+    .add(ExperimentalGroup)
     .add(ShellGroup.middleware(locationMiddleware))
     .add(ReferenceGroup.middleware(locationMiddleware))
     .add(WorktreeGroup)
@@ -195,6 +204,7 @@ const makeApiFromGroup = <
     .add(DebugGroup)
     .add(MigrationGroup)
     .add(WebSearchGroup.middleware(locationMiddleware))
+    .add(UsageGroup.middleware(locationMiddleware))
     .add(ConfigGroup.middleware(locationMiddleware))
     .annotateMerge(
       OpenApi.annotations({

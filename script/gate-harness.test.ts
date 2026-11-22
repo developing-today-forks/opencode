@@ -98,9 +98,9 @@ describe("treesOnDisk (shared inventory, #1425/#1494 shape)", () => {
       }
       tree("packages/ai/src", true)
       tree("packages/ai/script", true)
-      tree("packages/console/app/src", true)
+      tree("packages/data/app/src", true)
       tree("packages/plugins/figma/skills/example/src", false)
-      expect(treesOnDisk(root, ["src"])).toEqual(["packages/ai/src", "packages/console/app/src"])
+      expect(treesOnDisk(root, ["src"])).toEqual(["packages/ai/src", "packages/data/app/src"])
       expect(treesOnDisk(root, ["script", "scripts"])).toEqual(["packages/ai/script"])
     } finally {
       rmSync(root, { recursive: true, force: true })

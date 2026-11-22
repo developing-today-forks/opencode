@@ -41,6 +41,23 @@ const schema = <const Definitions extends ReadonlyArray<Definition>>(definitions
     }).annotate({ identifier: "V2Event.server.resync" }),
   ]).annotate({ identifier: "V2Event" })
 
+const query = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) =>
+  Schema.Struct({
+    types: Schema.optional(
+      Schema.ArrayEnsure(
+        Schema.Union([
+          Schema.Literals(
+            definitions.map((definition) => definition.type) as ReadonlyArray<Definitions[number]["type"]>,
+          ),
+          rpcEvent.fields.type,
+        ]),
+      ),
+    ).annotate({
+      description:
+        "Only send events of these types, plus the initial server.connected event. When omitted, all events are sent.",
+    }),
+  }).annotate({ identifier: "EventSubscribeQuery" })
+
 const make = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) => {
   const EventSchema = schema(definitions)
   return {
@@ -49,6 +66,7 @@ const make = <const Definitions extends ReadonlyArray<Definition>>(definitions: 
       .add(
         HttpApiEndpoint.get("event.subscribe", "/api/event", {
           headers: Schema.Struct({ "last-event-id": Schema.optional(Schema.String) }),
+          query: query(definitions),
           success: HttpApiSchema.StreamSse({ data: EventSchema }),
         }).annotateMerge(
           OpenApi.annotations({

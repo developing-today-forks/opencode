@@ -61,7 +61,7 @@ export * as MuseAttestation from "./muse-attestation.js"
  * route demotion/failover sees it. That is the one remaining
  * caller-visible diff from the door, and it is why #1443 stays open.
  */
-import { LLMEvent, LLMResponse, Message, ToolChoice, ToolEntry, type AIError, type ToolEntryInput } from "@opencode/ai"
+import { AssistantMessage, LLMEvent, LLMResponse, Message, ToolChoice, ToolEntry, type AIError, type ToolEntryInput } from "@opencode/ai/effect"
 import type { CompletionInput } from "./generate.js"
 import { ownValue } from "./util/record.js"
 
@@ -171,8 +171,6 @@ export const unaliasEvent = (event: LLMEvent, plan: Plan): LLMEvent => {
       return plan.backward.has(event.name) ? LLMEvent.toolCall({ ...event, name: plan.backward.get(event.name)! }) : event
     case "tool-result":
       return plan.backward.has(event.name) ? LLMEvent.toolResult({ ...event, name: plan.backward.get(event.name)! }) : event
-    case "tool-error":
-      return plan.backward.has(event.name) ? LLMEvent.toolError({ ...event, name: plan.backward.get(event.name)! }) : event
     default:
       return event
   }
@@ -189,7 +187,7 @@ export const unaliasResponse = (response: LLMResponse, plan: Plan): LLMResponse 
   if (events.every((event, index) => event === response.events[index]) && content.every((part, index) => part === response.message.content[index]))
     return response
   return new LLMResponse({
-    message: Message.make({ ...response.message, content }),
+    message: new AssistantMessage({ ...response.message, content }),
     events,
     ...(response.usage !== undefined ? { usage: response.usage } : {}),
     finishReason: response.finishReason,

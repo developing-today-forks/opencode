@@ -1,7 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
-import { LLMEvent, LLMResponse } from "@opencode/ai"
+import { LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { Generate, type CompletionInput } from "@opencode/core/generate"
 import { Embeddings, type EmbedInput } from "@opencode/core/embeddings"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -28,6 +28,14 @@ const fake = makeLocationNode({
   layer: Layer.succeed(
     Generate.Service,
     Generate.Service.of({
+      image: () => Effect.die("unused"),
+      decisions: () => Effect.die("unused"),
+      video: {
+        start: () => Effect.die("unused"),
+        status: () => Effect.die("unused"),
+        result: () => Effect.die("unused"),
+        cancel: () => Effect.die("unused"),
+      },
       text: () => Effect.die("unused"),
       complete: (input) => {
         captured.push(input)
