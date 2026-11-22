@@ -28,7 +28,7 @@ import {
   SkillNotFoundError,
 } from "@opencode/protocol/errors"
 import { AbsolutePath } from "@opencode/core/schema"
-import { awaitPlugins, locationErrors } from "../location"
+import { locationErrors } from "../location"
 import { failedMessageDecode, failedSnapshot, missingMessage, missingSession } from "./session-error"
 
 function missingForm(id: Form.ID) {
@@ -329,9 +329,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.routeTarget.set",
         Effect.fn(function* (ctx) {
-          // Pools are registered by the model-routes config plugin; validate against them
-          // only once the location's plugins have activated.
-          yield* awaitPlugins
+          // Pools are registered by the model-routes config plugin, which loads asynchronously; like every handler
+          // this answers with what is loaded now, so a client sets a target once its pools are listed.
           yield* session
             .routeTarget({ sessionID: ctx.params.sessionID, routeID: ctx.payload.routeID, target: ctx.payload.target })
             .pipe(
