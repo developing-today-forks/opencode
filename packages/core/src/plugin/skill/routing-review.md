@@ -58,7 +58,9 @@ configured `targets` as members until the history has offered the matched ones.
   `tokensPerDay`, `softLimit` (default 0.9). A target at its soft limit is passed over.
 - `attempts`: requests per target before failover (default 2, so one retry).
   Retries happen only before any output, and a rate limit or quota error moves on
-  at once.
+  at once. It never stops the turn: a failure after output keeps the partial reply
+  and the next target continues it in a new reply, so a turn errors only when every
+  target has failed.
 - `hedgeAfterMs`: after this many milliseconds without output, the next target gets
   the same request, and the first answer wins. It costs a duplicate request.
 - `autonomy`: `fixed`, `rules`, `adaptive`, `predictive` or `agent`, each including
