@@ -1006,6 +1006,28 @@ export const make = Effect.gen(function* () {
               ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
           }
         }
+        // A refusal delivered as a content-filter finish before any output fails over like
+        // the same refusal delivered as an error (policyFailure above): this target declined
+        // the request, another member of the pool may not. Health and quota stay untouched,
+        // as for every policy rejection (#1084). Once output started the gate stays closed:
+        // another model's output must not be appended to the published partial reply.
+        const policyFinishError = policyFinish ? recorded.failure : undefined
+        if (policyFinishError && input.model.routing && !failover && !recorded.outputStarted) {
+          const fallback = yield* Effect.result(input.model.routing.fallback())
+          if (Result.isSuccess(fallback) && fallback.success) {
+            failover = {
+              model: fallback.success,
+              overTo: `${fallback.success.ref.providerID}/${fallback.success.ref.id}`,
+            }
+            yield* Effect.logInfo("model route failover after a content-filter finish", {
+              routeID: input.model.routing.routeID,
+              from: `${input.model.routing.target.providerID}/${input.model.routing.target.id}`,
+              to: failover.overTo,
+            })
+            if (input.sessionID)
+              ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+          }
+        }
         recordAttempt()
         if (
           input.recoverContinuation &&
@@ -1016,6 +1038,7 @@ export const make = Effect.gen(function* () {
           return Outcome.RecoverFull()
         if (failover && failureError) return Outcome.Failover({ model: failover.model, error: failureError })
         if (failover && emptyError) return Outcome.Failover({ model: failover.model, error: emptyError })
+        if (failover && policyFinishError) return Outcome.Failover({ model: failover.model, error: policyFinishError })
         if (providerFailure) {
           yield* publisher.publish(providerFailure)
           recorded = publisher.record()
