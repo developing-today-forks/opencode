@@ -375,10 +375,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
             yield* session
               .setSubagentPolicy({ sessionID: ctx.params.sessionID, subagentPolicy: ctx.payload.subagentPolicy })
               .pipe(Effect.catchTag("Session.NotFoundError", missingSession))
-          if (ctx.payload.archived !== undefined)
-            yield* (ctx.payload.archived ? session.archive : session.unarchive)(ctx.params.sessionID).pipe(
-              Effect.catchTag("Session.NotFoundError", missingSession),
-            )
+          if (ctx.payload.archived === true)
+            yield* session
+              .archive(ctx.params.sessionID, { time: ctx.payload.experimental?.archivedAt })
+              .pipe(Effect.catchTag("Session.NotFoundError", missingSession))
+          if (ctx.payload.archived === false)
+            yield* session
+              .unarchive(ctx.params.sessionID)
+              .pipe(Effect.catchTag("Session.NotFoundError", missingSession))
           return HttpApiSchema.NoContent.make()
         }),
       )

@@ -366,6 +366,12 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
             description:
               "Archive the session with true or restore it with false. Repeating the current state is a no-op.",
           }),
+          experimental: Schema.Struct({
+            archivedAt: Schema.Finite.pipe(Schema.optional).annotate({
+              description:
+                "Experimental: may change without compatibility guarantees. Epoch-millisecond archive time for archived: true, for a session a client archived before carrying it over; ignored otherwise. Omitted means now.",
+            }),
+          }).pipe(Schema.optional),
         }),
         success: HttpApiSchema.NoContent,
         error: [SessionNotFoundError, LocationNotFoundError],

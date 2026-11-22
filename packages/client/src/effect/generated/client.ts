@@ -614,6 +614,7 @@ const EndpointSessionUpdate = (raw: RawClient["server.session"]) => (input: Sess
         permissions: input["permissions"],
         subagentPolicy: input["subagentPolicy"],
         archived: input["archived"],
+        experimental: input["experimental"],
       },
     }).pipe(Effect.mapError(mapClientError)),
   )

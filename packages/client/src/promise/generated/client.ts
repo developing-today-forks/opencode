@@ -868,6 +868,7 @@ export function make(options: ClientOptions) {
               permissions: input["permissions"],
               subagentPolicy: input["subagentPolicy"],
               archived: input["archived"],
+              experimental: input["experimental"],
             },
             successStatus: 204,
             declaredStatuses: [400, 401, 404],

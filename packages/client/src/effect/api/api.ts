@@ -222,6 +222,7 @@ export type SessionUpdateInput = {
   readonly permissions?: Permission.Ruleset | undefined
   readonly subagentPolicy?: Session.SubagentPolicy | undefined
   readonly archived?: boolean | undefined
+  readonly experimental?: { readonly archivedAt?: number | undefined } | undefined
 }
 export type SessionUpdateOutput = void
 export type SessionUpdateOperation<E = never> = (input: SessionUpdateInput) => Effect.Effect<SessionUpdateOutput, E>
@@ -789,7 +790,7 @@ export type ExperimentalSessionLogOutput =
           readonly location?:
             | { readonly directory: AbsolutePath; readonly workspaceID?: Workspace.ID | undefined }
             | undefined
-          readonly data: { readonly sessionID: Session.ID }
+          readonly data: { readonly sessionID: Session.ID; readonly time?: number | undefined }
         }
       | {
           readonly id: Event.ID
