@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { AIError, LanguageModel, LLM, LLMEvent, QuotaExceededError } from "@opencode/ai"
+import { AIError, HttpContext, LanguageModel, LLM, LLMEvent, QuotaExceededError, RateLimitError } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
@@ -464,6 +464,218 @@ describe("live step wiring", () => {
         .pipe(Effect.exit)
       expect(Exit.isSuccess(result) && result.value._tag === "QuotaWall").toBe(false)
       expect(Wiring.offeredWall(sessionID)).toBeUndefined()
+    }),
+  )
+
+  // Oracle: code#12228 done-when — a 429 whose stated reset is far out, with
+  // no other door in the route, ends the session with the structured wall
+  // error instead of wedging: no retry sleep is scheduled in-lane and no
+  // second attempt is spent against the walled door. The retry stub models
+  // the policy granting the stated wait (fifteen minutes), which before the
+  // wall ending became the in-lane sleep that froze sessions (#10085).
+  it.effect(
+    "a 429 with a far-out stated reset and no failover candidate ends in the quota-wall state instead of an in-lane retry",
+    () =>
+      Effect.gen(function* () {
+        ModelRoute.resetHealth()
+        const llm = yield* TestLLM.Test
+        const steps = yield* setupStep
+        const sessionID = Session.ID.create()
+        const assistantMessageID = SessionMessage.ID.create()
+        yield* insertSession(sessionID, "wall-ending")
+        const primary = SessionRunnerModel.resolved(
+          LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+          { capabilities, cost, limit },
+        )
+        const model = SessionRunnerModel.resolved(primary.model, {
+          capabilities,
+          cost,
+          limit,
+          routing: {
+            routeID: Model.ID.make("wall-ending-route"),
+            target: primary.ref,
+            attempts: 1,
+            policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+            fallback: () => Effect.succeed(undefined),
+          },
+        })
+        yield* llm.push(
+          TestLLM.failAfter(
+            new AIError({
+              reason: new RateLimitError({
+                message: "Rate limit reached; slow down",
+                retryAfterMs: 900_000,
+                http: new HttpContext({ url: "https://mock.invalid/openai/primary", status: 429, headers: {} }),
+              }),
+            }),
+          ),
+        )
+        const before = Date.now()
+        const result = yield* steps
+          .attempt({
+            isLocationClosed: () => false,
+            sessionID,
+            assistantMessageID,
+            agent: Agent.defaultID,
+            model,
+            toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
+            prepared: {
+              retry: () => Effect.void,
+              request: LLM.request({ model: model.model, prompt: "Check the service" }),
+              options: {},
+              executeTool: () => Effect.die("not used"),
+            },
+            retry: () => Effect.succeed({ retry: true as const, attempt: 2, delay: 900_000 }),
+            recoverContinuation: true,
+            recoverOverflow: Effect.succeed(false),
+          })
+          .pipe(Effect.exit)
+        expect(Exit.isSuccess(result)).toBe(true)
+        if (Exit.isSuccess(result)) {
+          // The structured wall ending, not a Retry outcome: the runner only
+          // sleeps on Retry, so no in-lane wait was scheduled.
+          expect(result.value._tag).toBe("QuotaWall")
+          if (result.value._tag === "QuotaWall") {
+            // Re-launchable: the wall names the door and its reset.
+            expect(result.value.wall.providerID).toBe("openai")
+            expect(result.value.wall.modelID).toBe("primary")
+            expect(Math.abs((result.value.wall.resetAt ?? 0) - (before + 900_000))).toBeLessThan(10_000)
+          }
+        }
+        // Exactly one attempt reached the walled door.
+        expect(yield* llm.requests()).toHaveLength(1)
+        expect(Wiring.offeredWall(sessionID)).toBeDefined()
+        Wiring.clearSession(sessionID)
+      }),
+  )
+
+  // Oracle: code#12228 done-when — the same no-candidate wall without the
+  // render tool ends promptly on the bare error (the ending a quota wall
+  // already gets there), never as an in-lane retry sleep.
+  it.effect("the same far-out 429 without the render tool ends promptly instead of retrying in-lane", () =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      const llm = yield* TestLLM.Test
+      const steps = yield* setupStep
+      const sessionID = Session.ID.create()
+      const assistantMessageID = SessionMessage.ID.create()
+      yield* insertSession(sessionID, "wall-ending-absent")
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("wall-ending-route"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => Effect.succeed(undefined),
+        },
+      })
+      yield* llm.push(
+        TestLLM.failAfter(
+          new AIError({
+            reason: new RateLimitError({
+              message: "Rate limit reached; slow down",
+              retryAfterMs: 900_000,
+              http: new HttpContext({ url: "https://mock.invalid/openai/primary", status: 429, headers: {} }),
+            }),
+          }),
+        ),
+      )
+      const result = yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: () => Effect.succeed({ retry: true as const, attempt: 2, delay: 900_000 }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+      // A failure ending (the bare provider error), not a Retry outcome.
+      expect(Exit.isFailure(result)).toBe(true)
+      expect(yield* llm.requests()).toHaveLength(1)
+      expect(Wiring.offeredWall(sessionID)).toBeUndefined()
+    }),
+  )
+
+  // Oracle: code#12228 — only wall-length waits end the step; a 429 whose
+  // stated wait is short keeps the in-lane retry it has today, render tool
+  // or not, so a transient throttle still recovers inside the turn.
+  it.effect("a 429 with a short stated wait and no failover candidate still retries in-lane", () =>
+    Effect.gen(function* () {
+      ModelRoute.resetHealth()
+      const llm = yield* TestLLM.Test
+      const steps = yield* setupStep
+      const sessionID = Session.ID.create()
+      const assistantMessageID = SessionMessage.ID.create()
+      yield* insertSession(sessionID, "wall-ending-short")
+      const primary = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      )
+      const model = SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("wall-ending-route"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          fallback: () => Effect.succeed(undefined),
+        },
+      })
+      yield* llm.push(
+        TestLLM.failAfter(
+          new AIError({
+            reason: new RateLimitError({
+              message: "Rate limit reached; slow down",
+              retryAfterMs: 5_000,
+              http: new HttpContext({ url: "https://mock.invalid/openai/primary", status: 429, headers: {} }),
+            }),
+          }),
+        ),
+      )
+      const result = yield* steps
+        .attempt({
+          isLocationClosed: () => false,
+          sessionID,
+          assistantMessageID,
+          agent: Agent.defaultID,
+          model,
+          toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
+          prepared: {
+            retry: () => Effect.void,
+            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          },
+          retry: () => Effect.succeed({ retry: true as const, attempt: 2, delay: 5_000 }),
+          recoverContinuation: true,
+          recoverOverflow: Effect.succeed(false),
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isSuccess(result)).toBe(true)
+      if (Exit.isSuccess(result)) {
+        expect(result.value._tag).toBe("Retry")
+        if (result.value._tag === "Retry") expect(result.value.decision.delay).toBe(5_000)
+      }
+      expect(Wiring.offeredWall(sessionID)).toBeUndefined()
+      Wiring.clearSession(sessionID)
     }),
   )
 
