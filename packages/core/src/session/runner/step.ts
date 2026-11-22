@@ -136,6 +136,16 @@ export const failedAttemptCount = (key?: string) =>
 
 export const clearFailedAttempt = (key: string) => failedAttempts.delete(key)
 
+/** The longest in-lane wait a wall-class failure (rate limit / quota) may sleep
+ * before the step ends instead (#12228): the retry schedule's own gaps never
+ * exceed ten seconds, so a granted wait past this bound is the wall's own
+ * statement — a stated retry-after or reset, or a last-resort seat's recheck
+ * instant — not a retry gap. Sleeping it out inside the step loop is the
+ * #10085 freeze: the session sits at "retry attempt 2" for up to fifteen
+ * minutes, holding its lane against a door that has already said when it
+ * recovers. A wait at or under the bound stays a pause and keeps the retry. */
+export const WALL_ENDING_MIN_DELAY_MS = 60_000
+
 /** Consecutive no-message completions per session and target (#1903): a provider that keeps
  * answering with a few tokens and no message at all would otherwise loop a session forever,
  * every attempt recorded as a success. The bound is small on purpose: each empty attempt is a
@@ -230,7 +240,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
     retryAfterMs?: number
-    rateLimit?: { retryAfterMs?: number }
+    rateLimit?: ModelRouteLimits.Details
     http?: { status?: number }
     code?: string
     message?: string
@@ -257,10 +267,27 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   // `message ?? body` instead would discard the body whenever a message
   // exists, even when the message states no reset at all.
   const quotaResetAtMs = quota ? ModelRouteLimits.resetAtFromMessage(text, Date.now()) : undefined
+  // A rate-limit failure's headers may state the wall's reset without stating
+  // a retry-after (the reset headers the executor parses into the rate-limit
+  // details, #12228): the reset is the same statement in absolute form, so it
+  // feeds the retry-after below — bench() believes a stated retry-after
+  // as-is, which benches the door until its reset on the first failure
+  // instead of the short ladder a bare 429 earns until its failures prove
+  // sustained. A stated retry-after header still wins: it is the more
+  // direct instruction.
+  const hintNow = Date.now()
+  const rateLimitSnapshot =
+    reason._tag === "RateLimit" && reason.rateLimit
+      ? ModelRouteLimits.snapshot(reason.rateLimit, hintNow)
+      : undefined
+  const rateLimitResetAtMs = rateLimitSnapshot
+    ? ModelRouteLimits.statedResetAt(rateLimitSnapshot, hintNow)
+    : undefined
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
+      (rateLimitResetAtMs !== undefined ? Math.max(0, rateLimitResetAtMs - hintNow) : undefined) ??
       (clientTimeoutMessage ? undefined : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
     // The rate-limit class itself, stated wait or not: bench() counts these, and
@@ -994,16 +1021,33 @@ export const make = Effect.gen(function* () {
           recorded = publisher.record()
         }
         if (llmFailure && llmError && retry?.retry && !recorded.outputStarted) {
-          // Retry state projects onto the existing assistant, even before it has produced output.
-          yield* publisher.startAssistant()
-          // No failover candidate served (the Failover outcome above did not
-          // fire): a last-resort seat's retry waits for its recheck instant —
-          // the earliest excluded candidate's re-admission — rather than
-          // re-resolving into the same wall on the short schedule (#1806).
-          return Outcome.Retry({
-            error: llmError,
-            decision: SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt),
-          })
+          const decision = SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt)
+          // Wall ending (#12228): a wall-class failure (RateLimit /
+          // QuotaExceeded) on a routed step whose granted wait is the wall's
+          // own — past WALL_ENDING_MIN_DELAY_MS — does not sleep in-lane.
+          // Reaching this branch means the failover walk above served no
+          // candidate (the Failover outcome did not fire), so the sleep would
+          // hold the session's lane against a walled door until its reset —
+          // the #10085 freeze at "retry attempt 2". The step falls through
+          // instead: the quota-wall gate below ends it in the structured
+          // wall state when the host render tool is present, and the
+          // ordinary failure ending below applies when it is not — prompt
+          // either way, and re-launchable once the bench's reset passes.
+          // Unrouted steps (compaction, a bare model) and short stated waits
+          // keep the in-lane retry exactly as before.
+          const wallEnding =
+            input.model.routing !== undefined &&
+            (llmFailure.reason._tag === "RateLimit" || llmFailure.reason._tag === "QuotaExceeded") &&
+            decision.delay > WALL_ENDING_MIN_DELAY_MS
+          if (!wallEnding) {
+            // Retry state projects onto the existing assistant, even before it has produced output.
+            yield* publisher.startAssistant()
+            // No failover candidate served (the Failover outcome above did not
+            // fire): a last-resort seat's retry waits for its recheck instant —
+            // the earliest excluded candidate's re-admission — rather than
+            // re-resolving into the same wall on the short schedule (#1806).
+            return Outcome.Retry({ error: llmError, decision })
+          }
         }
         if (llmError && !recorded.providerFailed) yield* publisher.failAssistant(llmError)
 
