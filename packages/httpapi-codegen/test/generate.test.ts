@@ -106,6 +106,25 @@ describe("HttpApiCodegen.generate", () => {
     )
   })
 
+  test("renders types for schemas carrying custom filters with no code representation", () => {
+    // A custom Schema.makeFilter has no representation and no toCode callback. Generation
+    // threw on one ("Missing key ... representation", then "Missing toCode callback") once
+    // the route Window fields gained such filters (#2041); the type is the unfiltered one.
+    const Day = Schema.String.check(Schema.makeFilter((value: string) => (value.length > 0 ? undefined : "empty")))
+    const Window = Schema.Struct({ day: Day, days: Schema.Array(Schema.Union([Schema.Int, Day])) }).annotate({
+      identifier: "Window",
+    })
+    const contract = compileContract(
+      api(HttpApiEndpoint.get("get", "/window", { success: Schema.Struct({ data: Schema.Array(Window) }) })),
+    )
+    const shape = emitEffectShape(contract).files[0]?.content
+    expect(shape).toContain('readonly "day": string, readonly "days": ReadonlyArray<number | string>')
+    const types = emitPromise(contract).files.find((file) => file.path === "types.ts")?.content
+    expect(types).toContain(
+      'export type Window = { readonly "day": string, readonly "days": ReadonlyArray<number | string> }',
+    )
+  })
+
   test("generates Effect API types from schemas instead of the imported API", () => {
     const Info = Schema.Struct({ id: Schema.String }).annotate({ identifier: "Session.Info" })
     const output = emitEffectShape(
