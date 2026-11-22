@@ -199,6 +199,22 @@ export type SessionSwitchModelOperation<E = never> = (
   input: SessionSwitchModelInput,
 ) => Effect.Effect<SessionSwitchModelOutput, E>
 
+export type SessionRouteTargetListInput = { readonly sessionID: Session.ID }
+export type SessionRouteTargetListOutput = ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>
+export type SessionRouteTargetListOperation<E = never> = (
+  input: SessionRouteTargetListInput,
+) => Effect.Effect<SessionRouteTargetListOutput, E>
+
+export type SessionRouteTargetSetInput = {
+  readonly sessionID: Session.ID
+  readonly routeID: string
+  readonly target: Model.Ref | null
+}
+export type SessionRouteTargetSetOutput = ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>
+export type SessionRouteTargetSetOperation<E = never> = (
+  input: SessionRouteTargetSetInput,
+) => Effect.Effect<SessionRouteTargetSetOutput, E>
+
 export type SessionUpdateInput = {
   readonly sessionID: Session.ID
   readonly title?: string | undefined
@@ -432,6 +448,10 @@ export interface SessionApi<E = never> {
   readonly fork: SessionForkOperation<E>
   readonly switchAgent: SessionSwitchAgentOperation<E>
   readonly switchModel: SessionSwitchModelOperation<E>
+  readonly routeTarget: {
+    readonly list: SessionRouteTargetListOperation<E>
+    readonly set: SessionRouteTargetSetOperation<E>
+  }
   readonly update: SessionUpdateOperation<E>
   readonly move: SessionMoveOperation<E>
   readonly prompt: SessionPromptOperation<E>

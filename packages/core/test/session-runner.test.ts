@@ -1381,6 +1381,40 @@ describe("SessionRunnerLLM", () => {
     expect(ModelRoute.steady(s.routing.target, Credential.ID.make("cred-lab"))).toBe(true)
   })
 
+  scenario("fails over on a content-filter finish that arrives before any output", function* (s) {
+    ModelRoute.resetHealth()
+    const options = {
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      cost: [],
+      limit: defaultModelLimit,
+    } as const
+    let fallbacks = 0
+    const backup = SessionRunnerModel.resolved(replacementModel, options)
+    s.routing = {
+      routeID: Model.ID.make("pool"),
+      target: ModelRoute.ref({ providerID: "fake", model: "fake-model" }),
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+      attempts: 3,
+      fallback: () => Effect.sync(() => (fallbacks++, backup)),
+    }
+    yield* s.admit("Say something")
+    // The refusal shape Anthropic sends as `stop_reason: refusal`: a content-filter
+    // finish with no text, reasoning or tool call before it.
+    yield* s.llm.push(
+      TestLLM.complete({ reason: { normalized: "content-filter", raw: "refusal" } }),
+    )
+    yield* s.llm.push(TestLLM.text("from the backup target", "t1"))
+    yield* s.resume
+
+    expect(fallbacks).toBe(1)
+    expect(s.requests).toHaveLength(2)
+    expect(String(s.requests[1]?.model.id)).toBe("replacement")
+    expect(JSON.stringify(requireAssistant(yield* s.messages))).toContain("from the backup target")
+    // A refusal is not a target failure: the refused member keeps its health.
+    expect(ModelRoute.coolingDown(s.routing.target)).toBe(false)
+    expect(ModelRoute.steady(s.routing.target)).toBe(true)
+  })
+
   scenario("keeps the target at full health across ten consecutive content-policy rejections", function* (s) {
     ModelRoute.resetHealth()
     const options = {

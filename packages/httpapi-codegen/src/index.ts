@@ -1536,6 +1536,16 @@ function codegenAsts(roots: ReadonlyArray<SchemaAST.AST>) {
     return output
   }
   const normalize = (ast: SchemaAST.AST): SchemaAST.AST => {
+    // A custom Schema.makeFilter has no toCode callback, so toCodeDocument cannot render it
+    // (the route Window string fields, #2041). Generated code only needs the type, which the
+    // filter does not change: keep the string or number and drop such filters.
+    if ((SchemaAST.isString(ast) || SchemaAST.isNumber(ast)) && ast.checks?.some(opaqueFilter)) {
+      const kept = ast.checks.filter((check) => !opaqueFilter(check))
+      const checks = kept.length > 0 ? (kept as unknown as SchemaAST.Checks) : undefined
+      return SchemaAST.isString(ast)
+        ? new SchemaAST.String(ast.annotations, checks, ast.encoding, ast.context)
+        : new SchemaAST.Number(ast.annotations, checks, ast.encoding, ast.context)
+    }
     if (SchemaAST.isDeclaration(ast) && ast.annotations?.toCode === undefined) {
       const representation = ast.annotations?.representation
       if (
@@ -1557,6 +1567,13 @@ function codegenAsts(roots: ReadonlyArray<SchemaAST.AST>) {
     return ast.recur(recur)
   }
   return roots.map(recur)
+}
+
+// A group is dropped whole when any filter inside it is opaque: toCodeDocument renders a
+// group by rendering each member, and the group never changes the type either.
+function opaqueFilter(check: SchemaAST.Check<unknown>): boolean {
+  if (check.annotations?.toCode !== undefined || check.annotations?.representation !== undefined) return false
+  return check._tag === "Filter" || check.checks.some(opaqueFilter)
 }
 
 function preserveStringSuggestions(type: string) {

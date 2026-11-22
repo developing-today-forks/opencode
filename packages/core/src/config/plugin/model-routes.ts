@@ -42,6 +42,9 @@ type SourceModel = {
    * reached this leaf, including a nested-route reference's own limit. Undefined when no target on the
    * path declares one; the model's own limit applies on top of what is stored here. */
   readonly contextLimit?: number
+  /** The pools from the one being built down to the one that placed this leaf, a pool the leaf was
+   * matched from by name last. Decides the leaf's first-output wait under nestedTimeout own. */
+  readonly path?: readonly string[]
 }
 
 /** What the pools a pool is nested in hand down to its members. */
@@ -161,7 +164,7 @@ export const Plugin = define({
         if (later.has(id)) return undefined
         const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
-        return routeModel(id, route, expanded, nodes, globalSchedules, ctx.location.directory)
+        return routeModel(id, route, routes, expanded, nodes, globalSchedules, ctx.location.directory)
       }).filter((model): model is Model.Info => model !== undefined)
       reportedByProviders = report(diagnostics, reportedByProviders)
 
@@ -332,7 +335,7 @@ export const Plugin = define({
         } = expand(id, routes, definitions, (providerID, modelID) => editor.get(providerID, modelID))
         found.forEach((message) => diagnostics.add(message))
         if (leaves.length === 0) return editor.remove(ModelRoute.PROVIDER_ID, id)
-        const info = routeModel(id, route, leaves, nodes, globalSchedules)
+        const info = routeModel(id, route, routes, leaves, nodes, globalSchedules)
         editor.update(ModelRoute.PROVIDER_ID, id, (model) => {
           Object.assign(model, info)
         })
@@ -363,6 +366,24 @@ export const Plugin = define({
       })
       reportedByModels = report(diagnostics, reportedByModels)
     })
+
+    // The transforms above add pools in three passes, so a pool built late (matching or effort keys, or
+    // targets only a model transform creates) would land after the others. Pickers list pools in catalog
+    // order and users order them in config, so restore the config order last.
+    yield* ctx.model.transform((editor) => {
+      const current = editor.ids(ModelRoute.PROVIDER_ID).map(String)
+      const configured = [...configuredRoutes(loaded.entries).keys()].filter((id) => current.includes(id))
+      const wanted = [...configured, ...current.filter((id) => !configured.includes(id))]
+      if (wanted.every((id, index) => id === current[index])) return
+      // Each pool is taken out and put back in order: the model map keeps insertion order.
+      const models = wanted.flatMap((id) => editor.get(ModelRoute.PROVIDER_ID, Model.ID.make(id)) ?? [])
+      models.forEach((model) => editor.remove(ModelRoute.PROVIDER_ID, model.id))
+      models.forEach((model) =>
+        editor.update(ModelRoute.PROVIDER_ID, model.id, (draft) => {
+          Object.assign(draft, model)
+        }),
+      )
+    })
   }),
 })
 
@@ -373,6 +394,7 @@ export const Plugin = define({
 function routeModel(
   id: string,
   route: ConfigModelRoutes.Route,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   expanded: readonly SourceModel[],
   nodes: ModelRoute.Node[],
   globalSchedules: readonly ModelRoute.WeightRule[],
@@ -386,7 +408,11 @@ function routeModel(
   const leafCeiling = (target: (typeof expanded)[number]) =>
     Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
   const leafContext = Math.min(...expanded.map(leafCeiling))
-  const health = ModelRoute.policy(route.health, directory)
+  const health = ModelRoute.policy(
+    { ...route.health, firstTokenTimeoutMs: firstTokenTimeout(id, routes, route) },
+    directory,
+  )
+  const targetFirstTokenTimeouts = targetWaits(route, routes, expanded)
   const targetCacheFormats = expanded.map((target) => (target.cacheFormat ? { cacheFormat: target.cacheFormat } : {}))
   return Model.Info.make({
     ...Model.Info.default(direct?.providerID ?? ModelRoute.PROVIDER_ID, Model.ID.make(id)),
@@ -420,6 +446,7 @@ function routeModel(
             }
           : {}),
         ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
+        ...(targetFirstTokenTimeouts ? { targetFirstTokenTimeouts } : {}),
       },
     },
     capabilities: {
@@ -490,6 +517,94 @@ function builtWithModels(routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
   return new Set([...routes.keys()].filter((id) => uses(id, new Set())))
 }
 
+type Wait = number | false
+
+/** How long a pool waits for a model's first output, for the models it does not hand to a nested pool:
+ * its own health.firstTokenTimeoutMs, kept under nestedTimeout own; for a pool that nests others, the
+ * longest of their waits (nestedTimeout longest, also when the pool names no wait) or the shortest;
+ * otherwise DEFAULT_FIRST_TOKEN_TIMEOUT_MS. `false` waits without a limit and counts as the longest.
+ * A pool met again on its own way in contributes the default, so the result never depends on a cycle. */
+export function firstTokenTimeout(
+  id: string,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  route = routes.get(id),
+  trail: ReadonlySet<string> = new Set(),
+): Wait {
+  if (!route || trail.has(id)) return ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  const own = route.health?.firstTokenTimeoutMs
+  if (route.nestedTimeout === "own") return own ?? ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  if (own !== undefined && route.nestedTimeout === undefined) return own
+  const nested = nestedPools(id, route, routes)
+  if (nested.length === 0) return own ?? ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  const next = new Set(trail).add(id)
+  const waits = nested.flatMap((pool) => waitsOf(pool, routes, next))
+  const rank = (wait: Wait) => (wait === false ? Number.POSITIVE_INFINITY : wait)
+  const shortest = route.nestedTimeout === "shortest"
+  return waits.reduce((best, wait) => ((shortest ? rank(wait) < rank(best) : rank(wait) > rank(best)) ? wait : best))
+}
+
+/** Every wait a pool applies to the models it reaches: one, or under nestedTimeout own its own and each
+ * nested pool's, so a pool around it can wait as long as the slowest of them. */
+function waitsOf(id: string, routes: ReadonlyMap<string, ConfigModelRoutes.Route>, trail: ReadonlySet<string>): Wait[] {
+  const route = routes.get(id)
+  const wait = firstTokenTimeout(id, routes, route, trail)
+  if (!route || route.nestedTimeout !== "own" || trail.has(id)) return [wait]
+  const next = new Set(trail).add(id)
+  return [wait, ...nestedPools(id, route, routes).flatMap((pool) => waitsOf(pool, routes, next))]
+}
+
+/** The pools a pool nests: its opencode-route/<id> targets and the pools it names in include or in a
+ * match term that is not negated. A pool it only excludes adds nothing, so it does not count. */
+function nestedPools(id: string, route: ConfigModelRoutes.Route, routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
+  const targets = (route.targets ?? []).flatMap((target) => {
+    const ref = targetRef(targetSpec(target).model)
+    return ref.providerID === ModelRoute.PROVIDER_ID
+      ? [ModelRouteMatch.poolsNamed(routes.keys(), ref.id)[0] ?? String(ref.id)]
+      : []
+  })
+  return [...new Set([...targets, ...namedPools(route, routes)])].filter((pool) => pool !== id && routes.has(pool))
+}
+
+/** The pools a pool takes models from by name, as the matching keys read a term that names a pool. */
+function namedPools(route: ConfigModelRoutes.Route, routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
+  const named = (text: string) =>
+    ModelRouteMatch.poolsNamed(routes.keys(), text)[0] ??
+    (text.toLowerCase().startsWith(POOL_PREFIX)
+      ? ModelRouteMatch.poolsNamed(routes.keys(), text.slice(POOL_PREFIX.length))[0]
+      : undefined)
+  const parsed = route.match === undefined ? undefined : ModelRouteMatch.parse(route.match)
+  const terms = parsed !== undefined && Result.isSuccess(parsed) ? positiveTerms(parsed.success) : []
+  return [...new Set([...(route.include ?? []), ...terms].flatMap((text) => named(text) ?? []))]
+}
+
+const positiveTerms = (expression: ModelRouteMatch.Expression, negated = false): string[] => {
+  if (expression.type === "term") return negated ? [] : [expression.text]
+  if (expression.type === "not") return positiveTerms(expression.operand, !negated)
+  return [...positiveTerms(expression.left, negated), ...positiveTerms(expression.right, negated)]
+}
+
+/** Parallel to a pool's leaves under nestedTimeout own: the wait of the nested pool each leaf was reached
+ * through (the outermost below this pool, or deeper while that one is own too), or an empty object for the
+ * pool's own leaves. Undefined when the pool applies one wait to every leaf. */
+function targetWaits(
+  route: ConfigModelRoutes.Route,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  leaves: readonly SourceModel[],
+) {
+  if (route.nestedTimeout !== "own") return undefined
+  const decides = (pools: readonly string[]): string | undefined => {
+    const [head, ...rest] = pools
+    if (head === undefined) return undefined
+    return routes.get(head)?.nestedTimeout === "own" && rest.length > 0 ? decides(rest) : head
+  }
+  const waits = leaves.map((leaf) => {
+    // Provider routes on the path are groups, not pools with a wait of their own.
+    const pool = decides((leaf.path ?? []).slice(1).filter((poolID) => routes.has(poolID)))
+    return pool === undefined ? {} : { firstTokenTimeoutMs: firstTokenTimeout(pool, routes) }
+  })
+  return waits.some((wait) => wait.firstTokenTimeoutMs !== undefined) ? waits : undefined
+}
+
 /** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
  * Expansion only consumes a provider route when a model route seats it, so a session
  * addressing the route provider directly finds no catalog entry and dies as
@@ -532,7 +647,7 @@ export function buildProviderRouteModels(
       // the miss branch can diagnose no-eligible-member instead of serving a dead entry.
       if (expanded.length === 0) continue
       models.push(
-        routeModel(modelID, synthRoute, expanded, nodes, globalSchedules, directory, {
+        routeModel(modelID, synthRoute, routes, expanded, nodes, globalSchedules, directory, {
           providerID: Provider.ID.make(routeID),
           routeID: synthID,
         }),
@@ -1408,11 +1523,14 @@ function expandCollected(
             ...(Object.keys(variantMap).length ? { variantMap } : {}),
             ...(cacheFormat ? { cacheFormat } : {}),
             ...(ceiling !== undefined ? { contextLimit: ceiling } : {}),
+            path: [...nextTrail],
           })
         }
       }
     }
     if (compiled.success.selects) {
+      // Pools this pool names in include or match: a model they hand in waits as long as they do.
+      const viaPools = namedPools(current, routes)
       let matched = 0
       for (const entry of shared.models()) {
         const key = `${entry.providerID}/${entry.id}`
@@ -1450,6 +1568,7 @@ function expandCollected(
         leafByKey.set(seenKey, result.length)
         attach({ leaf: result.length }, key)
         const cacheFormat = current.cache_format ?? inheritedCacheFormat
+        const viaPool = viaPools.find((poolID) => shared.members.get(poolID)?.has(key))
         result.push({
           ...(budget ? { budget } : {}),
           ref: Model.Ref.make({
@@ -1461,6 +1580,7 @@ function expandCollected(
           fixedVariant: pin !== undefined,
           ...(Object.keys(variantMap).length ? { variantMap } : {}),
           ...(cacheFormat ? { cacheFormat } : {}),
+          path: viaPool === undefined ? [...nextTrail] : [...nextTrail, viaPool],
         })
       }
       if (matched === 0) diagnostics.push(`pool ${routeID}'s matching keys select no models, so they add nothing`)
@@ -1686,7 +1806,7 @@ export function createRouteModel(
     providerRoutes,
   )
   if (leaves.length === 0) return undefined
-  return routeModel(id, route, leaves, nodes, globalSchedules, directory)
+  return routeModel(id, route, routes, leaves, nodes, globalSchedules, directory)
 }
 
 /** Re-expands one route's stored definition against the models that exist after model
@@ -1751,7 +1871,14 @@ export function retargetDefinition(
           context: Math.min(leaf.model.limit.context, leaf.contextLimit ?? Number.POSITIVE_INFINITY),
         }))
       : undefined
-  const { targetCacheFormats: _stored, targetLimits: _storedLimits, ...rest } = current
+  const route = routes.get(String(current.id))
+  const targetFirstTokenTimeouts = route ? targetWaits(route, routes, leaves) : undefined
+  const {
+    targetCacheFormats: _stored,
+    targetLimits: _storedLimits,
+    targetFirstTokenTimeouts: _storedWaits,
+    ...rest
+  } = current
   const next: ModelRoute.Definition = {
     ...rest,
     targets,
@@ -1760,6 +1887,7 @@ export function retargetDefinition(
     ...(targetLimits === undefined ? {} : { targetLimits }),
     nodes,
     ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
+    ...(targetFirstTokenTimeouts ? { targetFirstTokenTimeouts } : {}),
   }
   return { definition: next, variants }
 }

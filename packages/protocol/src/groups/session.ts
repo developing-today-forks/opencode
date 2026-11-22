@@ -45,6 +45,11 @@ const SessionActive = Schema.Struct({
   type: Schema.Literal("running"),
 }).annotate({ identifier: "SessionActive" })
 
+const SessionRouteTarget = Schema.Struct({
+  routeID: Schema.String,
+  target: Model.Ref,
+}).annotate({ identifier: "Session.RouteTarget" })
+
 const PublicSessionInfo = Schema.Struct({
   ...Struct.omit(Session.Info.fields, ["location"]),
   location: Location.PublicRef,
@@ -314,6 +319,40 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           description: "Switch the model used by subsequent provider turns.",
         }),
       ),
+    )
+    .add(
+      HttpApiEndpoint.get("session.routeTarget.list", "/api/session/:sessionID/route-target", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ data: Schema.Array(SessionRouteTarget) }),
+        error: SessionNotFoundError,
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.routeTarget.list",
+          summary: "List pinned pool members",
+          description:
+            "The pool members this session has pinned, one per model pool (opencode-route/<routeID>). Pins live in server memory and are cleared by a restart.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.routeTarget.set", "/api/session/:sessionID/route-target", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({
+          routeID: Schema.String,
+          target: Schema.NullOr(Model.Ref),
+        }),
+        success: Schema.Struct({ data: Schema.Array(SessionRouteTarget) }),
+        error: [SessionNotFoundError, InvalidRequestError, ServiceUnavailableError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.routeTarget.set",
+            summary: "Pin a pool member",
+            description:
+              "Pin the session's preferred member of a model pool, or clear the pin with target null, and return the session's pins. The session stays on the pool: the pinned member serves every request while it is healthy, requests fail over to the other members when it errors or is benched, avoided, over budget or quota-demoted, and return to it once it is healthy again. Applies from the next model request. A routeID that names no pool, or a target that is not a member of it, is rejected. Pins live in server memory and are cleared by a restart; other sessions are unaffected.",
+          }),
+        ),
     )
     .add(
       HttpApiEndpoint.patch("session.update", "/api/session/:sessionID", {

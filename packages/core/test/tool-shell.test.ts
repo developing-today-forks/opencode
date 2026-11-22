@@ -2078,6 +2078,8 @@ describe("ShellTool", () => {
             },
           ])
           expect((yield* shell.list()).map((info) => info.id)).toContain(id)
+          // A background start publishes its own timeout (#2675).
+          expect(info.metadata).toMatchObject({ sessionID, timeout: 50 })
           const timedOut = yield* shell.wait(id)
           expect(timedOut.status).toBe("timeout")
           // The timeout keeps its status but still records how the killed process exited.

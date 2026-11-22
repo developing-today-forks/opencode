@@ -1476,4 +1476,34 @@ describe("ConfigProviderPlugin.Plugin", () => {
       expect(catalog.map((model) => String(model.id)).sort()).toEqual(["listed", "pooled"])
     }),
   )
+
+  it.effect("carries a model's default and locked effort to the record", () =>
+    Effect.gen(function* () {
+      const models = yield* Model.Service
+      const providerID = Provider.ID.make("custom")
+      yield* addPlugin([
+        new Document({
+          type: "document",
+          info: decode({
+            providers: {
+              custom: {
+                package: "native",
+                models: {
+                  plain: { name: "Plain" },
+                  thoughtful: { name: "Thoughtful", defaultVariant: "high" },
+                  pinned: { name: "Pinned", defaultVariant: "low", lockVariant: true },
+                },
+              },
+            },
+          }),
+        }),
+      ])
+      const plain = required(yield* models.get(providerID, Model.ID.make("plain")))
+      const thoughtful = required(yield* models.get(providerID, Model.ID.make("thoughtful")))
+      const pinned = required(yield* models.get(providerID, Model.ID.make("pinned")))
+      expect([plain.defaultVariant, plain.lockVariant]).toEqual([undefined, undefined])
+      expect([thoughtful.defaultVariant, thoughtful.lockVariant]).toEqual([Model.VariantID.make("high"), undefined])
+      expect([pinned.defaultVariant, pinned.lockVariant]).toEqual([Model.VariantID.make("low"), true])
+    }),
+  )
 })

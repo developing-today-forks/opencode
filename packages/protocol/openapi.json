@@ -2042,6 +2042,190 @@
         }
       }
     },
+    "/api/session/{sessionID}/route-target": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.routeTarget.list",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Session.RouteTarget"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The pool members this session has pinned, one per model pool (opencode-route/<routeID>). Pins live in server memory and are cleared by a restart.",
+        "summary": "List pinned pool members"
+      },
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.routeTarget.set",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Session.RouteTarget"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Pin the session's preferred member of a model pool, or clear the pin with target null, and return the session's pins. The session stays on the pool: the pinned member serves every request while it is healthy, requests fail over to the other members when it errors or is benched, avoided, over budget or quota-demoted, and return to it once it is healthy again. Applies from the next model request. A routeID that names no pool, or a target that is not a member of it, is rejected. Pins live in server memory and are cleared by a restart; other sessions are unaffected.",
+        "summary": "Pin a pool member",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "routeID": {
+                    "type": "string"
+                  },
+                  "target": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Model.Ref"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": ["routeID", "target"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/session/{sessionID}/move": {
       "post": {
         "tags": ["session"],
@@ -21108,6 +21292,14 @@
           "hidden": {
             "type": "boolean"
           },
+          "defaultVariant": {
+            "type": "string",
+            "description": "The variant (effort) a request runs at when it names none or asks for the default, e.g. high. A request that names a variant still runs at it unless lockVariant is set. Ignored when the model does not offer the variant."
+          },
+          "lockVariant": {
+            "type": "boolean",
+            "description": "Run every request at defaultVariant, whatever variant it names, including inside model routes. Has no effect without defaultVariant."
+          },
           "limit": {
             "type": "object",
             "properties": {
@@ -21385,7 +21577,21 @@
                     "enum": [false]
                   }
                 ],
-                "description": "Fail over if the target produces no response output within this many milliseconds. Defaults to 10000."
+                "description": "Fail over if the target produces no response output within this many milliseconds. Defaults to 30000; a route that nests other routes defaults to the longest wait among them (see nestedTimeout). false waits without a limit."
+              },
+              "lastTargetTimeoutMs": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "maximum": 3600000,
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "boolean",
+                    "enum": [false]
+                  }
+                ],
+                "description": "How long the last target that can take the request may go without response output. firstTokenTimeoutMs only moves a request to another target, so once it passes with no other target left, the target keeps going until this many milliseconds instead of failing. Defaults to 900000 (15 minutes), the silence OpenCode allows any streaming response. A value at or below firstTokenTimeoutMs ends the last target at firstTokenTimeoutMs; false waits without a limit."
               },
               "maxResponseTimeMs": {
                 "type": "integer",
@@ -21424,6 +21630,11 @@
               }
             },
             "additionalProperties": false
+          },
+          "nestedTimeout": {
+            "type": "string",
+            "enum": ["longest", "shortest", "own"],
+            "description": "How a route that nests other routes (as opencode-route/<id> targets, or by name in include or match) waits for first output. longest (the default when health.firstTokenTimeoutMs is unset) and shortest take the longest or shortest wait of the nested routes and apply it to every target, replacing health.firstTokenTimeoutMs. own keeps health.firstTokenTimeoutMs for the route's own targets and lets each nested route's targets wait as long as that nested route would. Has no effect on a route that nests none."
           },
           "budgets": {
             "type": "object",
@@ -27450,6 +27661,12 @@
           "hidden": {
             "type": "boolean"
           },
+          "defaultVariant": {
+            "type": "string"
+          },
+          "lockVariant": {
+            "type": "boolean"
+          },
           "limit": {
             "type": "object",
             "properties": {
@@ -30951,6 +31168,19 @@
           }
         },
         "required": ["messageID"],
+        "additionalProperties": false
+      },
+      "Session.RouteTarget": {
+        "type": "object",
+        "properties": {
+          "routeID": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Model.Ref"
+          }
+        },
+        "required": ["routeID", "target"],
         "additionalProperties": false
       },
       "Session.StructuredError": {

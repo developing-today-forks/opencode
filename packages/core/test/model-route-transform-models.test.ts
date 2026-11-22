@@ -515,3 +515,52 @@ it.effect("a pool built by the later model transform (matching keys) keeps its c
     expect(patterned?.name).toEqual("Patterned Route")
   }),
 )
+
+// Oracle: the order of experimental.routes.models in config, which users set and pickers show.
+it.effect("pools keep their config order in the catalog, however late a pool is built", () =>
+  Effect.gen(function* () {
+    const plugins = yield* Plugin.Service
+    const source: Plugin.Generation = {
+      id: "ordered-route-source",
+      revision: "1",
+      effect: (ctx) =>
+        ctx.provider
+          .transform((editor) =>
+            editor.add({
+              info: { ...Provider.Info.empty(azure), activation: "enabled" },
+              models: [info("gpt-5-base"), info("gpt-5-mini")],
+            }),
+          )
+          .pipe(Effect.asVoid),
+    }
+    yield* plugins.activate([source])
+    const raw = {
+      experimental: {
+        routes: {
+          models: {
+            zeta: { targets: [{ providerID: "azure", model: "gpt-5-base" }] },
+            // An effort key and a matching key both defer a pool to the later model transform.
+            levelled: { targets: [{ providerID: "azure", model: "gpt-5-base" }], levels: [] },
+            plain: { targets: [{ providerID: "azure", model: "gpt-5-mini" }] },
+            matched: { include: ["*mini*"] },
+            alpha: { targets: [{ providerID: "azure", model: "gpt-5-mini" }] },
+          },
+        },
+      },
+    }
+    const normalized = ConfigNormalize.normalize(raw)
+    if (normalized.type !== "normalized") throw new Error("the test config must normalize")
+    const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test")).pipe(
+      Effect.provide(Config.testLayer(entries)),
+    )
+    const models = yield* Model.Service
+    const pools = (yield* models.all()).filter((model) => model.providerID === ModelRoute.PROVIDER_ID)
+    expect(pools.map((model) => String(model.id))).toEqual(["zeta", "levelled", "plain", "matched", "alpha"])
+    // Putting a pool back in order keeps what it was built with.
+    const matched = pools.find((model) => String(model.id) === "matched")
+    expect(matched ? ModelRoute.definition(matched)?.targets.map((target) => String(target.id)) : undefined).toEqual([
+      "gpt-5-mini",
+    ])
+  }),
+)

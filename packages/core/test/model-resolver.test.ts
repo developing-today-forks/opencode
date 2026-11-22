@@ -13,12 +13,14 @@ import { ModelPlan } from "@opencode/core/model-plan"
 import { Provider } from "@opencode/core/provider"
 import { Variant } from "@opencode/core/variant"
 import fs from "node:fs/promises"
+import fsSync from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { ModelResolver } from "@opencode/core/model-resolver"
 import { ModelRoute } from "@opencode/core/model-route"
 import type { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { ModelRouteOverrides } from "@opencode/core/model-route-overrides"
 import { RouteAttemptTable } from "@opencode/core/model-route-log/sql"
 import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { AISDK } from "@opencode/core/aisdk"
@@ -3959,5 +3961,164 @@ describe("ModelResolver routes", () => {
         expect(targetOf(yield* resolver.resolveModel(route, VariantID.make("high")))).toBe("pa")
       }),
     )
+  })
+
+  // #2671: a session pins a preferred pool member and stays on the pool.
+  describe("a pinned pool member", () => {
+    const pool = (selection: "ordered" | "round-robin" | "weighted") => ({
+      nodes: [{ selection, weights: [1, 1, 1], children: [{ leaf: 0 }, { leaf: 1 }, { leaf: 2 }] }],
+    })
+    const pin = (sessionID: string, providerID: string | undefined) =>
+      ModelRoute.pinTarget(
+        "pool",
+        sessionID,
+        providerID === undefined ? undefined : ModelRoute.ref({ providerID, model: "test-model" }),
+      )
+    const sessions = Array.from({ length: 9 }, (_, index) => `pin-${index}`)
+
+    for (const selection of ["ordered", "round-robin", "weighted"] as const)
+      it.effect(`serves every pinned session on its member in a ${selection} pool`, () => {
+        ModelRoute.resetHealth()
+        ModelRoute.resetSelection()
+        const leaves = [leaf("pa"), leaf("pb"), leaf("pc")]
+        const route = routed(leaves, pool(selection))
+        return withResolver(leaves, (resolver) =>
+          Effect.gen(function* () {
+            // Without a pin, nine sessions never all land on one member: ordered takes pa,
+            // round-robin rotates, and a weighted draw is 1 in 3 per session.
+            sessions.forEach((id, index) => pin(id, index % 2 === 0 ? "pc" : "pb"))
+            for (const [index, id] of sessions.entries()) {
+              const expected = index % 2 === 0 ? "pc" : "pb"
+              expect(targetOf(yield* resolver.resolveModel(route, undefined, id))).toBe(expected)
+              expect(targetOf(yield* resolver.resolveModel(route, undefined, id))).toBe(expected)
+            }
+          }),
+        )
+      })
+
+    it.effect("fails over while the member is benched and returns once it is healthy", () => {
+      ModelRoute.resetHealth()
+      ModelRoute.resetSelection()
+      const leaves = [leaf("pa"), leaf("pb"), leaf("pc")]
+      const route = routed(leaves, pool("ordered"))
+      const pinned = ModelRoute.ref({ providerID: "pb", model: "test-model" })
+      return withResolver(leaves, (resolver) =>
+        Effect.gen(function* () {
+          pin("s", "pb")
+          const first = yield* resolver.resolveModel(route, undefined, "s")
+          expect(targetOf(first)).toBe("pb")
+          // An error on the member fails over to the pool's normal order.
+          const next = yield* first.routing!.fallback()
+          expect(next ? targetOf(next) : undefined).toBe("pa")
+          // Benched, the member is skipped; the runner records the move to pa.
+          ModelRoute.failed(pinned, ModelRoute.policy(), Date.now())
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pa")
+          ModelRoute.moved("pool", "s", pinned)
+          ModelRoute.served("pool", "s", ModelRoute.ref({ providerID: "pa", model: "test-model" }))
+          // Healthy again (the bench ends; the session's move to pa stays recorded): the pin
+          // pulls the session back, past continuity on pa.
+          ModelRoute.resetHealth()
+          ModelRoute.moved("pool", "s", pinned)
+          ModelRoute.served("pool", "s", ModelRoute.ref({ providerID: "pa", model: "test-model" }))
+          expect(ModelRoute.cooldownUntil(pinned)).toBeLessThanOrEqual(Date.now())
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pb")
+          // Cleared, the session selects normally again: continuity keeps it on pa.
+          pin("s", undefined)
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pa")
+        }),
+      )
+    })
+
+    it.effect("does not lead the last resort when every member is benched", () => {
+      ModelRoute.resetHealth()
+      ModelRoute.resetSelection()
+      const leaves = [leaf("pa"), leaf("pb"), leaf("pc")]
+      const route = routed(leaves, pool("ordered"))
+      return withResolver(leaves, (resolver) =>
+        Effect.gen(function* () {
+          for (const providerID of ["pa", "pb", "pc"])
+            ModelRoute.failed(ModelRoute.ref({ providerID, model: "test-model" }), ModelRoute.policy(), Date.now())
+          // Nothing is healthy, so the pin is not honoured: the last resort keeps its normal order.
+          pin("s", "pc")
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pa")
+        }),
+      )
+    })
+
+    it.effect("ignores a pin on a member that left the pool", () => {
+      ModelRoute.resetHealth()
+      ModelRoute.resetSelection()
+      const leaves = [leaf("pa"), leaf("pb")]
+      const route = routed(leaves, ordered)
+      return withResolver(leaves, (resolver) =>
+        Effect.gen(function* () {
+          pin("s", "gone")
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pa")
+        }),
+      )
+    })
+
+    it.effect("ignores a pin on a member the user avoids", () => {
+      ModelRoute.resetHealth()
+      ModelRoute.resetSelection()
+      const leaves = [leaf("pa"), leaf("pb")]
+      const route = routed(leaves, ordered)
+      return Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "route-pin-"))
+          ModelRouteOverrides.setFilePath(path.join(dir, "route-overrides.json"))
+          const now = Date.now()
+          ModelRouteOverrides.add(
+            {
+              id: "avoid-pb",
+              action: "avoid",
+              providers: ["pb"],
+              models: [],
+              routes: [],
+              fixed: true,
+              until: now + 60_000,
+              text: "",
+              source: "user",
+              createdAt: now,
+            },
+            now,
+          )
+          return dir
+        }),
+        () =>
+          withResolver(leaves, (resolver) =>
+            Effect.gen(function* () {
+              pin("s", "pb")
+              expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pa")
+            }),
+          ),
+        (dir) =>
+          Effect.sync(() => {
+            ModelRouteOverrides.setFilePath(undefined)
+            fsSync.rmSync(dir, { recursive: true, force: true })
+          }),
+      )
+    })
+
+    it.effect("leaves other sessions on the same pool to normal selection", () => {
+      ModelRoute.resetHealth()
+      ModelRoute.resetSelection()
+      const leaves = [leaf("pa"), leaf("pb"), leaf("pc")]
+      const route = routed(leaves, pool("round-robin"))
+      return withResolver(leaves, (resolver) =>
+        Effect.gen(function* () {
+          const others = ["o1", "o2", "o3"]
+          const alone: string[] = []
+          for (const id of others) alone.push(targetOf(yield* resolver.resolveModel(route, undefined, id)))
+          ModelRoute.resetSelection()
+          pin("s", "pc")
+          expect(targetOf(yield* resolver.resolveModel(route, undefined, "s"))).toBe("pc")
+          const beside: string[] = []
+          for (const id of others) beside.push(targetOf(yield* resolver.resolveModel(route, undefined, id)))
+          expect(beside).toEqual(alone)
+          expect(new Set(alone).size).toBe(3)
+        }),
+      )
+    })
   })
 })

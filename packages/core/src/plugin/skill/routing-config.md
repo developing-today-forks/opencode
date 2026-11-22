@@ -51,7 +51,13 @@ Model entries sit under `providers`:
 ```
 
 - `disabled: true` hides the model from the picker and takes it out of routing.
-- Show it again: set `"disabled": false`, or delete the key.
+- `hidden: true` keeps the model out of the picker only: pools and an explicit
+  `provider/model` still use it.
+- Show it again: set `"disabled": false` or `"hidden": false`, or delete the key.
+- `defaultVariant: "<variant>"` is the effort a request runs at when it names none
+  or asks for the default; a request that names one runs at it. Add
+  `lockVariant: true` to run every request at it, inside pools too. A variant the
+  model does not offer is ignored.
 - Add a model the catalog does not list: a new key under `models` with `modelID`
   (the provider's real id), `name`, and `limit` (`context`, `output`).
 - In OpenChamber, hiding a model from the model picker is a UI-only setting. OpenCode
@@ -72,7 +78,7 @@ model `opencode-route/<id>`.
         "selection": "weighted",
         "weights": { "openai/gpt-6-luna": 3, "github-copilot/gpt-6-luna": 1 },
         "autonomy": "agent",
-        "health": { "firstTokenTimeoutMs": 10000, "cooldownMs": 60000 },
+        "health": { "firstTokenTimeoutMs": 30000, "cooldownMs": 60000 },
         "budgets": { "openai/gpt-6-luna": { "requestsPerDay": 500, "softLimit": 0.9 } },
         "attempts": 1,
         "hedgeAfterMs": 8000,
@@ -149,6 +155,14 @@ model `opencode-route/<id>`.
   no `autonomy`, whatever model the session runs. `route_stats` reports on every
   pool, and a `route_adjust` adjustment applies to every pool that is not `fixed`.
 - `health`, `budgets`, `attempts`, `hedgeAfterMs`: see routing-review, section 1.
+- `nestedTimeout` (`"longest"`, `"shortest"` or `"own"`): how a pool that nests pools
+  waits for first output. Unset, a pool with no `health.firstTokenTimeoutMs` of its
+  own waits as long as the slowest pool inside it; `own` keeps the pool's wait for its
+  own targets and lets each nested pool's targets wait as long as that pool would.
+- `health.lastTargetTimeoutMs`: the first-output wait only moves a request on, so the
+  last target that can take it keeps going past it until this (900000, 15 minutes,
+  by default). At or below `firstTokenTimeoutMs` it ends at the wait; `false` waits
+  without a limit.
 
 A malformed pattern, regular expression or expression skips the whole pool, and a
 pool with none of `targets`, `include`, `contains` and `match` is skipped too. A

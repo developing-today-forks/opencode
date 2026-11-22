@@ -35,6 +35,10 @@ import type {
   SessionSwitchAgentOutput,
   SessionSwitchModelInput,
   SessionSwitchModelOutput,
+  SessionRouteTargetListInput,
+  SessionRouteTargetListOutput,
+  SessionRouteTargetSetInput,
+  SessionRouteTargetSetOutput,
   SessionUpdateInput,
   SessionUpdateOutput,
   SessionMoveInput,
@@ -828,6 +832,31 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      routeTarget: {
+        list: (input: SessionRouteTargetListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: SessionRouteTargetListOutput }>(
+            {
+              method: "GET",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/route-target`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        set: (input: SessionRouteTargetSetInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: SessionRouteTargetSetOutput }>(
+            {
+              method: "POST",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/route-target`,
+              body: { routeID: input["routeID"], target: input["target"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404, 503],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
       update: (input: SessionUpdateInput, requestOptions?: RequestOptions) =>
         request<SessionUpdateOutput>(
           {

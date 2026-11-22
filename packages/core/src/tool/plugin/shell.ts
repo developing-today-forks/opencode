@@ -466,7 +466,10 @@ export const Plugin = {
                       environment: target.environment,
                       timeout,
                       shell: yield* compatibleShell,
-                      metadata: { sessionID: context.sessionID },
+                      // A background command's own timeout is published so watchers can tell a bounded job from
+                      // one with none (OpenChamber's goal loop asks about the latter). A foreground command loses
+                      // its timeout when it moves to the background, so only background starts carry it.
+                      metadata: { sessionID: context.sessionID, ...(background && timeout > 0 ? { timeout } : {}) },
                       waited: !background,
                       toolCall: {
                         sessionID: context.sessionID,

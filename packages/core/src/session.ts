@@ -40,6 +40,7 @@ import {
   MessageNotFoundError,
   NotFoundError,
   PromptConflictError,
+  RouteTargetError,
   SkillNotFoundError,
   SyntheticConflictError,
 } from "./session/error.js"
@@ -70,6 +71,8 @@ import type { FileDiff } from "@opencode/schema/file-diff"
 import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
+import { SessionRouteTarget } from "./session/route-target.js"
+import { ModelRoute } from "./model-route.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
 import { McpxSubagent } from "./tool/plugin/mcpx-subagent.js"
 import { MessagingVars } from "./messaging/vars.js"
@@ -124,6 +127,7 @@ export {
   MessageNotFoundError,
   NotFoundError,
   PromptConflictError,
+  RouteTargetError,
   SkillNotFoundError,
   SyntheticConflictError,
 }
@@ -216,6 +220,20 @@ export interface Interface {
     sessionID: SessionSchema.ID
     model: Model.Ref
   }) => Effect.Effect<void, NotFoundError | ModelGovernance.DeniedError>
+  /**
+   * Pins (or, with `target: null`, clears) the session's preferred member of a model pool. The
+   * session stays on the pool: the member serves while healthy, failover works as usual, and later
+   * requests return to the member once it recovers. Applies from the next model request. Held in
+   * memory (see `ModelRoute.pinTarget`), so a restart clears it.
+   */
+  readonly routeTarget: (input: {
+    sessionID: SessionSchema.ID
+    routeID: string
+    target: Model.Ref | null
+  }) => Effect.Effect<void, NotFoundError | RouteTargetError>
+  readonly routeTargets: (
+    sessionID: SessionSchema.ID,
+  ) => Effect.Effect<ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>, NotFoundError>
   readonly rename: (input: { sessionID: SessionSchema.ID; title: string }) => Effect.Effect<void, NotFoundError>
   readonly archive: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly unarchive: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
@@ -583,6 +601,7 @@ const layer = Layer.effect(
         // lifecycle write then fails on the deleted row.
         yield* McpxSubagent.releaseSubagentSession(sessionID).pipe(Effect.catch(() => Effect.void))
         yield* environments.clear(sessionID)
+        ModelRoute.forgetPins(sessionID)
         yield* bus.publish(SessionEvent.Deleted, { sessionID })
         yield* bus.remove(sessionID)
         yield* Effect.forEach(children, (child) => result.remove(child.id), { concurrency: 1, discard: true })
@@ -685,6 +704,24 @@ const layer = Layer.effect(
       skill: (input) => sessions.forSession(input.sessionID).skill(input),
       switchAgent: (input) => sessions.forSession(input.sessionID).switchAgent(input),
       switchModel: (input) => sessions.forSession(input.sessionID).switchModel(input),
+      routeTarget: Effect.fn("Session.routeTarget")(function* (input) {
+        const session = yield* result.get(input.sessionID)
+        if (input.target === null) return ModelRoute.pinTarget(input.routeID, input.sessionID, undefined)
+        const lookup = yield* SessionRouteTarget.lookup(locations, session.location, input.routeID)
+        const reason = !lookup.checked
+          ? undefined
+          : lookup.definition === undefined
+            ? "no model pool has this id"
+            : ModelRoute.memberIndex(lookup.definition, input.target) === undefined
+              ? `${input.target.providerID}/${input.target.id}${input.target.variant ? `#${input.target.variant}` : ""} is not a member of the pool`
+              : undefined
+        if (reason) return yield* new RouteTargetError({ routeID: input.routeID, reason })
+        ModelRoute.pinTarget(input.routeID, input.sessionID, input.target)
+      }),
+      routeTargets: Effect.fn("Session.routeTargets")(function* (sessionID) {
+        yield* result.get(sessionID)
+        return ModelRoute.pinnedTargets(sessionID)
+      }),
       rename: (input) => sessions.forSession(input.sessionID).rename(input),
       archive: (sessionID) => sessions.forSession(sessionID).archive(),
       unarchive: (sessionID) => sessions.forSession(sessionID).unarchive(),

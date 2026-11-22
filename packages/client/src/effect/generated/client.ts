@@ -41,6 +41,10 @@ import type {
   SessionSwitchAgentOutput,
   SessionSwitchModelInput,
   SessionSwitchModelOutput,
+  SessionRouteTargetListInput,
+  SessionRouteTargetListOutput,
+  SessionRouteTargetSetInput,
+  SessionRouteTargetSetOutput,
   SessionUpdateInput,
   SessionUpdateOutput,
   SessionMoveInput,
@@ -581,6 +585,25 @@ const EndpointSessionSwitchModel = (raw: RawClient["server.session"]) => (input:
     ),
   )
 
+const EndpointSessionRouteTargetList = (raw: RawClient["server.session"]) => (input: SessionRouteTargetListInput) =>
+  preserveEffect<SessionRouteTargetListOutput>()(
+    raw["session.routeTarget.list"]({ params: { sessionID: input["sessionID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointSessionRouteTargetSet = (raw: RawClient["server.session"]) => (input: SessionRouteTargetSetInput) =>
+  preserveEffect<SessionRouteTargetSetOutput>()(
+    raw["session.routeTarget.set"]({
+      params: { sessionID: input["sessionID"] },
+      payload: { routeID: input["routeID"], target: input["target"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointSessionUpdate = (raw: RawClient["server.session"]) => (input: SessionUpdateInput) =>
   preserveEffect<SessionUpdateOutput>()(
     raw["session.update"]({
@@ -834,6 +857,7 @@ const adaptGroupSession = (raw: RawClient["server.session"]) => ({
   fork: EndpointSessionFork(raw),
   switchAgent: EndpointSessionSwitchAgent(raw),
   switchModel: EndpointSessionSwitchModel(raw),
+  routeTarget: { list: EndpointSessionRouteTargetList(raw), set: EndpointSessionRouteTargetSet(raw) },
   update: EndpointSessionUpdate(raw),
   move: EndpointSessionMove(raw),
   prompt: EndpointSessionPrompt(raw),

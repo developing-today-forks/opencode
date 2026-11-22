@@ -1376,6 +1376,8 @@ export type SessionAgentOverride = {
   force?: boolean
 }
 
+export type SessionRouteTarget = { routeID: string; target: ModelRef }
+
 export type SessionMessageModelSelected = {
   id: SessionMessageID
   metadata?: { [x: string]: JsonValue }
@@ -2588,6 +2590,7 @@ export type ConfigModelRoutes = {
     cache_format?: ModelCacheFormat
     health?: {
       firstTokenTimeoutMs?: number | false
+      lastTargetTimeoutMs?: number | false
       maxResponseTimeMs?: number
       minOutputTokensPerSecond?: number
       sampleWindow?: number
@@ -2595,6 +2598,7 @@ export type ConfigModelRoutes = {
       cooldownMs?: number
       quotaCooldownMs?: number
     }
+    nestedTimeout?: "longest" | "shortest" | "own"
     budgets?: {
       [x: string]: {
         requestsPerMinute?: number
@@ -2878,6 +2882,8 @@ export type ModelInfo = {
   status: "alpha" | "beta" | "deprecated" | "active"
   enabled: boolean
   hidden?: boolean
+  defaultVariant?: string
+  lockVariant?: boolean
   limit: { context: number; input?: number; output: number }
 }
 
@@ -3160,6 +3166,8 @@ export type ConfigEntry =
                     }>
                 disabled?: boolean
                 hidden?: boolean
+                defaultVariant?: string
+                lockVariant?: boolean
                 limit?: { context?: number; input?: number; output?: number }
               }
             }
@@ -4280,6 +4288,18 @@ export type SessionSwitchModelInput = {
 }
 
 export type SessionSwitchModelOutput = void
+
+export type SessionRouteTargetListInput = { readonly sessionID: string }
+
+export type SessionRouteTargetListOutput = { data: Array<SessionRouteTarget> }["data"]
+
+export type SessionRouteTargetSetInput = {
+  readonly sessionID: string
+  readonly routeID: string
+  readonly target: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+}
+
+export type SessionRouteTargetSetOutput = { data: Array<SessionRouteTarget> }["data"]
 
 export type SessionUpdateInput = {
   readonly sessionID: string

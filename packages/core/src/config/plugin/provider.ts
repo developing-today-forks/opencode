@@ -373,5 +373,7 @@ function overlay(
     }
     if (config.disabled !== undefined) model.enabled = !config.disabled
     if (config.hidden !== undefined) model.hidden = config.hidden
+    if (config.defaultVariant !== undefined) model.defaultVariant = config.defaultVariant
+    if (config.lockVariant !== undefined) model.lockVariant = config.lockVariant
   })
 }
