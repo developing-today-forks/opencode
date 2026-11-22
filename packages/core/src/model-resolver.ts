@@ -271,17 +271,17 @@ export const withVariant = (
 }
 
 // The model's configured default effort (provider model config `defaultVariant`) applies when a
-// request names no variant; `lockVariant` applies it to every request. "default" asks for the
-// provider's own default. A configured variant the model does not offer is ignored rather than
-// failing every request.
+// request names no variant or asks for the default, which is what clients send when the user picked
+// none; `lockVariant` applies it to every request. Without one, the default is the provider's own.
+// A configured variant the model does not offer is ignored rather than failing every request.
 const chosenVariant = (model: Info, requested: VariantID | undefined) => {
   const configured =
     model.defaultVariant !== undefined && model.variants?.some((item) => item.id === model.defaultVariant)
       ? model.defaultVariant
       : undefined
-  if (configured !== undefined && model.lockVariant) return configured
-  if (requested === "default") return undefined
-  return requested ?? configured
+  if (configured !== undefined && (model.lockVariant || requested === undefined || requested === "default"))
+    return configured
+  return requested === "default" ? undefined : requested
 }
 
 export interface Dependencies {

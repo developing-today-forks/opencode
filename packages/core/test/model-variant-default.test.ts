@@ -6,9 +6,10 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { Provider } from "@opencode/core/provider"
 
 // A model's configured default effort (provider model config defaultVariant and lockVariant).
-// Oracle: the rules stated on Config.Model: a request that names no variant runs at defaultVariant;
-// one that names a variant, or "default" (the provider's own default), runs as asked; lockVariant
-// runs every request at defaultVariant; a configured variant the model does not offer is ignored.
+// Oracle: the rules stated on Config.Model: a request that names no variant, or asks for "default"
+// (what clients send when the user picked none), runs at defaultVariant; one that names a variant
+// runs as asked; lockVariant runs every request at defaultVariant; a configured variant the model
+// does not offer is ignored, leaving the provider's own default.
 // Each variant marks the request body with its id, so the body says which variant ran.
 
 const model = (variants: readonly string[], defaultVariant?: string, lockVariant?: boolean): Model.Info => ({
@@ -26,12 +27,13 @@ const ran = (info: Model.Info, requested: string | undefined) => {
 }
 
 describe("a model's default effort", () => {
-  test("applies when a request names none, and never over an explicit one", () => {
+  test("applies when a request names none or asks for the default, and never over a named one", () => {
     const info = model(["low", "high"], "high")
     expect(ran(info, undefined)).toBe("high")
+    expect(ran(info, "default")).toBe("high")
     expect(ran(info, "low")).toBe("low")
-    expect(ran(info, "default")).toBe("none")
     expect(ran(model(["low", "high"]), undefined)).toBe("none")
+    expect(ran(model(["low", "high"]), "default")).toBe("none")
   })
 
   test("a locked default runs every request at it, the provider default included", () => {
@@ -57,13 +59,11 @@ describe("a model's default effort", () => {
           const expected =
             offered !== undefined && locked
               ? offered
-              : requested === "default"
-                ? "none"
-                : requested === undefined
-                  ? (offered ?? "none")
-                  : variants.includes(requested)
-                    ? requested
-                    : "unavailable"
+              : requested === undefined || requested === "default"
+                ? (offered ?? "none")
+                : variants.includes(requested)
+                  ? requested
+                  : "unavailable"
           expect(ran(model(variants, configured, locked), requested)).toBe(expected)
         },
       ),

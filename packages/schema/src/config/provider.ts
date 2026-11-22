@@ -116,7 +116,7 @@ class Model extends Schema.Class<Model>("Config.Model")({
   hidden: Schema.Boolean.pipe(optional),
   defaultVariant: VariantID.annotate({
     description:
-      "The variant (effort) a request runs at when it names none, e.g. high. A request that names a variant, or the explicit default, still runs as asked unless lockVariant is set. Ignored when the model does not offer the variant.",
+      "The variant (effort) a request runs at when it names none or asks for the default, e.g. high. A request that names a variant still runs at it unless lockVariant is set. Ignored when the model does not offer the variant.",
   }).pipe(optional),
   lockVariant: Schema.Boolean.annotate({
     description:

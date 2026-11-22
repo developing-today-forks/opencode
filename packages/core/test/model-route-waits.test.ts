@@ -71,9 +71,9 @@ describe("first-output wait of a pool", () => {
     // A wait of its own without nestedTimeout is kept as written.
     expect(firstTokenTimeout("top", routesOf({ ...base, top: { ...top, wait: 7_000 } }))).toBe(7_000)
     // With nestedTimeout the derived wait replaces a stale written one, so a nested change reaches it.
-    expect(firstTokenTimeout("top", routesOf({ ...base, top: { ...top, wait: 7_000, nestedTimeout: "longest" } }))).toBe(
-      120_000,
-    )
+    expect(
+      firstTokenTimeout("top", routesOf({ ...base, top: { ...top, wait: 7_000, nestedTimeout: "longest" } })),
+    ).toBe(120_000)
     // No limit is the longest wait of all, and shortest passes over it.
     const open = { ...base, slow: { targets: ["openai/a"], wait: false as const } }
     expect(firstTokenTimeout("top", routesOf({ ...open, top }))).toBe(false)
@@ -117,7 +117,10 @@ describe("first-output wait of a pool", () => {
   test("a pool that applies one wait stores no per-target waits", () => {
     const built = definition(
       "top",
-      routesOf({ slow: { targets: ["openai/b"], wait: 120_000 }, top: { targets: ["openai/a", "opencode-route/slow"] } }),
+      routesOf({
+        slow: { targets: ["openai/b"], wait: 120_000 },
+        top: { targets: ["openai/a", "opencode-route/slow"] },
+      }),
     )
     expect(built.targetFirstTokenTimeouts).toBeUndefined()
     expect(built.targets.map((_, index) => ModelRoute.targetPolicy(built, index).firstTokenTimeoutMs)).toEqual([
@@ -130,10 +133,15 @@ describe("first-output wait of a pool", () => {
     FastCheck.tuple(
       ...Array.from({ length: count }, (_, index) =>
         FastCheck.record({
-          wait: FastCheck.option(FastCheck.oneof(FastCheck.integer({ min: 1, max: 3_600_000 }), FastCheck.constant(false as const)), {
+          wait: FastCheck.option(
+            FastCheck.oneof(FastCheck.integer({ min: 1, max: 3_600_000 }), FastCheck.constant(false as const)),
+            {
+              nil: undefined,
+            },
+          ),
+          nestedTimeout: FastCheck.option(FastCheck.constantFrom("longest" as const, "shortest" as const), {
             nil: undefined,
           }),
-          nestedTimeout: FastCheck.option(FastCheck.constantFrom("longest" as const, "shortest" as const), { nil: undefined }),
           nests: FastCheck.subarray(Array.from({ length: count - index - 1 }, (_, offset) => index + offset + 1)),
         }),
       ),
@@ -176,9 +184,12 @@ describe("first-output wait of a pool", () => {
       FastCheck.array(
         FastCheck.record({
           wait: FastCheck.option(FastCheck.integer({ min: 1, max: 3_600_000 }), { nil: undefined }),
-          nestedTimeout: FastCheck.option(FastCheck.constantFrom("longest" as const, "shortest" as const, "own" as const), {
-            nil: undefined,
-          }),
+          nestedTimeout: FastCheck.option(
+            FastCheck.constantFrom("longest" as const, "shortest" as const, "own" as const),
+            {
+              nil: undefined,
+            },
+          ),
           nests: FastCheck.subarray(Array.from({ length: count }, (_, index) => index)),
         }),
         { minLength: count, maxLength: count },

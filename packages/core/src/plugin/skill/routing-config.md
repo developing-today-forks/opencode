@@ -54,8 +54,8 @@ Model entries sit under `providers`:
 - `hidden: true` keeps the model out of the picker only: pools and an explicit
   `provider/model` still use it.
 - Show it again: set `"disabled": false` or `"hidden": false`, or delete the key.
-- `defaultVariant: "<variant>"` is the effort a request runs at when it names none;
-  a request that names one, or the explicit default, runs as asked. Add
+- `defaultVariant: "<variant>"` is the effort a request runs at when it names none
+  or asks for the default; a request that names one runs at it. Add
   `lockVariant: true` to run every request at it, inside pools too. A variant the
   model does not offer is ignored.
 - Add a model the catalog does not list: a new key under `models` with `modelID`

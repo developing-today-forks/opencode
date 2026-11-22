@@ -1250,8 +1250,8 @@ routes and by name.
 }
 ```
 
-`defaultVariant` applies when a request names no variant; a request that names
-one, or the explicit default, runs as asked. `lockVariant` runs every request at
+`defaultVariant` applies when a request names no variant or asks for the default;
+a request that names one runs at it. `lockVariant` runs every request at
 `defaultVariant`, including inside model routes. A variant the model does not
 offer is ignored.
 
