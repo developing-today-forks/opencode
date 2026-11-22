@@ -220,3 +220,24 @@ describe("first-output wait of a pool", () => {
     )
   })
 })
+
+describe("how long the last target that can take a request may stay silent", () => {
+  // Oracle: the rule stated on Config.ModelRoute.Health.lastTargetTimeoutMs — no limit when either
+  // wait is off, otherwise the last-target limit (15 minutes unset), never shorter than the first-output wait.
+  test("is the last-target limit, never shorter than the first-output wait (property)", () => {
+    const wait = FastCheck.oneof(FastCheck.integer({ min: 1, max: 3_600_000 }), FastCheck.constant(false as const))
+    FastCheck.assert(
+      FastCheck.property(wait, FastCheck.option(wait, { nil: undefined }), (first, last) => {
+        const policy = ModelRoute.policy({
+          firstTokenTimeoutMs: first,
+          ...(last === undefined ? {} : { lastTargetTimeoutMs: last }),
+        })
+        const limit = last ?? ModelRoute.DEFAULT_LAST_TARGET_TIMEOUT_MS
+        const expected = first === false || limit === false ? false : Math.max(limit, first)
+        expect(ModelRoute.lastTargetTimeout(policy)).toBe(expected)
+      }),
+      { numRuns: 1000 },
+    )
+    expect(ModelRoute.lastTargetTimeout(ModelRoute.policy())).toBe(900_000)
+  })
+})

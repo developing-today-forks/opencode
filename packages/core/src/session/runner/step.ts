@@ -406,6 +406,27 @@ export const make = Effect.gen(function* () {
     return notices.length > 0 ? notices : undefined
   })
 
+  /** Whether another target can take this request now: the route's next fallback, resolved the way a
+   * hedge explores it — speculatively, from this resolution's state, so the failover that may follow
+   * still resolves it itself. A resolution not used hands its bench probe claim back (#1478). A
+   * resolution that fails counts as nowhere to move. */
+  const canMoveOn = (input: Input) => {
+    const routing = input.model.routing
+    if (!routing) return Effect.succeed(false)
+    return routing.fallback().pipe(
+      Effect.map((next) => {
+        const claim = next?.routing?.probeClaim
+        if (next?.routing && claim) {
+          ModelRoute.releaseBenchProbe(next.routing.target, undefined, claim.claimedAt, claim.token)
+          if (claim.credentialID)
+            ModelRoute.releaseBenchProbe(next.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+        }
+        return next !== undefined
+      }),
+      Effect.orElseSucceed(() => false),
+    )
+  }
+
   const run = Effect.fn("SessionStep.run")(function* (
     input: Input,
     /** Events already being produced for this attempt, from a hedge race. */
@@ -567,24 +588,50 @@ export const make = Effect.gen(function* () {
           stream = yield* restore(providerStream).pipe(Effect.exit)
         } else {
           const streamFiber = yield* Effect.forkScoped(Effect.exit(restore(providerStream)))
-          const timedOut = yield* restore(
-            Effect.raceFirst(
-              Deferred.await(firstOutput).pipe(Effect.as(false)),
+          // True when `deadlineMs` (from the request's start; false for none) passes before the first
+          // output or the end of the stream.
+          const silentUntil = (deadlineMs: number | false) =>
+            restore(
               Effect.raceFirst(
-                Fiber.await(streamFiber).pipe(Effect.as(false)),
-                Effect.sleep(
-                  Duration.millis(Math.max(0, firstTokenTimeout - (performance.now() - requestStarted))),
-                ).pipe(Effect.as(true)),
+                Deferred.await(firstOutput).pipe(Effect.as(false)),
+                deadlineMs === false
+                  ? Fiber.await(streamFiber).pipe(Effect.as(false))
+                  : Effect.raceFirst(
+                      Fiber.await(streamFiber).pipe(Effect.as(false)),
+                      Effect.sleep(
+                        Duration.millis(Math.max(0, deadlineMs - (performance.now() - requestStarted))),
+                      ).pipe(Effect.as(true)),
+                    ),
               ),
-            ),
-          )
+            )
+          let waited: number | false = firstTokenTimeout
+          let timedOut = yield* silentUntil(firstTokenTimeout)
+          // The first-output wait only moves the request to another target. With none left to take it,
+          // ending this attempt would only turn a slow answer into an error, so the target keeps going
+          // until the route's last-target limit instead.
+          const lastTarget = ModelRoute.lastTargetTimeout(input.model.routing!.policy)
+          if (timedOut && (lastTarget === false || lastTarget > firstTokenTimeout)) {
+            const moveOn = yield* restore(canMoveOn(input))
+            // Output, or the end of the stream, may have arrived while that was decided: the attempt stands.
+            if ((yield* Deferred.isDone(firstOutput)) || streamFiber.pollUnsafe() !== undefined) timedOut = false
+            else if (!moveOn) {
+              yield* Effect.logInfo("last target kept past the first-output wait", {
+                routeID: input.model.routing?.routeID,
+                target: `${input.model.ref.providerID}/${input.model.ref.id}`,
+                firstTokenTimeoutMs: firstTokenTimeout,
+                lastTargetTimeoutMs: lastTarget,
+              })
+              waited = lastTarget
+              timedOut = yield* silentUntil(lastTarget)
+            }
+          }
           stream = timedOut
             ? yield* Fiber.interrupt(streamFiber).pipe(
                 Effect.as(
                   Exit.fail(
                     new AIError({
                       reason: new TransportError({
-                        message: `No response output within ${firstTokenTimeout}ms`,
+                        message: `No response output within ${waited}ms`,
                         transport: "http",
                         operation: "request",
                         code: "Timeout",

@@ -4,6 +4,7 @@ import { Model } from "@opencode/schema/model"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
+import { DEFAULT_CHUNK_TIMEOUT_MS } from "./provider.js"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { ownValue } from "./util/record.js"
@@ -21,6 +22,9 @@ export const SETTING = "opencodeRoute"
 
 const Policy = Schema.Struct({
   firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]),
+  /** How long the last target that can take a request may stay silent once firstTokenTimeoutMs has
+   * passed (see lastTargetTimeout). Optional so a policy written without it keeps decoding. */
+  lastTargetTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
   maxResponseTimeMs: PositiveInt.pipe(optional),
   minOutputTokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
   sampleWindow: PositiveInt,
@@ -209,6 +213,11 @@ export type Definition = typeof Definition.Type
  * before it answers; a nested route's longer wait wins by default (config plugin firstTokenTimeout). */
 export const DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000
 
+/** How long the last target that can take a request may go without output. The first-output wait only
+ * moves a request to another target; with none left, ending the attempt would only turn a slow answer
+ * into an error, so the target gets the silence the transport allows any streaming response. */
+export const DEFAULT_LAST_TARGET_TIMEOUT_MS = DEFAULT_CHUNK_TIMEOUT_MS
+
 const DEFAULT_POLICY: Policy = {
   firstTokenTimeoutMs: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
   sampleWindow: 5,
@@ -220,6 +229,7 @@ const DEFAULT_POLICY: Policy = {
 export const policy = (
   input?: {
     readonly firstTokenTimeoutMs?: number | false
+    readonly lastTargetTimeoutMs?: number | false
     readonly maxResponseTimeMs?: number
     readonly minOutputTokensPerSecond?: number
     readonly sampleWindow?: number
@@ -233,6 +243,7 @@ export const policy = (
   const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
+    lastTargetTimeoutMs: input?.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
     ...(input?.maxResponseTimeMs !== undefined ? { maxResponseTimeMs: input.maxResponseTimeMs } : {}),
     ...(input?.minOutputTokensPerSecond !== undefined
@@ -243,6 +254,15 @@ export const policy = (
     cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
     quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
+}
+
+/** How long the last target that can take a request may go without output, from the request's start.
+ * Never shorter than the first-output wait itself, so a value at or below it changes nothing. */
+export const lastTargetTimeout = (policy: Policy): number | false => {
+  const last = policy.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS
+  const first = policy.firstTokenTimeoutMs
+  if (last === false || first === false) return false
+  return Math.max(last, first)
 }
 
 /** The policy an attempt on one target runs under: the route's, with the target's own first-output
