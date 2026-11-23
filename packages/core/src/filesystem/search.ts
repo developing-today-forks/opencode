@@ -10,6 +10,7 @@ import { Environment } from "../environment/index.js"
 import { Location } from "../location.js"
 import { Ripgrep } from "../ripgrep.js"
 import { RelativePath } from "../schema.js"
+import { pageLimit } from "../util/number.js"
 import { Protected } from "./protected.js"
 
 export interface Interface {
@@ -25,6 +26,14 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Fi
 const REFRESH_INTERVAL = Duration.toMillis("10 seconds")
 type Prepared = ReturnType<typeof fuzzysort.prepare>
 
+/**
+ * Normalise a `find` page size before it sizes an index scan: absent or
+ * non-finite becomes the default 50, and oversized requests are capped at
+ * 200 so one call cannot return the whole index (fff would page it,
+ * fuzzysort would materialise it). Mirrors the session-list ceiling (#2483).
+ */
+const findLimit = (limit: number | undefined) => pageLimit(limit, { default: 50, max: 200 })
+
 function emptyIndex() {
   return { files: new Map<string, Prepared>(), directories: new Map<string, Prepared>() }
 }
@@ -36,7 +45,7 @@ function search(index: ReturnType<typeof emptyIndex>, input: FileSystem.FindInpu
       : input.type === "directory"
         ? Array.from(index.directories.values())
         : [...index.files.values(), ...index.directories.values()]
-  const result = fuzzysort.go(input.query, items, { limit: input.limit ?? 50 })
+  const result = fuzzysort.go(input.query, items, { limit: findLimit(input.limit) })
   // Targets are owned by the current location index. The only global fuzzysort
   // state left is its query cache, which must not retain every query forever.
   fuzzysort.cleanup()
@@ -180,7 +189,7 @@ export const makeFffLayer = (create: CreatePicker) =>
           Effect.gen(function* () {
             const finder = yield* picker
             if (!finder) return []
-            const options = { pageIndex: 0, pageSize: input.limit ?? 50 }
+            const options = { pageIndex: 0, pageSize: findLimit(input.limit) }
             const items = (() => {
               if (input.type === "file") {
                 const found = finder.fileSearch(input.query.trim(), options)

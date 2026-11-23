@@ -10750,7 +10750,12 @@
             "name": "limit",
             "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum number of entries to return, at most 200. Defaults to 50."
             },
             "required": false
           }
