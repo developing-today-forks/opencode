@@ -36,7 +36,10 @@ export interface Interface {
 // targets are reported by their canonical path, which is where their
 // approval boundary sits. The working-directory and project roots are
 // canonicalized on the same basis, so the containment checks compare
-// like with like.
+// like with like. authorizeRead goes one step further, mirroring core:
+// for an existing target it returns the canonical path, so the file that
+// was authorized is the file that is read — swapping a symlink after
+// authorization cannot redirect an already-authorized read.
 const canonicalize = (absolute: string): string => {
   let current = absolute
   const tail: string[] = []
@@ -126,7 +129,15 @@ export function make(input: {
           save: ["*"],
           ...source(context),
         })
-        return target
+        // A not-yet-existing target (stat fails, as it does for a dangling
+        // final symlink) keeps the resolved path unchanged.
+        let exists = true
+        try {
+          fs.statSync(target.absolute)
+        } catch {
+          exists = false
+        }
+        return exists ? { ...target, absolute: canonicalize(target.absolute) } : target
       }),
   }
 }

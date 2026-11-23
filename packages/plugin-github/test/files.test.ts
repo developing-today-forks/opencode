@@ -159,18 +159,21 @@ describe("GitHubFiles canonical classification", () => {
     },
   )
 
-  it.live("an in-project symlink to an in-project file stays internal", () => {
-    const { base, app, project } = fixture()
-    return Effect.gen(function* () {
-      const real = path.join(app, "real.txt")
-      fs.writeFileSync(real, "real\n")
-      fs.symlinkSync(real, path.join(app, "alias.txt"))
-      const { files, asserted } = makeAt(app, project)
-      const target = yield* files.authorizeRead("alias.txt", context)
-      expect(target).toEqual({ absolute: path.join(app, "alias.txt"), resource: "alias.txt" })
-      expect(asserted).toEqual([{ action: "read", resources: ["alias.txt"] }])
-    }).pipe(Effect.ensuring(cleanup(base)))
-  })
+  it.live(
+    "an in-project symlink to an in-project file is authorized on its lexical resource and returns the canonical path",
+    () => {
+      const { base, app, project } = fixture()
+      return Effect.gen(function* () {
+        const real = path.join(app, "real.txt")
+        fs.writeFileSync(real, "real\n")
+        fs.symlinkSync(real, path.join(app, "alias.txt"))
+        const { files, asserted } = makeAt(app, project)
+        const target = yield* files.authorizeRead("alias.txt", context)
+        expect(target).toEqual({ absolute: real, resource: "alias.txt" })
+        expect(asserted).toEqual([{ action: "read", resources: ["alias.txt"] }])
+      }).pipe(Effect.ensuring(cleanup(base)))
+    },
+  )
 
   it.live("a not-yet-existing file under a symlinked in-project directory is classified by the ancestor", () => {
     const { base, app, project, outside } = fixture()
