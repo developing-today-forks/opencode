@@ -97,6 +97,8 @@ export type SessionInboxDelivery = "steer" | "queue"
 
 export type SessionInboxSyntheticPayload = { text: string; description?: string; metadata?: { [x: string]: JsonValue } }
 
+export type SessionInboxShellPayload = { command: string }
+
 export type SessionInboxCompactionPayload = {}
 
 export type ShellID = string
@@ -762,6 +764,16 @@ export type PromptFileAttachment = {
 
 export type PromptAgentAttachment = { name: string; mention?: PromptMention }
 
+export type PromptInputFileAttachment = {
+  uri: string
+  source?: PromptFileSource
+  name?: string
+  description?: string
+  mention?: PromptMention
+}
+
+export type PromptInputSkillAttachment = { id: SkillID; mention?: PromptMention }
+
 export type PromptSkillAttachment = { id: SkillID; name: SkillName; text?: string; mention?: PromptMention }
 
 export type SessionMessageSkill = {
@@ -790,6 +802,15 @@ export type SessionInboxSynthetic = {
   time: { created: number }
   type: "synthetic"
   payload: SessionInboxSyntheticPayload
+  delivery: SessionInboxDelivery
+}
+
+export type SessionInboxShell = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "shell"
+  payload: SessionInboxShellPayload
   delivery: SessionInboxDelivery
 }
 
@@ -1562,6 +1583,14 @@ export type GenerateImageResult = {
   cost?: MoneyUSD
   tokens?: GenerateUsage
   native?: GenerateNative
+}
+
+export type SessionInboxCommandPayload = {
+  command: string
+  text: string
+  files?: Array<PromptInputFileAttachment>
+  agents?: Array<PromptAgentAttachment>
+  skills?: Array<PromptInputSkillAttachment>
 }
 
 export type SessionInboxUserPayload = {
@@ -3004,6 +3033,15 @@ export type UsageLimitsInfo = {
 
 export type GenerateImageResponse = { data: GenerateImageResult }
 
+export type SessionInboxCommand = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "command"
+  payload: SessionInboxCommandPayload
+  delivery: SessionInboxDelivery
+}
+
 export type SessionInboxUser = {
   id: SessionMessageID
   sessionID: SessionID
@@ -3034,6 +3072,8 @@ export type SessionInboxItem =
   | { type: "synthetic"; payload: SessionInboxSyntheticPayload1; delivery: SessionInboxDelivery }
   | { type: "compaction"; payload: SessionInboxCompactionPayload; delivery: SessionInboxDelivery }
   | { type: "move"; payload: SessionInboxMovePayload1; delivery: SessionInboxDelivery }
+  | { type: "shell"; payload: SessionInboxShellPayload; delivery: SessionInboxDelivery }
+  | { type: "command"; payload: SessionInboxCommandPayload; delivery: SessionInboxDelivery }
 
 export type SessionMessageAssistantTool1 = {
   type: "tool"
@@ -3617,7 +3657,13 @@ export type AutomationInfo = {
   time: { created: number; updated: number }
 }
 
-export type SessionInboxInfo = SessionInboxUser | SessionInboxSynthetic | SessionInboxCompaction | SessionInboxMove
+export type SessionInboxInfo =
+  | SessionInboxUser
+  | SessionInboxSynthetic
+  | SessionInboxCompaction
+  | SessionInboxMove
+  | SessionInboxShell
+  | SessionInboxCommand
 
 export type SessionMessageAssistant = {
   id: SessionMessageID
@@ -3975,14 +4021,6 @@ export type CommandNotFoundError = {
 }
 export const isCommandNotFoundError = (value: unknown): value is CommandNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "CommandNotFoundError"
-
-export type CommandExecutionError = {
-  readonly _tag: "CommandExecutionError"
-  readonly command: string
-  readonly message: string
-}
-export const isCommandExecutionError = (value: unknown): value is CommandExecutionError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "CommandExecutionError"
 
 export type SessionBusyError = {
   readonly _tag: "SessionBusyError"
@@ -4471,6 +4509,7 @@ export type SessionPromptOutput = { data: SessionInboxUser }["data"]
 
 export type SessionCommandInput = {
   readonly sessionID: string
+  readonly id?: string | null | undefined
   readonly name: string
   readonly text: string
   readonly files?:
@@ -4497,7 +4536,7 @@ export type SessionCommandInput = {
   readonly delivery?: ("steer" | "queue") | null | undefined
 }
 
-export type SessionCommandOutput = void
+export type SessionCommandOutput = { data: SessionInboxCommand }["data"]
 
 export type SessionSyntheticInput = {
   readonly sessionID: string
@@ -4515,9 +4554,10 @@ export type SessionShellInput = {
   readonly sessionID: string
   readonly id?: string | undefined
   readonly command: string
+  readonly delivery?: ("steer" | "queue") | undefined
 }
 
-export type SessionShellOutput = void
+export type SessionShellOutput = { data: SessionInboxShell }["data"]
 
 export type SessionCompactInput = {
   readonly sessionID: string

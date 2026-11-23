@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { and, eq } from "drizzle-orm"
-import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
+import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schedule, Scope } from "effect"
 import { Agent } from "@opencode/schema/agent"
 import { Event } from "@opencode/schema/event"
 import { Model } from "@opencode/schema/model"
@@ -562,25 +562,35 @@ describe("Session-owned handles", () => {
           output: () => Effect.succeed(Output.make({ output: "owned", cursor: 5, size: 5, truncated: false })),
         }),
       })
-      const shell = yield* fixture.sessions
+      yield* fixture.sessions
         .forSession(sessionID)
         .shell({ id: SessionMessage.ID.make("msg_owned_shell"), command: started.command })
-        .pipe(Effect.forkScoped)
       yield* Deferred.await(blocked)
 
       const admitted = yield* fixture.sessions.forSession(sessionID).prompt({ text: "Admit while the shell runs" })
       expect(yield* SessionInbox.find(fixture.db, admitted.id)).toEqual(admitted)
-      expect(fixture.wakes).toEqual([{ sessionID, pending: [admitted.id], enqueued: 1 }])
+      // The wake is the prompt's alone, but its pending snapshot now includes the shell's admission,
+      // which sits in the inbox until the shell settles.
+      expect(fixture.wakes).toEqual([
+        { sessionID, pending: [SessionMessage.ID.make("msg_owned_shell"), admitted.id], enqueued: 2 },
+      ])
       const other = yield* fixture.sessions.forSession(otherID).prompt({ text: "Independent Session" })
       expect(fixture.wakes).toEqual([
-        { sessionID, pending: [admitted.id], enqueued: 1 },
+        { sessionID, pending: [SessionMessage.ID.make("msg_owned_shell"), admitted.id], enqueued: 2 },
         { sessionID: otherID, pending: [other.id], enqueued: 1 },
       ])
 
       yield* Deferred.succeed(release, undefined)
-      yield* Fiber.join(shell)
+      // Admission already returned; wait until the operation records the shell's completion.
+      yield* Effect.gen(function* () {
+        const inbox = yield* fixture.sessions.forSession(sessionID).inbox()
+        return inbox.some((item) => item.type === "synthetic")
+      }).pipe(
+        Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("10 millis") }),
+        Effect.timeout("4 seconds"),
+      )
       expect(fixture.wakes).toEqual([
-        { sessionID, pending: [admitted.id], enqueued: 1 },
+        { sessionID, pending: [SessionMessage.ID.make("msg_owned_shell"), admitted.id], enqueued: 2 },
         { sessionID: otherID, pending: [other.id], enqueued: 1 },
       ])
       expect(yield* fixture.store.context(sessionID)).toMatchObject([

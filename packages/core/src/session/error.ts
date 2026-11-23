@@ -85,6 +85,19 @@ export class CompactionConflictError extends Schema.TaggedError<CompactionConfli
   },
 ) {}
 
+export class ShellConflictError extends Schema.TaggedError<ShellConflictError>()("Session.ShellConflictError", {
+  sessionID: SessionSchema.ID,
+  inputID: SessionMessage.ID,
+}) {}
+
+export class CommandConflictError extends Schema.TaggedError<CommandConflictError>()(
+  "Session.CommandConflictError",
+  {
+    sessionID: SessionSchema.ID,
+    inputID: SessionMessage.ID,
+  },
+) {}
+
 export class BusyError extends Schema.TaggedError<BusyError>()("Session.BusyError", {
   sessionID: SessionSchema.ID,
 }) {}

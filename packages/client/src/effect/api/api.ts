@@ -251,6 +251,7 @@ export type SessionPromptOperation<E = never> = (input: SessionPromptInput) => E
 
 export type SessionCommandInput = {
   readonly sessionID: Session.ID
+  readonly id?: SessionMessage.ID | undefined
   readonly name: string
   readonly text: string
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
@@ -258,7 +259,7 @@ export type SessionCommandInput = {
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
 }
-export type SessionCommandOutput = void
+export type SessionCommandOutput = SessionInbox.Command
 export type SessionCommandOperation<E = never> = (input: SessionCommandInput) => Effect.Effect<SessionCommandOutput, E>
 
 export type SessionSyntheticInput = {
@@ -279,8 +280,9 @@ export type SessionShellInput = {
   readonly sessionID: Session.ID
   readonly id?: SessionMessage.ID | undefined
   readonly command: string
+  readonly delivery?: SessionInbox.Delivery | undefined
 }
-export type SessionShellOutput = void
+export type SessionShellOutput = SessionInbox.Shell
 export type SessionShellOperation<E = never> = (input: SessionShellInput) => Effect.Effect<SessionShellOutput, E>
 
 export type SessionCompactInput = {

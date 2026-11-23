@@ -15,7 +15,6 @@ import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenAp
 import {
   ConflictError,
   LocationNotFoundError,
-  CommandExecutionError,
   CommandNotFoundError,
   FormAlreadySettledError,
   FormInvalidAnswerError,
@@ -75,12 +74,21 @@ const PublicInboxInfo = Schema.Union([
   SessionInbox.Synthetic,
   SessionInbox.Compaction,
   PublicMove,
+  SessionInbox.Shell,
+  SessionInbox.Command,
 ]).annotate({ identifier: "Session.Inbox.Info" })
 
 /** Experimental: the `session.inbox.list` response for clients that opt into `experimental-media-uri`. */
 export const SessionMediaInboxResponse = Schema.Struct({
   data: Schema.Array(
-    Schema.Union([SessionInbox.MediaUser, SessionInbox.Synthetic, SessionInbox.Compaction, PublicMove]).annotate({
+    Schema.Union([
+      SessionInbox.MediaUser,
+      SessionInbox.Synthetic,
+      SessionInbox.Compaction,
+      PublicMove,
+      SessionInbox.Shell,
+      SessionInbox.Command,
+    ]).annotate({
       identifier: "Session.Inbox.MediaInfo",
     }),
   ),
@@ -423,19 +431,21 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
       HttpApiEndpoint.post("session.command", "/api/session/:sessionID/command", {
         params: { sessionID: Session.ID },
         payload: Schema.Struct({
+          id: SessionMessage.ID.pipe(Schema.optional),
           name: Schema.String,
           ...PromptInput.Prompt.fields,
           delivery: SessionInbox.Delivery.pipe(Schema.optional),
         }),
-        success: HttpApiSchema.NoContent,
-        error: [SessionNotFoundError, CommandNotFoundError, CommandExecutionError],
+        success: Schema.Struct({ data: SessionInbox.Command }),
+        error: [ConflictError, SessionNotFoundError, CommandNotFoundError],
       })
         .middleware(sessionLocationMiddleware)
         .annotateMerge(
           OpenApi.annotations({
             identifier: "session.command",
             summary: "Run command",
-            description: "Execute a slash command callback immediately.",
+            description:
+              "Durably admit one slash command and return on admission: an unknown command still fails the request, a known one executes in admission order, and its start, completion and failure arrive as session events and inbox records.",
           }),
         ),
     )
@@ -485,9 +495,10 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
         payload: Schema.Struct({
           id: SessionMessage.ID.pipe(Schema.optional),
           command: Schema.String,
+          delivery: SessionInbox.Delivery.pipe(Schema.optional),
         }),
-        success: HttpApiSchema.NoContent,
-        error: SessionNotFoundError,
+        success: Schema.Struct({ data: SessionInbox.Shell }),
+        error: [ConflictError, SessionNotFoundError],
       })
         .middleware(sessionLocationMiddleware)
         .annotateMerge(
@@ -495,7 +506,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
             identifier: "session.shell",
             summary: "Run shell command",
             description:
-              "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+              "Durably admit one shell command in the session's working directory and return on admission. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
           }),
         ),
     )

@@ -1,9 +1,11 @@
 export * as SessionInbox from "./inbox.js"
 
-import { and, asc, eq, or } from "drizzle-orm"
+import { and, asc, eq, notInArray, or } from "drizzle-orm"
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import {
+  Command,
+  CommandPayload,
   Compaction,
   CompactionPayload,
   Delivery,
@@ -14,6 +16,8 @@ import {
   MediaUserPayload,
   Move,
   MovePayload,
+  Shell,
+  ShellPayload,
   Synthetic,
   SyntheticPayload,
   User,
@@ -33,6 +37,8 @@ import { SessionHistory } from "./history.js"
 type DatabaseService = Database.Interface["db"]
 
 export {
+  Command,
+  CommandPayload,
   Compaction,
   CompactionPayload,
   Delivery,
@@ -43,6 +49,8 @@ export {
   MediaUserPayload,
   Move,
   MovePayload,
+  Shell,
+  ShellPayload,
   Synthetic,
   SyntheticPayload,
   User,
@@ -66,6 +74,10 @@ const decodeCompaction = Schema.decodeUnknownSync(CompactionPayload)
 const encodeCompaction = Schema.encodeSync(CompactionPayload)
 const decodeMove = Schema.decodeUnknownSync(MovePayload)
 const encodeMove = Schema.encodeSync(MovePayload)
+const decodeShell = Schema.decodeUnknownSync(ShellPayload)
+const encodeShell = Schema.encodeSync(ShellPayload)
+const decodeCommand = Schema.decodeUnknownSync(CommandPayload)
+const encodeCommand = Schema.encodeSync(CommandPayload)
 const inboxLocks = KeyedMutex.makeUnsafe<SessionSchema.ID>()
 type PendingRef = { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID }
 
@@ -110,6 +122,20 @@ const fromRow = (row: typeof SessionInboxTable.$inferSelect): Info => {
       ...base,
       type: "synthetic",
       payload: decodeSynthetic(row.payload),
+      delivery: row.delivery,
+    })
+  if (row.type === "shell")
+    return Shell.make({
+      ...base,
+      type: "shell",
+      payload: decodeShell(row.payload),
+      delivery: row.delivery,
+    })
+  if (row.type === "command")
+    return Command.make({
+      ...base,
+      type: "command",
+      payload: decodeCommand(row.payload),
       delivery: row.delivery,
     })
   throw new LifecycleConflict({ id: base.id })
@@ -324,7 +350,11 @@ export const projectAdmitted = Effect.fn("SessionInbox.projectAdmitted")(functio
         ? encodeSynthetic(request.item.payload)
         : request.item.type === "compaction"
           ? encodeCompaction(request.item.payload)
-          : encodeMove(request.item.payload)
+          : request.item.type === "shell"
+            ? encodeShell(request.item.payload)
+            : request.item.type === "command"
+              ? encodeCommand(request.item.payload)
+              : encodeMove(request.item.payload)
   const stored = yield* db
     .insert(SessionInboxTable)
     .values({
@@ -383,7 +413,7 @@ export type Delivered =
       readonly delivery: Delivery
       readonly payload: SyntheticPayload
     }
-  | { readonly id: SessionMessage.ID; readonly type: "compaction" | "move" }
+  | { readonly id: SessionMessage.ID; readonly type: "compaction" | "move" | "shell" | "command" }
 
 const delivered = (row: typeof SessionInboxTable.$inferSelect): Delivered => {
   if (row.type === "user")
@@ -506,11 +536,55 @@ export type Promotion =
       readonly delivery: Delivery
       readonly payload: MovePayload
     }
+  | {
+      readonly id: SessionMessage.ID
+      readonly type: "shell"
+      readonly delivery: Delivery
+      readonly payload: ShellPayload
+    }
+  | {
+      readonly id: SessionMessage.ID
+      readonly type: "command"
+      readonly delivery: Delivery
+      readonly payload: CommandPayload
+    }
+
+/** An admitted shell or command whose execution has not started yet. */
+export type Operation = Extract<Promotion, { readonly type: "shell" | "command" }>
 
 const promotion = (row: typeof SessionInboxTable.$inferSelect): Promotion =>
   row.type === "move"
     ? { id: row.id, type: "move", delivery: row.delivery, payload: decodeMove(row.payload) }
-    : { id: row.id, type: row.type, delivery: row.delivery }
+    : row.type === "shell"
+      ? { id: row.id, type: "shell", delivery: row.delivery, payload: decodeShell(row.payload) }
+      : row.type === "command"
+        ? { id: row.id, type: "command", delivery: row.delivery, payload: decodeCommand(row.payload) }
+        : { id: row.id, type: row.type, delivery: row.delivery }
+
+/**
+ * Admitted shell/command operations still pending execution, in admission
+ * order. Operations are started by their admission; this is the recovery net
+ * for one whose start was lost (a crash between admission and start, or a
+ * failed start) — execution drains consult it before running the Session.
+ */
+export const pendingOperations = Effect.fn("SessionInbox.pendingOperations")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const rows = yield* db
+    .select()
+    .from(SessionInboxTable)
+    .where(
+      and(
+        eq(SessionInboxTable.session_id, sessionID),
+        or(eq(SessionInboxTable.type, "shell"), eq(SessionInboxTable.type, "command")),
+      ),
+    )
+    .orderBy(asc(SessionInboxTable.enqueued_seq))
+    .all()
+    .pipe(Effect.orDie)
+  return rows.map(promotion).filter((item): item is Operation => item.type === "shell" || item.type === "command")
+})
 
 /** Which pending rows count: "input" means any item in either delivery mode. */
 export type Scope = "input" | Delivery
@@ -529,6 +603,7 @@ export const has = Effect.fn("SessionInbox.has")(function* (
         scope === "input"
           ? or(eq(SessionInboxTable.delivery, "steer"), eq(SessionInboxTable.delivery, "queue"))
           : eq(SessionInboxTable.delivery, scope),
+        notInArray(SessionInboxTable.type, ["shell", "command"]),
       ),
     )
     .limit(1)
@@ -617,7 +692,13 @@ const firstQueued = (db: DatabaseService, sessionID: SessionSchema.ID) =>
   db
     .select()
     .from(SessionInboxTable)
-    .where(and(eq(SessionInboxTable.session_id, sessionID), eq(SessionInboxTable.delivery, "queue")))
+    .where(
+      and(
+        eq(SessionInboxTable.session_id, sessionID),
+        eq(SessionInboxTable.delivery, "queue"),
+        notInArray(SessionInboxTable.type, ["shell", "command"]),
+      ),
+    )
     .orderBy(asc(SessionInboxTable.enqueued_seq))
     .limit(1)
     .get()
@@ -632,6 +713,7 @@ const pendingSteers = (db: DatabaseService, sessionID: SessionSchema.ID) =>
     .all()
     .pipe(
       Effect.orDie,
+      Effect.map((rows) => rows.filter((row) => row.type !== "shell" && row.type !== "command")),
       Effect.map((rows) => {
         // A move changes the context's Location: never pull compaction across it.
         // Within that boundary, compact before promoting even earlier steers so

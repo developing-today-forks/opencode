@@ -126,8 +126,8 @@ function session(input: {
   statuses?: ("idle" | "running")[]
   current?: ComposerSession["current"]
   admitted?: (messageID: string) => boolean
-  shell?: ComposerSession["api"]["shell"]
-  command?: ComposerSession["api"]["command"]
+  shell?: (input: Parameters<ComposerSession["data"]["session"]["shell"]>[0]) => Promise<unknown>
+  command?: (input: Parameters<ComposerSession["data"]["session"]["command"]>[0]) => Promise<unknown>
   switchAgent?: ComposerSession["api"]["switchAgent"]
   switchModel?: ComposerSession["api"]["switchModel"]
   background?: ComposerSession["background"]
@@ -138,7 +138,7 @@ function session(input: {
   // The requests made so far, settled or not: the next one starts once they all have.
   const chain: Promise<unknown>[] = []
 
-  const sequence: ComposerSession["data"]["session"]["sequence"] = (_sessionID, send, prepare) => {
+  const inChain = <Value,>(send: () => Promise<Value>, prepare?: () => Promise<unknown>): Promise<Value> => {
     const run = async () => {
       await prepare?.()
 
@@ -172,12 +172,22 @@ function session(input: {
         (async () => {
           input.calls.push("switch-model")
         }),
-      shell:
-        input.shell ??
-        (async () => {
-          input.calls.push("shell")
-        }),
-      command: input.command ?? (async () => undefined),
+      shell: async (value) => ({
+        id: value.id ?? "msg_admitted",
+        sessionID: value.sessionID,
+        time: { created: 0 },
+        type: "shell" as const,
+        payload: { command: value.command },
+        delivery: value.delivery ?? "steer",
+      }),
+      command: async (value) => ({
+        id: value.id ?? "msg_admitted",
+        sessionID: value.sessionID,
+        time: { created: 0 },
+        type: "command" as const,
+        payload: { command: value.name, text: value.text },
+        delivery: value.delivery ?? "steer",
+      }),
       revert: {
         commit: async () => {
           input.calls.push("revert-commit")
@@ -193,12 +203,43 @@ function session(input: {
           input.calls.push("accept-send")
           input.accept?.()
         },
-        sequence,
+        // Like the data layer: shells and commands admit in the session's send chain and return the admitted item.
+        shell: (value) =>
+          inChain(async () => {
+            if (input.shell) await input.shell(value)
+            else input.calls.push("shell")
+
+            return {
+              id: value.id ?? "msg_admitted",
+        sessionID: value.sessionID,
+        time: { created: 0 },
+        type: "shell" as const,
+        payload: { command: value.command },
+        delivery: value.delivery ?? "steer",
+            }
+          }),
+        command: (value) =>
+          inChain(async () => {
+            await value.prepare?.()
+            if (input.command) {
+              const { prepare: _prepare, gate: _gate, ...request } = value
+              await input.command(request)
+            }
+
+            return {
+              id: value.id ?? "msg_admitted",
+        sessionID: value.sessionID,
+        time: { created: 0 },
+        type: "command" as const,
+        payload: { command: value.name, text: value.text },
+        delivery: value.delivery ?? "steer",
+            }
+          }),
         // Like the data layer: admit locally, then prepare and send in the session's send chain.
         prompt: (value) => {
           input.calls.push("admit")
 
-          return sequence(value.sessionID, async () => {
+          return inChain(async () => {
             await value.prepare?.()
             input.calls.push("send")
             await input.prompt?.(value)
@@ -1753,6 +1794,7 @@ describe("Composer submission", () => {
     expect(requests).toEqual([
       {
         sessionID: target.id,
+        id: expect.any(String),
         name: "review",
         text: "https://github.com/example/repo/pull/1",
         files: [],

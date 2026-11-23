@@ -14,7 +14,6 @@ import { Api } from "../api"
 import { wantsMediaRefs } from "../media-uri"
 import {
   ConflictError,
-  CommandExecutionError,
   CommandNotFoundError,
   FormAlreadySettledError,
   FormInvalidAnswerError,
@@ -450,37 +449,39 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.command",
         Effect.fn(function* (ctx) {
-          yield* session
-            .command({
-              sessionID: ctx.params.sessionID,
-              command: ctx.payload.name,
-              text: ctx.payload.text,
-              files: ctx.payload.files,
-              agents: ctx.payload.agents,
-              skills: ctx.payload.skills,
-              delivery: ctx.payload.delivery,
-            })
-            .pipe(
-              Effect.catchTag("Session.NotFoundError", missingSession),
-              Effect.catchTag("Command.NotFoundError", (error) =>
-                Effect.fail(
-                  new CommandNotFoundError({
-                    command: error.command,
-                    message: error.message,
-                  }),
+          return {
+            data: yield* session
+              .command({
+                sessionID: ctx.params.sessionID,
+                id: ctx.payload.id,
+                command: ctx.payload.name,
+                text: ctx.payload.text,
+                files: ctx.payload.files,
+                agents: ctx.payload.agents,
+                skills: ctx.payload.skills,
+                delivery: ctx.payload.delivery,
+              })
+              .pipe(
+                Effect.catchTag("Session.NotFoundError", missingSession),
+                Effect.catchTag("Session.CommandConflictError", (error) =>
+                  Effect.fail(
+                    new ConflictError({
+                      message: `Command input ID conflicts with an existing durable record: ${error.inputID}`,
+                      resource: error.inputID,
+                    }),
+                  ),
                 ),
-              ),
-              Effect.catchTag("Command.ExecutionError", (error) =>
-                Effect.fail(
-                  new CommandExecutionError({
-                    command: error.command,
-                    message: error.message,
-                  }),
+                Effect.catchTag("Command.NotFoundError", (error) =>
+                  Effect.fail(
+                    new CommandNotFoundError({
+                      command: error.command,
+                      message: error.message,
+                    }),
+                  ),
                 ),
+                locationErrors,
               ),
-              locationErrors,
-            )
-          return HttpApiSchema.NoContent.make()
+          }
         }),
       )
       .handle(
@@ -532,10 +533,26 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.shell",
         Effect.fn(function* (ctx) {
-          yield* session
-            .shell({ sessionID: ctx.params.sessionID, id: ctx.payload.id, command: ctx.payload.command })
-            .pipe(Effect.catchTag("Session.NotFoundError", missingSession))
-          return HttpApiSchema.NoContent.make()
+          return {
+            data: yield* session
+              .shell({
+                sessionID: ctx.params.sessionID,
+                id: ctx.payload.id,
+                command: ctx.payload.command,
+                delivery: ctx.payload.delivery,
+              })
+              .pipe(
+                Effect.catchTag("Session.NotFoundError", missingSession),
+                Effect.catchTag("Session.ShellConflictError", (error) =>
+                  Effect.fail(
+                    new ConflictError({
+                      message: `Shell input ID conflicts with an existing durable record: ${error.inputID}`,
+                      resource: error.inputID,
+                    }),
+                  ),
+                ),
+              ),
+          }
         }),
       )
       .handle(
