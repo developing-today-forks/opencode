@@ -91,8 +91,8 @@ workflows — `test`, `check`, `nix-eval`, the same set
 `main-broken.yml` watches: for the exact SHA being published, the
 latest completed run of each on branch `main` must have conclusion
 `success`. A failed, cancelled, or missing conclusion refuses the
-publish (fail-closed). Enforcement is the reusable
-`.github/actions/main-gate` check.
+publish (fail-closed). Enforcement is the inline gate in the
+publish path (`release.yml`, `release_gate: true`).
 
 Since the 2026-11-22 anomalyco/opencode sync, this repository has no
 publish workflow that can run: upstream replaced `publish.yml`,
@@ -100,14 +100,17 @@ publish workflow that can run: upstream replaced `publish.yml`,
 `release-github-action.yml` and `containers.yml` with `release.yml`,
 whose every job depends on a `plan` job guarded to
 `github.repository == 'anomalyco/opencode'`, so it never publishes from
-this fork. The main-gate action is kept; any publish workflow added to
-this fork must gate on it before publishing.
+this fork. The former composite check (`.github/actions/main-gate`)
+was removed as orphaned dead code (#2687): no workflow referenced it.
+Any publish workflow added to this fork must enforce this gate for
+the exact SHA before publishing.
 
-Hotfix override: set the repository variable `MAIN_GATE_OVERRIDE=1`
-to bypass the gate for one release — the bypass is announced as a
-warning in the run log — and unset it immediately afterwards. The
-override is for a legitimate hotfix that cannot wait for a green
-main; it is not a way to make red-main releases routine.
+Hotfix override: the gate must keep a bypass for a legitimate
+hotfix that cannot wait for a green main, announced as a warning in
+the run log and never left in place afterwards — the removed
+composite check implemented this as the repository variable
+`MAIN_GATE_OVERRIDE=1`, set for one release and unset immediately
+after. The override is not a way to make red-main releases routine.
 
 ## Dedup rule
 
