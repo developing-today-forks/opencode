@@ -347,6 +347,33 @@ it.live("removes credentials through the HttpApi", () =>
   }),
 )
 
+it.live("never returns a raw session cookie from a credential create response", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options)
+    const response = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/credential", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            integrationID: "openai",
+            label: "provider session",
+            value: { type: "session-cookie", cookie: "session-cookie-secret", workspaceID: "wrk_test" },
+          }),
+        }),
+      ),
+    )
+    expect(response.status).toBe(200)
+    const body = yield* Effect.promise(() => response.text())
+    expect(body).not.toContain("session-cookie-secret")
+    expect(JSON.parse(body).data.value).toEqual({
+      type: "session-cookie",
+      cookie: "",
+      workspaceID: "wrk_test",
+    })
+  }),
+)
+
 it.live("serves unauthenticated and answers CORS preflight when no password is configured", () =>
   Effect.gen(function* () {
     const handler = yield* ServerFetch.make(options)

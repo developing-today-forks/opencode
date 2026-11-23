@@ -268,4 +268,74 @@ describe("Credential", () => {
       ])
     }),
   )
+
+  it.effect("stores session-cookie credentials through the existing credential service", () =>
+    Effect.gen(function* () {
+      const credentials = yield* Credential.Service
+      const database = yield* Database.Service
+      const integrationID = Integration.ID.make("opendesign")
+      const value = Credential.SessionCookie.make({
+        type: "session-cookie",
+        cookie: "fixture-cookie",
+        workspaceID: "wrk_fixture",
+        metadata: { externalRefresh: true },
+      })
+      const created = yield* credentials.create({ integrationID, label: "OpenDesign", value })
+      expect(created.value).toEqual(value)
+      expect(yield* credentials.get(created.id)).toEqual(created)
+      expect(yield* credentials.list(integrationID)).toEqual([created])
+
+      const row = yield* database.db
+        .select({ value: CredentialTable.value })
+        .from(CredentialTable)
+        .where(eq(CredentialTable.id, created.id))
+        .get()
+        .pipe(Effect.orDie)
+      expect(row?.value).toEqual(value)
+
+      const renewed = Credential.SessionCookie.make({
+        type: "session-cookie",
+        cookie: "fixture-cookie-renewed",
+        workspaceID: "wrk_fixture",
+        metadata: { externalRefresh: true },
+      })
+      yield* credentials.update(created.id, { value: renewed })
+      expect((yield* credentials.get(created.id))?.value).toEqual(renewed)
+
+      yield* credentials.remove(created.id)
+      expect(yield* credentials.list(integrationID)).toEqual([])
+    }),
+  )
+
+  it.effect("redacts session-cookie values for generic reads and passes other kinds through", () =>
+    Effect.gen(function* () {
+      const value = Credential.SessionCookie.make({
+        type: "session-cookie",
+        cookie: "fixture-cookie",
+        workspaceID: "wrk_fixture",
+        metadata: { externalRefresh: true },
+      })
+      const redacted = Credential.redactedValue(value)
+      expect(redacted).toEqual({
+        type: "session-cookie",
+        cookie: "",
+        workspaceID: "wrk_fixture",
+        metadata: { externalRefresh: true },
+      })
+      expect(JSON.stringify(redacted)).not.toContain("fixture-cookie")
+      expect(Credential.isSessionCookie(value)).toBeTrue()
+      expect(Credential.isSessionCookie(redacted)).toBeTrue()
+
+      const key = Credential.Key.make({ type: "key", key: "secret" })
+      expect(Credential.redactedValue(key)).toBe(key)
+      const oauth = Credential.OAuth.make({
+        type: "oauth",
+        methodID: Integration.MethodID.make("fixture"),
+        refresh: "refresh",
+        access: "access",
+        expires: 1,
+      })
+      expect(Credential.redactedValue(oauth)).toBe(oauth)
+    }),
+  )
 })

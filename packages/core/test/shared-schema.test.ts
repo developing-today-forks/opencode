@@ -81,6 +81,7 @@ test("Core reuses the canonical shared schemas", async () => {
     [coreCredential.ID, Credential.ID],
     [coreCredential.OAuth, Credential.OAuth],
     [coreCredential.Key, Credential.Key],
+    [coreCredential.SessionCookie, Credential.SessionCookie],
     [coreCredential.Value, Credential.Value],
     [coreFileSystem.Entry, FileSystem.Entry],
     [coreFileSystem.Submatch, FileSystem.Submatch],
