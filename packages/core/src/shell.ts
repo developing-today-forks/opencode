@@ -898,12 +898,14 @@ const layer = () =>
           )?.info
       })
 
+      // A read that fails (the capture was deleted mid-read, or is unreadable) is reported as failed, never
+      // as an empty page: a missing capture must not read as a successful empty one (#2759).
       const readRange = (file: string, start: number, length: number) =>
         length <= 0
-          ? Effect.succeed(Buffer.alloc(0))
+          ? Effect.succeed({ bytes: Buffer.alloc(0), failed: false })
           : Effect.promise(
               () =>
-                new Promise<Buffer>((resolve) => {
+                new Promise<{ bytes: Buffer; failed: boolean }>((resolve) => {
                   const buffer = Buffer.alloc(length)
                   const stream = createReadStream(file, { start, end: start + length - 1 })
                   let offset = 0
@@ -912,24 +914,34 @@ const layer = () =>
                     bytes.copy(buffer, offset)
                     offset += bytes.length
                   })
-                  stream.on("end", () => resolve(buffer.subarray(0, offset)))
-                  stream.on("error", () => resolve(buffer.subarray(0, 0)))
+                  stream.on("end", () => resolve({ bytes: buffer.subarray(0, offset), failed: false }))
+                  stream.on("error", () => resolve({ bytes: buffer.subarray(0, 0), failed: true }))
                 }),
             )
 
+      const missingCapture = (file: string) => `[output file ${file} is missing; the capture is no longer available]`
+
       // The capture a reader sees, bounded by MAX_OUTPUT_BYTES (#2486). The spawner stops writing at the cap. A daemon
       // command's file is the only record of its output and the daemon writes all of it, so its readable size is the
-      // file's up to the cap, and a longer file reads as truncated; a missing file is empty.
+      // file's up to the cap, and a longer file reads as truncated. Both kinds create their capture file up front, so
+      // a file that cannot be stat'ed has disappeared: it is reported missing, never read as an empty capture
+      // (#2759). A spawned command's size is its in-memory count, which survives the file.
       const captureOf = (command: Command) =>
         command.kind === "spawned"
-          ? Effect.succeed({ size: command.size, truncated: command.truncated })
+          ? Effect.promise(() =>
+              stat(command.info.file).then(
+                () => ({ size: command.size, truncated: command.truncated, missing: false }),
+                () => ({ size: command.size, truncated: command.truncated, missing: true }),
+              ),
+            )
           : Effect.promise(() =>
               stat(command.info.file).then(
                 (info) => ({
                   size: Math.min(info.size, MAX_OUTPUT_BYTES),
                   truncated: command.capped === true || info.size > MAX_OUTPUT_BYTES,
+                  missing: false,
                 }),
-                () => ({ size: 0, truncated: false }),
+                () => ({ size: 0, truncated: false, missing: true }),
               ),
             )
 
@@ -939,12 +951,15 @@ const layer = () =>
         const limit = outputLimit(input?.limit)
         const running = command.info.status === "running"
         // A capture that hit MAX_OUTPUT_BYTES reports truncated on every page (#2486).
-        const { size, truncated } = yield* captureOf(command)
+        const { size, truncated, missing } = yield* captureOf(command)
+        if (missing) return { output: missingCapture(command.info.file), cursor: size, size, truncated }
         if (cursor >= size) return { output: "", cursor: size, size, truncated }
         const start = cursor
         // A UTF-8 character can straddle either edge by up to three bytes.
         const offset = Math.max(0, start - 3)
-        const bytes = yield* readRange(command.info.file, offset, Math.min(size, start + limit + 3) - offset)
+        const page = yield* readRange(command.info.file, offset, Math.min(size, start + limit + 3) - offset)
+        if (page.failed) return { output: missingCapture(command.info.file), cursor: size, size, truncated }
+        const bytes = page.bytes
         const from = start - offset
         const to = Math.min(bytes.length, from + limit)
         const first = splitCharacter(bytes, from, running)?.end ?? from
@@ -987,7 +1002,8 @@ const layer = () =>
         const floor = Math.max(0, size - LINE_START_SCAN_LIMIT)
         while (end > floor && starts.length < 2) {
           const from = Math.max(floor, end - 65536)
-          const chunk = yield* readRange(file, from, end - from)
+          // A failed read scans as an empty chunk; captureOf has already reported a missing capture.
+          const chunk = (yield* readRange(file, from, end - from)).bytes
           for (let index = chunk.length - 1; index >= 0 && starts.length < 2; index--)
             if (chunk[index] === 10) starts.push(from + index + 1)
           end = from
@@ -1021,11 +1037,15 @@ const layer = () =>
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const command = yield* require(info.id)
           // The result reads a bounded tail of the capture, which stops at the cap for both hosts (#2486).
-          const { size, truncated: overCap } = yield* captureOf(command)
+          const { size, truncated: overCap, missing } = yield* captureOf(command)
+          const killed = command.killed ? { killed: command.killed } : {}
+          if (missing) return { output: missingCapture(info.file), truncated: false, ...killed }
           const start = Math.max(0, size - maxBytes)
           // Read the byte before the window too, to tell whether the window starts on a line boundary.
           const before = Math.max(0, start - 1)
-          const window = yield* readRange(info.file, before, size - before)
+          const read = yield* readRange(info.file, before, size - before)
+          if (read.failed) return { output: missingCapture(info.file), truncated: false, ...killed }
+          const window = read.bytes
           const page = TextBoundary.utf8Tail(window, size - start)
           const partial = start > 0 && window[0] !== 10
           const endsWithNewline = page.endsWith("\n")
@@ -1042,7 +1062,6 @@ const layer = () =>
             command.kind === "host" && command.outputError
               ? `\n\n[output file ${info.file} stopped early: ${command.outputError}]`
               : ""
-          const killed = command.killed ? { killed: command.killed } : {}
           if (partial && lines.length === 1) {
             const lineStarts = command.kind === "spawned" ? command.lineStarts : yield* lineStartsOf(info.file, size)
             const lineStart = endsWithNewline ? lineStarts[0] : lineStarts[1]
