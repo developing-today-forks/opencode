@@ -140,6 +140,47 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
     return body.subarray(0, size).toString("utf8")
   })
 
+/**
+ * The wire facts of a token-endpoint rejection (#2693): the HTTP status
+ * and, when the response body carried one, the OAuth error code. They
+ * ride on the failure Error as properties alongside the human-readable
+ * message — message-only consumers (the keyring loadToken path) keep
+ * surfacing the message unchanged, while quota classification reads
+ * the facts back via tokenRefreshRejection.
+ */
+export interface TokenRefreshRejection {
+  readonly status: number
+  readonly oauthError?: string
+}
+
+const rejectionError = (status: number, body: string): Error => {
+  let oauthError: string | undefined
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown } | null
+    if (parsed && typeof parsed.error === "string" && parsed.error !== "") oauthError = parsed.error
+  } catch {
+    // A non-JSON rejection body carries no OAuth code; the status stands.
+  }
+  const error = new Error(`token endpoint rejected refresh (HTTP ${status})`) as Error & {
+    status: number
+    oauthError?: string
+  }
+  error.status = status
+  if (oauthError !== undefined) error.oauthError = oauthError
+  return error
+}
+
+/** The TokenRefreshRejection a refresh failure carries, if it carries one. */
+export const tokenRefreshRejection = (error: unknown): TokenRefreshRejection | undefined => {
+  if (!(error instanceof Error)) return undefined
+  const carried = error as Error & Partial<TokenRefreshRejection>
+  if (typeof carried.status !== "number") return undefined
+  return {
+    status: carried.status,
+    oauthError: typeof carried.oauthError === "string" ? carried.oauthError : undefined,
+  }
+}
+
 export const refresh = (
   refreshToken: string,
   timeoutMs = TOKEN_REFRESH_TIMEOUT_MS,
@@ -159,8 +200,7 @@ export const refresh = (
     const http = yield* HttpClient.HttpClient
     const response = yield* HttpClient.withScope(http).execute(request)
     const text = yield* readBoundedTokenResponse(response)
-    if (response.status !== 200)
-      return yield* Effect.fail(new Error(`token endpoint rejected refresh (HTTP ${response.status})`))
+    if (response.status !== 200) return yield* Effect.fail(rejectionError(response.status, text))
     const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(TokenResponse))(text)
     const accessToken = parsed.access_token?.trim()
     if (!accessToken) return yield* Effect.fail(new Error("token endpoint returned no access_token"))

@@ -178,6 +178,11 @@ const refreshAccessToken = async (_ctx: QuotaContext, refreshToken: string): Pro
     )
     return { ok: true, accessToken: token.accessToken, status: 200 }
   } catch (error) {
+    // A token-endpoint rejection that carried its OAuth error code
+    // (#2693): isWrongClientRejection reads the code and the status,
+    // not the human-readable message.
+    const rejection = AntigravityAuth.tokenRefreshRejection(error)
+    if (rejection?.oauthError !== undefined) return { ok: false, error: rejection.oauthError, status: rejection.status }
     return { ok: false, error: error instanceof Error ? error.message : "network" }
   }
 }
