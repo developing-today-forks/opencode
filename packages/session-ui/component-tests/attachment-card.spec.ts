@@ -16,6 +16,9 @@ story("exposes a clickable attachment card as a button and keeps the static card
   await expect(clickable).toHaveAccessibleName("Clickable card File")
   await expect(clickable).toHaveAttribute("type", "button")
   await expect(clickable).toHaveAttribute("data-clickable", "true")
+  // The element itself must be a real <button>: the role attribute alone would
+  // also match a div carrying role="button", which is what PR #2489 replaced.
+  expect(await clickable.evaluate((element) => element.tagName)).toBe("BUTTON")
 
   // The fix was about keyboard access, so a div with a click handler must not satisfy this.
   await clickable.focus()
