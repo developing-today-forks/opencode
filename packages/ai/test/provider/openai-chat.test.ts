@@ -2117,6 +2117,129 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
+  it.effect("keeps parallel calls that reuse one tool-call ID in their stated slots", () =>
+    Effect.gen(function* () {
+      // A gateway may reuse one tool-call ID at several indexes (#2658). The
+      // continuation naming index 1 must append to the call at index 1, not
+      // to the first (lowest) slot carrying the same ID.
+      const body = sseEvents(
+        deltaChunk({
+          tool_calls: [{ index: 0, id: "call_0", function: { name: "lookup", arguments: '{"a":1' } }],
+        }),
+        deltaChunk({
+          tool_calls: [{ index: 1, id: "call_0", function: { name: "lookup", arguments: '{"b":2' } }],
+        }),
+        deltaChunk({ tool_calls: [{ index: 1, id: "call_0", function: { arguments: "}" } }] }),
+        deltaChunk({ tool_calls: [{ index: 0, function: { arguments: "}" } }] }),
+        deltaChunk({}, "tool_calls"),
+      )
+      const response = yield* LLMClient.generate({
+        ...request,
+        tools: [ToolDefinition.make({ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } })],
+      }).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.events.filter(LLMEvent.is.toolCall)).toEqual([
+        {
+          type: "tool-call",
+          id: "call_0",
+          name: "lookup",
+          input: { a: 1 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+        {
+          type: "tool-call",
+          id: "call_0",
+          name: "lookup",
+          input: { b: 2 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+      ])
+    }),
+  )
+
+  it.effect("keeps a pending call that reuses one tool-call ID in its stated slot", () =>
+    Effect.gen(function* () {
+      // Same reuse as above, but the second call is still pending (its ID is
+      // known, its name has not arrived) when the collision first appears.
+      const body = sseEvents(
+        deltaChunk({
+          tool_calls: [{ index: 0, id: "call_0", function: { name: "lookup", arguments: '{"a":1' } }],
+        }),
+        deltaChunk({ tool_calls: [{ index: 1, id: "call_0", function: { arguments: '{"b":2' } }] }),
+        deltaChunk({ tool_calls: [{ index: 1, function: { name: "lookup", arguments: "}" } }] }),
+        deltaChunk({ tool_calls: [{ index: 0, function: { arguments: "}" } }] }),
+        deltaChunk({}, "tool_calls"),
+      )
+      const response = yield* LLMClient.generate({
+        ...request,
+        tools: [ToolDefinition.make({ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } })],
+      }).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.events.filter(LLMEvent.is.toolCall)).toEqual([
+        {
+          type: "tool-call",
+          id: "call_0",
+          name: "lookup",
+          input: { a: 1 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+        {
+          type: "tool-call",
+          id: "call_0",
+          name: "lookup",
+          input: { b: 2 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+      ])
+    }),
+  )
+
+  it.effect("keeps the first ID match when the stated slot holds a different call", () =>
+    Effect.gen(function* () {
+      // A stated index occupied by a different ID is a conflict the existing
+      // routing already owns: the fragment still lands on the first ID match
+      // (here it completes the call at index 0), never on the occupying call.
+      const body = sseEvents(
+        deltaChunk({
+          tool_calls: [{ index: 0, id: "call_0", function: { name: "lookup", arguments: '{"a":1' } }],
+        }),
+        deltaChunk({
+          tool_calls: [{ index: 1, id: "call_1", function: { name: "lookup", arguments: '{"b":2' } }],
+        }),
+        deltaChunk({ tool_calls: [{ index: 1, id: "call_0", function: { arguments: "}" } }] }),
+        deltaChunk({ tool_calls: [{ index: 1, id: "call_1", function: { arguments: "}" } }] }),
+        deltaChunk({}, "tool_calls"),
+      )
+      const response = yield* LLMClient.generate({
+        ...request,
+        tools: [ToolDefinition.make({ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } })],
+      }).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.events.filter(LLMEvent.is.toolCall)).toEqual([
+        {
+          type: "tool-call",
+          id: "call_0",
+          name: "lookup",
+          input: { a: 1 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+        {
+          type: "tool-call",
+          id: "call_1",
+          name: "lookup",
+          input: { b: 2 },
+          providerExecuted: undefined,
+          providerMetadata: undefined,
+        },
+      ])
+    }),
+  )
+
   it.effect("preserves Gemini thought signatures on streamed parallel tool calls", () =>
     Effect.gen(function* () {
       // Gemini's OpenAI-compatible endpoint omits `index`, streams each call whole,
