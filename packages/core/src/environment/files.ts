@@ -28,12 +28,16 @@ export class Failed extends Schema.TaggedError<Failed>()("Environment.Failed", {
   cause: Schema.Defect(),
 }) {}
 
+/** The upper bound on a whole-file `read` (no range): 64 MiB. Larger files must be read with ranges. */
+export const MAX_WHOLE_FILE_BYTES = 64 * 1024 * 1024
+
 export interface FilesImpl {
   /**
    * Content operations (`read`, `list`) follow final symlinks; metadata operations (`stat` and entry
    * tags returned by `list`) do not. `info` describes the target file whose bytes are returned.
-   * The process-backed default caps collected output at 64 MiB; larger whole-file reads fail with
-   * `Failed`, so callers must use ranges for larger files.
+   * The process-backed default caps collected output at `MAX_WHOLE_FILE_BYTES` (64 MiB); every driver
+   * enforces the same bound on whole-file reads, which fail with `Failed`, so callers must use
+   * ranges for larger files.
    */
   readonly read: (
     path: string,

@@ -9,6 +9,7 @@ export {
   type Files,
   type FilesImpl,
   type FileType,
+  MAX_WHOLE_FILE_BYTES,
   NotFound,
   typeFollowing,
   WrongKind,
