@@ -1,5 +1,3 @@
-import type { LLMRequest } from "../../schema/index.js"
-
 export const valid = /^[A-Za-z0-9]{9}$/
 
 export const hash = (value: string) => {
@@ -11,24 +9,16 @@ export const hash = (value: string) => {
   return `${hash(2166136261).padStart(7, "0")}${hash(2246822519).padStart(7, "0")}`.slice(-9)
 }
 
-export const normalizer = (request: LLMRequest) => {
-  const ids = request.messages.flatMap((message) =>
-    message.content.flatMap((part) => (part.type === "tool-call" || part.type === "tool-result" ? [part.id] : [])),
-  )
-  // Reserve valid IDs before projecting any history, including IDs encountered later.
-  const used = new Set(ids.filter((id) => valid.test(id)))
-  const normalized = new Map<string, string>()
-  return (id: string) => {
-    if (valid.test(id)) return id
-    const previous = normalized.get(id)
-    if (previous) return previous
-    let attempt = 0
-    let candidate = hash(id)
-    while (used.has(candidate)) candidate = hash(`${id}:${++attempt}`)
-    used.add(candidate)
-    normalized.set(id, candidate)
-    return candidate
-  }
-}
+// #2228 (from #1707 §2-G1): the projection is a pure function of the original
+// id, so a session's mapping is stable across requests by construction — the
+// same original id yields the same normalized id in every request, no matter
+// what other ids the history has gained since. The previous per-request
+// normalizer salted the hash whenever a candidate was already used in that
+// request, so an id's projection depended on the request's other ids and
+// could change between requests of one session. Two distinct originals now
+// share a projection only when their hashes collide (or one original is
+// literally another's hash) — the accepted bound of deterministic hash
+// derivation; there is no request state to consult or persist.
+export const normalize = (id: string) => (valid.test(id) ? id : hash(id))
 
 export * as MistralToolID from "./mistral-tool-id.js"
