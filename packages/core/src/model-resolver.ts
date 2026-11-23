@@ -853,12 +853,12 @@ export const layer = Layer.effect(
     })
     // Cross-route cascade (#1014, PR2): when a route exhausts, the session re-enters
     // through a parent route that nests it instead of dying on the sub-route. Tried
-    // targets are tracked by provider/model ref across definitions — per-definition
-    // index sets cannot seed a parent's tried set — and visited routes keep the
-    // upward walk from re-entering a route the chain already exhausted. `chain`
-    // holds every route the cascade has stood on, nearest last, so a parent that
-    // itself exhausts continues to its own parents and then to the remaining
-    // parents of the routes below it, in proximity order.
+    // targets are tracked by provider/model/effort ref across definitions —
+    // per-definition index sets cannot seed a parent's tried set — and visited
+    // routes keep the upward walk from re-entering a route the chain already
+    // exhausted. `chain` holds every route the cascade has stood on, nearest
+    // last, so a parent that itself exhausts continues to its own parents and
+    // then to the remaining parents of the routes below it, in proximity order.
     interface CascadeState {
       readonly triedRefs: Set<string>
       readonly visitedRoutes: Set<string>
@@ -876,7 +876,42 @@ export const layer = Layer.effect(
        * resolution does. Undefined when no session claims the resolution. */
       readonly kind?: ModelRoute.SessionKind
     }
-    const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
+    // The effort a target would serve a request for `requestedVariant` at: its
+    // own fixed variant, else the requested variant as the target's remap
+    // translates it, else the target's default. Undefined means the model's own
+    // default effort. Shared by the bench candidacy read in resolveRouteWithin
+    // and the tried key below, so both judge a leg by the same effort.
+    const cascadeServedVariant = (
+      definition: ModelRoute.Definition,
+      index: number,
+      requestedVariant: VariantID | undefined,
+    ): string | undefined => {
+      const target = definition.targets[index]
+      if (!target) return undefined
+      if (target.variant) return target.variant
+      const targetVariants = definition.targetVariants[index]
+      if (requestedVariant === undefined) return targetVariants?.default
+      const remapped = targetVariants?.map?.[requestedVariant]
+      if (remapped === false) return undefined
+      if (typeof remapped === "string") return remapped
+      return requestedVariant
+    }
+    // Within-call tried identity (#10367, design point 1): provider / model /
+    // effort, in the traffic-key shape model-route.ts uses for its per-effort
+    // traffic maps. A leg tried at one effort no longer skips the same model
+    // reached at another effort through another pool or fallback chain in the
+    // same call's walk; the same effort reached again still prunes. The
+    // cross-call bench keeps its coarser provider/model key — seeding its
+    // granularity by failure class is design point 2, a later slice.
+    const cascadeRefKey = (
+      definition: ModelRoute.Definition,
+      index: number,
+      requestedVariant: VariantID | undefined,
+    ): string => {
+      const target = definition.targets[index]
+      const effort = cascadeServedVariant(definition, index, requestedVariant)
+      return `${target.providerID}/${target.id}@${effort ?? "default"}`
+    }
     const resolveRouteWithin = (
       selected: Info,
       definition: ModelRoute.Definition,
@@ -894,24 +929,16 @@ export const layer = Layer.effect(
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
-        // The effort a target would serve this request at: its own fixed variant,
-        // else the requested variant as the target's remap translates it, else the
-        // target's default. Bench reads are addressed at this leg (door × model ×
-        // effort): a sibling effort's traffic bench must neither hold this leg out
-        // nor be invisible to it. The pick below re-derives the same value with
-        // the catalog source in hand (a target that lacks the requested variant
-        // natively serves its default); the candidacy read here cannot consult
-        // the catalog, so it judges by the remap alone.
-        const servedVariantFor = (index: number): string | undefined => {
-          const target = definition.targets[index]
-          if (target.variant) return target.variant
-          const targetVariants = definition.targetVariants[index]
-          if (requestedVariant === undefined) return targetVariants?.default
-          const remapped = targetVariants?.map?.[requestedVariant]
-          if (remapped === false) return undefined
-          if (typeof remapped === "string") return remapped
-          return requestedVariant
-        }
+        // The effort a target would serve this request at (cascadeServedVariant,
+        // shared with the within-call tried key). Bench reads are addressed at
+        // this leg (door × model × effort): a sibling effort's traffic bench must
+        // neither hold this leg out nor be invisible to it. The pick below
+        // re-derives the same value with the catalog source in hand (a target
+        // that lacks the requested variant natively serves its default); the
+        // candidacy read here cannot consult the catalog, so it judges by the
+        // remap alone.
+        const servedVariantFor = (index: number): string | undefined =>
+          cascadeServedVariant(definition, index, requestedVariant)
         let lastError: Error | undefined
         // The active stored credential per target provider (#6): the ready filter gates on the
         // credential that would actually serve the target, not only on the target itself.
@@ -1658,8 +1685,7 @@ export const layer = Layer.effect(
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         for (const index of fromTried) {
-          const target = from.targets[index]
-          if (target) cascade.triedRefs.add(cascadeRefKey(target))
+          if (from.targets[index]) cascade.triedRefs.add(cascadeRefKey(from, index, requestedVariant))
         }
         if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
           cascade.chain.push({ definition: from, tried: fromTried })
@@ -1696,7 +1722,9 @@ export const layer = Layer.effect(
             if (cascade.visitedRoutes.has(String(parent.id))) continue
             cascade.visitedRoutes.add(String(parent.id))
             const seed = new Set(
-              parent.targets.flatMap((target, index) => (cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [])),
+              parent.targets.flatMap((target, index) =>
+                cascade.triedRefs.has(cascadeRefKey(parent, index, requestedVariant)) ? [index] : [],
+              ),
             )
             // A parent whose remaining targets all fail to load is exhausted,
             // not fatal: the cascade continues upward instead of dying on the
@@ -1774,7 +1802,9 @@ export const layer = Layer.effect(
             // The selected route's variant gate applies to every route the
             // cascade enters (#1014 Codex P2), substitutes included.
             if (requestedVariant && !candidate.variants.some((item) => item.id === requestedVariant)) return []
-            const untried = substitute.targets.filter((target) => !cascade.triedRefs.has(cascadeRefKey(target)))
+            const untried = substitute.targets.filter(
+              (target, index) => !cascade.triedRefs.has(cascadeRefKey(substitute, index, requestedVariant)),
+            )
             if (untried.length === 0) return []
             const record = untried.reduce(
               (total, target) => {
@@ -1791,7 +1821,7 @@ export const layer = Layer.effect(
           cascade.visitedRoutes.add(String(substitute.id))
           const seed = new Set(
             substitute.targets.flatMap((target, index) =>
-              cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [],
+              cascade.triedRefs.has(cascadeRefKey(substitute, index, requestedVariant)) ? [index] : [],
             ),
           )
           // A substitute whose remaining targets all fail to load is
@@ -1872,7 +1902,7 @@ export const layer = Layer.effect(
         const requestedVariant = chosenVariant(selected, variant)
         const cascade: CascadeState = {
           kind: sessionID === undefined ? undefined : ModelRoute.sessionKind(parentID),
-          triedRefs: new Set([cascadeRefKey(route.targets[index])]),
+          triedRefs: new Set([cascadeRefKey(route, index, requestedVariant)]),
           visitedRoutes: new Set([String(route.id)]),
           chain: [],
           loadErrors: [],
