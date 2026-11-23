@@ -5,6 +5,7 @@ import { acquireApplicationLock, configureApplication } from "./lifecycle/config
 import { captureLaunchLinks } from "./lifecycle/launch-links"
 import { startSidecarProbe } from "./service/sidecar-probe"
 import { registerStorageSnapshotHandler } from "./storage/snapshot"
+import { registerWindowBootstrapHandler } from "./windows/bootstrap-channel"
 import { createEarlyWindow, earlyWindowClosed } from "./windows/early"
 import { rendererAssetsServed } from "./windows/protocol"
 import { registerRendererScheme } from "./windows/scheme"
@@ -23,6 +24,7 @@ if (acquireApplicationLock()) {
   void app.whenReady().then(async () => {
     marks.ready = Date.now()
     registerStorageSnapshotHandler()
+    registerWindowBootstrapHandler()
     createEarlyWindow()
     marks.window = Date.now()
     startSidecarProbe()
