@@ -24,6 +24,11 @@ const BranchesQuery = Schema.Struct({
   limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional),
 })
 
+const StatusQuery = Schema.Struct({
+  ...LocationQuery.fields,
+  limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional),
+})
+
 const DiffQuery = Schema.Struct({
   ...LocationQuery.fields,
   mode: Vcs.Mode,
@@ -81,7 +86,7 @@ export const VcsGroup = HttpApiGroup.make("server.vcs")
   )
   .add(
     HttpApiEndpoint.get("vcs.status", "/api/vcs/status", {
-      query: LocationQuery,
+      query: StatusQuery,
       success: Location.response(Schema.Array(Vcs.FileStatus)),
     })
       .annotateMerge(locationQueryOpenApi)
@@ -89,7 +94,8 @@ export const VcsGroup = HttpApiGroup.make("server.vcs")
         OpenApi.annotations({
           identifier: "vcs.status",
           summary: "VCS status",
-          description: "List uncommitted working-copy changes relative to the requested location.",
+          description:
+            "List uncommitted working-copy changes relative to the requested location. Results are bounded to one page (default 200, maximum 1000); when more changed files exist, the last entry of the page is marked `more`. Pass `limit` to choose a smaller page.",
         }),
       ),
   )

@@ -3250,7 +3250,7 @@ export function make(options: ClientOptions) {
           {
             method: "GET",
             path: `/api/vcs/status`,
-            query: { location: input?.["location"] },
+            query: { location: input?.["location"], limit: input?.["limit"] },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,

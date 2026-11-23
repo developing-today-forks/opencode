@@ -462,6 +462,7 @@ export type VcsFileStatus = {
   additions: number
   deletions: number
   status: "added" | "deleted" | "modified"
+  more?: true
 }
 
 export type VcsBranchList = Array<string>
@@ -6051,7 +6052,10 @@ export type VcsBaseInput = { readonly location?: { readonly directory?: string |
 
 export type VcsBaseOutput = { location: LocationPublicRef; data: VcsBase | null }
 
-export type VcsStatusInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
+export type VcsStatusInput = {
+  readonly location?: { readonly directory?: string | undefined } | undefined
+  readonly limit?: number | undefined
+}
 
 export type VcsStatusOutput = { location: LocationPublicRef; data: Array<VcsFileStatus> }
 

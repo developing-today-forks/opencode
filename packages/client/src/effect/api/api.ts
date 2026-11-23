@@ -3265,7 +3265,10 @@ export type VcsBaseInput = { readonly location?: { readonly directory?: string |
 export type VcsBaseOutput = { readonly location: Location.PublicRef; readonly data: Vcs.Base | null }
 export type VcsBaseOperation<E = never> = (input?: VcsBaseInput) => Effect.Effect<VcsBaseOutput, E>
 
-export type VcsStatusInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
+export type VcsStatusInput = {
+  readonly location?: { readonly directory?: string | undefined } | undefined
+  readonly limit?: number | undefined
+}
 export type VcsStatusOutput = { readonly location: Location.PublicRef; readonly data: ReadonlyArray<Vcs.FileStatus> }
 export type VcsStatusOperation<E = never> = (input?: VcsStatusInput) => Effect.Effect<VcsStatusOutput, E>
 
