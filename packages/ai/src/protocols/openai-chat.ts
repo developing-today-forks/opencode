@@ -1023,10 +1023,18 @@ const toolIndexByID = (
   tools: ParserState["tools"],
   pendingTools: ParserState["pendingTools"],
   id: string | undefined,
+  statedIndex?: number,
 ) => {
   if (!id) return undefined
   const entry = Object.entries({ ...pendingTools, ...tools }).find(([, tool]) => tool?.id === id)
-  return entry ? Number(entry[0]) : undefined
+  const matched = entry ? Number(entry[0]) : undefined
+  if (statedIndex === undefined || matched === undefined || matched === statedIndex) return matched
+  // A gateway may reuse one tool-call ID at several indexes. When the delta
+  // states an index whose slot is free or already carries this ID, the
+  // stated index identifies the call — not the first (lowest) ID match. A
+  // stated slot holding a different ID keeps the existing routing.
+  const stated = tools[statedIndex] ?? pendingTools[statedIndex]
+  return stated === undefined || stated.id === id ? statedIndex : matched
 }
 
 const isCompleteToolInput = (input: string): boolean => {
@@ -1236,7 +1244,7 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     // Compatible providers may omit indexes. Prefer durable identity, then use
     // batch position for parallel deltas or the latest call for sparse chunks.
     for (const [position, tool] of toolDeltas.entries()) {
-      const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
+      const matched = toolIndexByID(tools, pendingTools, tool.id || undefined, tool.index ?? undefined)
       const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
       const fallbackTool = tools[fallback] ?? pendingTools[fallback]
       // Some gateways (OpenDesign GLM-5.3-Flash, #1708) reuse index 0 for a
